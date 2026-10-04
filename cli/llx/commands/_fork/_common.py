@@ -83,3 +83,34 @@ def pick_dict(data: Any, *keys: str) -> dict:
                 return value
         return inner
     return {}
+
+
+def upload_files(client, path: str, files: list, *, field: str = "files",
+                 fields: dict | None = None) -> Any:
+    """Multipart upload whose field name repeats, as these routes expect.
+
+    `LlxClient.upload` hardcodes the part name "file". The upscaling batch route reads
+    `request.files.getlist("files")` and the voice route reads `request.files["audio"]`,
+    so neither can use it. Posting here reuses the client's own error mapping, so a 4xx
+    still arrives as an `LlxError` and lands in `fail()` like everything else.
+    """
+    from pathlib import Path
+
+    handles = []
+    parts = []
+    try:
+        for raw in files:
+            file_path = Path(raw)
+            if not file_path.is_file():
+                raise LlxError(f"No such file: {raw}")
+            handle = open(file_path, "rb")
+            handles.append(handle)
+            parts.append((field, (file_path.name, handle)))
+        data = {k: str(v) for k, v in (fields or {}).items() if v is not None}
+        response = client.http.post(path, files=parts, data=data)
+    finally:
+        for handle in handles:
+            handle.close()
+    # `_handle_response` is this package's own error mapping; reusing it keeps the
+    # error shape identical to every other command rather than inventing a second one.
+    return client._handle_response(response)

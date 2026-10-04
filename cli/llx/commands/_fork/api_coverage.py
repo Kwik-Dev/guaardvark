@@ -29,6 +29,7 @@ EXPOSED: dict[str, str] = {
     "batch_image_generation": "images, generate image",
     "batch_video_generation": "videos",
     "bulk_generation": "jobs (bulk generation job polling)",
+    "cast_library": "cast",
     "clients": "clients",
     "connections": "connections",
     "content_management": "content",
@@ -40,6 +41,7 @@ EXPOSED: dict[str, str] = {
     "gpu": "gpu, dashboard",
     "indexing": "index",
     "inbound_guard": "guard",
+    "infographic": "infographic",
     "interconnector": "family",
     "jobs": "jobs",
     "lessons": "lessons",
@@ -60,7 +62,8 @@ EXPOSED: dict[str, str] = {
     "tasks": "tasks",
     "tools": "tools, tool (REPL)",
     "unified_chat": "chat, ask",
-    "voice": "audio tts",
+    "upscaling": "upscale",
+    "voice": "audio tts, audio transcribe",
     "web_search": "web",
     "websites": "websites",
 }
@@ -68,9 +71,6 @@ EXPOSED: dict[str, str] = {
 # --- planned ---------------------------------------------------------------
 # area -> planned command group and the phase in docs/CLI_PLAN.md section 3
 PLANNED: dict[str, str] = {
-    "cast_library": "cast — CLI_PLAN 3.2 (Phase 2)",
-    "upscaling": "upscale — CLI_PLAN 3.3 (Phase 2)",
-    "infographic": "infographic — CLI_PLAN 3.13 (Phase 2)",
     "wordpress": "wordpress — CLI_PLAN 3.11 (Phase 4)",
     "llm_provider": "llm — CLI_PLAN 3.1 (Phase 4)",
     "video_editor": "video-editor — CLI_PLAN 3.4 (Phase 3)",

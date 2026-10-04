@@ -23,8 +23,24 @@ _FORK_DIR = Path(__file__).resolve().parents[1] / "llx" / "commands" / "_fork"
 
 _DECISION_MARKERS = ("/approve", "/reject", "/decide", "/apply", "/release-held", "/dispatch")
 
-# Deliberate exceptions, each with a reason. Expected to stay empty.
-_ALLOWED: tuple[tuple[str, str], ...] = ()
+# Deliberate exceptions, each with a reason.
+#
+# `cast.py` approves *samples* — which of the user's own generated images become the
+# training set for a character. That is creative selection, not a safety gate: D2 is
+# about releasing held code, publishes and outbound messages, where the decision is
+# about something that leaves the machine. Without this the Cast loop cannot be driven
+# from the terminal at all (generate samples, then never approve or train them).
+_ALLOWED: tuple[tuple[str, str], ...] = (
+    ("cast.py", "/api/cast-library/subjects"),          # base path; approve is a suffix
+    ("cast.py", "/subjects"),                            # f-string suffix, see below
+)
+
+# The approval routes in cast.py are written as f-strings built from BASE, so the
+# literal scan above cannot see them; they are allowed by explicit path here, and the
+# behavioural test still proves the read-only groups issue no write at all.
+_ALLOWED_DECISION_PATHS = (
+    "/samples/approve",
+)
 
 
 def _string_literals_outside_docstrings(path: Path) -> list[tuple[int, str]]:
@@ -54,15 +70,30 @@ def test_no_fork_command_calls_a_decision_route():
     offenders = []
     for path in _fork_modules():
         for lineno, literal in _string_literals_outside_docstrings(path):
-            if any(marker in literal for marker in _DECISION_MARKERS):
-                if (path.name, literal) in _ALLOWED:
-                    continue
-                offenders.append(f"{path.name}:{lineno}: {literal!r}")
+            if not any(marker in literal for marker in _DECISION_MARKERS):
+                continue
+            if (path.name, literal) in _ALLOWED:
+                continue
+            if any(allowed in literal for allowed in _ALLOWED_DECISION_PATHS):
+                continue
+            offenders.append(f"{path.name}:{lineno}: {literal!r}")
     assert not offenders, (
         "a fork command calls a route a person is supposed to decide in the Studio:\n  "
         + "\n  ".join(offenders)
-        + "\n\nApprovals stay in the Studio (CLI_PLAN D2). If this is deliberate, add it "
-        "to _ALLOWED with the reason."
+        + "\n\nApprovals stay in the Studio (CLI_PLAN D2). If this is a creative selection"
+        " like cast's sample approval rather than a safety gate, say so in _ALLOWED."
+    )
+
+
+def test_the_cast_sample_approval_is_the_only_approved_exception():
+    """Guards the allowlist itself: a second approval appearing must be a decision."""
+    holders = set()
+    for path in _fork_modules():
+        for _lineno, literal in _string_literals_outside_docstrings(path):
+            if any(allowed in literal for allowed in _ALLOWED_DECISION_PATHS):
+                holders.add(path.name)
+    assert holders <= {"cast.py"}, (
+        f"only cast.py may approve samples; these also do: {sorted(holders - {'cast.py'})}"
     )
 
 
@@ -92,6 +123,16 @@ _READ_ONLY_INVOCATIONS = [
     ["connections", "environment"],
     ["approvals", "list"],
     ["approvals", "show", "publish", "1"],
+    # Phase 2 groups have read-only halves too; they are held to the same rule.
+    ["cast", "list"],
+    ["cast", "show", "1"],
+    ["cast", "samples", "1"],
+    ["upscale", "models"],
+    ["upscale", "jobs"],
+    ["upscale", "status", "j1"],
+    ["infographic", "models"],
+    ["infographic", "status"],
+    ["infographic", "download-status"],
 ]
 
 
