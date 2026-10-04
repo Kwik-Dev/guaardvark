@@ -61,9 +61,11 @@ EXPOSED: dict[str, str] = {
     "system_map": "system-map",
     "tasks": "tasks",
     "tools": "tools, tool (REPL)",
+    "training_datasets": "training",
     "unified_chat": "chat, ask",
     "upscaling": "upscale",
     "voice": "audio tts, audio transcribe",
+    "video_editor": "video-editor",
     "web_search": "web",
     "websites": "websites",
 }
@@ -73,8 +75,6 @@ EXPOSED: dict[str, str] = {
 PLANNED: dict[str, str] = {
     "wordpress": "wordpress — CLI_PLAN 3.11 (Phase 4)",
     "llm_provider": "llm — CLI_PLAN 3.1 (Phase 4)",
-    "video_editor": "video-editor — CLI_PLAN 3.4 (Phase 3)",
-    "training_datasets": "training — CLI_PLAN 3.5 (Phase 3)",
 }
 
 # --- not exposed -----------------------------------------------------------

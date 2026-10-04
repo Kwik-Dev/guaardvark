@@ -85,6 +85,28 @@ def pick_dict(data: Any, *keys: str) -> dict:
     return {}
 
 
+def read_json_payload(path: str) -> dict:
+    """Read a JSON object the user supplied (or the Studio exported).
+
+    Some endpoints take payloads that are really authored in the UI — a full timeline
+    arrangement, a bin of clips. Rather than pretend the CLI can build one, those
+    commands accept `--from-file` and post exactly what they were handed.
+    """
+    import json
+    from pathlib import Path
+
+    source = Path(path)
+    if not source.is_file():
+        raise LlxError(f"No such payload file: {path}")
+    try:
+        data = json.loads(source.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise LlxError(f"{path} is not valid JSON: {exc}")
+    if not isinstance(data, dict):
+        raise LlxError(f"{path} must contain a JSON object, found {type(data).__name__}")
+    return data
+
+
 def upload_files(client, path: str, files: list, *, field: str = "files",
                  fields: dict | None = None) -> Any:
     """Multipart upload whose field name repeats, as these routes expect.

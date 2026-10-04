@@ -133,6 +133,17 @@ _READ_ONLY_INVOCATIONS = [
     ["infographic", "models"],
     ["infographic", "status"],
     ["infographic", "download-status"],
+    # Phase 3 groups.
+    ["video-editor", "health"],
+    ["video-editor", "projects"],
+    ["video-editor", "project", "abc"],
+    ["video-editor", "jobs"],
+    ["video-editor", "job", "j1"],
+    ["video-editor", "filters"],
+    ["video-editor", "transitions"],
+    ["training", "datasets"],
+    ["training", "dataset", "1"],
+    ["training", "backends"],
 ]
 
 
