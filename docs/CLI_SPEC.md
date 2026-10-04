@@ -371,17 +371,26 @@ it will conflict on every upstream sync unless it lives in new files.
 
 Rules that keep it cheap:
 
-1. Add a **new module** under `cli/llx/commands/` and register it in
-   `cli/llx/command_catalog.py` (+ the contract test), rather than editing upstream
-   command bodies.
-2. Reuse `llx/client.py`; never re-implement transport.
-3. Keep the scope rules in §3: no editing surfaces, no review gates, no render triggers
+1. Add a **new module** under `cli/llx/commands/_fork/` exporting `COMMAND_NAME` and a
+   `typer.Typer` named `app`. `_fork/registry.py` discovers it automatically — do not
+   edit a shared list, and do not touch `llx/main.py` beyond the two lines that are
+   already there.
+2. Declare the backend API area it drives in `cli/llx/commands/_fork/api_coverage.py`.
+   `cli/tests/test_spec_parity.py` fails until you do — that is what keeps §9 and §10 of
+   this document from drifting out of date.
+3. REPL (`/foo`) commands are a separate, more expensive seam: `_register_repl_commands`
+   in `slash.py` plus `COMMAND_TREE` in `command_catalog.py`, which the upstream contract
+   test pins to each other. Add one only when a command genuinely needs to be REPL-only;
+   no planned group does.
+4. Reuse `llx/client.py`; never re-implement transport.
+5. Keep the scope rules in §3: no editing surfaces, no review gates, no render triggers
    that bypass the Studio's approval.
-4. Follow the pattern of the two output-registration fixes: when a backend call can fail
+6. Follow the pattern of the two output-registration fixes: when a backend call can fail
    silently, log an error rather than returning a body with a missing id.
-5. The obvious first additions, all backed by existing endpoints that the CLI already
-   knows how to reach: `cast list|show`, `upscale`, `training list|start`, and a
-   `video-editor` group over `/api/video-editor/*`.
+7. Add a `--json` branch and a golden snapshot test (see `cli/tests/conftest.py` for the
+   shared fixtures and the tier markers).
+
+The plan for closing the rest of the gap, group by group, is [`docs/CLI_PLAN.md`](CLI_PLAN.md).
 
 ---
 

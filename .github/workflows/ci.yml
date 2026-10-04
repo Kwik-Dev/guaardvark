@@ -64,8 +64,30 @@ jobs:
       - name: Install CLI package
         run: pip install -e ./cli pytest
 
-      - name: Run CLI test suite
-        run: python -m pytest cli/tests -q
+      - name: Run CLI test suite (fast tiers)
+        # e2e has its own job below: it is the only tier that boots anything, and
+        # keeping it out of this run keeps the common case fast.
+        run: python -m pytest cli/tests -q -m "not e2e"
+
+  cli-e2e:
+    name: CLI End-to-End
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install CLI package
+        run: pip install -e ./cli pytest
+
+      - name: Run CLI end-to-end tests
+        # These boot an in-process backend; no GPU, no live server, no database.
+        run: python -m pytest cli/tests -q -m e2e
 
   frontend:
     name: Frontend Lint & Build

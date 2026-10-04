@@ -37,6 +37,10 @@ from llx.commands.mcp import mcp_app
 from llx.commands.audio import audio_app
 from llx.commands.swarm import swarm_app
 from llx.commands.lessons import lessons_app
+# Fork-owned commands. `cli/` is upstream-owned, so every fork command lives under
+# llx/commands/_fork/ and is mounted by this loop instead of by an edit per command.
+# See cli/llx/commands/_fork/registry.py.
+from llx.commands._fork import registry as _fork_registry
 
 app = typer.Typer(
     name="guaardvark",
@@ -172,6 +176,9 @@ app.add_typer(mcp_app, name="mcp")
 app.add_typer(audio_app, name="audio")
 app.add_typer(swarm_app, name="swarm")
 app.add_typer(lessons_app, name="lessons")
+
+for _fork_app, _fork_name in _fork_registry.typer_apps():
+    app.add_typer(_fork_app, name=_fork_name)
 
 
 def completion(

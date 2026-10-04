@@ -52,8 +52,15 @@ def test_make_diff():
 
 
 def test_run_command():
-    res = run_command("python -c 'print(2+2)'")
-    assert res["success"]
+    # Use an interpreter that exists on this host: some installs expose `python3` only
+    # (macOS/Homebrew), and CI's runner exposes `python`. Hardcoding `python` made the
+    # suite red on a developer machine for a reason that has nothing to do with the CLI.
+    import shutil
+    import sys
+
+    interp = shutil.which("python") or sys.executable
+    res = run_command(f'{interp} -c "print(2+2)"')
+    assert res["success"], res
     out = (res.get("output") or "") + (res.get("stdout") or "")
     assert "4" in out
 
