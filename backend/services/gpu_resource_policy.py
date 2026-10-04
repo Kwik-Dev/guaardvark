@@ -635,7 +635,8 @@ def _load_admit_or_busy(slot: str, *, ram_gb: float = 2.0):
         return weight
     except LoadGateTimeout as e:
         from backend.services.job_operation_gate import GpuBusyError
-        raise GpuBusyError(f"System under heavy load — {e}")
+        from backend.services.job_operation_gate import SystemLoadBusyError
+        raise SystemLoadBusyError(str(e).removeprefix("GlobalLoadGate blocked: "))
     except Exception as e:  # noqa: BLE001 - probe unavailable -> fail open, never block gen
         log.warning("GlobalLoadGate admit unavailable (%s); proceeding", e)
         return None

@@ -16,7 +16,14 @@ Thresholds for THIS box (60GB RAM / 16GB VRAM / 16 threads):
     RAM available  < 6 GB   -> HARD block      (< 12 GB -> warn)
     swap used      > 8 GB   -> HARD block
     VRAM free      < 1.5 GB -> HARD block      (< 3 GB  -> warn)
-    loadavg(1m)    > 18     -> HARD block
+    loadavg(1m)    > max(18, 1.125 x threads)    -> HARD block, and on Linux with
+                     PSI only while CPU pressure > 15% over both 10 s and 60 s
+
+The load average alone also counts tasks waiting on a disk and trails the
+machine by minutes, so a slow drive being read could refuse GPU work with the
+CPU idle, and a refusal outlived the contention behind it. Where the kernel has
+pressure-stall information, CPU pressure must agree, which drops both cases
+without refusing anything the load-average limit allowed.
 
 Intent buffer (the "shadow RAM" cover): when a job is admitted we add its
 ``ram_gb`` to ``reserved_ram`` and hold it for ~60s. Spawned subprocesses (e.g.
@@ -58,7 +65,47 @@ RAM_WARN_MIN_GB = 12.0     # below this -> warn (still admit)
 SWAP_HARD_MAX_GB = 8.0     # above this swap used -> hard block
 VRAM_HARD_MIN_GB = 1.5     # below this free VRAM -> hard block
 VRAM_WARN_MIN_GB = 3.0     # below this -> warn (still admit)
-LOADAVG_HARD_MAX = 18.0    # 1-min loadavg above this -> hard block
+LOADAVG_HARD_MAX = 18.0    # 1-min loadavg above this -> hard block (CPU pressure must agree where PSI exists)
+# Scaled with the machine: 18 was set for 16 threads, and the limit only ever
+# rises above it (more threads), never falls below.
+LOADAVG_PER_THREAD = LOADAVG_HARD_MAX / 16
+
+# CPU pressure (/proc/pressure/cpu "some": share of time runnable tasks waited for
+# a CPU). Over the load-average limit, a job is refused only while both the 10 s
+# and 60 s averages are above this, so a short burst does not refuse it and the
+# gate clears seconds after contention ends.
+# Measured 2026-10-04 on a 16-thread / 60 GB box: 18 busy processes (the old
+# loadavg limit as real contention) held avg10 at 16.5-17.7% and drove avg60 to
+# 14.4% in 90 s; 32 busy processes, 71% avg10; a 2-image Z-Image Turbo batch, 0%;
+# 24 looping disk readers, 0% while loadavg climbed to 16.5. After the 18 stopped,
+# avg10 fell under 10% in 6 s while loadavg stayed above 7 for a minute.
+CPU_PRESSURE_HARD_MAX_PCT = 15.0
+_CPU_PRESSURE_PATH = "/proc/pressure/cpu"
+
+
+def _read_cpu_pressure() -> Optional[tuple[float, float]]:
+    """(avg10, avg60) of CPU "some" pressure in percent, or None without PSI
+    (macOS, kernels before 4.20, PSI disabled)."""
+    try:
+        with open(_CPU_PRESSURE_PATH) as f:
+            for line in f:
+                kind, *fields = line.split()
+                if kind != "some":
+                    continue
+                values = dict(field.split("=", 1) for field in fields)
+                return float(values["avg10"]), float(values["avg60"])
+    except (OSError, KeyError, ValueError):
+        return None
+    return None
+
+
+def loadavg_hard_max() -> float:
+    """Load-average limit used where PSI is missing, scaled by thread count."""
+    try:
+        threads = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        threads = os.cpu_count() or 16
+    return max(LOADAVG_HARD_MAX, LOADAVG_PER_THREAD * threads)
 
 
 def _swap_hard_max_gb() -> float:
@@ -136,6 +183,8 @@ class LoadReading:
     loadavg_1m: float
     vram_free_gb: Optional[float]  # None == unknown (degrade gracefully)
     reserved_ram_gb: float = 0.0
+    # (avg10, avg60) CPU pressure in percent; None without PSI.
+    cpu_pressure: Optional[tuple[float, float]] = None
 
     @property
     def effective_ram_avail_gb(self) -> float:
@@ -213,6 +262,7 @@ class GlobalLoadGate:
             loadavg_1m=load1,
             vram_free_gb=_read_vram_free_gb(),
             reserved_ram_gb=reserved,
+            cpu_pressure=_read_cpu_pressure(),
         )
 
     def _blocking_reason(self, weight: JobWeight, reading: LoadReading) -> Optional[str]:
@@ -229,8 +279,17 @@ class GlobalLoadGate:
             )
         if reading.swap_used_gb > _swap_hard_max_gb():
             return f"swap in use: {reading.swap_used_gb:.1f} GB > {_swap_hard_max_gb():.0f} GB"
-        if reading.loadavg_1m > LOADAVG_HARD_MAX:
-            return f"loadavg high: {reading.loadavg_1m:.1f} > {LOADAVG_HARD_MAX:.0f}"
+        limit = loadavg_hard_max()
+        if reading.loadavg_1m > limit:
+            if reading.cpu_pressure is None:
+                return f"loadavg high: {reading.loadavg_1m:.1f} > {limit:.0f}"
+            avg10, avg60 = reading.cpu_pressure
+            if avg10 > CPU_PRESSURE_HARD_MAX_PCT and avg60 > CPU_PRESSURE_HARD_MAX_PCT:
+                return (
+                    f"CPU busy: tasks waited for a CPU {avg10:.0f}% of the last 10 s "
+                    f"and {avg60:.0f}% of the last minute; load average "
+                    f"{reading.loadavg_1m:.0f} (limit {limit:.0f})"
+                )
         # VRAM only blocks when we actually know it (None == unknown == OK).
         if reading.vram_free_gb is not None:
             if reading.vram_free_gb - weight.vram_gb < VRAM_HARD_MIN_GB:
