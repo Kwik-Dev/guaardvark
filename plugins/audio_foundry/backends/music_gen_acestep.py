@@ -98,36 +98,7 @@ class ACEStepBackend(AudioBackend):
         if not _RUNNER_SCRIPT.exists():
             raise RuntimeError(f"ACE-Step runner script missing at {_RUNNER_SCRIPT}")
 
-        logger.info("Spawning ACE-Step daemon: %s %s", _MUSIC_VENV_PYTHON, _RUNNER_SCRIPT)
-        # encoding pinned: the service often runs without a locale (LANG
-        # unset), where text-mode pipes default to ascii — ACE-Step's tqdm
-        # progress bars emit UTF-8 box characters, which killed the stderr
-        # pump thread with UnicodeDecodeError and hung the request.
-        self._proc = subprocess.Popen(
-            [str(_MUSIC_VENV_PYTHON), "-u", str(_RUNNER_SCRIPT)],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-            cwd=str(_PLUGIN_ROOT),
-        )
-
-        # Forward daemon stderr to our logger on a background thread so its
-        # progress output (download bars, model-load messages) shows up in
-        # logs/audio_foundry.log alongside everything else.
-        self._stderr_thread = threading.Thread(
-            target=self._pump_stderr, daemon=True
-        )
-        self._stderr_thread.start()
-
-        # Quick sanity ping before sending the heavy load command.
-        pong = self._send({"op": "ping"})
-        if not pong.get("ok"):
-            self._kill_proc()
-            raise RuntimeError(f"ACE-Step daemon ping failed: {pong}")
+        self._start_daemon(_MUSIC_VENV_PYTHON, _RUNNER_SCRIPT)
 
         # Send the load — this is the slow one (model download + GPU load).
         load_response = self._send(
@@ -242,6 +213,43 @@ class ACEStepBackend(AudioBackend):
         )
 
     # ----- subprocess plumbing -----
+
+    def _start_daemon(self, python: Path, script: Path, env: dict[str, str] | None = None) -> None:
+        """Spawn ``python -u script`` as the JSON-line daemon and check it answers a ping.
+
+        ``env`` replaces the inherited environment when given.
+        """
+        logger.info("Spawning ACE-Step daemon: %s %s", python, script)
+        # encoding pinned: the service often runs without a locale (LANG
+        # unset), where text-mode pipes default to ascii — ACE-Step's tqdm
+        # progress bars emit UTF-8 box characters, which killed the stderr
+        # pump thread with UnicodeDecodeError and hung the request.
+        self._proc = subprocess.Popen(
+            [str(python), "-u", str(script)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            cwd=str(_PLUGIN_ROOT),
+            env=env,
+        )
+
+        # Forward daemon stderr to our logger on a background thread so its
+        # progress output (download bars, model-load messages) shows up in
+        # logs/audio_foundry.log alongside everything else.
+        self._stderr_thread = threading.Thread(
+            target=self._pump_stderr, daemon=True
+        )
+        self._stderr_thread.start()
+
+        # Quick sanity ping before sending the heavy load command.
+        pong = self._send({"op": "ping"})
+        if not pong.get("ok"):
+            self._kill_proc()
+            raise RuntimeError(f"ACE-Step daemon ping failed: {pong}")
 
     def _send(self, command: dict[str, Any], timeout_s: float = 30) -> dict[str, Any]:
         """Send one JSON command, read one JSON response. Synchronous."""
