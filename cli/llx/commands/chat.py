@@ -375,6 +375,7 @@ def _chat_streaming(session_id: str, message: str, no_rag: bool, server: str | N
                     live_holder["live"] = live
                     completed = streamer.wait_for_completion(
                         approval_handler=_approval_handler,
+                        esc_stops=True,
                     )
                     current = "".join(response_parts)
                     if current:

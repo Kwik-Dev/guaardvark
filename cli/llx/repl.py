@@ -320,12 +320,14 @@ def _handle_chat(state: dict, ctx: ContextSnapshot, message: str, raw_message: s
                     data,
                     expected_target=expected_edit_target(memory),
                 ),
+                esc_stops=True,
             )
         except KeyboardInterrupt:
             aborted_by_user = True
             streamer.hard_abort(session_id, client)
             console.print("[llx.dim]Chat aborted.[/llx.dim]")
         finally:
+            state["type_ahead"] = streamer.type_ahead
             renderer.stop()
             if not completed and not aborted_by_user:
                 streamer.hard_abort(session_id, client)
@@ -500,7 +502,7 @@ def launch_repl():
     while True:
         try:
             prompt_text = _build_prompt(ctx, state)
-            line = session.prompt(prompt_text).strip()
+            line = session.prompt(prompt_text, default=state.pop("type_ahead", "")).strip()
         except EOFError:
             console.print("\n[llx.dim]Goodbye.[/llx.dim]")
             break

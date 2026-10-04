@@ -13,6 +13,7 @@ import socketio
 import json
 import threading
 import time
+from contextlib import nullcontext
 from typing import Callable
 
 from llx.config import get_api_key, get_server_url
@@ -42,6 +43,8 @@ class LlxStreamer:
         self._last_activity = time.monotonic()
         self._activity_lock = threading.Lock()
         self._closing = False
+        # What the user typed while a reply was streaming (see wait_for_completion).
+        self.type_ahead = ""
 
     def _connect_headers(self) -> dict[str, str]:
         headers: dict[str, str] = {}
@@ -177,6 +180,7 @@ class LlxStreamer:
         approval_handler: Callable[[dict], bool] | None = None,
         timeout: float = DEFAULT_IDLE_TIMEOUT,
         hard_timeout: float = DEFAULT_HARD_TIMEOUT,
+        esc_stops: bool = False,
     ) -> bool:
         """Block until chat is done, dispatching approval requests to the
         current thread via approval_handler(data) -> bool.
@@ -188,11 +192,29 @@ class LlxStreamer:
         (suitable for non-interactive / json mode). KeyboardInterrupt raised
         from the handler aborts the chat and propagates up.
 
+        With ``esc_stops``, Esc raises KeyboardInterrupt like Ctrl+C, so the
+        caller's existing Ctrl+C path stops the chat. Text typed during the
+        wait is left in ``self.type_ahead``.
+
         Returns True if chat completed, False on timeout.
         """
+        from llx.keywatch import EscWatch
+
+        watch = EscWatch() if esc_stops else None
+        self.type_ahead = ""
+        try:
+            with watch or nullcontext():
+                return self._wait_loop(approval_handler, timeout, hard_timeout, watch)
+        finally:
+            if watch is not None:
+                self.type_ahead = watch.type_ahead
+
+    def _wait_loop(self, approval_handler, timeout, hard_timeout, watch) -> bool:
         started = time.monotonic()
         self._touch_activity()
         while True:
+            if watch is not None and watch.pressed.is_set():
+                raise KeyboardInterrupt
             now = time.monotonic()
             if now - started >= hard_timeout:
                 return False
@@ -214,7 +236,8 @@ class LlxStreamer:
                 approved = False
             else:
                 try:
-                    approved = bool(approval_handler(data))
+                    with watch.paused() if watch is not None else nullcontext():
+                        approved = bool(approval_handler(data))
                 except KeyboardInterrupt:
                     if self._session_id:
                         self.send_approval_response(self._session_id, False)
@@ -369,6 +392,7 @@ class ChatRenderer:
         self._last_render_time = 0.0
         self._render_throttle = 0.05  # 50ms throttle for large documents
         self._live_status = "thinking"
+        self._stop_hint = False
 
     # ── Lifecycle ─────────────────────────────────────────────
 
@@ -384,6 +408,8 @@ class ChatRenderer:
         self._live_status = "thinking"
         self._spinner_stop.clear()
         self._last_render_time = 0.0
+        from llx.keywatch import available as esc_available
+        self._stop_hint = esc_available()
         self._live = Live(
             Text(""),
             console=self._console,
@@ -666,7 +692,10 @@ class ChatRenderer:
                 _set_title(f"{f} agent — {status}...")
                 # Update inline display
                 if self._live is not None and self._thinking:
-                    self._live.update(Text(f" {f} ", style="bold cyan"))
+                    frame = Text(f" {f} ", style="bold cyan")
+                    if self._stop_hint:
+                        frame.append("esc to stop", style="dim")
+                    self._live.update(frame)
                 frame_idx += 1
                 self._spinner_stop.wait(0.1)
 

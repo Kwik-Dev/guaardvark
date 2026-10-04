@@ -940,6 +940,44 @@ Please try a different image or check if the vision model is properly loaded.`;
     // typed goes to the running task as a note instead of a new message.
     const noteMode = disabled && chimeIn && typeof onChimeIn === "function";
 
+    // Esc presses Stop while a reply is running, but only when Stop could be
+    // clicked. Whether something covers the button is read in the capture
+    // phase, before an image viewer's own Esc handler can close it; the press
+    // is acted on in the bubble phase, after a dialog, the slash popup or the
+    // agent-screen key forwarder has had the chance to take the key.
+    const rootRef = useRef(null);
+    const stopButtonRef = useRef(null);
+    useEffect(() => {
+      if (!disabled || typeof onStop !== "function") return undefined;
+      let stopReachable = false;
+      const stopIsTopmost = () => {
+        const btn = stopButtonRef.current;
+        if (!btn) return false;
+        const r = btn.getBoundingClientRect();
+        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        return !!hit && btn.contains(hit);
+      };
+      const onCapture = (e) => {
+        stopReachable = e.key === "Escape" && stopIsTopmost();
+      };
+      const onBubble = (e) => {
+        if (e.key !== "Escape" || !stopReachable) return;
+        stopReachable = false;
+        if (e.defaultPrevented || e.repeat || e.isComposing) return;
+        const t = e.target;
+        const editable = t && (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName));
+        if (editable && !rootRef.current?.contains(t)) return;
+        e.preventDefault();
+        onStop();
+      };
+      window.addEventListener("keydown", onCapture, true);
+      window.addEventListener("keydown", onBubble);
+      return () => {
+        window.removeEventListener("keydown", onCapture, true);
+        window.removeEventListener("keydown", onBubble);
+      };
+    }, [disabled, onStop]);
+
     const handleSend = async () => {
       // Capture what the user typed for terminal-style history before any
       // branch consumes/clears it.
@@ -1025,6 +1063,7 @@ Please try a different image or check if the vision model is properly loaded.`;
 
     return (
       <Box
+        ref={rootRef}
         onDrop={handleImageDrop}
         onDragOver={handleDragOver}
         sx={{
@@ -1324,7 +1363,7 @@ Please try a different image or check if the vision model is properly loaded.`;
           <Tooltip
             title={
               disabled
-                ? "Stop"
+                ? "Stop (Esc)"
                 : imageState.analyzing
                   ? "Analyzing image..."
                   : imageState.images.length > 0
@@ -1335,6 +1374,7 @@ Please try a different image or check if the vision model is properly loaded.`;
             {imageState.analyzing ? (
               <span>
                 <IconButton
+                  ref={stopButtonRef}
                   color="primary"
                   onClick={disabled ? onStop : handleSend}
                   disabled={imageState.analyzing} // Disable during analysis
@@ -1344,6 +1384,7 @@ Please try a different image or check if the vision model is properly loaded.`;
               </span>
             ) : (
               <IconButton
+                ref={stopButtonRef}
                 color="primary"
                 onClick={disabled ? onStop : handleSend}
                 disabled={imageState.analyzing} // Disable during analysis
