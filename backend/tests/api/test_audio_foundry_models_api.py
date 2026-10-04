@@ -59,6 +59,7 @@ def test_list_models_shape(client):
         "chatterbox",
         "kokoro",
         "ace-step",
+        "ace-step-1.5",
         "stable-audio-open",
         "minimax-music3-int8",
     ]

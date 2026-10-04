@@ -11,6 +11,11 @@ rather than in the offline sidecar.
 "Installed" means every file generation reads is present, not one probe file:
 a Kokoro cache holding the weights but only some voice packs used to show as
 installed while the missing voices were fetched mid-generation.
+
+ACE-Step 1.5 is the one model outside that pattern: its loader reads a plain
+checkpoints folder and rewrites code files inside it, so Install puts its weights
+in data/models/ace-step-1.5/ rather than the shared cache, and first builds the
+Python environment it runs in (plugins/audio_foundry/scripts/setup_music15.sh).
 """
 
 from __future__ import annotations
@@ -29,13 +34,16 @@ logger = logging.getLogger(__name__)
 _DOWNLOAD_STALL_SECONDS = 180
 _HF_XET_ENV = "HF_HUB_DISABLE_XET"
 _PIP_TIMEOUT_SECONDS = 600
+# Building ACE-Step 1.5's environment downloads torch and the CUDA libraries.
+_ENV_BUILD_TIMEOUT_SECONDS = 3600
 
 # Two roots that coincide on a real install but mean different things. The
 # voice catalog is tracked source shipped in the same checkout as this module,
 # so it is always read from there. PLUGIN_DIR is where the plugin's venv lives
 # (untracked, created on this machine at first start); only venv lookups and
 # pip use it.
-PLUGIN_SOURCE_DIR = Path(__file__).resolve().parents[2] / "plugins" / "audio_foundry"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+PLUGIN_SOURCE_DIR = REPO_ROOT / "plugins" / "audio_foundry"
 PLUGIN_DIR = PLUGIN_SOURCE_DIR
 
 # MiniMax Music 3 lives in the video registry (ComfyUI/models). One Install
@@ -91,6 +99,7 @@ AUDIO_FOUNDRY_MODELS: List[Dict[str, Any]] = [
         "name": "ACE-Step v1 3.5B",
         "description": "Full songs with vocals from a style prompt and lyrics. 8.3 GB.",
         "group": "music",
+        "license": "Apache-2.0",
         "hf_repo": "ACE-Step/ACE-Step-v1-3.5B",
         "probe_file": "ace_step_transformer/config.json",
         # What ACEStepPipeline.load_checkpoint reads: its four model folders
@@ -101,6 +110,29 @@ AUDIO_FOUNDRY_MODELS: List[Dict[str, Any]] = [
         # the loader never opens. Install stays a full snapshot_download.
         "required_files_catalog": "backends/acestep_files.json",
         "size_gb": 8.3,
+        "gated": False,
+    },
+    {
+        "id": "ace-step-1.5",
+        "name": "ACE-Step 1.5",
+        "description": (
+            "Songs and instrumentals at 48 kHz from a 2B turbo model with a 1.7B planner. "
+            "Optional: ACE-Step v1 stays the default. Install downloads 9.4 GB of weights "
+            "and builds its own Python environment (about 8 GB more, Linux x86_64 only)."
+        ),
+        "group": "music",
+        "license": "MIT",
+        # Measured 2026-10-04 on a 16 GB card: 30 s and 240 s renders.
+        "vram_note": "Takes the whole GPU while it runs: 14.4 GB at peak, measured on a 16 GB card.",
+        "hf_repo": "ACE-Step/Ace-Step1.5",
+        "probe_file": "acestep-v15-turbo/config.json",
+        # The catalog names the files, the pinned Hugging Face revision, the folder
+        # under the repo root the weights go to, and the environment Install builds.
+        "required_files_catalog": "backends/acestep15_files.json",
+        "local_weights": True,
+        "environment_script": "scripts/setup_music15.sh",
+        # Sum of the snapshot's files at the pinned revision (read 2026-10-03).
+        "size_gb": 9.4,
         "gated": False,
     },
     {
@@ -257,8 +289,59 @@ def required_hub_files(entry: Dict[str, Any]) -> List[str]:
     return list(entry.get("required_files") or [entry["probe_file"]])
 
 
+def local_weights_dir(entry: Dict[str, Any]) -> Optional[Path]:
+    """The checkpoints folder of a model whose weights live outside the HF cache, else None."""
+    if not entry.get("local_weights"):
+        return None
+    cat = load_voice_catalog(entry["required_files_catalog"])
+    return REPO_ROOT / cat["local_dir"] / "checkpoints"
+
+
 def missing_hub_files(entry: Dict[str, Any]) -> List[str]:
+    local = local_weights_dir(entry)
+    if local is not None:
+        return [f for f in required_hub_files(entry) if not (local / f).is_file()]
     return [f for f in required_hub_files(entry) if not is_hub_cached(entry["hf_repo"], f)]
+
+
+# setup_music15.sh writes the source commit it built from here as its last step.
+_ENV_MARKER = ".acestep15-source"
+
+
+def missing_environment(entry: Dict[str, Any]) -> List[str]:
+    """The model's own Python environment, when it has one and it is not built
+    from the pinned source commit."""
+    if not entry.get("environment_script"):
+        return []
+    cat = load_voice_catalog(entry["required_files_catalog"])
+    venv = PLUGIN_DIR / cat["environment"]
+    try:
+        built_from = (venv / _ENV_MARKER).read_text(encoding="utf-8").strip()
+    except OSError:
+        built_from = None
+    if (venv / "bin" / "python").exists() and built_from == cat["source"]["commit"]:
+        return []
+    return [f"{cat['environment']} (Python environment)"]
+
+
+def missing_parts(model_id: str) -> List[str]:
+    """What generation with ``model_id`` would lack: files, packages, environment."""
+    entry = next((e for e in AUDIO_FOUNDRY_MODELS if e["id"] == model_id), None)
+    if entry is None:
+        return []
+    return (missing_environment(entry) + missing_hub_files(entry)
+            + [p["package"] for p in missing_venv_packages(entry)])
+
+
+def environment_supported(entry: Dict[str, Any]) -> Optional[str]:
+    """None when Install can build the entry's environment here, else the reason."""
+    if not entry.get("environment_script"):
+        return None
+    import platform
+    if platform.system() != "Linux" or platform.machine() != "x86_64":
+        return (f"{entry['name']} runs on Linux x86_64 with an NVIDIA GPU; "
+                f"this machine is {platform.system()} {platform.machine()}.")
+    return None
 
 
 def plugin_venv_python() -> Optional[Path]:
@@ -356,7 +439,8 @@ def _minimax_row() -> Dict[str, Any]:
 
 
 def _hub_row(entry: Dict[str, Any]) -> Dict[str, Any]:
-    missing = missing_hub_files(entry) + [p["package"] for p in missing_venv_packages(entry)]
+    missing = (missing_environment(entry) + missing_hub_files(entry)
+               + [p["package"] for p in missing_venv_packages(entry)])
     installed = not missing
     return {
         "id": entry["id"],
@@ -368,6 +452,8 @@ def _hub_row(entry: Dict[str, Any]) -> Dict[str, Any]:
         "size_gb": entry["size_gb"],
         "gated": bool(entry.get("gated")),
         "terms_url": entry.get("terms_url"),
+        "license": entry.get("license"),
+        "vram_note": entry.get("vram_note"),
         "installed": installed,
         "delegate": None,
         "missing_files": missing,
@@ -459,12 +545,16 @@ def start_download(model_id: str) -> tuple:
             ),
         }, 400
 
-    if not missing_hub_files(hub_entry) and not missing_venv_packages(hub_entry):
+    if not missing_parts(model_id):
         return {
             "success": True,
             "already_installed": True,
             "id": model_id,
         }, 200
+
+    unsupported = environment_supported(hub_entry)
+    if unsupported:
+        return {"success": False, "error": unsupported}, 400
 
     with _download_lock:
         _download_epoch += 1
@@ -529,6 +619,44 @@ class VenvInstallFailed(RuntimeError):
     """pip could not add a package to the plugin venv (not a Hugging Face error)."""
 
 
+class EnvironmentBuildFailed(VenvInstallFailed):
+    """A model's own Python environment could not be built."""
+
+
+def build_model_environment(entry: Dict[str, Any]) -> None:
+    """Run the entry's environment script; its output goes to logs/<id>_install.log."""
+    script = PLUGIN_SOURCE_DIR / entry["environment_script"]
+    log_path = REPO_ROOT / "logs" / f"{entry['id']}_install.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    # The backend's own interpreter settings must not leak into the build.
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV")}
+    try:
+        with log_path.open("w", encoding="utf-8") as log:
+            proc = subprocess.run(
+                ["bash", str(script)], stdout=log, stderr=subprocess.STDOUT,
+                cwd=str(REPO_ROOT), env=env, timeout=_ENV_BUILD_TIMEOUT_SECONDS,
+            )
+    except subprocess.TimeoutExpired as e:
+        raise EnvironmentBuildFailed(
+            f"Building the {entry['name']} environment took over "
+            f"{_ENV_BUILD_TIMEOUT_SECONDS // 60} minutes and was stopped. See {log_path}."
+        ) from e
+    except OSError as e:
+        raise EnvironmentBuildFailed(f"Could not run {script.name}: {e}") from e
+    if proc.returncode != 0:
+        lines = log_path.read_text(encoding="utf-8", errors="replace").strip().splitlines()
+        reason = next((ln.split("FAILED:", 1)[1].strip() for ln in reversed(lines) if "FAILED:" in ln),
+                      lines[-1] if lines else f"exit {proc.returncode}")
+        raise EnvironmentBuildFailed(
+            f"Building the {entry['name']} environment failed: {reason}. Full log: {log_path}"
+        )
+    if missing_environment(entry):
+        raise EnvironmentBuildFailed(
+            f"{script.name} finished but the {entry['name']} environment is not complete. See {log_path}."
+        )
+
+
 def pip_install_into_plugin_venv(wheel: str) -> None:
     """``pip install --no-deps <wheel>`` with the plugin venv's interpreter.
 
@@ -554,10 +682,12 @@ def pip_install_into_plugin_venv(wheel: str) -> None:
 
 
 def _run_install(entry: Dict[str, Any], epoch: int) -> None:
-    """Install thread: the repo snapshot when files are missing, then venv packages."""
+    """Install thread: the model's own environment when it has one, the repo
+    snapshot when files are missing, then venv packages."""
     os.environ.setdefault(_HF_XET_ENV, "1")
     repo_id = entry["hf_repo"]
-    dest = _hf_repo_cache_dir(repo_id)
+    local = local_weights_dir(entry)
+    dest = local if local is not None else _hf_repo_cache_dir(repo_id)
     dest.mkdir(parents=True, exist_ok=True)
     baseline = _dir_bytes(dest)
     total_bytes = int(float(entry["size_gb"]) * 1024**3) or 1
@@ -617,16 +747,33 @@ def _run_install(entry: Dict[str, Any], epoch: int) -> None:
             stop_monitor.wait(1.0)
 
     monitor = threading.Thread(target=_monitor, daemon=True)
-    monitor.start()
+
+    def _stop_monitor() -> None:
+        stop_monitor.set()
+        if monitor.ident is not None:
+            monitor.join(timeout=2)
+
     try:
+        if missing_environment(entry):
+            # Before the monitor starts: the build writes nothing under dest,
+            # which the monitor would report as a stall.
+            _update(status="installing")
+            build_model_environment(entry)
         _update(status="downloading")
+        started = time.time()
+        monitor.start()
         if missing_hub_files(entry):
             from huggingface_hub import snapshot_download
 
+            pinned: Dict[str, Any] = {}
+            if local is not None:
+                cat = load_voice_catalog(entry["required_files_catalog"])
+                pinned = {"revision": cat.get("hf_revision"), "local_dir": str(local)}
             snapshot_download(
                 repo_id=repo_id,
                 allow_patterns=entry.get("allow_patterns"),
                 ignore_patterns=entry.get("ignore_patterns"),
+                **pinned,
             )
         still_missing = missing_hub_files(entry)
         if still_missing:
@@ -635,11 +782,10 @@ def _run_install(entry: Dict[str, Any], epoch: int) -> None:
             )
         if stalled.is_set():
             return
-        # The monitor watches the HF cache only. Stop it here so a quiet pip
-        # run is not reported as a stall, and so a late progress tick cannot
+        # The monitor watches the download folder only. Stop it here so a quiet
+        # pip run is not reported as a stall, and so a late progress tick cannot
         # overwrite the final "completed".
-        stop_monitor.set()
-        monitor.join(timeout=2)
+        _stop_monitor()
         for pkg in missing_venv_packages(entry):
             _update(status="downloading", progress=99)
             pip_install_into_plugin_venv(pkg["wheel"])
@@ -667,8 +813,7 @@ def _run_install(entry: Dict[str, Any], epoch: int) -> None:
                 is_downloading=False,
             )
     finally:
-        stop_monitor.set()
-        monitor.join(timeout=2)
+        _stop_monitor()
         with _download_lock:
             if _download_state.get("epoch") == epoch and _download_state.get("is_downloading"):
                 _download_state["is_downloading"] = False
