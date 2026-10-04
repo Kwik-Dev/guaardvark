@@ -78,10 +78,17 @@ class FakeBackend:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, bytes]] = []
         self._routes: list[tuple[str, str, int, object, str | None]] = []
+        self._default: tuple[int, object] | None = None
 
     def route(self, method: str, path: str, *, status: int = 200, json: object = None,
               text: str | None = None) -> "FakeBackend":
         self._routes.append((method.upper(), path, status, json, text))
+        return self
+
+    def default(self, *, status: int = 200, json: object = None) -> "FakeBackend":
+        """Answer any unmatched route. For assertions of the form "this command
+        performs no writes", where the response body is irrelevant."""
+        self._default = (status, json if json is not None else {})
         return self
 
     def handler(self, request: httpx.Request) -> httpx.Response:
@@ -91,6 +98,9 @@ class FakeBackend:
                 if text is not None:
                     return httpx.Response(status, text=text)
                 return httpx.Response(status, json=payload if payload is not None else {})
+        if self._default is not None:
+            status, payload = self._default
+            return httpx.Response(status, json=payload)
         return httpx.Response(
             404,
             json={"error": f"fake backend has no route for {request.method} {request.url.path}"},

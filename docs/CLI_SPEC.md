@@ -202,7 +202,7 @@ Beyond the shell commands above, the REPL adds:
 | FilmCrewPage | ⚠️ `film-crew` | **plan only** |
 | AgentsPage | ✅ `agents` | |
 | AgentMemoryPage | ⚠️ REPL `remember`/`memory` only | no shell command |
-| ApprovalsPage | ❌ | no approvals command |
+| ApprovalsPage | ⚠️ `approvals list` | read-only; approving stays in the Studio |
 | OutreachPage | ✅ `outreach` | |
 | PluginsPage | ✅ `plugins` | |
 | MCPServersPage | ✅ `mcp` | |
@@ -212,12 +212,12 @@ Beyond the shell commands above, the REPL adds:
 | SwarmPage | ✅ `swarm` | |
 | ClientsPage | ✅ `clients` | |
 | Websites / WebsiteDetail | ✅ `websites` | |
-| ContentLibraryPage | ❌ | |
-| SystemMapPage | ❌ | `system-map` API unreferenced |
+| ContentLibraryPage | ✅ `content` | |
+| SystemMapPage | ✅ `system-map` | |
 | CodeEditorPage | ❌ | `code-execution` API unreferenced |
 | DevToolsPage / ProgressTestPage | ❌ | developer surfaces |
 | StickyNotesPage | ❌ | |
-| ConnectionsPage | ❌ | `connections` API unreferenced |
+| ConnectionsPage | ✅ `connections list\|show\|providers\|environment` | `oauth` stays in the Studio |
 | **CastStudioPage / CastMemberPage** | ❌ | **`cast-library` API unreferenced** |
 | **UpscalingPage** | ❌ | **`upscaling` API unreferenced** |
 | **VideoEditorPage** | ❌ | **`video-editor` API unreferenced** |
@@ -229,20 +229,27 @@ Beyond the shell commands above, the REPL adds:
 
 ## 9. API coverage
 
-The CLI issues literal `/api/...` paths from its command handlers. Grepping those against
-the 82 blueprint `url_prefix` values gives:
+The authoritative answer is not this prose but `cli/llx/commands/_fork/api_coverage.py`, which
+classifies **every** `backend/api/*_api.py` module and is enforced by
+`cli/tests/test_spec_parity.py` — a new backend area fails CI until it is declared. Keyed on
+the module, not the URL prefix (`inbound_guard_api.py` serves `/api/settings/inbound_guard`, so
+prefix keying would collide with `settings`).
 
-- **~60 areas reached**, including: `agent`, `agent-control`, `agents`, `audio-foundry`,
-  `automation`, `autoresearch`, `backups`, `batch-image`, `batch-video`, `bulk-generate`,
-  `chat`, `clients`, `code-intelligence`, `enhanced-chat`, `entity-indexing`, `files`,
-  `generate`, `gpu`, `index`, `interconnector`, `jobs`, `lessons`, `memory`, `meta`,
-  `model`, `music-video`, `plugins`, `production`, `projects`, `rules`, `settings`,
-  `social-outreach`, `swarm`, `tasks`, `tools`, `voice`, `websites`.
-- **22 areas with no trace anywhere in `cli/`**: `auth`, `brain`, `cast-library`,
-  `chat-sessions`, `code-execution`, `distributed`, `enhanced-generation`, `entity-links`,
-  `hierarchy`, `infographic`, `progress-test`, `rag-debug`, `scheduler`, `search-console`,
-  `self-code`, `simple-chat`, `system-map`, `training_datasets`, `video-editor`,
-  `video-overlay`, `web-search`, `wordpress`.
+At Phase 1: **43 exposed**, **7 planned**, **47 deliberately not exposed** (97 declared).
+
+Reached by a command, including: `agent-chat`, `agent-control`, `agents`, `audio-foundry`,
+`automation`, `autoresearch`, `backups`, `batch-image`, `batch-video`, `bulk-generation`,
+`chat`, `clients`, `code-intelligence`, `connections`, `content-management`,
+`enhanced-chat`, `entity-indexing`, `files`, `generate`, `gpu`, `inbound-guard`, `indexing`,
+`interconnector`, `jobs`, `lessons`, `memory`, `meta`, `model`, `music-video`, `plugins`,
+`production`, `projects`, `rules`, `self-improvement`, `settings`, `social-outreach`,
+`swarm`, `system-map`, `tasks`, `tools`, `unified-chat`, `voice`, `web-search`, `websites`.
+
+Planned: `cast-library` (cast), `upscaling` (upscale), `infographic`, `llm-provider` (llm),
+`video-editor`, `training_datasets` (training), `wordpress`.
+
+Everything else is declared `NOT_EXPOSED` with a reason in that file — Studio-only surfaces,
+internals, and endpoints reached indirectly.
 
 Caveats, so this table is not over-read:
 
