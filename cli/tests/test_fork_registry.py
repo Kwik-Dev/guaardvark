@@ -70,6 +70,44 @@ def test_the_real_package_mounts_without_error():
     assert isinstance(registry.typer_apps(), list)
 
 
+# --- failure containment ---------------------------------------------------
+# `typer_apps()` runs at import time from main.py, so an unguarded error here would
+# break every command *and* `guaardvark --version` with a raw traceback.
+
+
+def test_a_module_that_raises_on_import_does_not_break_the_cli(monkeypatch):
+    good = _fake_module("cast", command_name="cast", app=typer.Typer())
+    _stub_iter(monkeypatch, ["boom", "cast"])
+
+    def import_module(name):
+        if name.endswith(".boom"):
+            raise RuntimeError("kaboom")
+        return good
+
+    monkeypatch.setattr(registry.importlib, "import_module", import_module)
+
+    mounted = registry.typer_apps()  # must not raise
+
+    assert [n for _a, n in mounted] == ["cast"]
+    assert ("boom", "RuntimeError: kaboom") in registry.load_errors()
+
+
+def test_a_duplicate_command_name_is_reported_not_silently_dropped(monkeypatch):
+    """Click's add_typer overwrites silently, so a duplicate would lose a command
+    with no message at all."""
+    first = typer.Typer()
+    second = typer.Typer()
+    modules = {"alpha": _fake_module("alpha", command_name="cast", app=first),
+               "beta": _fake_module("beta", command_name="cast", app=second)}
+    _stub_iter(monkeypatch, ["alpha", "beta"])
+    monkeypatch.setattr(registry.importlib, "import_module", lambda name: modules[name.rsplit(".", 1)[-1]])
+
+    mounted = registry.typer_apps()
+
+    assert mounted == [(first, "cast")]
+    assert any("duplicate COMMAND_NAME" in message for _mod, message in registry.load_errors())
+
+
 def test_repl_commands_are_deferred_on_purpose():
     """No fork REPL command yet — wiring one means editing slash.py and
     command_catalog.py, which the upstream contract test pins to each other."""

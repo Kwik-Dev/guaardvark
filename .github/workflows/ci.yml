@@ -65,29 +65,13 @@ jobs:
         run: pip install -e ./cli pytest
 
       - name: Run CLI test suite (fast tiers)
-        # e2e has its own job below: it is the only tier that boots anything, and
-        # keeping it out of this run keeps the common case fast.
+        # e2e is deselected here on purpose. The suite's one e2e test
+        # (test_mcp_cli_e2e) needs the `mcp` SDK and the backend package, neither
+        # of which this CLI-only job installs — it would skip at collection and
+        # `-m e2e` would select nothing, so a separate job here would be green
+        # having exercised nothing. The e2e tier runs where the backend stack is
+        # already installed; see docs/CLI_PLAN.md section 4.5.
         run: python -m pytest cli/tests -q -m "not e2e"
-
-  cli-e2e:
-    name: CLI End-to-End
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-
-      - name: Install CLI package
-        run: pip install -e ./cli pytest
-
-      - name: Run CLI end-to-end tests
-        # These boot an in-process backend; no GPU, no live server, no database.
-        run: python -m pytest cli/tests -q -m e2e
 
   frontend:
     name: Frontend Lint & Build

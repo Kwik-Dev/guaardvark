@@ -2,8 +2,9 @@
 
 Before this file every test module hand-rolled its own fake backend, so each one
 differed slightly and the suite had no common notion of "a call the CLI made". These
-fixtures are additive — no upstream test file is edited — and they are the base the
-new tiers build on.
+fixtures are additive: no upstream test file was changed to accommodate them. (The
+same change does modify one upstream test, `test_local_tools.py`, to stop assuming a
+`python` on PATH — unrelated to the fixtures.)
 
 Tiers (registered here, applied automatically by filename so upstream test files never
 need editing):
@@ -144,7 +145,33 @@ def cli_runner():
 @pytest.fixture
 def isolated_home(tmp_path, monkeypatch):
     """Point the CLI's config at a throwaway home so tests cannot read or write the
-    developer's real config."""
+    developer's real config.
+
+    `HOME` alone is not enough: `llx.config` computes `CONFIG_FILE` from
+    `Path.home()` at import time, and by the time a test runs the module is already
+    imported. So the resolved paths are re-pointed too, and `HOME` is set for any
+    subprocess a test spawns.
+    """
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+
+    try:
+        from llx import config
+    except Exception:  # pragma: no cover - config is always importable in practice
+        return tmp_path
+
+    home = tmp_path / ".guaardvark"
+    legacy = tmp_path / ".llx"
+    for name, value in (
+        ("GUAARDVARK_DIR", home),
+        ("CONFIG_DIR", home),
+        ("CONFIG_FILE", home / "cli.json"),
+        ("RUNTIME_FILE", home / "runtime.json"),
+        ("LEGACY_CONFIG_DIR", legacy),
+        ("LEGACY_CONFIG_FILE", legacy / "config.json"),
+        ("LEGACY_SESSIONS_FILE", legacy / "sessions.json"),
+        ("LEGACY_HISTORY_FILE", legacy / "history"),
+    ):
+        if hasattr(config, name):
+            monkeypatch.setattr(config, name, value, raising=False)
     return tmp_path

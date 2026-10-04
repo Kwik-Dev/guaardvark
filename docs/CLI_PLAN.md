@@ -40,7 +40,8 @@ Today `cli/llx/main.py` imports every command module (lines 7–39) and calls
 `app.add_typer(...)` for each group (~line 146+); `slash.py` has `_register_repl_commands`
 and `_register_typer_commands`.
 
-**Plan:** add exactly two fork-owned files and touch one upstream line:
+**Plan:** add three fork-owned files and touch one upstream file twice (a single import
+plus a single loop):
 
 ```
 cli/llx/commands/_fork/__init__.py        # FORK-OWNED
@@ -247,9 +248,11 @@ cli/tests/
   test_fork_cli_contract.py   # NEW: D1/D2 gates are enforced
 ```
 
-Markers in `cli/tests/pytest.ini` (or the repo `pyproject.toml`):
-`unit`, `contract`, `e2e`, `slow`. CI runs `-m "not e2e"` for the fast job and a second
-job for `-m e2e`.
+Markers are registered in `cli/tests/conftest.py::pytest_configure` and applied by file
+name. Not a `pytest.ini` or the repo `pyproject.toml`: this repo's .gitignore ignores
+`pytest.ini` ("local-only dev tooling config"), so an ini file would never reach CI, and
+`conftest.py` also lets the marking stay additive to upstream test files. Tiers:
+`unit`, `contract`, `e2e`.
 
 ### 4.3 The spec-parity test — the piece that keeps this honest
 
@@ -259,7 +262,7 @@ CLI. Make it fail loudly:
 ```python
 # cli/tests/test_spec_parity.py
 def test_every_backend_api_area_is_either_exposed_or_declared():
-    prefixes = parse_url_prefixes("backend/api/*_api.py")        # 82 today
+    areas = parse_api_modules("backend/api/*_api.py")            # 97 today
     exposed  = fork_registry.api_coverage.EXPOSED                # command -> area
     declared = fork_registry.api_coverage.NOT_EXPOSED            # area -> reason
     for area in prefixes:
@@ -290,6 +293,14 @@ Postgres), and plugins mocked at the boundary — the pattern already proven by
 `video-editor projects list`, `llm provider`, `guard status`, …) asserting exit code and
 JSON shape, never real GPU work.
 
+**Where e2e runs in CI.** Phase 0 registers the tier and deselects it from the CLI job
+(`-m "not e2e"`) but does **not** add a dedicated e2e job, because the suite's only e2e
+test needs the `mcp` SDK *and* the backend package, neither of which the CLI-only job
+installs — such a job would collect zero tests and fail (pytest exits 5), or pass having
+exercised nothing. The tier's CI home belongs with the real harness above, in a job
+that already has the backend stack (the `backend` job, or `cli-e2e` with
+`backend/requirements-base.txt` installed).
+
 ### 4.6 New contract tests for the gates
 
 | Test | Asserts |
@@ -303,7 +314,7 @@ JSON shape, never real GPU work.
 
 | Phase | Content | Acceptance | Size |
 |---|---|---|---|
-| **0** | Extension point (`_fork/registry.py`), test layout, fixtures, spec-parity test, `python` PATH fix | `pytest cli/tests` green locally **and** in the `cli` CI job; spec-parity test present and passing against the 82 areas with an explicit `NOT_EXPOSED` | M |
+| **0** | Extension point (`_fork/registry.py`), test layout, fixtures, spec-parity test, `python` PATH fix | `pytest cli/tests` green locally **and** in the `cli` CI job; spec-parity test present and passing against all backend API areas, each declared `EXPOSED` / `PLANNED` / `NOT_EXPOSED` | M |
 | **1** | Read-only groups: `guard`, `improve`, `system-map`, `content`, `web`, `connections list/show`, `approvals list/show` | each group has `--json`, a golden snapshot, and an e2e smoke | M |
 | **2** | `cast`, `upscale`, `infographic`, `audio transcribe`, `images --engine` | generation commands queue jobs and print job ids; no approval commands; golden + e2e per group | L |
 | **3** | `video-editor`, `training` | render/training go through the GPU gate; `training --backend runpod` requires `--yes`; contract tests for both | L |

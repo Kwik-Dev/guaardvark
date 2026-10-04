@@ -30,7 +30,7 @@ regeneration commands are in the appendix.
 | REPL commands | ~70 (a superset — includes local file/agent tooling) |
 | Backend blueprints it can reach | ~60 of 82 `url_prefix` areas; **22** with no trace at all |
 | Studio pages | **42** page components; ~22 have a CLI equivalent |
-| **Fork commits touching `cli/`** | **0** |
+| **Fork commits touching `cli/` before this branch** | **0** — `cli/` was untouched upstream-owned code. `cli/llx/commands/_fork/` and the two hooks in `main.py` are the first deliberate divergence; see §11. |
 
 ---
 
@@ -39,9 +39,10 @@ regeneration commands are in the appendix.
 - A **thin client**. Command handlers build an HTTP request and format the response.
   There is no local state, no database access, no model execution and no render logic in
   the CLI. `cli/llx/client.py` is the whole transport.
-- **Upstream-owned.** `git log --no-merges --oneline upstream/main..cloud-plus -- cli/`
-  returns nothing: no `cloud-plus` commit has ever modified the CLI. Consequently every
-  `cloud-plus` feature is absent from it *unless the backend exposes it generically*.
+- **Upstream-owned until now.** `git log --no-merges --oneline upstream/main..cloud-plus -- cli/`
+  was empty before this work: no fork commit had ever modified the CLI, so every
+  `cloud-plus` feature was absent from it *unless the backend exposed it generically*.
+  §11 describes the one seam that now changes that.
 - **Two front doors to the same surface:** a Typer app (shell commands) and a
   `prompt_toolkit` REPL (slash commands). See §4.
 
