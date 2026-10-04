@@ -1669,7 +1669,11 @@ class BatchImageGenerator:
                     gpu_session,
                     vram_probe_snapshot,
                 )
-                from backend.services.job_operation_gate import GpuBusyError, GpuCapacityError
+                from backend.services.job_operation_gate import (
+                    GpuBusyError,
+                    GpuCapacityError,
+                    gpu_wait_message,
+                )
                 from backend.services.job_types import JobKind
 
                 reuse_model = self._kept_model_for_batch(request)
@@ -1751,11 +1755,7 @@ class BatchImageGenerator:
                             return
 
                         snap = vram_probe_snapshot(reserve_mb=reserve_mb)
-                        wait_msg = (
-                            f"Waiting for VRAM — "
-                            f"{(snap.get('free_mb') or 0) / 1024:.1f}GB free, "
-                            f"need ~{need_mb / 1024:.1f}GB"
-                        )
+                        wait_msg = gpu_wait_message(e, snap.get("free_mb"), need_mb)
                         batch_status.gpu_wait_reason = wait_msg
                         if batch_status.status not in ("running", "queued", "pending"):
                             batch_status.status = "queued"

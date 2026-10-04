@@ -180,12 +180,16 @@ class _SW:
         self.used = int(used_gb * (1024 ** 3))
 
 
-def _patch_load(monkeypatch, *, ram_avail_gb, swap_used_gb=0.0, load1=1.0, vram_free_gb=None):
+def _patch_load(monkeypatch, *, ram_avail_gb, swap_used_gb=0.0, load1=1.0, vram_free_gb=None,
+                cpu_pressure=None, threads=16):
     import backend.services.system_load_gate as slg
     monkeypatch.setattr(slg.psutil, "virtual_memory", lambda: _VM(ram_avail_gb))
     monkeypatch.setattr(slg.psutil, "swap_memory", lambda: _SW(swap_used_gb))
     monkeypatch.setattr(slg.os, "getloadavg", lambda: (load1, load1, load1))
     monkeypatch.setattr(slg, "_read_vram_free_gb", lambda: vram_free_gb)
+    # None = no PSI on this "machine", so the load-average check applies.
+    monkeypatch.setattr(slg, "_read_cpu_pressure", lambda: cpu_pressure)
+    monkeypatch.setattr(slg.os, "sched_getaffinity", lambda _pid: set(range(threads)), raising=False)
 
 
 def test_load_gate_admits_when_healthy(monkeypatch):
@@ -210,6 +214,76 @@ def test_load_gate_blocks_on_swap(monkeypatch):
     g = GlobalLoadGate()
     with pytest.raises(LoadGateTimeout):
         g.admit(JobWeight(ram_gb=1.0), timeout=0.0)
+
+
+def _blocked(monkeypatch, **load):
+    from backend.services.system_load_gate import GlobalLoadGate, JobWeight
+    _patch_load(monkeypatch, ram_avail_gb=40.0, **load)
+    g = GlobalLoadGate()
+    return g._blocking_reason(JobWeight(ram_gb=4.0), g.read())
+
+
+def test_load_gate_disk_waits_do_not_block_with_psi(monkeypatch):
+    # Tasks waiting on a disk raise the load average, not CPU pressure.
+    assert _blocked(monkeypatch, load1=30.0, cpu_pressure=(0.0, 0.0)) is None
+
+
+def test_load_gate_blocks_on_sustained_cpu_pressure(monkeypatch):
+    reason = _blocked(monkeypatch, load1=20.0, cpu_pressure=(17.0, 16.0))
+    assert reason and "CPU busy" in reason
+
+
+def test_load_gate_cpu_pressure_alone_never_blocks_under_the_load_limit(monkeypatch):
+    # PSI is per-thread; on its own it would refuse small machines the old
+    # load-average limit admitted. It only narrows that limit, never adds to it.
+    assert _blocked(monkeypatch, load1=10.0, cpu_pressure=(60.0, 50.0), threads=8) is None
+
+
+def test_load_gate_short_cpu_burst_does_not_block(monkeypatch):
+    # Contended now but not over the last minute: a burst, not an overload.
+    assert _blocked(monkeypatch, load1=20.0, cpu_pressure=(60.0, 5.0)) is None
+
+
+def test_load_gate_clears_once_contention_ends(monkeypatch):
+    # The load average and the minute figure still remember it; nothing waits now.
+    assert _blocked(monkeypatch, load1=20.0, cpu_pressure=(3.0, 20.0)) is None
+
+
+def test_load_gate_without_psi_uses_loadavg_scaled_by_threads(monkeypatch):
+    assert "loadavg high" in (_blocked(monkeypatch, load1=20.0, threads=16) or "")
+    assert _blocked(monkeypatch, load1=20.0, threads=32) is None       # limit 36
+    assert "loadavg high" in (_blocked(monkeypatch, load1=19.0, threads=4) or "")  # never below 18
+
+
+def test_read_cpu_pressure_parses_psi(tmp_path, monkeypatch):
+    import backend.services.system_load_gate as slg
+    psi = tmp_path / "cpu"
+    psi.write_text(
+        "some avg10=16.75 avg60=14.05 avg300=5.00 total=123\n"
+        "full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+    )
+    monkeypatch.setattr(slg, "_CPU_PRESSURE_PATH", str(psi))
+    assert slg._read_cpu_pressure() == (16.75, 14.05)
+    monkeypatch.setattr(slg, "_CPU_PRESSURE_PATH", str(tmp_path / "missing"))
+    assert slg._read_cpu_pressure() is None
+
+
+def test_load_refusal_names_the_system_not_vram(monkeypatch):
+    # A load-gate refusal is a SystemLoadBusyError (still a GpuBusyError, so every
+    # retry loop keeps working) and the queue panel says what it waits for.
+    from backend.services import gpu_resource_policy as grp
+    from backend.services.job_operation_gate import (
+        GpuBusyError, SystemLoadBusyError, gpu_wait_message,
+    )
+    _patch_load(monkeypatch, ram_avail_gb=40.0, load1=25.0, cpu_pressure=(50.0, 40.0))
+    import backend.services.system_load_gate as slg
+    monkeypatch.setattr(slg, "_LOAD_GATE_SINGLETON", None)
+    with pytest.raises(SystemLoadBusyError) as caught:
+        grp._load_admit_or_busy("image_batch:test", ram_gb=2.0)
+    assert isinstance(caught.value, GpuBusyError)
+    assert caught.value.detail.startswith("CPU busy")
+    assert gpu_wait_message(caught.value, 14000, 12000).startswith("Waiting for the system: CPU busy")
+    assert gpu_wait_message(GpuBusyError("held"), 4096, 12288) == "Waiting for VRAM — 4.0GB free, need ~12.0GB"
 
 
 def test_load_gate_reserved_ram_accounting(monkeypatch):

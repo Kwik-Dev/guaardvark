@@ -848,7 +848,11 @@ class BatchVideoGenerator:
         # until the deadline; a capacity refusal is terminal. Eviction belongs to
         # gpu_session once it has won the slot — this loop never reclaims.
         from backend.services.gpu_resource_policy import gpu_session, vram_probe_snapshot
-        from backend.services.job_operation_gate import GpuBusyError, GpuCapacityError
+        from backend.services.job_operation_gate import (
+            GpuBusyError,
+            GpuCapacityError,
+            gpu_wait_message,
+        )
         from backend.services.job_types import JobKind
         from backend.services.video_model_registry import vram_mb_for_model
 
@@ -870,6 +874,7 @@ class BatchVideoGenerator:
         backoff_s = 2.0
         deadline = time.time() + admit_deadline_s
         need_mb = int(vram_mb) + 1024
+        last_refusal: Optional[BaseException] = None
 
         while True:
             if cancel_event and cancel_event.is_set():
@@ -882,11 +887,7 @@ class BatchVideoGenerator:
                 return
 
             snap = vram_probe_snapshot()
-            wait_msg = (
-                f"Waiting for VRAM — "
-                f"{(snap.get('free_mb') or 0) / 1024:.1f}GB free, "
-                f"need ~{need_mb / 1024:.1f}GB"
-            )
+            wait_msg = gpu_wait_message(last_refusal, snap.get("free_mb"), need_mb)
             status.status = status.status if status.status in ("running", "queued", "pending") else "queued"
             if status.status == "pending":
                 status.status = "queued"
@@ -933,6 +934,7 @@ class BatchVideoGenerator:
                 )
                 return
             except GpuBusyError as e:
+                last_refusal = e
                 remaining = deadline - time.time()
                 if remaining <= 0:
                     status.status = "error"

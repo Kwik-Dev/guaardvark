@@ -62,6 +62,22 @@ class GpuCapacityError(GpuBusyError):
     """The estimate can never fit this card; retrying will not help."""
 
 
+class SystemLoadBusyError(GpuBusyError):
+    """The GPU could take the job but the machine cannot yet: system RAM, swap or
+    CPU is short (GlobalLoadGate). ``detail`` says which, in plain words."""
+
+    def __init__(self, detail: str):
+        super().__init__(f"System under heavy load — {detail}")
+        self.detail = detail
+
+
+def gpu_wait_message(exc: BaseException, free_mb, need_mb) -> str:
+    """What a queued job is waiting for, for the queue panel."""
+    if isinstance(exc, SystemLoadBusyError):
+        return f"Waiting for the system: {exc.detail}"
+    return f"Waiting for VRAM — {(free_mb or 0) / 1024:.1f}GB free, need ~{need_mb / 1024:.1f}GB"
+
+
 class GpuOOMError(RuntimeError):
     """CUDA/MPS ran out of memory during a render."""
 
