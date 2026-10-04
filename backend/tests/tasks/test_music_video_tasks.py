@@ -273,6 +273,90 @@ def test_assembler_sets_output_and_completes(app, sent, monkeypatch, tmp_path):
     assert captured["body"]["render_mp4"] is True
 
 
+def test_assembler_registers_the_render_when_the_plugin_did_not(app, sent, monkeypatch, tmp_path):
+    """The plugin posts the render to /api/outputs/register from its OWN process,
+    and that POST is non-fatal by design. A wrong backend port, an unreachable
+    backend or a timeout therefore used to leave output_document_id NULL and the
+    finished video invisible in the library, with nothing said about it.
+    (2026-08-30: the plugin pointed registration at :5002 while the backend ran
+    on :5055; "The Last Spark Theme" rendered complete and stayed invisible.)
+    The assembler must register the render itself instead — never fail silently.
+    """
+    svc = MusicVideoService(db.session)
+    mv = _mk(svc)
+    mv.current_stage = "assembling"
+    mv.status = "assembling"
+    f0 = tmp_path / "c0.mp4"; f0.write_bytes(b"x")
+    mv.clips = [{"index": 0, "start": 0.0, "end": 2.0, "clip_path": str(f0), "status": "done"}]
+    mv.cut_plan = [{"index": 0, "start_s": 0.0, "end_s": 2.0, "energy": 1.0, "section_label": "a"}]
+    db.session.commit()
+
+    final = tmp_path / "final.mp4"; final.write_bytes(b"final-bytes")
+
+    monkeypatch.setattr(mvt, "ensure_plugin_running", lambda *a, **k: None)
+    monkeypatch.setattr(
+        mvt.requests, "post",
+        lambda url, json=None, timeout=None, **k: _Resp({"rendered_mp4": str(final), "documents": []}),
+        raising=False,
+    )
+
+    calls = {}
+
+    class _Doc:
+        id = 4242
+
+    def fake_register(path, folder_name=None, file_metadata=None, **kw):
+        calls["path"] = path
+        calls["folder"] = folder_name
+        calls["meta"] = file_metadata
+        return _Doc()
+
+    import backend.services.output_registration as reg
+    monkeypatch.setattr(reg, "register_file", fake_register)
+
+    mvt.run_assembler(mv.id)
+    db.session.refresh(mv)
+
+    assert calls["path"] == str(final)
+    assert calls["folder"] == "Videos"
+    assert calls["meta"]["music_video_id"] == mv.id
+    assert calls["meta"]["fallback_registration"] is True
+    assert mv.output_document_id == 4242
+    assert mv.current_stage == "complete"
+
+
+def test_assembler_prefers_the_plugin_document_when_present(app, sent, monkeypatch, tmp_path):
+    """The fallback must not fire, and must not touch the DB, when the plugin DID
+    register the render — the happy path stays exactly as it was."""
+    svc = MusicVideoService(db.session)
+    mv = _mk(svc)
+    mv.current_stage = "assembling"
+    mv.status = "assembling"
+    f0 = tmp_path / "c0.mp4"; f0.write_bytes(b"x")
+    mv.clips = [{"index": 0, "start": 0.0, "end": 2.0, "clip_path": str(f0), "status": "done"}]
+    mv.cut_plan = [{"index": 0, "start_s": 0.0, "end_s": 2.0, "energy": 1.0, "section_label": "a"}]
+    db.session.commit()
+
+    monkeypatch.setattr(mvt, "ensure_plugin_running", lambda *a, **k: None)
+    monkeypatch.setattr(
+        mvt.requests, "post",
+        lambda url, json=None, timeout=None, **k: _Resp(
+            {"rendered_mp4": "/out/final.mp4", "documents": [{"id": 77, "path": "Videos/x.mp4"}]}
+        ),
+        raising=False,
+    )
+
+    import backend.services.output_registration as reg
+    monkeypatch.setattr(
+        reg, "register_file",
+        lambda *a, **k: pytest.fail("fallback registration must not run on the happy path"),
+    )
+
+    mvt.run_assembler(mv.id)
+    db.session.refresh(mv)
+    assert mv.output_document_id == 77
+
+
 # --- render-tuning settings (moonwalk fix + cost knobs) ----------------------
 
 def test_settings_exposes_tuning_defaults(app):

@@ -1038,6 +1038,54 @@ def run_assembler(mv_id: int):
         mp4_doc = next((d for d in docs if _is_mp4(d)), None) or (docs[0] if docs else None)
         if mp4_doc:
             mv.output_document_id = mp4_doc.get("id")
+        else:
+            # The plugin registers the render as a Document from its OWN process,
+            # by POSTing back to /api/outputs/register. That POST is non-fatal by
+            # design, so a wrong backend port, an unreachable backend or a timeout
+            # leaves the file on disk with NO Document and output_document_id NULL
+            # — the finished video exists but never appears in the library, and
+            # nothing in this task said so. (Observed 2026-08-30: the plugin
+            # config pointed registration at :5002 while the backend ran on :5055;
+            # "The Last Spark Theme" rendered complete and stayed invisible.)
+            # Register it in-process instead, and never fail silently again.
+            rendered = result.get("rendered_mp4")
+            if rendered and os.path.exists(rendered):
+                try:
+                    from backend.services.output_registration import register_file
+                    fallback_doc = register_file(
+                        rendered,
+                        folder_name="Videos",
+                        file_metadata={
+                            "kind": "arrangement_render",
+                            "music_video_id": mv_id,
+                            "fallback_registration": True,
+                        },
+                    )
+                except Exception:  # noqa: BLE001
+                    fallback_doc = None
+                    log.exception(
+                        "music_video %s: fallback registration raised for %s",
+                        mv_id, rendered,
+                    )
+                if fallback_doc is not None:
+                    mv.output_document_id = fallback_doc.id
+                    log.warning(
+                        "music_video %s: plugin returned no registered document; "
+                        "registered the render in-process instead (doc %s, %s)",
+                        mv_id, fallback_doc.id, rendered,
+                    )
+                else:
+                    log.error(
+                        "music_video %s: render %s could not be registered as a "
+                        "Document — it will not appear in the library",
+                        mv_id, rendered,
+                    )
+            else:
+                log.error(
+                    "music_video %s: compose-arrangement returned no document and "
+                    "no existing rendered_mp4 (%r)",
+                    mv_id, rendered,
+                )
 
         # Convenience copy: put a nicely-named .mlt next to the music_video's clips/
         # so the user can easily find and open "the shotcut file" for this project
