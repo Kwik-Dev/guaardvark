@@ -232,6 +232,46 @@ def shotcut_compose():
     return jsonify(body), status_code
 
 
+def _register_render_in_process(rendered_path: str) -> Optional[int]:
+    """Register a render the plugin failed to register, and return its doc id.
+
+    The plugin registers outputs by POSTing back to /api/outputs/register from
+    its own process. That POST is non-fatal by design — register_output()
+    swallows the HTTP error, logs a warning and returns None — so a wrong backend
+    port, an unreachable backend or a timeout leaves the file on disk with no
+    Document. The Video Editor frontend addresses a finished render by
+    ``rendered_mp4_doc_id``, so an unregistered render is unaddressable: no
+    preview, no download link, and nothing said about it. Register it here.
+    """
+    from backend.services.output_registration import register_file
+
+    try:
+        doc = register_file(
+            rendered_path,
+            folder_name="Videos",
+            file_metadata={"kind": "arrangement_render", "fallback_registration": True},
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "video-editor: fallback registration raised for %s", rendered_path
+        )
+        return None
+    if doc is None:
+        logger.error(
+            "video-editor: render %s could not be registered as a Document — "
+            "the editor cannot address it",
+            rendered_path,
+        )
+        return None
+    logger.warning(
+        "video-editor: plugin returned no registered document; registered the "
+        "render in-process instead (doc %s, %s)",
+        doc.id,
+        rendered_path,
+    )
+    return doc.id
+
+
 @video_editor_bp.route("/shotcut/compose-arrangement", methods=["POST"])
 def shotcut_compose_arrangement():
     """Multi-clip render path. Resolves the song document_id if provided."""
@@ -253,6 +293,14 @@ def shotcut_compose_arrangement():
                 if fname.endswith(".mp4"):
                     body["rendered_mp4_doc_id"] = doc.get("id")
                     break
+        # That registration POST is non-fatal, so a miss leaves the render
+        # unaddressable. Register it in-process rather than return a body the
+        # editor cannot resolve.
+        rendered = body.get("rendered_mp4")
+        if rendered and not body.get("rendered_mp4_doc_id") and os.path.exists(rendered):
+            doc_id = _register_render_in_process(str(rendered))
+            if doc_id is not None:
+                body["rendered_mp4_doc_id"] = doc_id
     return jsonify(body), status_code
 
 
