@@ -134,6 +134,9 @@ AUDIO_FOUNDRY_MODELS: List[Dict[str, Any]] = [
         # Sum of the snapshot's files at the pinned revision (read 2026-10-03).
         "size_gb": 9.4,
         "gated": False,
+        # Installed only by its own Install button, never by "Install all missing":
+        # a stock install keeps v1 and does not pull 9.4 GB plus an 8 GB environment.
+        "optional": True,
     },
     {
         "id": "stable-audio-open",
@@ -454,6 +457,7 @@ def _hub_row(entry: Dict[str, Any]) -> Dict[str, Any]:
         "terms_url": entry.get("terms_url"),
         "license": entry.get("license"),
         "vram_note": entry.get("vram_note"),
+        "optional": bool(entry.get("optional")),
         "installed": installed,
         "delegate": None,
         "missing_files": missing,

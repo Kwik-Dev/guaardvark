@@ -173,7 +173,8 @@ const AudioFoundryModelsModal = ({
     }
   };
 
-  const missing = models.filter((m) => !m.installed);
+  // Optional models (e.g. ACE-Step 1.5) install only from their own row.
+  const missing = models.filter((m) => !m.installed && !m.optional);
   const missingTotalGb = missing.reduce((sum, m) => sum + (m.size_gb || 0), 0);
 
   const handleInstallAllMissing = async () => {
