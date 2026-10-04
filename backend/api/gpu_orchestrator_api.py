@@ -7,6 +7,7 @@ Provides:
     GET  /api/gpu/memory/tier     — Get current quality tier
     POST /api/gpu/memory/tier     — Set quality tier (speed/balanced/quality)
     POST /api/gpu/memory/evict    — Force-evict a specific model
+    POST /api/gpu/memory/release-kept-image — Unload an image model kept after a batch
     POST /api/gpu/memory/preload  — Manually preload a model
 
 Auto-discovered by blueprint_discovery.py.
@@ -89,6 +90,22 @@ def gpu_evict():
         return jsonify({"success": True, "slot_id": slot_id}), 200
     else:
         return jsonify({"success": False, "error": f"Could not evict {slot_id} (not loaded or eviction failed)"}), 404
+
+
+@gpu_orchestrator_bp.route("/release-kept-image", methods=["POST"])
+def gpu_release_kept_image():
+    """Unload an image model kept loaded after a batch. GPU jobs in worker
+    processes call this before they start (gpu_resource_policy)."""
+    import sys
+    from backend.services.gpu_resource_policy import kept_image_pipeline_marker
+
+    mod = sys.modules.get("backend.services.offline_image_generator")
+    gen = getattr(mod, "_generator_instance", None) if mod else None
+    released = bool(gen.release_kept_pipeline()) if gen is not None else False
+    if gen is None or gen.kept_model() is None:
+        # Nothing is kept here, so a marker left by an earlier backend is stale.
+        kept_image_pipeline_marker().unlink(missing_ok=True)
+    return jsonify({"success": True, "released": released}), 200
 
 
 @gpu_orchestrator_bp.route("/preload", methods=["POST"])

@@ -274,3 +274,35 @@ def set_confine_tool_paths(enabled: bool) -> None:
     global _confine_tool_paths
     save_setting("confine_tool_paths", "true" if enabled else "false")
     _confine_tool_paths = bool(enabled)
+
+
+# Minutes an image model stays loaded after a batch, waiting for the next one.
+# 0 (the default) unloads it as the batch ends. Read by the batch worker thread,
+# which has no app context, so it is cached like confine_tool_paths.
+IMAGE_KEEP_LOADED_MAX_MINUTES = 240
+_image_keep_loaded_minutes: Optional[int] = None
+
+
+def _clamp_keep_minutes(value) -> int:
+    try:
+        minutes = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(IMAGE_KEEP_LOADED_MAX_MINUTES, minutes))
+
+
+def get_image_keep_loaded_minutes() -> int:
+    global _image_keep_loaded_minutes
+    if has_app_context() or _image_keep_loaded_minutes is None:
+        _image_keep_loaded_minutes = _clamp_keep_minutes(
+            get_setting("image_keep_loaded_minutes", default=0)
+        )
+    return _image_keep_loaded_minutes
+
+
+def set_image_keep_loaded_minutes(minutes) -> int:
+    global _image_keep_loaded_minutes
+    minutes = _clamp_keep_minutes(minutes)
+    save_setting("image_keep_loaded_minutes", str(minutes))
+    _image_keep_loaded_minutes = minutes
+    return minutes

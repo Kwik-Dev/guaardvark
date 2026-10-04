@@ -1176,6 +1176,13 @@ def _initialize_app_components(app):
             get_confine_tool_paths()
     except Exception as e:
         app.logger.warning(f"Could not load the tool path limit setting: {e}")
+    # The image batch worker reads this from its own thread, too.
+    try:
+        with app.app_context():
+            from backend.utils.settings_utils import get_image_keep_loaded_minutes
+            get_image_keep_loaded_minutes()
+    except Exception as e:
+        app.logger.warning(f"Could not load the keep-image-model setting: {e}")
     try:
         with app.app_context():
             from backend.services.inbound_guard_service import get_mode

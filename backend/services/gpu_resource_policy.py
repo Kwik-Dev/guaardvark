@@ -23,10 +23,13 @@ only AFTER the slot is claimed — we never evict on behalf of a job that lost t
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
+import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterator, Optional
 
 log = logging.getLogger(__name__)
@@ -257,6 +260,67 @@ def reclaim_gpu(
     if in_process:
         evict_audio_foundry_backends()
         reclaim_in_process_vram(needed_mb)
+
+
+# --- Image pipeline kept loaded between batches ------------------------------
+
+def kept_image_pipeline_marker() -> Path:
+    """Where the backend records an image pipeline it is keeping loaded after a
+    batch (Settings → Generation), so GPU jobs in other processes can ask for the
+    memory back. It exists only while a pipeline is being kept."""
+    return Path(__file__).resolve().parents[2] / "pids" / "image_pipeline_kept.json"
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def release_kept_image_pipeline(image_model: Optional[str] = None) -> bool:
+    """Unload an image pipeline kept loaded between batches, unless this job renders with it.
+
+    Every gpu_session calls this once it holds the GPU. With nothing kept (the
+    default) it is a single file check. In the process holding the pipeline it
+    unloads it directly, leaving it for a job that names the same model; from any
+    other process it asks the backend, since only the backend can free that
+    memory. Never raises. True when a pipeline was unloaded.
+    """
+    marker = kept_image_pipeline_marker()
+    try:
+        info = json.loads(marker.read_text())
+        pid = int(info.get("pid") or 0)
+    except FileNotFoundError:
+        return False
+    except Exception as e:  # noqa: BLE001
+        log.debug("unreadable kept-image marker %s: %s", marker, e)
+        return False
+    try:
+        if pid == os.getpid():
+            mod = sys.modules.get("backend.services.offline_image_generator")
+            gen = getattr(mod, "_generator_instance", None) if mod else None
+            if gen is None:
+                marker.unlink(missing_ok=True)
+                return False
+            return bool(gen.release_kept_pipeline(keep_model=image_model))
+        if not _pid_alive(pid):
+            marker.unlink(missing_ok=True)
+            return False
+        from backend.utils.backend_http import request_json
+        resp = request_json(
+            "POST", "/api/gpu/memory/release-kept-image",
+            payload={}, connect_timeout=2.0, read_timeout=60.0,
+        )
+        return bool((resp.data or {}).get("released"))
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not release the image model kept loaded between batches: %s", e)
+        return False
 
 
 # --- Orchestrator budget hooks (opt-in) --------------------------------------
@@ -606,6 +670,7 @@ def gpu_session(
     lease_seconds: Optional[int] = None,
     vram_reserve_mb: int = 0,
     cancel_event=None,
+    image_model: Optional[str] = None,
 ) -> Iterator[bool]:
     """Claim the GPU for a unit of work — exclusivity + VRAM reclaim/budget in one place.
 
@@ -620,6 +685,9 @@ def gpu_session(
 
     ``cancel_event`` ends an ``on_busy='wait'`` gate wait with ``GpuBusyError``
     once it is set, so a cancelled job does not hold up the queue behind it.
+
+    An image pipeline kept loaded after a batch is unloaded first, unless
+    ``image_model`` names the model it holds (the job will render with it).
 
     A refusal raised after the claim releases the gate without its post-release
     cooldown: nothing touched the card. Teardown runs in reverse order and before
@@ -700,6 +768,7 @@ def gpu_session(
                     )
                     if lease_held:
                         heartbeat_stop = _start_lease_heartbeat(_slot, lease_len)
+                release_kept_image_pipeline(image_model)
                 # Evict residents only when the estimate does not already fit and
                 # the card could hold it at all; otherwise the refusal would have
                 # cost the user their chat model for nothing.

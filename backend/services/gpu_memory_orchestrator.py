@@ -65,6 +65,7 @@ class ModelSlot:
     state: SlotState = SlotState.LOADED
     preloaded_for: Optional[str] = None # Route hint that triggered preload
     in_use: int = 0                     # Active inference pins; >0 blocks idle/forced yank
+    idle_timeout_s: Optional[int] = None  # Overrides the orchestrator's idle timeout for this slot
 
     def to_dict(self) -> dict:
         return {
@@ -79,6 +80,7 @@ class ModelSlot:
             "state": self.state.value,
             "preloaded_for": self.preloaded_for,
             "in_use": self.in_use,
+            "idle_timeout_s": self.idle_timeout_s,
         }
 
 
@@ -403,6 +405,19 @@ class GPUMemoryOrchestrator:
             slot.in_use = max(0, int(slot.in_use or 0) - 1)
             slot.last_used = time.time()
             logger.debug(f"Model {slot_id} end_use (in_use={slot.in_use})")
+
+    def set_idle_timeout(self, slot_id: str, seconds: Optional[int]) -> bool:
+        """Give one slot its own idle timeout (None returns it to the default).
+
+        For a model someone chose to keep loaded for a while, such as the image
+        pipeline between batches. False when the slot is not registered.
+        """
+        with self._lock:
+            slot = self._registry.get(slot_id)
+            if not slot:
+                return False
+            slot.idle_timeout_s = int(seconds) if seconds else None
+            return True
 
     def release_model(self, slot_id: str):
         """
@@ -1177,11 +1192,12 @@ class GPUMemoryOrchestrator:
                         and not self._cpu_ram_pressure()):
                     continue
                 idle_s = now - slot.last_used
-                if idle_s > self._idle_timeout_s:
+                timeout_s = slot.idle_timeout_s or self._idle_timeout_s
+                if idle_s > timeout_s:
                     # Don't evict high-priority models that are recently used frequently
                     if slot.priority >= 90 and slot.use_count > 10:
                         continue
-                    logger.info(f"Idle eviction: {slot.slot_id} (idle {idle_s:.0f}s > timeout {self._idle_timeout_s}s)")
+                    logger.info(f"Idle eviction: {slot.slot_id} (idle {idle_s:.0f}s > timeout {timeout_s}s)")
                     self._unload_model(slot)
 
     def _emit_status_if_subscribers(self):
