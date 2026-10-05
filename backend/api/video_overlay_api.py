@@ -201,7 +201,7 @@ def render_timeline_endpoint():
         video_document_id: int,
         video_trim_start: float | null,
         video_trim_end: float | null,
-        text_elements: [{text, fontSize, fontColor, x, y, rotation,
+        text_elements: [{text, fontSize, fontColor, position?, x, y, rotation,
                           startSeconds, endSeconds}, ...],
         audio_document_id: int | null,
         audio_volume: float,
@@ -209,6 +209,13 @@ def render_timeline_endpoint():
 
     Returns the new Document on success. JobOperationGate integration and
     Celery routing for long renders are wired in Phase 8.
+
+    `position` on a text element is a name -- one of top-left,top-center,top-right,
+    middle-left,center,middle-right,bottom-left,bottom-center,bottom-right -- and it wins
+    over x/y. The ffmpeg renderer turns it into a drawtext expression, so it is correct at
+    any frame size; without it the x/y pixel defaults apply. Added for
+    `video-editor captions-burn`, which cannot know the frame size. The mlt backend does not
+    read it (plugins/video_editor/mlt/timeline_compose.py takes x/y only).
     """
     payload = request.get_json(silent=True) or {}
     

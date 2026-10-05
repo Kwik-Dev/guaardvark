@@ -33,21 +33,51 @@ _VIDEO_AUDIO_LABEL = "0:a"
 _AUDIO_OVERLAY_LABEL = "1:a"
 
 
+# Named placements, in the same vocabulary `/api/video-overlay/text` already accepts (its
+# _VALID_POSITIONS). A name becomes a drawtext *expression* rather than a pixel pair, so it
+# is correct at any frame size: centring needs the rendered text width, which only the
+# filter itself knows.
+_POSITION_EXPRS = {
+    "top-left": ("40", "40"),
+    "top-center": ("(w-text_w)/2", "40"),
+    "top-right": ("w-text_w-40", "40"),
+    "middle-left": ("40", "(h-th)/2"),
+    "center": ("(w-text_w)/2", "(h-th)/2"),
+    "middle-right": ("w-text_w-40", "(h-th)/2"),
+    "bottom-left": ("40", "h-th-40"),
+    "bottom-center": ("(w-text_w)/2", "h-th-40"),
+    "bottom-right": ("w-text_w-40", "h-th-40"),
+}
+
+
 def _build_drawtext_filter(text_el: dict, label_in: str, label_out: str) -> str:
     """One drawtext per text element. Non-rotation only for v1; rotation is
-    a §10 decision in the editor plan (overlay-PNG render path, deferred)."""
+    a §10 decision in the editor plan (overlay-PNG render path, deferred).
+
+    Placement: an element may carry ``position`` (a name from `_POSITION_EXPRS`), and that
+    wins over ``x``/``y``. Without it, ``x``/``y`` are used as integer pixels exactly as
+    before -- so the Studio, which sends the dragged coordinates, is unaffected. Added for
+    `video-editor captions-burn` (2026-10-05): captions need the bottom of the frame, the
+    CLI cannot know the frame size, and the old pixel defaults (320, 240) put them
+    left-of-centre in the middle of a 1920x1080 picture.
+    """
     text = text_el.get("text") or ""
     if not text.strip():
         return None
     # Resolved per call, like video_text_overlay does: the font lives wherever
     # this machine keeps it (2026-08-28: the fixed Debian path broke every Mac).
+    placement = _POSITION_EXPRS.get(str(text_el.get("position") or "").strip().lower())
+    if placement:
+        x_expr, y_expr = placement
+    else:
+        x_expr, y_expr = f"{int(text_el.get('x', 320))}", f"{int(text_el.get('y', 240))}"
     parts = [
         f"fontfile={resolve_font_path()}",
         f"text='{_ffmpeg_escape_text(text)}'",
         f"fontsize={int(text_el.get('fontSize', 48))}",
         f"fontcolor={_validate_color(text_el.get('fontColor', 'white'))}",
-        f"x={int(text_el.get('x', 320))}",
-        f"y={int(text_el.get('y', 240))}",
+        f"x={x_expr}",
+        f"y={y_expr}",
         "borderw=2",
         "bordercolor=black",
     ]

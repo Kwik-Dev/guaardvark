@@ -297,6 +297,42 @@ Why these three and nothing else:
    `guaardvark api request POST …/storyboard/approve` refuses without `--yes` too: the named
    command and the escape hatch gate the same routes the same way.
 
+### 3.18 Captions onto a video — `video-editor captions-burn`
+
+The last piece of the ask that opened this work ("I need captions on videos").
+`captions-export` and `captions-import` moved SRT in and out of an arrangement, but nothing
+put captions *on* a video. No new capability was needed: the renderer already takes timed
+`text_elements`, which is what a caption track is.
+
+| | |
+| `video-editor captions-burn <video_doc> --srt F` | parse the SRT with the **backend's** parser, then render |
+| `… --captions-doc ID` | same, for an .srt Guaardvark already holds |
+| `… --position bottom-center` | placement; `--x/--y` for raw pixels |
+| `… --font-size / --color / --audio / --backend` | style and the optional audio overlay |
+| `video-editor captions-status <job_id>` | progress, and the new document when it finishes |
+
+Three decisions worth recording:
+
+1. **The SRT is parsed by the backend, not by a second CLI parser.** `/api/video-editor/
+   captions/import` already owns `_parse_srt`, so whatever `captions-export` produced goes
+   straight back on and the two cannot drift.
+2. **It is a D1 render, so no `--yes`.** It dispatches through `/api/` and the backend's job
+   queue, like `video-editor render`. Nothing here is a decision a person inspects first.
+3. **Placement needed a renderer change, and that is why `--position` exists.** The CLI cannot
+   know the frame size, and `_build_drawtext_filter` forced `int()` on x/y with defaults of
+   320,240 — a caption left-of-centre in the middle of a 1920x1080 picture, with no way out.
+   Rather than guess pixels, `position` (the nine names `/api/video-overlay/text` already
+   uses) is now honoured by the ffmpeg renderer as a drawtext expression, so it is correct at
+   any frame size. It is additive: without a `position` the old pixel path is byte-identical,
+   so the Studio, which sends dragged coordinates, is unaffected. The mlt backend does not
+   read it (`timeline_compose.py` takes x/y only) and its own default is the top-left corner.
+
+Known to be broken on a machine whose ffmpeg lacks `--enable-libfreetype`: the renderer
+resolves ffmpeg with `shutil.which("ffmpeg")`, which checks presence and not capability, so a
+build with no `drawtext` filter fails inside the queue with `No such filter: 'drawtext'`.
+That is pre-existing and affects `/api/video-overlay/text` too, not just this command; a
+capability check would turn it into an actionable message and is the obvious follow-up.
+
 ## 4. Test framework renewal
 
 The current suite is good but flat: 221 tests, one style per file, one e2e, no shared
@@ -402,6 +438,7 @@ that already has the backend stack (the `backend` job, or `cli-e2e` with
 | **5** | Docs: update `CLI_SPEC.md` §6/§7/§8/§9 from the code; refresh the README CLI section; regenerate coverage tables | `CLI_SPEC.md` regenerates clean from the appendix commands; spec-parity test proves no undocumented area | S |
 | **6** | **Generic REST access — `api request` / `api routes` / `api audit`** (D5, safety tier B) | **Shipped** with D5. `api request` sends any `/api/...` route: reads free, writes and decision-class routes need `--yes`, every attempt appended to `<GUAARDVARK_DIR>/api-audit.jsonl`, `--dry-run` sends nothing. `api routes` reads `GET /api/routes`; `api audit` reads the log back. `test_fork_api_command.py` proves the gate (refuses `/…/approve` without `--yes`), the audit (writes an entry for ok / refused / dry-run), the path guard (absolute URL and non-`/api/` path rejected), and that the guard module is the only place naming a decision route. Named-command promotion is the follow-up, not part of this phase. | M |
 | **7** | **Film Crew and music video from the terminal** (D6): read-only introspection, plus the three render gates | **Shipped** with D6. `film-crew subjects\|shots\|shot\|templates` and `music-video cuts\|clips\|storyboard` read what the pipelines actually produced; `film-crew confirm-casting`, `film-crew approve-storyboard` and `music-video approve` perform the three stage transitions that start a render, each behind `--yes`. Two new fork modules extend upstream-owned groups via the `audio_ext.py` pattern (no `COMMAND_NAME`, no `app`), so no upstream file is edited and `test_music_video_cli.py`'s per-invocation "never POST approve" assertions still pass unchanged. `render_gates.py` is the single documented `_ALLOWED` exception in the D2 static scan. | M |
+| **8** | **Captions onto a video** (3.18): `video-editor captions-burn` / `captions-status`, plus `position` on the ffmpeg renderer | **Shipped.** The SRT is parsed by the backend's own reader, the render goes through the job queue (D1, so no `--yes`), and `--position` places the text frame-size-independently because the CLI cannot know the frame size. `position` was accepted by `/api/video-overlay/text` and silently ignored by the timeline renderer before this; it is now a drawtext expression, and the pixel path is unchanged when it is absent. 25 CLI tests and 4 renderer tests; one review round found the placement gap, a test fixture the backend cannot produce, and the group's usage-error convention. | M |
 
 Rough total: **L×3, M×3, S×1**. Phase 0 first is non-negotiable — without the extension
 point every later phase edits upstream files, and without the parity test the docs drift
