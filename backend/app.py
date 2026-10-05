@@ -2014,6 +2014,11 @@ def health_frontend():
 _celery_health_cache = {"data": None, "timestamp": 0}
 _HEALTH_CACHE_DURATION = 30
 
+# The queue this endpoint's liveness ping is sent to. A worker answering the broadcast
+# while consuming only another queue (e.g. the idle `training` worker) must not read as
+# "busy", so the probe checks this queue by name.
+HEALTH_QUEUE = "health"
+
 
 def _celery_worker_snapshot(celery, timeout: float = 2.0) -> dict:
     """Best-effort worker state for health/busy reporting."""
@@ -2034,16 +2039,130 @@ def _celery_worker_snapshot(celery, timeout: float = 2.0) -> dict:
     }
 
 
-def _celery_workers_registered(celery) -> bool:
-    """True when at least one worker is registered (stats/ping), even if task queue is backed up."""
+def _celery_worker_probe(celery, timeout: float = 2.0) -> dict:
+    """Worker state for health, keeping "could not ask", "no worker" and "wrong worker" apart.
+
+    ``reachable`` is False when the workers/counts inspect raised: the exchange did not
+    complete (the broker or the workers were unreachable, or the reply could not be read).
+    That is not the same as the broker answering with an empty worker set.
+
+    ``health_workers`` names the hosts that consume ``HEALTH_QUEUE`` -- the queue this
+    endpoint's ping goes to. A worker answering the broadcast while consuming only another
+    queue does not make the endpoint "busy": on a single-GPU box ``training`` is alive
+    while ``main`` is the only consumer of ``health``, and that state must read as no
+    worker, not backlog (the Oct-4 backlog this endpoint failed to surface).
+
+    Counts are zeroed when no worker answered, so the body cannot claim queued work while
+    also claiming no consumer. ``health_queues_read`` is False when the ``active_queues``
+    reply itself was lost, so the diagnosis can soften rather than assert that a worker
+    does not consume the queue when it merely could not be read.
+    """
     try:
-        snap = _celery_worker_snapshot(celery, timeout=2.0)
-        if snap.get("workers"):
-            return True
-        pings = celery.control.inspect(timeout=2).ping() or {}
-        return bool(pings)
-    except Exception:
-        return False
+        snap = _celery_worker_snapshot(celery, timeout=timeout)
+    except Exception as exc:  # noqa: BLE001 - the caller reports a verdict, not a crash
+        logger_module.warning("Celery worker probe could not be read (reporting unreachable): %s", exc)
+        return {
+            "reachable": False,
+            "workers": [],
+            "health_workers": [],
+            "health_queues_read": False,
+            "active_tasks": 0,
+            "queued_tasks": 0,
+        }
+
+    workers = snap["workers"]
+    health_workers: list[str] = []
+    health_queues_read = True
+    if workers:
+        try:
+            queues = celery.control.inspect(timeout=timeout).active_queues() or {}
+            health_workers = [
+                host
+                for host, entries in queues.items()
+                if any((q or {}).get("name") == HEALTH_QUEUE for q in (entries or []))
+            ]
+        except Exception as exc:  # noqa: BLE001 - a partial reply; workers are still known
+            health_queues_read = False
+            logger_module.warning("Celery active_queues probe failed (health queue unknown): %s", exc)
+
+    return {
+        "reachable": True,
+        "workers": workers,
+        "health_workers": health_workers,
+        "health_queues_read": health_queues_read,
+        "active_tasks": snap["active_tasks"] if workers else 0,
+        "queued_tasks": snap["queued_tasks"] if workers else 0,
+    }
+
+
+def _celery_health_diagnosis(probe: dict, error_msg: str, queue: str = HEALTH_QUEUE) -> dict:
+    """The /api/health/celery body when the health ping did not answer.
+
+    Three outcomes, worded apart on purpose. Only the middle one is "busy": a worker that
+    consumes ``queue`` answered the broadcast, so the ping result was merely late (a short
+    backlog or a transient result). A registered worker that does *not* consume ``queue``
+    is not busy -- it cannot answer this ping at all -- and that must not be reported as
+    backlog. On this repo's ``--pool=solo --concurrency=1`` a long task usually starves the
+    pidbox broadcast altogether, so the slow case normally reads as the softened "no
+    worker" below, not "busy".
+
+    The no-worker wording stays honest about that solo pool: a worker mid-task cannot serve
+    the broadcast within the timeout, so "no worker registered" cannot be stated without
+    the "(or none answered)" qualifier. When the queue list itself could not be read
+    (``health_queues_read`` False), the "not consuming the queue" claim is softened too.
+    """
+    workers = probe.get("workers", [])
+    body = {
+        "workers": workers,
+        "active_tasks": probe.get("active_tasks", 0) if workers else 0,
+        "queued_tasks": probe.get("queued_tasks", 0) if workers else 0,
+    }
+    if not probe.get("reachable"):
+        return {
+            **body,
+            "status": "down",
+            "error": error_msg,
+            "suggestion": "Could not reach the Celery broker or any worker. Check that Redis "
+                          "is running and start the workers: ./restart_celery.sh",
+        }
+    if probe.get("health_workers"):
+        return {
+            **body,
+            "status": "busy",
+            "message": "Worker backlog — health ping queued behind long task(s)",
+            # A busy body needs an `error` too: the Studio reads it and would otherwise
+            # render a literal "Service down" for a worker that is merely mid-task.
+            "error": "Celery worker busy — the health ping queued behind a long task.",
+        }
+    if workers:
+        if probe.get("health_queues_read", True):
+            error = (
+                f"No Celery worker is consuming the '{queue}' queue — the registered "
+                "worker(s) do not consume it, or the one that does is stopped."
+            )
+        else:
+            # The active_queues reply was lost, so we cannot say which queues a worker
+            # consumes -- do not assert the confident version of the claim.
+            error = (
+                f"No Celery worker was seen consuming the '{queue}' queue — the registered "
+                "worker(s) may not consume it, the one that does may be stopped, or its queue "
+                "list could not be read."
+            )
+        return {
+            **body,
+            "status": "down",
+            "error": error,
+            "suggestion": "Start the Celery workers: ./restart_celery.sh. A stopped worker is not "
+                          "restarted automatically.",
+        }
+    return {
+        **body,
+        "status": "down",
+        "error": "No Celery worker is registered with the broker (or none answered within the "
+                 "probe timeout).",
+        "suggestion": "Start the Celery workers: ./restart_celery.sh. A stopped worker is not "
+                      "restarted automatically.",
+    }
 
 
 @app.route("/api/health/celery")
@@ -2076,7 +2195,7 @@ def health_celery():
 
     try:
         from backend.celery_app import celery
-        result = celery.send_task('backend.celery_tasks_isolated.ping', queue='health')
+        result = celery.send_task('backend.celery_tasks_isolated.ping', queue=HEALTH_QUEUE)
         # Short timeout: if the worker is busy with a long task (LoRA train etc.) we don't want
         # the health check itself to block the UI for 15s. We detect "busy" below.
         status = result.get(timeout=3)
@@ -2098,45 +2217,18 @@ def health_celery():
             "suggestion": "Start Redis and the Celery worker (./start.sh starts both).",
         }), 503), "down")
     except Exception as exc:
-        error_msg = str(exc)
-
-        # Ping timeout with registered workers = backlog on solo-pool worker, not dead.
-        if "timeout" in error_msg.lower():
-            try:
-                from backend.celery_app import celery
-                snap = _celery_worker_snapshot(celery)
-                if snap.get("workers") or _celery_workers_registered(celery):
-                    worker_info = {
-                        "active_tasks": snap.get("active_tasks", 0),
-                        "queued_tasks": snap.get("queued_tasks", 0),
-                        "workers": snap.get("workers", []),
-                        "message": "Worker backlog — health ping queued behind long task(s)",
-                    }
-                    return _cache_and_return(
-                        (jsonify({"status": "busy", **worker_info}), 200), "busy"
-                    )
-                # Fallback: any visible queue work
-                has_work = snap.get("active_tasks", 0) > 0 or snap.get("queued_tasks", 0) > 0
-                if has_work:
-                    worker_info = {
-                        "active_tasks": snap.get("active_tasks", 0),
-                        "queued_tasks": snap.get("queued_tasks", 0),
-                        "message": "Worker processing long-running task",
-                    }
-                    return _cache_and_return(
-                        (jsonify({"status": "busy", **worker_info}), 200), "busy"
-                    )
-            except Exception:
-                pass
-            error_msg = f"Worker busy or overloaded: {error_msg}"
-
-        error_response = jsonify({
-            "status": "down",
-            "error": error_msg,
-            "suggestion": "Worker may be processing large tasks. Check /api/celery/tasks for details."
-        }), 503
-
-        return _cache_and_return(error_response, "down")
+        # No answer from the ping. Ask the broker who is registered -- and which queue they
+        # consume -- before blaming the worker: "no worker", "busy worker" and "wrong worker"
+        # need different fixes. The old check keyed off "timeout" in the error text, which
+        # Celery's TimeoutError ("The operation timed out.") does not contain, so a dead
+        # worker read as a busy one.
+        from backend.celery_app import celery
+        logger_module.warning("Celery health ping did not answer (%s); probing the workers", exc)
+        diagnosis = _celery_health_diagnosis(_celery_worker_probe(celery), str(exc))
+        status_key = diagnosis["status"]
+        return _cache_and_return(
+            (jsonify(diagnosis), 200 if status_key == "busy" else 503), status_key
+        )
 
 
 @app.route("/api/version")
