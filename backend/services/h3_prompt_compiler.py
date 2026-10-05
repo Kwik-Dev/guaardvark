@@ -490,7 +490,11 @@ def enhance_for_family(prompt: str, *, style: str = "cinematic", width: int = 0,
             intent = intent_from_dict(h3_intent)
             return compile(intent, polish=polish)[0]
         except Exception as e:  # noqa: BLE001 — fall back to the plain prompt path
-            logger.info("H3 intent could not be used (%s); compiling the plain prompt", e)
+            # WARNING, not INFO. Supplying a structured intent means the caller needs the
+            # H3 shape; discarding it and compiling the prose prompt instead is a real
+            # degradation, and at INFO it went unnoticed for as long as the two bugs above
+            # existed. Nothing else in the request path is expected to fail here.
+            logger.warning("H3 intent could not be used (%s); compiling the plain prompt", e)
     mode = "fl2va" if (first_frame and last_frame) else "i2va" if first_frame else "l2va" if last_frame else "t2va"
     intent = intent_from_plain_prompt(
         prompt, duration_s or 5.17, mode=mode, style=None if fidelity_mode else style,
@@ -501,12 +505,39 @@ def enhance_for_family(prompt: str, *, style: str = "cinematic", width: int = 0,
     return compile(intent, polish=polish)[0]
 
 
+def _dialogue_from_dict(d: dict, language: str) -> H3Dialogue:
+    """One dialogue line from its JSON form (``H3Intent``'s ``shots[].dialogue[]``).
+
+    Deliberately mirrors ``intent_from_director``'s construction, because the JSON form
+    used to differ from it in two ways that each cost a correct prompt (2026-10-05):
+
+    * ``lang`` had no fallback, so a request that declared ``"language": "ja"`` and left
+      the per-line one out — which is every request, the field being optional — tagged its
+      dialogue ``<d>[English] …</d>`` and H3 spoke English. The intent's language is the
+      default, not a suggestion; a line that names its own still wins.
+    * ``speaker`` had no default and ``H3Dialogue`` requires it, so a line without one
+      raised TypeError. That happened inside ``enhance_for_family``'s broad except, which
+      logged at INFO and fell back to the plain-prompt path: the structured prompt was
+      thrown away and the model was handed the prose shape it cannot use, with nothing
+      louder than an info line to say so. The Director path defaulted to "the character";
+      now so does this one.
+    """
+    return H3Dialogue(
+        speaker=d.get("speaker") or "the character",
+        text=d.get("text", ""),
+        lang=d.get("lang") or language,
+        intro=d.get("intro", ""),
+        voiceover=bool(d.get("voiceover")),
+    )
+
+
 def intent_from_dict(data: dict) -> H3Intent:
     """Rebuild an intent from its JSON form (the request field h3_intent)."""
+    language = normalize_language(data.get("language"))
     shots = [
         H3Shot(description=s.get("description", ""), duration_s=float(s.get("duration_s") or 0),
                camera=s.get("camera"), transition=s.get("transition") or "the camera cuts to",
-               dialogue=[H3Dialogue(**{k: v for k, v in d.items() if k in ("speaker", "text", "lang", "intro", "voiceover")})
+               dialogue=[_dialogue_from_dict(d, language)
                          for d in s.get("dialogue", []) if d.get("text")])
         for s in data.get("shots", [])
     ]
@@ -521,7 +552,7 @@ def intent_from_dict(data: dict) -> H3Intent:
         shots=shots, subjects=subjects, audio_refs=audio_refs, picture_frames=list(data.get("picture_frames", [])),
         task_types=list(data.get("task_types", [])), soundscape=data.get("soundscape", ""),
         music=data.get("music", "N/A"), summary=data.get("summary", ""),
-        language=normalize_language(data.get("language")),
+        language=language,
     )
 
 
