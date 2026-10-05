@@ -1,4 +1,4 @@
-"""Phase 1 command groups: guard, improve, system-map, content, web, connections, approvals.
+"""Phase 1 command groups: guard, improve, system-map, content, websearch, connections, approvals.
 
 Each group gets a smoke test through the real CLI against the fake backend: it proves
 the command reaches the route it claims to, that `--json` emits the documented envelope,
@@ -107,7 +107,7 @@ def test_content_page_delete_with_yes_deletes(fake_backend, cli_runner, isolated
     assert ("DELETE", "/api/content/pages/4", b"") in fake_backend.calls
 
 
-# --- web -------------------------------------------------------------------
+# --- websearch -------------------------------------------------------------
 
 
 def test_web_search_posts_the_query(fake_backend, cli_runner, isolated_home):
@@ -115,7 +115,7 @@ def test_web_search_posts_the_query(fake_backend, cli_runner, isolated_home):
         "success": True, "data": {"results": [{"title": "Docs", "url": "https://example.test"}]},
     })
 
-    payload = _run(cli_runner, ["web", "search", "aardvark docs", "--json"])
+    payload = _run(cli_runner, ["websearch", "search", "aardvark docs", "--json"])
 
     assert payload["data"]["results"][0]["url"] == "https://example.test"
     body = json.loads(fake_backend.calls_for("POST", "/api/web-search/search")[0][2])

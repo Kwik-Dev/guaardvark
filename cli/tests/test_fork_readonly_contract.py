@@ -127,7 +127,7 @@ _READ_ONLY_INVOCATIONS = [
     ["content", "page", "1"],
     ["content", "stats"],
     ["content", "generations"],
-    ["web", "status"],
+    ["websearch", "status"],
     ["connections", "list"],
     ["connections", "show", "1"],
     ["connections", "providers"],

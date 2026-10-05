@@ -222,7 +222,7 @@ upstream edit — see §11. Their read-only halves are covered by
 | `improve` | `status, precheck, runs, metrics, pending, trigger, toggle` | self-improvement state. Applying a fix is the Studio's |
 | `system-map` | `health, snapshot, findings, dismiss` | the repository map and its findings. `dispatch` is the Studio's |
 | `content` | `pages, page, stats, generations, duplicates, page-delete` | content library; `page-delete` needs `--yes` |
-| `web` | `status, search, quick-search, sitemap` | web research, through the backend's outbound policy (distinct from document `search`) |
+| `websearch` | `status, search, quick-search, sitemap` | web research, through the backend's outbound policy (distinct from document `search`). The shell group is `websearch`, not `web`: the REPL `/web` (upstream) opens the web UI, and two different things under one word is a trap |
 | `connections` | `list, show, test, providers, environment` | connected accounts. `oauth` stays in the Studio |
 | `approvals` | `list, show` | one read-only queue: publishes, held code, outreach drafts |
 | `cast` | `list, show, samples, plan, generate, cancel, approve, train, train-cancel, make-default, delete, import-lora` | the Cast Library. `train` and `delete` need `--yes`; `approve` is sample selection (§10 note) |

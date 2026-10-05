@@ -165,3 +165,15 @@ def test_every_area_is_exposed_or_explained():
         "these areas are still marked planned: "
         + ", ".join(sorted(api_coverage.PLANNED))
     )
+
+
+def test_the_web_research_group_is_named_websearch_not_web():
+    """The shell group is `websearch`; the REPL `/web` opens the web UI.
+
+    `test_spec_parity` accepts `web` in this EXPOSED value because `web` is a valid
+    REPL name, so pin the shell name here too, or a stale value passes silently.
+    """
+    mounted = {name for _app, name in registry.typer_apps()}
+    assert "websearch" in mounted
+    assert "web" not in mounted
+    assert api_coverage.EXPOSED["web_search"].split()[0] == "websearch"

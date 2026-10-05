@@ -1,9 +1,13 @@
-"""`guaardvark web` — web research: search, quick search, sitemap, status.
+"""`guaardvark websearch` — web research: search, quick search, sitemap, status.
 
 Distinct from the top-level `search`, which searches *your indexed documents*. This
 group asks the internet, through the backend's web-search routes (and therefore
 through its outbound policy — a disabled web switch refuses here too, which is the
 whole point of routing it through the backend rather than fetching directly).
+
+The shell group is named `websearch`, not `web`: upstream's REPL already has a
+`/web` command, and that one opens the Guaardvark web UI. Two different things
+under one word is a trap, so the shell name spells out which one it is.
 """
 from __future__ import annotations
 
@@ -14,7 +18,7 @@ from llx.client import LlxError, get_client
 
 from ._common import fail, json_mode, pick_dict, pick_list, resolve_server, success
 
-COMMAND_NAME = "web"
+COMMAND_NAME = "websearch"
 app = typer.Typer(help="Web research — search, quick search, sitemap.", no_args_is_help=True)
 
 BASE = "/api/web-search"

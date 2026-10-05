@@ -180,12 +180,13 @@ Routes: `GET /api/wordpress/{sites,pages,pages/<id>}`,
 `POST /pull/{sitemap,page/<site>/<post>,bulk,list}`,
 `POST /process/{queue,queue/execute,page/<id>}`, `GET /process/status/<id>`.
 
-### 3.12 Web research — `web` (Tier 1) `U`
+### 3.12 Web research — `websearch` (Tier 1) `U`
 
-`web search <q>` · `web quick-search <q>` · `web sitemap <url>` · `web status`
+`websearch search <q>` · `websearch quick-search <q>` · `websearch sitemap <url>` · `websearch status`
 
 Routes: `POST /api/web-search/{search,quick-search,sitemap}`, `GET /status`.
-Distinct from the existing document `search` — name it `web`, not `search`.
+Distinct from the existing document `search` — and named `websearch`, not `web`, because
+the REPL already has a `/web` that opens the web UI (upstream).
 
 ### 3.13 Infographic — `infographic` (Tier 2) `U`
 
@@ -465,7 +466,7 @@ that already has the backend stack (the `backend` job, or `cli-e2e` with
 | Phase | Content | Acceptance | Size |
 |---|---|---|---|
 | **0** | Extension point (`_fork/registry.py`), test layout, fixtures, spec-parity test, `python` PATH fix | `pytest cli/tests` green locally **and** in the `cli` CI job; spec-parity test present and passing against all backend API areas, each declared `EXPOSED` / `PLANNED` / `NOT_EXPOSED` | M |
-| **1** | Read-only groups: `guard`, `improve`, `system-map`, `content`, `web`, `connections list/show`, `approvals list/show` | **Shipped.** Seven groups under `cli/llx/commands/_fork/`; `api_coverage` moved six areas from `PLANNED` to `EXPOSED` (43/7/47); the read-only tier is enforced by `cli/tests/test_fork_readonly_contract.py`, which scans the source for decision routes and runs every read-only command asserting no write was issued. Deviations: `connections` shipped in Phase 1 rather than Phase 4 (it was cheap and it is read-only in this form); `content page-delete` exists but requires `--yes`, and `connections oauth` / `system-map dispatch` were left out as Studio flows. | M |
+| **1** | Read-only groups: `guard`, `improve`, `system-map`, `content`, `websearch`, `connections list/show`, `approvals list/show` | **Shipped.** Seven groups under `cli/llx/commands/_fork/`; `api_coverage` moved six areas from `PLANNED` to `EXPOSED` (43/7/47); the read-only tier is enforced by `cli/tests/test_fork_readonly_contract.py`, which scans the source for decision routes and runs every read-only command asserting no write was issued. Deviations: `connections` shipped in Phase 1 rather than Phase 4 (it was cheap and it is read-only in this form); `content page-delete` exists but requires `--yes`, and `connections oauth` / `system-map dispatch` were left out as Studio flows. | M |
 | **2** | `cast`, `upscale`, `infographic`, `audio transcribe`, `images --engine` | generation commands queue jobs and print job ids; no approval commands; golden + e2e per group | L |
 | **3** | `video-editor`, `training` | render/training go through the GPU gate; `training --backend runpod` requires `--yes`; contract tests for both | L |
 | **4** | `llm` (cloud providers), `models image *`, `wordpress`, `film-crew`/`music-video` read-only extensions | **Shipped.** `llm` (provider, set, models, openai-model, mistral-model, test, cloud on\|off), `wordpress` (sites, site, site-test, pages, pull-sitemap\|list\|page\|bulk\|status, process-queue, process-run), and `audio models` / `audio model-download` added to the upstream audio group. Deviations: the `images --engine` flag was dropped — `settings set chat_image_model` and `images generate --model` already cover it, so a flag would have been a third way to set one thing; image/video weight downloads were dropped because `/api/model` has no download route at all; `models image *` was dropped for the same reason (it would only duplicate `images models`). | M |

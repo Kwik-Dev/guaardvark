@@ -76,7 +76,7 @@ EXPOSED: dict[str, str] = {
     "upscaling": "upscale",
     "voice": "audio tts, audio transcribe",
     "video_editor": "video-editor",
-    "web_search": "web",
+    "web_search": "websearch",
     "websites": "websites",
     "wordpress": "wordpress",
 }
