@@ -30,6 +30,15 @@ class TestSlashAndBareCompletion:
         assert "recipes" in names
         assert set(names) == set(COMMAND_TREE)
 
+    def test_fork_groups_complete(self):
+        """Fork REPL groups reach the completer through the catalog merge."""
+        assert "cast" in _names("/cas")
+        assert "websearch" in _names("/webs")
+        assert "list" in _names("/cast ")
+        # The upstream group's list stays as pinned; its fork extensions are a known
+        # completion gap (dispatch still works).
+        assert "approve-storyboard" not in _names("/film-crew ")
+
     def test_subcommand_completion(self):
         names = _names("/jobs ")
         assert "list" in names

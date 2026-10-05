@@ -68,6 +68,9 @@ def test_private_and_infrastructure_modules_are_never_candidates(monkeypatch):
 def test_the_real_package_mounts_without_error():
     """Phase 0: the seam is wired and the package is importable."""
     assert isinstance(registry.typer_apps(), list)
+    # A fork module that raises on import is skipped with a log line, so pin the
+    # whole package as clean — otherwise a new broken module keeps the suite green.
+    assert registry.load_errors() == []
 
 
 # --- failure containment ---------------------------------------------------
@@ -108,10 +111,36 @@ def test_a_duplicate_command_name_is_reported_not_silently_dropped(monkeypatch):
     assert any("duplicate COMMAND_NAME" in message for _mod, message in registry.load_errors())
 
 
-def test_repl_commands_are_deferred_on_purpose():
-    """No fork REPL command yet — wiring one means editing slash.py and
-    command_catalog.py, which the upstream contract test pins to each other."""
-    assert registry.repl_commands() == []
+def test_fork_groups_are_repl_commands_too():
+    """Every mounted fork group is offered to the REPL, from this one registry.
+
+    Wiring a REPL command means appearing in BOTH the router and `COMMAND_TREE`,
+    which the upstream contract test pins to each other. Both merge from here, so
+    this asserts the registry actually offers them.
+    """
+    mounted = {name for _app, name in registry.typer_apps()}
+    names = registry.repl_commands()
+    assert names, "no fork group is offered to the REPL"
+    assert set(names) == mounted
+
+
+def test_repl_catalog_covers_every_group_with_sorted_subcommands():
+    tree, meta = registry.repl_catalog()
+    names = set(registry.repl_commands())
+    assert set(tree) == names
+    assert set(meta) == names
+    for name, subs in tree.items():
+        assert subs == sorted(subs), f"{name}: subcommands not sorted"
+    # Derive, not hardcode: a real group's subcommands come through, and every group
+    # carries a non-empty description for /help.
+    assert "list" in tree["cast"]
+    assert all(meta.values()), f"groups with no description: {[n for n, m in meta.items() if not m]}"
+
+
+def test_repl_help_group_lists_the_same_names():
+    title, names = registry.repl_help_group()
+    assert title == "Fork Commands"
+    assert names == registry.repl_commands()
 
 
 # --- coverage maps ---------------------------------------------------------

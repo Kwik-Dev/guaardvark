@@ -28,6 +28,10 @@ def test_catalog_commands_are_registered_in_router():
     assert "recipes" in names
     assert "music-video" in names
     assert "film-crew" in names
+    # Fork groups are REPL commands too (llx/commands/_fork/registry.py).
+    assert "cast" in names
+    assert "websearch" in names
+    assert COMMAND_TREE["cast"] and COMMAND_TREE["cast"] == sorted(COMMAND_TREE["cast"])
     assert COMMAND_TREE["music-video"] == ["list", "create", "status", "cancel", "delete"]
     assert COMMAND_TREE["film-crew"] == ["list", "create", "status", "delete"]
 
@@ -56,3 +60,18 @@ def test_router_quality_subapp_dispatches():
         mock_get_command.assert_called_once()
         click_cmd.assert_called_once()
         assert click_cmd.call_args.kwargs["args"] == ["scorecard", "--json"]
+
+
+def test_router_fork_subapp_dispatches():
+    """A fork group routes through the same sub-app path as an upstream one."""
+    from unittest.mock import MagicMock, patch
+
+    router = _make_router()
+    with patch("typer.main.get_command") as mock_get_command:
+        click_cmd = MagicMock()
+        mock_get_command.return_value = click_cmd
+        router.dispatch("/cast list")
+        mock_get_command.assert_called_once()
+        click_cmd.assert_called_once()
+        assert click_cmd.call_args.kwargs["args"] == ["list"]
+        assert click_cmd.call_args.kwargs["prog_name"] == "guaardvark cast"

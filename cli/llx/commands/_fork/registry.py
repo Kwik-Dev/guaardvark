@@ -37,15 +37,21 @@ Adding a command
    `cli/tests/test_fixture_smoke.py` for the pattern; the shared `fake_backend`,
    `cli_runner` and `isolated_home` fixtures live in `cli/tests/conftest.py`).
 
-REPL (`/foo`) commands are deliberately NOT hooked yet
-------------------------------------------------------
-The REPL surface is `llx/command_catalog.py`'s `COMMAND_TREE`, and
+REPL (`/foo`) commands
+----------------------
+Fork groups are REPL commands too, and this registry is what drives them. The REPL
+surface is `llx/command_catalog.py`'s `COMMAND_TREE`, and
 `cli/tests/test_command_catalog_contract.py` pins it to `SlashRouter`'s registered
-names, so a fork REPL command means editing both `slash.py` and `command_catalog.py`
-— two more upstream files. No planned fork group needs a REPL-only command (they map
-to an existing group or a new shell group), so the hook is deferred rather than paid
-for. When it is needed, the patch is one merge in `slash.py::_register_repl_commands`
-plus the catalog entry; see `docs/CLI_SPEC.md` section 11.
+names, so a fork group has to appear in both. Instead of editing those upstream files
+once per command, each merges this registry in one guarded block:
+
+* `command_catalog.py` does `COMMAND_TREE.update(repl_catalog()[0])` plus the same
+  for `COMMAND_META`, so the catalog can never drift from the mounted groups.
+* `slash.py` registers `repl_apps()` through its existing `_register_subapp` path and
+  appends `repl_help_group()` to `_HELP_GROUPS`, so `/help` lists them too.
+
+Adding a fork group therefore still means adding one file — it reaches the shell and
+the REPL with no further edit. See `docs/CLI_SPEC.md` section 11.
 """
 from __future__ import annotations
 
@@ -53,7 +59,7 @@ import importlib
 import logging
 import pkgutil
 from pathlib import Path
-from typing import Any, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -127,5 +133,47 @@ def typer_apps() -> List[Tuple[Any, str]]:
 
 
 def repl_commands() -> List[str]:
-    """Fork REPL command names. Empty by design — see the module docstring."""
-    return []
+    """Fork group names, which are REPL command names too (one per shell group)."""
+    return [name for _app, name in typer_apps()]
+
+
+def repl_apps() -> List[Tuple[Any, str]]:
+    """`(typer_app, name)` pairs for `SlashRouter` to register as REPL commands.
+
+    The same apps `main.py` mounts on the shell, so a group behaves identically on
+    both surfaces: same options, same `--yes` gates, same JSON.
+    """
+    return typer_apps()
+
+
+def repl_catalog() -> Tuple[Dict[str, List[str]], Dict[str, str]]:
+    """`(COMMAND_TREE entries, COMMAND_META entries)` for the fork groups.
+
+    One pass over the mounted apps: the subcommand names come from the app itself
+    (via `typer.main.get_command`) and the description from its help text, so the
+    REPL catalog is *derived* rather than a second hand-kept list that can drift.
+
+    Introspection of one app is isolated: a malformed app yields an empty subcommand
+    list rather than taking the catalog (and the whole REPL) down.
+    """
+    from collections import OrderedDict
+
+    from typer.main import get_command
+
+    tree: Dict[str, List[str]] = OrderedDict()
+    meta: Dict[str, str] = {}
+    for app, name in typer_apps():
+        try:
+            group = get_command(app)
+            tree[name] = sorted(getattr(group, "commands", {}) or {})
+        except Exception as exc:  # noqa: BLE001 - isolation is the point
+            logger.warning("fork command %r subcommands not introspectable: %s", name, exc)
+            tree[name] = []
+        help_text = getattr(getattr(app, "info", None), "help", None) or ""
+        meta[name] = " ".join(str(help_text).split())
+    return tree, meta
+
+
+def repl_help_group() -> Tuple[str, List[str]]:
+    """`(section_title, command_names)` for the REPL `/help` listing."""
+    return ("Fork Commands", repl_commands())

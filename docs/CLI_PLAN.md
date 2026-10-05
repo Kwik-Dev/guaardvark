@@ -30,7 +30,8 @@ These change the shape of the work; everything else can proceed without them.
    No new transport, no local state.
 3. **`command_catalog.py` is contract-enforced** (`cli/tests/test_command_catalog_contract.py`):
    `COMMAND_TREE`, `SlashRouter`, the completer and `/help` must agree. Any new REPL
-   command must be declared there.
+   command must be declared there. The fork groups get there through the registry merge
+   (one guarded block in `command_catalog.py`), so a new group needs no catalog edit.
 4. **The portability gate** (`scripts/check_portable.sh`) runs on `cloud-plus`; new files
    must not contain literal absolute home paths, identities or secrets.
 5. **CI job `cli`** runs `pip install -e ./cli pytest && python -m pytest cli/tests -q` —
@@ -42,8 +43,9 @@ Today `cli/llx/main.py` imports every command module (lines 7–39) and calls
 `app.add_typer(...)` for each group (~line 146+); `slash.py` has `_register_repl_commands`
 and `_register_typer_commands`.
 
-**Plan:** add three fork-owned files and touch one upstream file twice (a single import
-plus a single loop):
+**Plan:** add three fork-owned files and touch the upstream files in a few small, guarded
+places — `main.py` (a single import plus a single loop), one merge in `command_catalog.py`
+(the REPL catalog), and two in `slash.py` (REPL registration + `/help`):
 
 ```
 cli/llx/commands/_fork/__init__.py        # FORK-OWNED
@@ -53,12 +55,15 @@ cli/llx/commands/_fork/api_coverage.py    # FORK-OWNED: command -> API area map 
 
 - `main.py` gains a single loop:
   `for mod, typer_app, name in fork_registry.typer_apps(): app.add_typer(typer_app, name=name)`.
-- `command_catalog.py` gains one merge of `fork_registry.repl_commands()`, or the contract
-  test is taught to accept the fork registry as a second source.
+- `command_catalog.py` gains one merge of `fork_registry.repl_catalog()` into
+  `COMMAND_TREE`/`COMMAND_META`; `slash.py` gains two guarded blocks — `repl_apps()`
+  registration and `repl_help_group()` in `_HELP_GROUPS`. The upstream contract test pins
+  catalog and router to each other, so the merges cannot drift.
 - Everything else — every new command module — lives under `cli/llx/commands/_fork/`.
 
-Net expected conflict on an upstream sync: **one import line + one add_typer loop**. If
-upstream ever refactors `main.py`, the fix is mechanical.
+Net expected conflict on an upstream sync: **one import line + one add_typer loop in
+`main.py`, plus one guarded block in `command_catalog.py` and two in `slash.py`**. If
+upstream ever refactors those, the fix is mechanical.
 
 ## 3. Command map — the gap, group by group
 

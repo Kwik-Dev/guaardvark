@@ -181,6 +181,22 @@ COMMAND_META: dict[str, str] = {
 }
 
 
+# Fork-owned REPL groups. `cli/` is upstream-owned, so the fork contributes its groups
+# here from a single place rather than editing this catalog per command; see
+# llx/commands/_fork/registry.py. Guarded: a broken fork module must not take the
+# catalog (and therefore the whole REPL) down with it.
+try:
+    from llx.commands._fork import registry as _fork_registry
+
+    _fork_tree, _fork_meta = _fork_registry.repl_catalog()
+    COMMAND_TREE.update(_fork_tree)
+    COMMAND_META.update(_fork_meta)
+except Exception as _exc:  # pragma: no cover - isolation is the point
+    import logging as _logging
+
+    _logging.getLogger(__name__).warning("fork REPL catalog not merged: %s", _exc)
+
+
 def suggest_command(name: str, n: int = 3, cutoff: float = 0.55) -> list[str]:
     """Return close command-name matches for an unknown token."""
     if not name:

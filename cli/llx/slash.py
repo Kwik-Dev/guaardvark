@@ -1,6 +1,7 @@
 """Slash-command router for the REPL — maps /command args to handlers."""
 
 import inspect
+import logging
 import os
 import re
 import shlex
@@ -17,6 +18,8 @@ from llx.command_catalog import COMMAND_META, COMMAND_TREE, suggest_command
 from llx.lite_mode import lite_mode_block_message
 from llx.theme import make_console, THEMES, set_active_theme, get_active_theme_name, get_theme_names
 from llx.typer_utils import build_typer_kwargs, format_command_usage
+
+logger = logging.getLogger(__name__)
 
 
 def _subapp_usage(name: str) -> str:
@@ -40,6 +43,16 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("Config Commands", ["config", "settings", "theme", "quality"]),
     ("REPL", ["help", "quit", "exit"]),
 ]
+
+# Fork-owned groups appear in REPL /help too; see llx/commands/_fork/registry.py.
+try:
+    from llx.commands._fork import registry as _fork_registry
+
+    _HELP_GROUPS.append(_fork_registry.repl_help_group())
+except Exception as _exc:  # pragma: no cover - a broken fork must not break the REPL
+    # Log, don't swallow: a fork command that vanishes without explanation is the
+    # silent-failure pattern this repo keeps paying for.
+    logger.warning("fork REPL help section not added: %s", _exc)
 
 
 class SlashRouter:
@@ -249,6 +262,16 @@ class SlashRouter:
         }
         for name, subapp in subapps.items():
             self._register_subapp(name, subapp)
+
+        # Fork-owned groups are REPL commands too. Registry-driven, so adding a fork
+        # group needs no edit here; see llx/commands/_fork/registry.py.
+        try:
+            from llx.commands._fork import registry as _fork_registry
+
+            for _fork_app, _fork_name in _fork_registry.repl_apps():
+                self._register_subapp(_fork_name, _fork_app)
+        except Exception as _exc:  # pragma: no cover - a broken fork must not break the REPL
+            logger.warning("fork REPL commands not registered: %s", _exc)
 
     def _register_simple(self, name: str, func: Callable):
         """Register a simple Typer command (direct function call)."""

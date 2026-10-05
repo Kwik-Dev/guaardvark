@@ -27,10 +27,10 @@ regeneration commands are in the appendix.
 | Python | `>=3.12,<3.13` (the ML stack has no 3.13+ wheels) |
 | Backend it fronts | the Flask app, default `http://localhost:5000`; macOS `:5055` |
 | Shell commands | **58** top-level, **236** subcommands |
-| REPL commands | ~70 (a superset — includes local file/agent tooling) |
+| REPL commands | **89** (a superset — the shared shell groups, the fork groups, and the local file/agent tooling) |
 | Backend blueprints it can reach | ~60 of 82 `url_prefix` areas; **22** with no trace at all |
 | Studio pages | **42** page components; ~22 have a CLI equivalent |
-| **Fork commits touching `cli/` before this branch** | **0** — `cli/` was untouched upstream-owned code. `cli/llx/commands/_fork/` and the two hooks in `main.py` are the first deliberate divergence; see §11. |
+| **Fork commits touching `cli/` before this branch** | **0** — `cli/` was untouched upstream-owned code. `cli/llx/commands/_fork/` and the two hooks in `main.py` are the first deliberate divergence; the REPL support adds one guarded merge in `command_catalog.py` and two in `slash.py`; see §11. |
 
 ---
 
@@ -254,7 +254,15 @@ all attempts are audited.
 ## 7. REPL command reference
 
 `cli/llx/command_catalog.py` is the source of truth and a contract test enforces it.
-Beyond the shell commands above, the REPL adds:
+Every shared shell group is a REPL command (the fork groups included — `/cast list`,
+`/api routes`, `/websearch search …`), because `command_catalog.py` merges
+`_fork/registry.py` and `slash.py` registers it — one guarded block in the first, two in
+the second. Shell-exclusive commands (`chat`, `ask`, `setup`, `completion`, `launch`) are
+not REPL commands, and the REPL has commands the shell does not; `/web` (open the web UI)
+is upstream's, and is not the research group — that one is `/websearch`. Fork subcommands
+added to an *upstream* group (`/film-crew approve-storyboard`, `/audio transcribe`,
+`/music-video cuts`) dispatch but do not auto-complete: those groups' `COMMAND_TREE`
+entries list only the upstream subcommands.
 
 | Group | Commands |
 |---|---|
@@ -263,7 +271,7 @@ Beyond the shell commands above, the REPL adds:
 | Agent context | `tools, tool, context, suggest, analyze, init, load, skills` |
 | Memory | `remember, memory list\|search\|delete\|clear` |
 | Session | `new, clear, abort, history, export, config server\|theme\|timeout\|api_key, theme` |
-| Multimodal | `imagine, video, voice, ingest, agent on\|off\|shot, web` |
+| Multimodal | `imagine, video, voice, ingest, agent on\|off\|shot, web` (web UI), `websearch` (research) |
 | Help | `help, quit, exit` |
 
 ---
@@ -483,10 +491,12 @@ Rules that keep it cheap:
 2. Declare the backend API area it drives in `cli/llx/commands/_fork/api_coverage.py`.
    `cli/tests/test_spec_parity.py` fails until you do — that is what keeps §9 and §10 of
    this document from drifting out of date.
-3. REPL (`/foo`) commands are a separate, more expensive seam: `_register_repl_commands`
-   in `slash.py` plus `COMMAND_TREE` in `command_catalog.py`, which the upstream contract
-   test pins to each other. Add one only when a command genuinely needs to be REPL-only;
-   no planned group does.
+3. REPL (`/foo`) commands come from the same registry, so a fork group is a REPL
+   command without any further edit: `command_catalog.py` merges `repl_catalog()` into
+   `COMMAND_TREE`/`COMMAND_META` (one guarded block), and `slash.py` appends
+   `repl_help_group()` to `_HELP_GROUPS` and registers `repl_apps()` (two guarded blocks).
+   The upstream contract test pins the catalog and the router to each other, so if a merge
+   ever stops running the test fails rather than the REPL silently losing groups.
 4. Reuse `llx/client.py`; never re-implement transport.
 5. Keep the scope rules in §3: no editing surfaces, no review gates, no render triggers
    that bypass the Studio's approval. There are **two** documented exceptions, both
@@ -515,8 +525,9 @@ for c in $(guaardvark --help 2>&1 | sed -n '/Commands/,/╰/p' | grep -oE '^│ 
   guaardvark "$c" --help
 done
 
-# the REPL command tree (source of truth) and its contract test
-sed -n '/COMMAND_TREE/,/^)/p' cli/llx/command_catalog.py
+# the REPL command tree (source of truth; fork groups are merged in at import) and its
+# contract test
+python -c "from llx.command_catalog import COMMAND_TREE as T; print(len(T), sorted(T))"
 python -m pytest cli/tests/test_command_catalog_contract.py
 
 # Studio pages and backend API areas
