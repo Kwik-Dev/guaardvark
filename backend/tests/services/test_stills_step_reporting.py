@@ -58,6 +58,12 @@ def test_pipeline_reports_renderer_steps(monkeypatch, explicit, requested, actua
 
 def test_batch_file_reports_actual_steps_and_original_notice(monkeypatch, tmp_path):
     monkeypatch.setattr(offline.torch.cuda, "is_available", lambda: False)
+    # This asserts the OFFLINE engine, so it has to say so. Engine routing is one env
+    # check (stills_pipeline.zimage_via_comfyui_enabled) and backend/config.py
+    # load_dotenv()s the repo .env at import with override=False, so the suite otherwise
+    # inherits whatever this machine is configured for and the assertions below quietly
+    # measure ComfyUI instead. Broke here on 2026-10-05 on an MPS box that sets the flag.
+    monkeypatch.setenv("GUAARDVARK_ZIMAGE_USE_COMFYUI", "0")
     from backend.services.batch_image_generator import BatchImageGenerator, BatchPrompt
     image = tmp_path / "source.png"
     image.write_bytes(b"mock renderer output")
@@ -91,6 +97,8 @@ def test_batch_file_reports_actual_steps_and_original_notice(monkeypatch, tmp_pa
 def test_character_still_uses_resolved_steps(monkeypatch, tmp_path, explicit, expected):
     from backend.services.character_still_pipeline import render_character_still
     monkeypatch.setitem(_FAMILY_DEFAULTS["zimage"], "min_steps", 8)
+    # Offline engine, pinned — see the note in test_batch_file_reports_actual_steps….
+    monkeypatch.setenv("GUAARDVARK_ZIMAGE_USE_COMFYUI", "0")
     dest = tmp_path / "character.png"
     calls = []
 

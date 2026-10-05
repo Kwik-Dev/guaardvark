@@ -71,6 +71,13 @@ def test_metadata_records_the_file_and_the_generator_gets_the_request(tmp_path, 
     gen = BatchImageGenerator.__new__(BatchImageGenerator)
     gen.progress_system = None
     gen._should_use_comfy_stills = lambda prompt: False
+    # The routing has a SECOND ComfyUI branch, `_zimage_via_comfyui_enabled() and
+    # _is_zimage_model(model)`, which stubbing only `_should_use_comfy_stills` above does
+    # not reach. Pin the single source of truth instead of chasing each call site: this is
+    # an offline-canvas test, and backend/config.py load_dotenv()s the repo .env at import
+    # (override=False), so an MPS box that opts into ComfyUI for Z-Image otherwise
+    # rendered this through ComfyUI and `asked` stayed empty (2026-10-05).
+    monkeypatch.setenv("GUAARDVARK_ZIMAGE_USE_COMFYUI", "0")
     output_dir = tmp_path / "ImageBatch_test"
     (output_dir / "images").mkdir(parents=True)
     prompt = BatchPrompt(id="prompt_1", prompt=INCIDENT_PROMPT, style="artistic",
