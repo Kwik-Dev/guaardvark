@@ -26,7 +26,7 @@ regeneration commands are in the appendix.
 | Entry point | `guaardvark = llx.main:run` (`cli/setup.py`) |
 | Python | `>=3.12,<3.13` (the ML stack has no 3.13+ wheels) |
 | Backend it fronts | the Flask app, default `http://localhost:5000`; macOS `:5055` |
-| Shell commands | **43** top-level, **122** subcommands |
+| Shell commands | **57** top-level, **221** subcommands |
 | REPL commands | ~70 (a superset — includes local file/agent tooling) |
 | Backend blueprints it can reach | ~60 of 82 `url_prefix` areas; **22** with no trace at all |
 | Studio pages | **42** page components; ~22 have a CLI equivalent |
@@ -91,7 +91,7 @@ These rules explain the coverage gaps in §8 and §10. They are intentional, not
 | `--non-interactive` | do not start the REPL when no command is given |
 | `--version`, `-v` / `--help` | version / help |
 
-## 6. Shell command reference (43 commands, 122 subcommands)
+## 6. Shell command reference (57 commands, 221 subcommands)
 
 Commands with no subcommands are marked *(leaf)*.
 
@@ -164,6 +164,35 @@ Commands with no subcommands are marked *(leaf)*.
 | `swarm` | `list, run, templates, status, logs` |
 | `lessons` | `begin, end, list` |
 | `analyze` *(leaf)* / `init` *(leaf)* | project scan / write `GUAARDVARK.md` |
+
+### Fork groups (added by `cloud-plus`; none of these exist upstream)
+
+All fourteen live in `cli/llx/commands/_fork/` and are mounted by the registry, not by an
+upstream edit — see §11. Their read-only halves are covered by
+`cli/tests/test_fork_readonly_contract.py`, which proves they issue no write.
+
+| Group | Subcommands | What it is for |
+|---|---|---|
+| `guard` | `status, scans, show, git, sweep` | inbound guard: what is held, and the posture. No approve/reject — that is the Studio's |
+| `improve` | `status, precheck, runs, metrics, pending, trigger, toggle` | self-improvement state. Applying a fix is the Studio's |
+| `system-map` | `health, snapshot, findings, dismiss` | the repository map and its findings. `dispatch` is the Studio's |
+| `content` | `pages, page, stats, generations, duplicates, page-delete` | content library; `page-delete` needs `--yes` |
+| `web` | `status, search, quick-search, sitemap` | web research, through the backend's outbound policy (distinct from document `search`) |
+| `connections` | `list, show, test, providers, environment` | connected accounts. `oauth` stays in the Studio |
+| `approvals` | `list, show` | one read-only queue: publishes, held code, outreach drafts |
+| `cast` | `list, show, samples, plan, generate, cancel, approve, train, train-cancel, make-default, delete, import-lora` | the Cast Library. `train` and `delete` need `--yes`; `approve` is sample selection (§10 note) |
+| `upscale` | `image, video, models, model-download, jobs, status, cancel` | Real-ESRGAN / HAT-L / SwinIR. `cancel` needs `--yes` |
+| `infographic` | `generate, models, model-download, download-status, status` | infographics |
+| `training` | `datasets, dataset, dataset-new, dataset-update, dataset-delete, backends` | training datasets; the run itself is `cast train` |
+| `video-editor` | `health, projects, project, project-new, project-delete, jobs, job, filters, transitions, render, analyze, captions-export, captions-import, shotcut` | editor operations, not timeline authoring |
+| `llm` | `provider, set, models, openai-model, mistral-model, test, cloud on\|off` | the chat provider and the master cloud switch — `cloud on` needs `--yes` |
+| `wordpress` | `sites, site, site-test, pages, pull-sitemap, pull-list, pull-page, pull-bulk, pull-status, process-queue, process-run` | sites and page pull; `process-run` publishes, so it needs `--yes` |
+
+### Extended upstream groups
+
+| Group | Added by the fork |
+|---|---|
+| `audio` | `transcribe` (speech-to-text), `models`, `model-download` — added from a fork module without editing `cli/llx/commands/audio.py` |
 
 ## 7. REPL command reference
 
