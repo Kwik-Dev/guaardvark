@@ -33,6 +33,17 @@ _DECISION_MARKERS = ("/approve", "/reject", "/decide", "/apply", "/release-held"
 _ALLOWED: tuple[tuple[str, str], ...] = (
     ("cast.py", "/api/cast-library/subjects"),          # base path; approve is a suffix
     ("cast.py", "/subjects"),                            # f-string suffix, see below
+    # CLI_PLAN D6 — the three render gates, and the only other approval D2 permits.
+    # Neither pipeline has a render route: the render IS the consequence of one of these
+    # POSTs, so driving a production from the terminal means sending one. They decide what
+    # to do with output the operator already owns (which storyboard frames become shots;
+    # whether to spend the GPU on clips) — the `cast approve` class, not the held-code /
+    # inbound-guard / publish class. All three live in `render_gates.py`, so this stays a
+    # single file-wide exception rather than a rule any future module could lean on, and
+    # every one of them refuses without `--yes`.
+    ("render_gates.py", "/api/production/%d/casting/confirm"),
+    ("render_gates.py", "/api/production/%d/storyboard/approve"),
+    ("render_gates.py", "/api/music-video/%d/approve"),
 )
 
 # The approval routes in cast.py are written as f-strings built from BASE, so the
@@ -158,6 +169,17 @@ _READ_ONLY_INVOCATIONS = [
     # test_fork_api_command.py instead.
     ["api", "routes"],
     ["api", "audit"],
+    # Phase 7 (D6): the read-only halves of the two pipelines. The gates those modules sit
+    # beside (confirm-casting / approve-storyboard / approve) are writes by definition and
+    # are covered in test_fork_render_gates.py.
+    ["film-crew", "subjects", "1"],
+    ["film-crew", "shots", "1"],
+    ["film-crew", "templates"],
+    ["music-video", "cuts", "1"],
+    ["music-video", "clips", "1"],
+    # `film-crew shot <id> <shot>` and `music-video storyboard` are read-only too, but they
+    # need a populated payload (a shot that exists; a PNG to write), and this list runs
+    # every command against one empty default. Both are covered in test_fork_render_gates.py.
 ]
 
 

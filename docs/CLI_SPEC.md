@@ -26,7 +26,7 @@ regeneration commands are in the appendix.
 | Entry point | `guaardvark = llx.main:run` (`cli/setup.py`) |
 | Python | `>=3.12,<3.13` (the ML stack has no 3.13+ wheels) |
 | Backend it fronts | the Flask app, default `http://localhost:5000`; macOS `:5055` |
-| Shell commands | **58** top-level, **224** subcommands |
+| Shell commands | **58** top-level, **234** subcommands |
 | REPL commands | ~70 (a superset — includes local file/agent tooling) |
 | Backend blueprints it can reach | ~60 of 82 `url_prefix` areas; **22** with no trace at all |
 | Studio pages | **42** page components; ~22 have a CLI equivalent |
@@ -62,10 +62,13 @@ These rules explain the coverage gaps in §8 and §10. They are intentional, not
 
    The render is not a separate route to call: it is unlocked by an approval POST
    (`POST /api/production/<id>/casting/confirm`, `…/storyboard/approve`,
-   `POST /api/music-video/<id>/approve`) that the **named** commands deliberately do not
-   wrap. Since D5 there is one **generic** way to send such a request on purpose,
-   `guaardvark api request` (§6.1), which demands `--yes`, flags the route as a decision
-   and audits it.
+   `POST /api/music-video/<id>/approve`). Since D6 those three exist as **named, `--yes`-gated
+   commands** — `film-crew confirm-casting`, `film-crew approve-storyboard`,
+   `music-video approve` — because they decide what to do with output the operator already
+   owns, which is the `cast approve` class, and because "render my film from the terminal"
+   should not require knowing a route. The held-code / inbound-guard / publish class stays
+   Studio-only. The generic `guaardvark api request` (D5, §3.1) reaches all three too, gated
+   the same way, so the named command and the escape hatch never disagree.
 4. **Script and automate.** `--json` on every command; `--non-interactive` never falls into
    the REPL; piped stdin is a valid chat input.
 5. **No editing surfaces.** Where the Studio is an *editor* (video editor, code editor,
@@ -133,7 +136,7 @@ whether an area has a **first-class** command, not whether it is reachable. Ever
 | `--non-interactive` | do not start the REPL when no command is given |
 | `--version`, `-v` / `--help` | version / help |
 
-## 6. Shell command reference (58 commands, 224 subcommands)
+## 6. Shell command reference (58 commands, 234 subcommands)
 
 Commands with no subcommands are marked *(leaf)*.
 
@@ -175,8 +178,8 @@ Commands with no subcommands are marked *(leaf)*.
 ### Productions (plan only)
 | Command | Subcommands |
 |---|---|
-| `music-video` | `list, create, status, cancel, delete` |
-| `film-crew` | `list, create, status, delete` |
+| `music-video` | `list, create, status, cancel, delete`; **D6:** `cuts` (the Director's plan, `--prompts` for full text), `clips` (per-cut render state), `storyboard <id> <idx> --out F`, `approve <id> --yes` **(starts the render)** |
+| `film-crew` | `list, create, status, delete`; **D6:** `subjects` (extracted cast + LoRA/training state), `shots`, `shot <id> <shot> [--image F]`, `templates`, `confirm-casting <id> --yes`, `approve-storyboard <id> --yes` **(starts the render)** |
 
 ### Data, RAG & knowledge
 | Command | Subcommands |
@@ -281,8 +284,8 @@ Beyond the shell commands above, the REPL adds:
 | VideoGeneratorPage | ✅ `videos` | |
 | AudioFoundryPage | ✅ `audio` | |
 | VoiceChatPage | ⚠️ `audio tts` | no live voice chat |
-| MusicVideoPage | ⚠️ `music-video` | **plan only** |
-| FilmCrewPage | ⚠️ `film-crew` | **plan only** |
+| MusicVideoPage | ✅ `music-video` | plan **and** render: `cuts`, `clips`, `storyboard`, `approve --yes` |
+| FilmCrewPage | ✅ `film-crew` | plan **and** render: `subjects`, `shots`, `shot --image`, `templates`, `confirm-casting`/`approve-storyboard --yes` |
 | AgentsPage | ✅ `agents` | |
 | AgentMemoryPage | ⚠️ REPL `remember`/`memory` only | no shell command |
 | ApprovalsPage | ⚠️ `approvals list` | read-only; approving stays in the Studio |
@@ -383,7 +386,7 @@ This is the authoritative "what the fork added that the terminal cannot do".
 | Resumable rendering + per-shot clip persistence | ❌ | Studio only |
 | Storyboard generation progress indicator | ❌ | Studio only |
 | Subject LoRAs refreshed/dropped during storyboard gen | ❌ | backend |
-| Script templates from `docs/film-crew-scripts` | ⚠️ | `film-crew create` starts the screenwriter; template choice is Studio |
+| Script templates from `docs/film-crew-scripts` | ✅ | `film-crew templates` lists them; the text goes in through `film-crew create --file`. There is no create-time `--template` flag upstream and this adds none: the template *is* the script |
 | Film Crew agents via OpenAI-compatible provider | ❌ | backend config |
 | I2V speed/quality env vars | ❌ | `.env` |
 | I2V model dropdown in the music-video approval panel | ❌ | Studio only — **the CLI cannot choose the I2V model** |
@@ -451,7 +454,12 @@ Highest-value `cloud-plus` capabilities with **no CLI surface at all**:
 3. **ComfyUI engine selection** — covered by `settings set chat_image_model comfyui` (persistent)
    or `images generate --model comfyui` (per-request). Verify before adding a flag.
 4. **Video editor** — FFmpeg stills, framing, captions, bin reorder (`video-editor`).
-5. **Film Crew / music-video render control** — render, resume, I2V model choice.
+5. **Film Crew / music-video render control** — ✅ render (`film-crew confirm-casting`,
+   `film-crew approve-storyboard`, `music-video approve`, all `--yes`); ✅ resume/retry of a
+   failed production stays Studio-side, but `POST /api/production/<id>/retry` is reachable
+   through `api request`; ⚠️ I2V model choice is settable at creation
+   (`music-video create --model`, which persists `settings.i2v_model`) but **not** changed
+   afterwards — the approval panel's dropdown is the Studio's.
 6. **Upscaling** (`upscaling`).
 7. **System Map** (`system-map`) and **code execution** (`code-execution`).
 8. **Approvals** — the held-changes review queue.
@@ -480,9 +488,11 @@ Rules that keep it cheap:
    no planned group does.
 4. Reuse `llx/client.py`; never re-implement transport.
 5. Keep the scope rules in §3: no editing surfaces, no review gates, no render triggers
-   that bypass the Studio's approval. The **one** documented exception is the `api` group
-   (§3.1, D5): it is `--yes`-gated and audited precisely so the exception does not become
-   the rule, and the named commands it lives beside keep obeying this rule unchanged.
+   that bypass the Studio's approval. There are **two** documented exceptions, both
+   `--yes`-gated so neither becomes the rule and both named in one file: the `api` group
+   (§3.1, D5), which is audited, and the three render gates (§3, D6) in `render_gates.py`,
+   which are the single file-wide entry in the D2 static scan's `_ALLOWED`. The named
+   commands beside them keep obeying this rule unchanged.
 6. Follow the pattern of the two output-registration fixes: when a backend call can fail
    silently, log an error rather than returning a body with a missing id.
 7. Add a `--json` branch and a golden snapshot test (see `cli/tests/conftest.py` for the

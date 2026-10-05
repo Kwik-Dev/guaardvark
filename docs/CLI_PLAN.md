@@ -17,6 +17,7 @@ These change the shape of the work; everything else can proceed without them.
 | **D3** | Where does fork code live? | (a) new modules + one registry line · (b) a separate pip package | **(a)** — see §2. |
 | **D4** | Is the CLI surface a fork-only concern? | (a) fork-only · (b) upstreamable | **Mixed** (§3 marks each): `upscaling`, `system-map`, `web-search`, `content-management`, `wordpress`, `connections`, `self-improvement`, `inbound-guard`, `infographic` are *upstream* features that upstream's own CLI also lacks — upstreamable in principle, but per fork policy **no PR is opened**. |
 | **D5** | A **generic REST escape hatch** — does one command reach every backend route? | (a) keep wrapping one command at a time · (b) a single `api request <METHOD> <PATH>` with a guard · (c) a separate second CLI that speaks raw REST | **(b), safety tier B** (decided 2026-10-05, after a proposal for (c)). Adding commands one at a time is why coverage is always N of 97 — a route nobody wrapped is unreachable from the terminal, which is exactly what blocks *render Film Crew / music-video by CLI* and the ~25 unwrapped files routes. (c) was rejected: the value is one ~200-line command reusing `llx.client`, not a second 9.7k-line CLI to re-port against ~5 upstream `cli/` commits a week. **Tier B**: reads free; every write needs `--yes`; a decision-class route needs `--yes` even as a read; `--dry-run` previews a gated request **without** needing `--yes` (seeing what would be sent is how a person decides); every attempt (allowed, refused, failed, previewed) is appended to `<GUAARDVARK_DIR>/api-audit.jsonl`. This **amends D2**: D2 still governs the *named* commands (no `film-crew approve-storyboard`, no `guard approve`, no held-code release), while `api request` is the documented, gated, audited escape hatch that can reach them when a person types the path deliberately. See §3.16. |
+| **D6** | Do the **two render gates** become named commands, or stay `api request`-only? | (a) raw paths only · (b) named, `--yes`-gated commands for the three routes that start a render | **(b)** (decided 2026-10-05, after the asks that opened this work: "I need captions on videos, film crew and music video by CLI"). (a) is technically sufficient — D5 reaches them — but "render my film from the terminal" should not require knowing the route. The gates are the **only** named commands D2 permits: `film-crew confirm-casting`, `film-crew approve-storyboard`, `music-video approve`. They are creative and cost selections on the operator's own output, the same class as the `cast approve` exception that already exists; **inbound-guard, held-code release and publish stay Studio-only** because those decide whether something leaves the machine. Each needs `--yes`, each names the stage transition it performs, and the D2 static scan keeps exactly one file-wide exception (`render_gates.py`). See §3.17. |
 
 ---
 
@@ -218,7 +219,6 @@ Routes: `/api/connections` CRUD, `POST /<id>/test`,
 `film-crew`/`music-video` render and approval routes stay out **of the named commands** per D2 (amended by D5): there is no `film-crew approve-storyboard`, and `test_music_video_cli.py`'s "never POST approve" contract keeps passing unchanged. D5 adds one generic, `--yes`-gated, audited route (`api request`, §3.16) that can reach them when a person names the path deliberately.
 
 ### 3.16 Generic REST access — `api` (fork, D5)
-
 One command, every route. Nothing here is a new backend capability: every route already
 exists, is already called by the Studio, and is already listed by the backend itself at
 `GET /api/routes`.
@@ -249,6 +249,53 @@ Design notes, because the guard is the point:
    command.** The reasons there say why no *first-class* command exists, not that the
    route is unreachable. That distinction is now load-bearing and is stated in that
    file's docstring and in `CLI_SPEC.md` §3/§11.
+
+### 3.17 Driving Film Crew and music video from the terminal — `D6`
+
+Two groups upstream owns (`cli/llx/commands/film_crew.py`, `music_video.py`) gain
+commands, and **neither upstream file is edited**: each new module has no `COMMAND_NAME`
+and no `app`, so the registry imports it and mounts nothing while the import registers
+commands on the upstream app object — the `audio_ext.py` pattern, unchanged.
+
+**Read-only introspection** (`film_crew_ext.py`, `music_video_ext.py`) — the half of the
+ask that is "explore internal outputs", and the half that cannot regress anything:
+
+| Command | Route | What it answers |
+| `film-crew subjects <id>` | `GET /api/production/<id>/subjects` | who the Screenwriter extracted, each one's kind, LoRA and training state, and whether casting needs it (`cast_required`) |
+| `film-crew shots <id>` | `GET /api/production/<id>` | every shot: scene/shot number, description, approval, storyboard and clip paths, regen count |
+| `film-crew shot <id> <shot_id> [--image PATH]` | same, plus `GET …/storyboard/shot/<shot_id>/image` | one shot's detail, and its storyboard frame as a PNG |
+| `film-crew templates` | `GET /api/production/script-templates` | the script templates the screenwriter can be pointed at |
+| `music-video cuts <id>` | `GET /api/music-video/<id>` (`cut_plan`) | the Director's cut list with each cut's prompt — the thing `music-video status` reduced to a count |
+| `music-video clips <id>` | same (`clips`) | per-clip status, index, path; which cuts are done |
+| `music-video storyboard <id> <idx> --out F` | `GET /api/music-video/<id>/storyboard/<idx>` | one cut's storyboard still (the route serves a PNG, so this downloads) |
+
+**The three render gates** (`render_gates.py`, D6) — the named half of "render it by CLI":
+
+| Command | Route | Transition |
+| `film-crew confirm-casting <id> --yes` | `POST /api/production/<id>/casting/confirm` | `casting` → `cinematography` |
+| `film-crew approve-storyboard <id> --yes` | `POST /api/production/<id>/storyboard/approve` | `awaiting_approval` → `rendering` |
+| `music-video approve <id> --yes` | `POST /api/music-video/<id>/approve` | `awaiting_approval` → `generating` |
+
+Why these three and nothing else:
+
+1. **They are the only routes that start a render.** Neither pipeline has a render route:
+   the render *is* the consequence of the approval. `production_service.STAGE_TO_AGENT`
+   marks `casting` and `awaiting_approval` as user-gated (`None`), and everything after
+   them self-dispatches — the editor even resumes after a restart.
+2. **They are creative and cost selections, not safety gates.** All three decide what to
+   do with output the operator already owns: which storyboard frames become shots, and
+   whether to spend the GPU on clips. That is the `cast approve` class that D2 already
+   allows, not the inbound-guard / held-code / publish class it forbids.
+3. **The exception is one file wide.** The D2 static scan matches `/approve`, `/reject`,
+   `/decide`, `/apply`, `/release-held`, `/dispatch`; it catches `storyboard/approve` and
+   `music-video/<id>/approve` but **not** `casting/confirm`. So `_ALLOWED` grows three
+   literal-and-filename pairs for `render_gates.py` and nothing else, and
+   `test_the_cast_sample_approval_is_the_only_approved_exception` still holds because
+   `render_gates.py` contains no `/samples/approve`.
+4. **Every gate is `--yes`-gated and refuses otherwise**, and a refusal sends nothing.
+   `api request`'s tier-B guard already treats these three as decision-class, so
+   `guaardvark api request POST …/storyboard/approve` refuses without `--yes` too: the named
+   command and the escape hatch gate the same routes the same way.
 
 ## 4. Test framework renewal
 
@@ -354,6 +401,7 @@ that already has the backend stack (the `backend` job, or `cli-e2e` with
 | **4** | `llm` (cloud providers), `models image *`, `wordpress`, `film-crew`/`music-video` read-only extensions | **Shipped.** `llm` (provider, set, models, openai-model, mistral-model, test, cloud on\|off), `wordpress` (sites, site, site-test, pages, pull-sitemap\|list\|page\|bulk\|status, process-queue, process-run), and `audio models` / `audio model-download` added to the upstream audio group. Deviations: the `images --engine` flag was dropped — `settings set chat_image_model` and `images generate --model` already cover it, so a flag would have been a third way to set one thing; image/video weight downloads were dropped because `/api/model` has no download route at all; `models image *` was dropped for the same reason (it would only duplicate `images models`). | M |
 | **5** | Docs: update `CLI_SPEC.md` §6/§7/§8/§9 from the code; refresh the README CLI section; regenerate coverage tables | `CLI_SPEC.md` regenerates clean from the appendix commands; spec-parity test proves no undocumented area | S |
 | **6** | **Generic REST access — `api request` / `api routes` / `api audit`** (D5, safety tier B) | **Shipped** with D5. `api request` sends any `/api/...` route: reads free, writes and decision-class routes need `--yes`, every attempt appended to `<GUAARDVARK_DIR>/api-audit.jsonl`, `--dry-run` sends nothing. `api routes` reads `GET /api/routes`; `api audit` reads the log back. `test_fork_api_command.py` proves the gate (refuses `/…/approve` without `--yes`), the audit (writes an entry for ok / refused / dry-run), the path guard (absolute URL and non-`/api/` path rejected), and that the guard module is the only place naming a decision route. Named-command promotion is the follow-up, not part of this phase. | M |
+| **7** | **Film Crew and music video from the terminal** (D6): read-only introspection, plus the three render gates | **Shipped** with D6. `film-crew subjects\|shots\|shot\|templates` and `music-video cuts\|clips\|storyboard` read what the pipelines actually produced; `film-crew confirm-casting`, `film-crew approve-storyboard` and `music-video approve` perform the three stage transitions that start a render, each behind `--yes`. Two new fork modules extend upstream-owned groups via the `audio_ext.py` pattern (no `COMMAND_NAME`, no `app`), so no upstream file is edited and `test_music_video_cli.py`'s per-invocation "never POST approve" assertions still pass unchanged. `render_gates.py` is the single documented `_ALLOWED` exception in the D2 static scan. | M |
 
 Rough total: **L×3, M×3, S×1**. Phase 0 first is non-negotiable — without the extension
 point every later phase edits upstream files, and without the parity test the docs drift
