@@ -1039,6 +1039,17 @@ def parse_whisper_output(raw_output):
     
     return final_text
 
+def _whisper_server_refused(exc: Exception) -> bool:
+    """True when the whisper server rejected OUR request (4xx) rather than failing.
+
+    A 4xx from /inference means the audio we posted was unacceptable — which is the
+    uploader's problem, not the server's. Anything else (connection refused, timeout, 5xx)
+    is a service failure and stays a 500.
+    """
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    return isinstance(status, int) and 400 <= status < 500
+
+
 def _transcribe_via_whisper_server(audio_path: str) -> str:
     """Transcribe an audio file via a running whisper.cpp HTTP server.
 
@@ -1100,7 +1111,15 @@ def speech_to_text():
                 import io
                 from faster_whisper.audio import decode_audio
                 audio_bytes = audio_file.read()
-                audio_array = decode_audio(io.BytesIO(audio_bytes))
+                # Same rule as the faster-whisper path below: this is a *local* decode of
+                # what was uploaded, so a failure is the caller's file, not the server.
+                try:
+                    audio_array = decode_audio(io.BytesIO(audio_bytes))
+                except Exception as decode_err:
+                    logger.warning(f"Voice API: could not decode the uploaded audio ({decode_err})")
+                    return jsonify({
+                        "error": "Could not decode the uploaded audio. Send a valid audio file.",
+                    }), 400
                 audio_duration = len(audio_array) / 16000.0
 
                 # Save to a temp WAV the whisper-server can read from disk.
@@ -1139,6 +1158,13 @@ def speech_to_text():
                         pass
             except Exception as ws_err:
                 logger.error(f"Voice API: whisper-server path failed ({ws_err})")
+                # The decode happens in the remote server, so from here a bad upload and a
+                # broken server look alike — except that a bad upload comes back as 4xx.
+                status = 400 if _whisper_server_refused(ws_err) else 500
+                if status == 400:
+                    return jsonify({
+                        "error": "Could not decode the uploaded audio. Send a valid audio file.",
+                    }), 400
                 return jsonify({"error": f"Speech recognition failed: {str(ws_err)}"}), 500
         
         # Get optional model preference from request
@@ -1156,8 +1182,19 @@ def speech_to_text():
                 import io
                 audio_io = io.BytesIO(audio_bytes)
                 
-                # Decode audio in memory
-                audio_array = decode_audio(audio_io)
+                # Decode audio in memory. A file that cannot be decoded is the *caller's*
+                # problem: it got past the extension check above, so it is a .wav that is
+                # not a WAV. It used to fall into the broad handler below and come back as
+                # a 500 "Speech recognition failed: [Errno …] Invalid data found …", which
+                # reads as a server fault. (Found by sending a 12-byte fake WAV through the
+                # new CLI command `guaardvark audio transcribe`.)
+                try:
+                    audio_array = decode_audio(audio_io)
+                except Exception as decode_err:
+                    logger.warning(f"Voice API: could not decode the uploaded audio ({decode_err})")
+                    return jsonify({
+                        "error": "Could not decode the uploaded audio. Send a valid audio file.",
+                    }), 400
                 audio_duration = len(audio_array) / 16000.0
                 
                 # Select optimal model based on audio duration
