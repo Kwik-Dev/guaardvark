@@ -77,6 +77,9 @@ class FakeBackend:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, bytes]] = []
+        # The query string is not part of `url.path`, and a fork command may legitimately
+        # put one there (`api request --query`), so the full URL is kept alongside.
+        self.full_urls: list[str] = []
         self._routes: list[tuple[str, str, int, object, str | None]] = []
         self._default: tuple[int, object] | None = None
 
@@ -93,6 +96,7 @@ class FakeBackend:
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.calls.append((request.method, request.url.path, request.content))
+        self.full_urls.append(str(request.url))
         for method, path, status, payload, text in self._routes:
             if request.method == method and request.url.path == path:
                 if text is not None:

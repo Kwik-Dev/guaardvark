@@ -153,6 +153,11 @@ _READ_ONLY_INVOCATIONS = [
     ["wordpress", "site", "1"],
     ["wordpress", "pages"],
     ["wordpress", "pull-status", "1"],
+    # Phase 6 (D5): the generic escape hatch's own read-only half. `api request` is not
+    # listed because it is general by construction — its gate is proven in
+    # test_fork_api_command.py instead.
+    ["api", "routes"],
+    ["api", "audit"],
 ]
 
 

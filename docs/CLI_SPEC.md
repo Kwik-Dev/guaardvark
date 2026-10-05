@@ -26,7 +26,7 @@ regeneration commands are in the appendix.
 | Entry point | `guaardvark = llx.main:run` (`cli/setup.py`) |
 | Python | `>=3.12,<3.13` (the ML stack has no 3.13+ wheels) |
 | Backend it fronts | the Flask app, default `http://localhost:5000`; macOS `:5055` |
-| Shell commands | **57** top-level, **221** subcommands |
+| Shell commands | **58** top-level, **224** subcommands |
 | REPL commands | ~70 (a superset — includes local file/agent tooling) |
 | Backend blueprints it can reach | ~60 of 82 `url_prefix` areas; **22** with no trace at all |
 | Studio pages | **42** page components; ~22 have a CLI equivalent |
@@ -53,11 +53,19 @@ These rules explain the coverage gaps in §8 and §10. They are intentional, not
 1. **Operate the machine.** Status, health, doctor, start/stop, logs, GPU, plugins, jobs.
 2. **Trigger generation** — images, videos, audio, music, SFX — because these are
    fire-and-forget jobs the backend queues and gates itself.
-3. **Plan productions, never render them.** `film-crew` and `music-video` create a project
-   and start the *planning* stage, then stop. Their own help says so:
+3. **Plan productions, never render them**, *by named command*. `film-crew` and
+   `music-video` create a project and start the *planning* stage, then stop. Their own help
+   says so:
    - `film-crew create` → *"Does not render shots."*
    - `music-video create` → *"Does not render clips."*
    - REPL meta → *"plan; render in Studio"*.
+
+   The render is not a separate route to call: it is unlocked by an approval POST
+   (`POST /api/production/<id>/casting/confirm`, `…/storyboard/approve`,
+   `POST /api/music-video/<id>/approve`) that the **named** commands deliberately do not
+   wrap. Since D5 there is one **generic** way to send such a request on purpose,
+   `guaardvark api request` (§6.1), which demands `--yes`, flags the route as a decision
+   and audits it.
 4. **Script and automate.** `--json` on every command; `--non-interactive` never falls into
    the REPL; piped stdin is a valid chat input.
 5. **No editing surfaces.** Where the Studio is an *editor* (video editor, code editor,
@@ -68,7 +76,41 @@ These rules explain the coverage gaps in §8 and §10. They are intentional, not
    subcommands.
 7. **The CLI reads some things locally.** `logs tail|search|stats` opens
    `<repo>/logs/*.log` directly rather than calling an API — so it works with the backend
-   down.
+   down. The `api` group's audit log is the second local file: `<GUAARDVARK_DIR>/api-audit.jsonl`.
+
+### 3.1 The one deliberate escape hatch — `guaardvark api` (D5)
+
+Rules 1–7 describe the *named* commands. `guaardvark api request <METHOD> <PATH>` is the
+acknowledged exception, added because wrapping routes one at a time is why coverage is
+permanently N of 97 — and because a route nobody wrapped used to be unreachable from the
+terminal except through `curl`.
+
+| Command | What it does |
+| `api request <METHOD> <PATH>` | Send any `/api/...` request. `--data` / `--data-file` / `@file` body, repeatable `--query k=v`, `--dry-run`, `--json`. |
+| `api routes` | List every route the backend serves (`GET /api/routes`, or `--docs` for docstrings), filterable by `--search` / `--method`. |
+| `api audit` | Read the tier-B audit log back: what this CLI sent, refused or failed. |
+
+The guard, in `cli/llx/commands/_fork/_api_guard.py` (deliberately a `_`-prefixed,
+non-command module, so the fork contract tests skip it and it is the single place that
+names a decision class):
+
+- **Reads are free.** GET, HEAD, OPTIONS need nothing.
+- **Writes need `--yes`.** POST, PUT, PATCH, DELETE are refused with exit code 2 otherwise,
+  and the refusal is logged.
+- **A decision-class route needs `--yes` even as a read**, so a future GET-shaped approval
+  cannot slip through the read path. Matching is on whole path *segments* (`approve`,
+  `reject`, `decide`, `apply`, `release-held`, `dispatch`, `confirm`, `publish`, `trigger`,
+  `execute`) — `/api/connections/publishes` is a read and is not dragged through the gate.
+- **Paths must start with `/api/`**, and an absolute URL is refused outright. Both keep
+  every call on the backend's own gate and audit path rather than at a plugin port, which
+  is what preserves D1.
+- **Every attempt is appended** to `<GUAARDVARK_DIR>/api-audit.jsonl` — ok, refused,
+  dry-run and error alike, with the body's **byte size, not its content**.
+
+Because this command can reach every one of the 97 backend API areas, the coverage table
+below and `api_coverage.py` now mean something narrower than they used to: they say
+whether an area has a **first-class** command, not whether it is reachable. Every
+`NOT_EXPOSED` entry is still reachable through `api request`.
 
 ## 4. Two surfaces
 
@@ -91,7 +133,7 @@ These rules explain the coverage gaps in §8 and §10. They are intentional, not
 | `--non-interactive` | do not start the REPL when no command is given |
 | `--version`, `-v` / `--help` | version / help |
 
-## 6. Shell command reference (57 commands, 221 subcommands)
+## 6. Shell command reference (58 commands, 224 subcommands)
 
 Commands with no subcommands are marked *(leaf)*.
 
@@ -194,6 +236,18 @@ upstream edit — see §11. Their read-only halves are covered by
 |---|---|
 | `audio` | `transcribe` (speech-to-text), `models`, `model-download` — added from a fork module without editing `cli/llx/commands/audio.py` |
 
+### Generic backend access (D5) — one command, every route
+
+| Command | Subcommands |
+|---|---|
+| `api` | `request`, `routes`, `audit` |
+
+See §3.1. `api request` is the only command in the CLI that is not a curated wrapper: it
+reaches routes no named command covers, which is what makes the render gates on
+`production`/`music-video` and the ~25 unwrapped `files` routes reachable from the
+terminal without a `curl`. Reads are free; writes and decision-class routes need `--yes`;
+all attempts are audited.
+
 ## 7. REPL command reference
 
 `cli/llx/command_catalog.py` is the source of truth and a contract test enforces it.
@@ -247,11 +301,11 @@ Beyond the shell commands above, the REPL adds:
 | DevToolsPage / ProgressTestPage | ❌ | developer surfaces |
 | StickyNotesPage | ❌ | |
 | ConnectionsPage | ✅ `connections list\|show\|providers\|environment` | `oauth` stays in the Studio |
-| **CastStudioPage / CastMemberPage** | ❌ | **`cast-library` API unreferenced** |
-| **UpscalingPage** | ❌ | **`upscaling` API unreferenced** |
-| **VideoEditorPage** | ❌ | **`video-editor` API unreferenced** |
-| **VideoTextOverlayPage** | ❌ | **`video-overlay` API unreferenced** |
-| **TrainingPage** | ❌ | **`training_datasets` API unreferenced** |
+| **CastStudioPage / CastMemberPage** | ✅ `cast` | training runs are `cast train` |
+| **UpscalingPage** | ✅ `upscale` | |
+| **VideoEditorPage** | ⚠️ `video-editor` | editor operations, not timeline authoring |
+| **VideoTextOverlayPage** | ⚠️ `api request` only | no named command; the generic escape hatch (§3.1) reaches `/api/video-overlay/*` |
+| **TrainingPage** | ✅ `training` | datasets; the run itself is `cast train` |
 | WordPressPages / WordPressSites | ✅ `wordpress sites\|pages\|pull-*\|process-run` | `process-run` publishes, so it needs `--yes` |
 | ActivitiesPage / AutoresearchPage | ⚠️ | partial (jobs / `rag eval`) |
 | NotFoundPage | — | n/a |
@@ -265,9 +319,13 @@ the module, not the URL prefix (`inbound_guard_api.py` serves `/api/settings/inb
 prefix keying would collide with `settings`).
 
 At Phase 4 — the end state: **50 exposed**, **0 planned**, **47 deliberately not exposed** (97
-declared). Nothing is left undecided: every backend API area is either driven by a command
-or carries a written reason, and `cli/tests/test_spec_parity.py` fails when a new one
-appears without one.
+declared). Nothing is left undecided: every backend API area is either driven by a named
+command or carries a written reason, and `cli/tests/test_spec_parity.py` fails when a new
+one appears without one.
+
+Since D5, those three buckets describe **first-class commands**, not reachability. Every
+one of the 47 unexposed areas is still reachable through `guaardvark api request` (§3.1);
+the reason on each says why it has no *named* command, not that the route is out of reach.
 
 Reached by a command, including: `agent-chat`, `agent-control`, `agents`, `audio-foundry`,
 `automation`, `autoresearch`, `backups`, `batch-image`, `batch-video`, `bulk-generation`,
@@ -277,11 +335,8 @@ Reached by a command, including: `agent-chat`, `agent-control`, `agents`, `audio
 `production`, `projects`, `rules`, `self-improvement`, `settings`, `social-outreach`,
 `swarm`, `system-map`, `tasks`, `tools`, `unified-chat`, `voice`, `web-search`, `websites`.
 
-Planned: `cast-library` (cast), `upscaling` (upscale), `infographic`, `llm-provider` (llm),
-`video-editor`, `training_datasets` (training), `wordpress`.
-
 Everything else is declared `NOT_EXPOSED` with a reason in that file — Studio-only surfaces,
-internals, and endpoints reached indirectly.
+internals, and endpoints reached indirectly. All of them remain reachable via `api request`.
 
 Caveats, so this table is not over-read:
 
@@ -425,7 +480,9 @@ Rules that keep it cheap:
    no planned group does.
 4. Reuse `llx/client.py`; never re-implement transport.
 5. Keep the scope rules in §3: no editing surfaces, no review gates, no render triggers
-   that bypass the Studio's approval.
+   that bypass the Studio's approval. The **one** documented exception is the `api` group
+   (§3.1, D5): it is `--yes`-gated and audited precisely so the exception does not become
+   the rule, and the named commands it lives beside keep obeying this rule unchanged.
 6. Follow the pattern of the two output-registration fixes: when a backend call can fail
    silently, log an error rather than returning a body with a missing id.
 7. Add a `--json` branch and a golden snapshot test (see `cli/tests/conftest.py` for the

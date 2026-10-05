@@ -14,6 +14,15 @@ rather than the URL prefix matters: `inbound_guard_api.py` serves
 This is the file that stops the coverage table in `docs/CLI_SPEC.md` from drifting
 from the code. When upstream adds a backend API area, the test fails and names it —
 either write the command, or declare it here with a reason.
+
+First-class commands, not reachability
+--------------------------------------
+Since CLI_PLAN D5 these three buckets describe whether an area has a **named** command.
+Every area here — including all of `NOT_EXPOSED` — is reachable through the generic escape
+hatch `guaardvark api request <METHOD> <PATH>` (`_api_guard.py` holds its gate). So a
+`NOT_EXPOSED` reason says "no command should exist for this", never "this is unreachable".
+When you move an area out of `NOT_EXPOSED`, the reason above it should move to `EXPOSED`
+with the command that now drives it — that is what this table is for.
 """
 from __future__ import annotations
 

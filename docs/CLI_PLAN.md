@@ -16,6 +16,7 @@ These change the shape of the work; everything else can proceed without them.
 | **D2** | Do **approval** actions enter the CLI? | (a) keep approvals Studio-only · (b) add explicit `approve`/`reject` subcommands | **Split**: read-only `approvals list/show` in the CLI; `approve`/`reject` **only** where a contract test already permits it (`outreach approve`). Do **not** add approvals for held code / inbound guard / film-crew storyboards, and keep `test_music_video_cli.py`'s "never POST approve" contract. |
 | **D3** | Where does fork code live? | (a) new modules + one registry line · (b) a separate pip package | **(a)** — see §2. |
 | **D4** | Is the CLI surface a fork-only concern? | (a) fork-only · (b) upstreamable | **Mixed** (§3 marks each): `upscaling`, `system-map`, `web-search`, `content-management`, `wordpress`, `connections`, `self-improvement`, `inbound-guard`, `infographic` are *upstream* features that upstream's own CLI also lacks — upstreamable in principle, but per fork policy **no PR is opened**. |
+| **D5** | A **generic REST escape hatch** — does one command reach every backend route? | (a) keep wrapping one command at a time · (b) a single `api request <METHOD> <PATH>` with a guard · (c) a separate second CLI that speaks raw REST | **(b), safety tier B** (decided 2026-10-05, after a proposal for (c)). Adding commands one at a time is why coverage is always N of 97 — a route nobody wrapped is unreachable from the terminal, which is exactly what blocks *render Film Crew / music-video by CLI* and the ~25 unwrapped files routes. (c) was rejected: the value is one ~200-line command reusing `llx.client`, not a second 9.7k-line CLI to re-port against ~5 upstream `cli/` commits a week. **Tier B**: reads free; every write needs `--yes`; a decision-class route needs `--yes` even as a read; `--dry-run` previews a gated request **without** needing `--yes` (seeing what would be sent is how a person decides); every attempt (allowed, refused, failed, previewed) is appended to `<GUAARDVARK_DIR>/api-audit.jsonl`. This **amends D2**: D2 still governs the *named* commands (no `film-crew approve-storyboard`, no `guard approve`, no held-code release), while `api request` is the documented, gated, audited escape hatch that can reach them when a person types the path deliberately. See §3.16. |
 
 ---
 
@@ -214,8 +215,40 @@ Routes: `/api/connections` CRUD, `POST /<id>/test`,
 | `film-crew` | `storyboard show`, `cast add <shot> <subject>`, `retry` | `GET /api/production/<id>/storyboard/shot/<sid>/image`, `POST /<id>/cast/<subject>`, `POST /<id>/retry` |
 | `music-video` | `clips show <idx>` (read-only progress) | `GET /api/music-video/<id>` |
 
-`film-crew`/`music-video` render and approval routes stay out per D2; the existing
-contract test must keep passing unchanged.
+`film-crew`/`music-video` render and approval routes stay out **of the named commands** per D2 (amended by D5): there is no `film-crew approve-storyboard`, and `test_music_video_cli.py`'s "never POST approve" contract keeps passing unchanged. D5 adds one generic, `--yes`-gated, audited route (`api request`, §3.16) that can reach them when a person names the path deliberately.
+
+### 3.16 Generic REST access — `api` (fork, D5)
+
+One command, every route. Nothing here is a new backend capability: every route already
+exists, is already called by the Studio, and is already listed by the backend itself at
+`GET /api/routes`.
+
+| Command | What it does |
+| `api request <METHOD> <PATH>` | Send any `/api/...` request: `--data`/`--data-file`/`@file` body, repeatable `--query k=v`, `--dry-run` (free — previews a gated request without `--yes`), `--json`. Reads are free; writes need `--yes`; a decision-class route needs `--yes` even as a read. |
+| `api routes` | List every route the backend serves (`GET /api/routes`, or `--docs` for docstrings), filterable by `--search`/`--method`. This is the discovery surface that makes the escape hatch usable. |
+| `api audit` | Show recent entries from `<GUAARDVARK_DIR>/api-audit.jsonl` — what this CLI actually sent, refused, or failed, with `--decisions` to filter. |
+
+Design notes, because the guard is the point:
+
+1. **The guard lives in `_api_guard.py`**, not in `api.py`. The registry and the fork
+   contract tests both skip a leading underscore, so that file is the one place allowed
+   to *name* the decision-class routes every other fork command is forbidden to call.
+   `api.py` therefore contains no decision-route literal at all, and the existing static
+   scan in `test_fork_readonly_contract.py` keeps working unmodified.
+2. **Path must start with `/api/`.** That is what keeps the command away from plugin
+   ports and the non-API surface, and it reuses the client's `base_url` rather than an
+   absolute URL — so `--server` still points at a remote box and the GPU gate (D1) still
+   holds: every call lands on a backend route, never on a plugin directly.
+3. **The audit log is client-side** (`<GUAARDVARK_DIR>/api-audit.jsonl`, JSONL). The CLI
+   records what *it* did; it works against a remote server and needs no backend change.
+   It records the body's **byte size, not its content** — a body can carry a prompt, a
+   caption, or a credential — and an unwritable log must not eat a request already sent.
+4. **A refusal is audited too.** "Someone tried to POST an approval without `--yes`" is
+   exactly the fact worth having later.
+5. **Every `NOT_EXPOSED` area in `api_coverage.py` is still reachable through this
+   command.** The reasons there say why no *first-class* command exists, not that the
+   route is unreachable. That distinction is now load-bearing and is stated in that
+   file's docstring and in `CLI_SPEC.md` §3/§11.
 
 ## 4. Test framework renewal
 
@@ -320,6 +353,7 @@ that already has the backend stack (the `backend` job, or `cli-e2e` with
 | **3** | `video-editor`, `training` | render/training go through the GPU gate; `training --backend runpod` requires `--yes`; contract tests for both | L |
 | **4** | `llm` (cloud providers), `models image *`, `wordpress`, `film-crew`/`music-video` read-only extensions | **Shipped.** `llm` (provider, set, models, openai-model, mistral-model, test, cloud on\|off), `wordpress` (sites, site, site-test, pages, pull-sitemap\|list\|page\|bulk\|status, process-queue, process-run), and `audio models` / `audio model-download` added to the upstream audio group. Deviations: the `images --engine` flag was dropped — `settings set chat_image_model` and `images generate --model` already cover it, so a flag would have been a third way to set one thing; image/video weight downloads were dropped because `/api/model` has no download route at all; `models image *` was dropped for the same reason (it would only duplicate `images models`). | M |
 | **5** | Docs: update `CLI_SPEC.md` §6/§7/§8/§9 from the code; refresh the README CLI section; regenerate coverage tables | `CLI_SPEC.md` regenerates clean from the appendix commands; spec-parity test proves no undocumented area | S |
+| **6** | **Generic REST access — `api request` / `api routes` / `api audit`** (D5, safety tier B) | **Shipped** with D5. `api request` sends any `/api/...` route: reads free, writes and decision-class routes need `--yes`, every attempt appended to `<GUAARDVARK_DIR>/api-audit.jsonl`, `--dry-run` sends nothing. `api routes` reads `GET /api/routes`; `api audit` reads the log back. `test_fork_api_command.py` proves the gate (refuses `/…/approve` without `--yes`), the audit (writes an entry for ok / refused / dry-run), the path guard (absolute URL and non-`/api/` path rejected), and that the guard module is the only place naming a decision route. Named-command promotion is the follow-up, not part of this phase. | M |
 
 Rough total: **L×3, M×3, S×1**. Phase 0 first is non-negotiable — without the extension
 point every later phase edits upstream files, and without the parity test the docs drift
@@ -330,6 +364,8 @@ again immediately.
 | Risk | Mitigation |
 |---|---|
 | Upstream refactors `main.py`/`command_catalog.py` → our one-line hooks conflict on every sync | keep hooks to a single import + loop; document the mechanical fix in `CLI_SPEC.md` §11 |
+| `approve`-style commands erode the Studio's human gate | D2 for the named commands; D5 `--yes` + decision-class detection + audit log for the generic route; `test_fork_api_command.py` proves a decision route is refused without `--yes` and audited when sent |
+| The generic `api` command becomes the only interface anyone uses, and argument validation rots | `api.py`'s own help and `CLI_SPEC.md` §11 say to promote a route to a named command once it is used repeatedly; the audit log makes "what do people actually call" answerable |
 | `approve`-style commands erode the Studio's human gate | D2 + `test_fork_cli_contract.py` |
 | Paid GPU (RunPod) triggered from a script | D1 + `--yes` + cost echo + contract test |
 | Golden snapshots become noise | normalise volatile fields; `--update-golden` is explicit and reviewed |

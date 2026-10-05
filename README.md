@@ -103,7 +103,7 @@ curl -fsSL https://raw.githubusercontent.com/Kwik-Dev/guaardvark/cloud-plus/inst
 | **Agent swarms** | Up to 20 parallel coding agents in isolated git worktrees with dependency-aware merging; fully-local backend via Ollama | [CAPABILITIES.md](CAPABILITIES.md) |
 | **Screen agents** | A real Ubuntu/XFCE desktop of their own, vision + closed-loop servo clicking, live VNC viewer on any page | Ep [4](https://www.youtube.com/watch?v=3VfHrJmqYos) |
 | **Knowledge** | Hybrid RAG on pgvector with cross-encoder reranking, layout-aware document parsing with page-level citations, retrieval that shows its chunks and scores, Autoresearch that tunes retrieval overnight | Ep [3](https://www.youtube.com/watch?v=pT_J93qTCL0) |
-| **Voice & channels** | Continuous voice chat, a three-tier chat brain, Discord bot, supervised outreach, MCP in both directions, a 57-command CLI | Ep [2](https://www.youtube.com/watch?v=5HcSAf96j_M) |
+| **Voice & channels** | Continuous voice chat, a three-tier chat brain, Discord bot, supervised outreach, MCP in both directions, a 58-command CLI | Ep [2](https://www.youtube.com/watch?v=5HcSAf96j_M) |
 | **Self-running platform** | Self-improvement behind guardian review and kill switches, rules engine, jobs & scheduling, schema-aware backups, GPU orchestrator, multi-machine Interconnector | Eps [11](https://www.youtube.com/watch?v=7kHvi_2vT6U) · [12](https://www.youtube.com/watch?v=A1-_ykcHOhQ) |
 
 > **The aardvark** (/ˈɑːrd.vɑːrk/; *Orycteropus afer*) is a medium-sized, burrowing, nocturnal mammal native to Africa. The aardvark is the only living member of the genus *Orycteropus*, the family Orycteropodidae and the order Tubulidentata. It is found over much of the southern two-thirds of the African continent, avoiding areas that are mainly rocky. A nocturnal feeder, the aardvark subsists on ants and termites (myrmecophagy) by using its sharp claws and powerful legs to dig the insects out of their hills, and its long snout to sniff out food. It digs a burrow in which to live and rear its young.
@@ -542,6 +542,25 @@ guaardvark completion zsh               # Shell completion script
 ```
 
 Config: `~/.guaardvark/cli.json` (legacy `~/.llx/config.json` is still read). Themes: `default`, `teal`, `musk`, `hacker`, `vader`, `guaardvark`, `day`, `auto`. Short terminals get a compact aardvark banner.
+
+### Every route, when no command wraps it yet
+
+`guaardvark api` is the generic backend escape hatch — one command instead of waiting for a
+wrapper. Reads are free; writes need `--yes`; and a route that is a decision a person
+normally makes in the Studio needs `--yes` too, with every attempt logged.
+
+```bash
+guaardvark api routes --search storyboard          # discover what exists (GET /api/routes)
+guaardvark api request GET  /api/version            # any read
+guaardvark api request POST /api/files/folder -d '{"name":"renders"}' --yes
+guaardvark api request POST /api/production/3/storyboard/approve --yes   # start a render
+guaardvark api request POST /api/production/3/storyboard/approve --dry-run  # preview, free
+guaardvark api audit --decisions                   # what this CLI sent, refused or failed
+```
+
+The audit log is `<GUAARDVARK_DIR>/api-audit.jsonl` (body sizes, not contents). Paths must
+stay under `/api/`, so every call goes through the backend's own gates rather than a plugin
+port. Full reasoning: [docs/CLI_SPEC.md](docs/CLI_SPEC.md) §3.1.
 
 ### REPL Slash Commands (examples)
 
