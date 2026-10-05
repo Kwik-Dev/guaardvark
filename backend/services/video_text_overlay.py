@@ -81,6 +81,67 @@ class VideoOverlayError(RuntimeError):
     """ffmpeg refused to encode, or the input wasn't a usable video."""
 
 
+# drawtext is an *optional* ffmpeg filter: the binary must be built with
+# libfreetype (and fontconfig/harfbuzz for font lookup). Some builds — Homebrew's
+# slim `ffmpeg` formula, notably — have no font libraries at all, and then a text
+# render dies inside the filter graph with a bare `exit 8: Filter not found`.
+# The probe below turns that into an instruction.
+_DRAWTEXT_MISSING_MESSAGE = (
+    "This ffmpeg build has no 'drawtext' filter (it is optional and needs "
+    "libfreetype/fontconfig). Text overlays cannot render on this box. "
+    "Install an ffmpeg built with libfreetype and put it first on PATH — on macOS: "
+    "`brew install ffmpeg-full && brew link --overwrite --force ffmpeg-full` — "
+    "or render with the MLT engine, which does not use drawtext: "
+    "`guaardvark video-editor captions-burn ... --engine editor`."
+)
+
+# Distinct from "build has no drawtext": ffmpeg resolved on PATH but could not be
+# run or queried (a bad interpreter, a non-executable file, an x86 binary without
+# Rosetta). Claiming the build lacks the filter would be a wrong diagnosis.
+_DRAWTEXT_UNQUERYABLE_MESSAGE = (
+    "Could not run 'ffmpeg -filters' to check for the 'drawtext' filter. "
+    "The ffmpeg on PATH cannot be executed or queried; check that it runs, then retry. "
+    "Or render with the MLT engine, which does not use drawtext: "
+    "`guaardvark video-editor captions-burn ... --engine editor`."
+)
+
+
+def _ffmpeg_has_drawtext() -> Optional[bool]:
+    """Does the ffmpeg on PATH advertise the optional drawtext filter?
+
+    ``True`` / ``False`` when the filter list was read; ``None`` when ffmpeg could
+    not be run or queried at all — a different failure with a different fix.
+    """
+    try:
+        listing = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-filters"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if listing.returncode != 0:
+        return None
+    return re.search(r"^\s*\S+\s+drawtext(?:\s|$)", listing.stdout, re.MULTILINE) is not None
+
+
+def require_drawtext() -> None:
+    """Raise VideoOverlayError — legibly — unless ffmpeg can render drawtext.
+
+    Presence of the *binary* is not capability: a slim build resolves on PATH
+    and then fails the render in a worker with a message that names neither the
+    cause nor the fix.
+    """
+    if shutil.which("ffmpeg") is None:
+        raise VideoOverlayError("ffmpeg not found on PATH; cannot render text overlays")
+    status = _ffmpeg_has_drawtext()
+    if status is None:
+        raise VideoOverlayError(_DRAWTEXT_UNQUERYABLE_MESSAGE)
+    if not status:
+        raise VideoOverlayError(_DRAWTEXT_MISSING_MESSAGE)
+
+
 def _ffmpeg_escape_text(text: str) -> str:
     """Escape user text for use inside drawtext's `text='...'` argument.
 
@@ -153,8 +214,7 @@ def add_text_to_video(
     Raises:
         VideoOverlayError on bad input, missing tools, ffmpeg failure, or timeout.
     """
-    if shutil.which("ffmpeg") is None:
-        raise VideoOverlayError("ffmpeg not found on PATH; cannot overlay text")
+    require_drawtext()
     if not input_path.is_file():
         raise VideoOverlayError(f"Input video not found: {input_path}")
     if not text or not text.strip():

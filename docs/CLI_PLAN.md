@@ -327,12 +327,16 @@ Three decisions worth recording:
    so the Studio, which sends dragged coordinates, is unaffected. The mlt backend does not
    read it (`timeline_compose.py` takes x/y only) and its own default is the top-left corner.
 
-Known to be broken on a machine whose ffmpeg lacks `--enable-libfreetype`: the renderer
-resolves ffmpeg with `shutil.which("ffmpeg")`, which checks presence and not capability, so a
-build with no `drawtext` filter fails inside the queue with `No such filter: 'drawtext'`.
-Homebrew's `ffmpeg` formula has **zero** font libraries by design — they live in the separate
-`ffmpeg-full` formula — so this is the common case on a Homebrew Mac. A capability check
-would turn it into an actionable message and is the obvious follow-up.
+Shipped 2026-10-05. The renderer now probes capability, not presence:
+`video_text_overlay.require_drawtext()` runs `ffmpeg -filters` and, when the build has no
+`drawtext`, raises a legible `VideoOverlayError` naming the cause (needs libfreetype) and the
+fix (install a build with it — on macOS `brew install ffmpeg-full && brew link --overwrite
+--force ffmpeg-full` — or use `--engine editor`). That error reaches the polling client via
+`render_timeline_task`'s handler and `/api/video-overlay/render-status/<job_id>`, instead of
+dying in the queue as `No such filter: 'drawtext'`. Homebrew's `ffmpeg` formula still has
+**zero** font libraries by design — they live in the separate `ffmpeg-full` formula — so the
+probe is what makes that common case on a Homebrew Mac actionable. `ffmpeg-full` is installed
+and linked on this box; both drawtext paths were verified by rendering and looking at frames.
 
 **Two renderers, and only one of them needs ffmpeg.** Verified 2026-10-05 by rendering and
 looking at frames, not by reading code:

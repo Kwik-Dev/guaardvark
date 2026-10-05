@@ -152,3 +152,64 @@ def test_render_timeline_task_invokes_render_timeline_service(monkeypatch, app):
         proc = progress_system.get_process(job_id)
         assert proc.status.value == "complete"
         assert proc.progress == 100
+
+
+def test_capability_error_reaches_the_job_status(monkeypatch, app):
+    """A drawtext-capability failure must be legible where the user polls.
+
+    The whole point of the probe is that a missing drawtext no longer dies as
+    'ffmpeg exit 8: Filter not found'; that only holds if render_timeline_task's
+    VideoOverlayError branch carries the message into progress_system.
+    """
+    import sys
+    from types import ModuleType
+    from contextlib import contextmanager
+
+    from backend.services.video_text_overlay import VideoOverlayError
+
+    mock_app_module = ModuleType("backend.app")
+    mock_app_module.create_app = lambda: app
+    monkeypatch.setitem(sys.modules, "backend.app", mock_app_module)
+
+    with app.app_context():
+        class MockCeleryApp:
+            def task(self, bind, name):
+                def decorator(func):
+                    self.task_func = func
+                    return func
+                return decorator
+
+        tasks = create_video_render_tasks(MockCeleryApp())
+        render_task = tasks["render_timeline_task"]
+
+        def mock_render_timeline(*args, **kwargs):
+            raise VideoOverlayError(
+                "This ffmpeg build has no 'drawtext' filter (needs libfreetype)."
+            )
+
+        monkeypatch.setattr(
+            "backend.tasks.video_render_tasks.render_timeline", mock_render_timeline
+        )
+
+        @contextmanager
+        def mock_gpu_session(kind, ident, **kwargs):
+            yield
+
+        monkeypatch.setattr("backend.tasks.video_render_tasks.gpu_session", mock_gpu_session)
+        monkeypatch.setattr(
+            "backend.api.video_overlay_api._resolve_video_path", lambda d: Path("dummy.mp4")
+        )
+
+        doc = Document(filename="source_video.mp4", path="source_video.mp4")
+        db.session.add(doc)
+        db.session.commit()
+
+        progress_system = get_unified_progress()
+        job_id = progress_system.create_process(ProcessType.VIDEO_RENDER, "Test Render")
+
+        render_task(None, {"video_document_id": doc.id}, "dummy_out.mp4", job_id)
+
+        proc = progress_system.get_process(job_id)
+        assert proc.status.value == "error"
+        assert "libfreetype" in proc.message
+        assert "Render failed" in proc.message

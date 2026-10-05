@@ -20,6 +20,7 @@ from typing import Any
 from backend.services.video_text_overlay import (
     _ffmpeg_escape_text,
     _validate_color,
+    require_drawtext,
     resolve_font_path,
     VideoOverlayError,
 )
@@ -157,6 +158,9 @@ def render_timeline(
             next_label_idx += 1
 
     if filter_chain:
+        # Presence of ffmpeg is not capability: a build without libfreetype
+        # advertises no drawtext filter and would fail opaquely in the worker.
+        require_drawtext()
         cmd.extend(["-filter_complex", ";".join(filter_chain), "-map", "[vout]"])
     else:
         # No text elements — straight passthrough video.

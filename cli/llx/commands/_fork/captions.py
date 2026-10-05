@@ -134,7 +134,9 @@ def ve_captions_burn(
 
     - `ffmpeg` (default) needs an ffmpeg built with libfreetype for `drawtext`. Homebrew's
       regular `ffmpeg` formula has no font stack at all (the fonts live in `ffmpeg-full`),
-      so on such a machine this fails inside the queue with `No such filter: 'drawtext'`.
+      so on such a machine the backend refuses up front with a message naming the cause and
+      the fix (install `ffmpeg-full`, or use `--engine editor`), instead of failing opaquely
+      in the queue.
     - `editor` is a synchronous call to the Video Editor plugin: no queue, no drawtext.
       It is the path the editor page uses, and the one to reach for when ffmpeg cannot
       draw text. Placement is `--x/--y` only.
