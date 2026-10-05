@@ -169,3 +169,74 @@ def test_languages_and_bundle_files_exist():
     assert "English" in c.load_languages() and len(c.load_languages()) == 11
     assert c.normalize_language("ja") == "Japanese" and c.normalize_language("klingon") == "English"
     assert (c.BUNDLE_DIR / "presets.json").exists() and (c.BUNDLE_DIR / "NOTICE.md").exists()
+
+
+# --- the JSON form (the h3_intent request field) ---------------------------
+# These all go through intent_from_dict, which is what the API, batch video and music
+# video actually send. It used to disagree with intent_from_director in two ways that
+# each cost a correct prompt; the Director path is the reference in each case.
+
+def _json_intent(**over):
+    intent = {"duration_s": 5, "mode": "t2va",
+              "shots": [{"description": "a girl pours tea",
+                         "dialogue": [{"speaker": "the girl", "text": "Ready?"}]}],
+              "language": "ja"}
+    intent.update(over)
+    return intent
+
+
+def test_a_json_dialogue_line_speaks_the_intents_declared_language():
+    """Declaring `ja` used to produce `<d>[English] …</d>` — H3 then spoke English.
+
+    `lang` is optional per line, so *every* JSON request hit the missing fallback.
+    """
+    prompt = c.compile(c.intent_from_dict(_json_intent()))[0]
+
+    assert "<d>[Japanese] Ready?</d>" in prompt
+    assert "[English]" not in prompt
+
+
+def test_the_json_and_director_forms_agree_on_language():
+    """The two builders must not drift: same declaration, same tag."""
+    from types import SimpleNamespace
+
+    result = SimpleNamespace(shots=[SimpleNamespace(
+        prompt="a girl pours tea", camera=None, duration=5,
+        dialogue=[{"speaker": "the girl", "text": "Ready?"}], speaker=None)])
+
+    from_json = c.compile(c.intent_from_dict(_json_intent()))[0]
+    from_director = c.compile(c.intent_from_director(result, 5, language="ja"))[0]
+
+    assert "<d>[Japanese] Ready?</d>" in from_json
+    assert "<d>[Japanese] Ready?</d>" in from_director
+
+
+def test_a_per_line_language_still_beats_the_intents():
+    """The intent's language is a default, not an override."""
+    intent = _json_intent(shots=[{"description": "a girl pours tea",
+                                  "dialogue": [{"speaker": "the girl", "text": "Ready?", "lang": "fr"}]}])
+
+    assert "<d>[French] Ready?</d>" in c.compile(c.intent_from_dict(intent))[0]
+
+
+def test_a_json_dialogue_line_without_a_speaker_keeps_the_structured_prompt():
+    """`speaker` is optional in the request and H3Dialogue requires it.
+
+    Its absence raised TypeError inside enhance_for_family's broad except, which logged at
+    INFO and fell back to the plain-prompt path — throwing away the structured prompt the
+    caller needs and handing H3 the prose shape it cannot use.
+    """
+    intent = {"duration_s": 5, "mode": "t2va",
+              "shots": [{"description": "a girl pours tea", "dialogue": [{"text": "Ready?"}]}]}
+
+    prompt = c.compile(c.intent_from_dict(intent))[0]
+
+    assert "the character (S1) says: <d>[English] Ready?</d>" in prompt
+
+
+def test_the_enhancer_keeps_a_structured_intent_it_can_use():
+    """End to end through the hook the enhancer calls, which is where the fallback lived."""
+    out = c.enhance_for_family("ignored", h3_intent=_json_intent())
+
+    assert out.startswith("integrated_multimodal_description: [Shot 1]")
+    assert "<d>[Japanese] Ready?</d>" in out
