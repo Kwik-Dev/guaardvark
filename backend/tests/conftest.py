@@ -139,3 +139,30 @@ def _isolate_gpu_lock_file(tmp_path_factory):
         yield
     finally:
         coord.LOCK_FILE = original
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_progress_jobs(tmp_path_factory):
+    """Keep cross-process progress records out of the repo's OUTPUT_DIR.
+
+    The global UnifiedProgressSystem lazily falls back to config.OUTPUT_DIR when
+    initialize() has not run, so any test driving it without an output dir would
+    otherwise create and delete real data/outputs/.progress_jobs/<job> records —
+    which a backend running on the same checkout would poll as phantom jobs.
+    Pin the singleton to a private directory for the session.
+    """
+    try:
+        from backend.utils.unified_progress_system import get_unified_progress
+    except Exception:
+        yield
+        return
+    system = get_unified_progress()
+    original_dir = system._output_dir
+    original_initialized = system._initialized
+    system._output_dir = str(tmp_path_factory.mktemp("progress"))
+    system._initialized = True
+    try:
+        yield
+    finally:
+        system._output_dir = original_dir
+        system._initialized = original_initialized

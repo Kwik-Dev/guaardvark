@@ -80,15 +80,23 @@ class ProgressEvent:
         self.additional_data = additional_data or {}
         
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for serialization"""
+        """Convert to dictionary for serialization.
+
+        ``additional_data`` is spread first so it can carry arbitrary extras
+        (``document_id``, ``sample_id``, …) without ever shadowing the canonical
+        fields: a caller that puts ``status`` in ``additional_data`` used to
+        overwrite the real status on the wire (2026-10-05), which also made
+        ``ingest_event`` reject the event because the value was not a
+        ProcessStatus.
+        """
         return {
+            **self.additional_data,
             "job_id": self.process_id,
             "progress": self.progress,
             "message": self.message,
             "status": self.status.value,
             "process_type": self.process_type.value,
             "timestamp": self.timestamp.isoformat(),
-            **self.additional_data
         }
 
 
@@ -214,6 +222,9 @@ class UnifiedProgressSystem:
         self._timeout_timers: Dict[str, threading.Timer] = {}
         self._gpu_monitor = GPUMonitor()
         self._gpu_monitoring_enabled = True
+        # Set only by initialize(). A Celery worker reaches this singleton before
+        # create_app() initializes it, and must still find the shared record.
+        self._initialized = False
 
     def initialize(self, output_dir: Optional[str] = None, socketio=None, flask_app=None):
         """Initialize the progress system
@@ -226,6 +237,7 @@ class UnifiedProgressSystem:
         self._output_dir = output_dir
         self._socketio = socketio
         self._flask_app = flask_app
+        self._initialized = True
         
         # Create progress directory if file-based tracking is enabled
         if self._file_based_enabled and output_dir:
@@ -236,6 +248,31 @@ class UnifiedProgressSystem:
             except Exception as e:
                 logger.warning(f"Failed to create progress directory: {e}")
                 self._file_based_enabled = False
+
+    def _progress_dir(self) -> Optional[Path]:
+        """The on-disk ``.progress_jobs`` directory, or None when unavailable.
+
+        ``initialize()`` sets this from ``config.OUTPUT_DIR`` in production. But a
+        Celery worker obtains this singleton and calls ``update_process`` **before**
+        ``create_app()`` has run ``initialize()``, so ``_output_dir`` is still unset
+        and the first cross-process update has nowhere to read or write — the job
+        then sits at its dispatch-time "starting" state while the render runs.
+        Fall back to the configured directory in that case; an explicit
+        ``initialize()`` (including one with no output_dir, as tests do) disables
+        the fallback so nothing writes to the repo by surprise.
+        """
+        output_dir = self._output_dir
+        if not output_dir and not self._initialized:
+            try:
+                from backend import config  # local: config loads env/dotenv
+                output_dir = getattr(config, "OUTPUT_DIR", None)
+            except Exception:
+                output_dir = None
+            if output_dir:
+                self._output_dir = str(output_dir)
+        if not output_dir:
+            return None
+        return Path(str(output_dir)) / ".progress_jobs"
     
     def _get_socketio(self):
         """Get SocketIO instance with delayed import to avoid circular imports"""
@@ -424,6 +461,18 @@ class UnifiedProgressSystem:
                     return False
             
             current_event = self._active_processes[process_id]
+
+            # A finished job is final: never let a late error (e.g. a timeout
+            # thread that passed its check just before a relayed completion)
+            # overwrite it. Re-checked here under the same lock that stores the
+            # result, which closes the check-then-act window.
+            if status == ProcessStatus.ERROR and current_event.status in (
+                ProcessStatus.COMPLETE, ProcessStatus.CANCELLED
+            ):
+                logger.info(
+                    f"Ignoring error for already-{current_event.status.value} process {process_id}: {message}"
+                )
+                return False
             
             # Merge additional_data: preserve existing and update with new values
             existing_additional_data = current_event.additional_data or {}
@@ -549,11 +598,11 @@ class UnifiedProgressSystem:
     
     def _create_file_tracking(self, process_id: str, event: ProgressEvent):
         """Create file-based tracking for a process"""
-        if not self._output_dir:
+        progress_dir = self._progress_dir()
+        if progress_dir is None:
             return
             
         try:
-            progress_dir = Path(str(self._output_dir)) / ".progress_jobs"
             job_dir = progress_dir / process_id
             job_dir.mkdir(parents=True, exist_ok=True)
             
@@ -577,11 +626,11 @@ class UnifiedProgressSystem:
     
     def _load_process_from_file(self, process_id: str) -> bool:
         """Load a process from file system into memory (for cross-process communication)"""
-        if not self._output_dir:
+        progress_dir = self._progress_dir()
+        if progress_dir is None:
             return False
             
         try:
-            progress_dir = Path(str(self._output_dir)) / ".progress_jobs"
             job_dir = contained(progress_dir, process_id)
             metadata_file = job_dir / "metadata.json"
             
@@ -620,12 +669,13 @@ class UnifiedProgressSystem:
     
     def _update_file_tracking(self, process_id: str, event: ProgressEvent):
         """Update file-based tracking for a process"""
-        if not self._output_dir:
+        progress_dir = self._progress_dir()
+        if progress_dir is None:
             return
             
         try:
-            progress_dir = Path(str(self._output_dir)) / ".progress_jobs"
             metadata_file = contained(progress_dir, process_id, "metadata.json")
+            metadata_file.parent.mkdir(parents=True, exist_ok=True)
             
             if metadata_file.exists():
                 raw = metadata_file.read_text(encoding="utf-8")
@@ -646,12 +696,13 @@ class UnifiedProgressSystem:
     
     def _finish_file_tracking(self, process_id: str, event: ProgressEvent):
         """Finish file-based tracking for a process"""
-        if not self._output_dir:
+        progress_dir = self._progress_dir()
+        if progress_dir is None:
             return
             
         try:
-            progress_dir = Path(str(self._output_dir)) / ".progress_jobs"
             metadata_file = contained(progress_dir, process_id, "metadata.json")
+            metadata_file.parent.mkdir(parents=True, exist_ok=True)
             
             if metadata_file.exists():
                 raw = metadata_file.read_text(encoding="utf-8")
@@ -676,8 +727,16 @@ class UnifiedProgressSystem:
         """Handle timeout for stuck processes"""
         with self._lock:
             # Check if process still exists before timing it out
-            if process_id not in self._active_processes:
+            current = self._active_processes.get(process_id)
+            if current is None:
                 logger.debug(f"Process {process_id} already completed before timeout")
+                return
+            # A job can finish long before its (3h, for video_render) timer
+            # fires — a relayed completion must not be overwritten with error.
+            if current.status in (ProcessStatus.COMPLETE, ProcessStatus.ERROR, ProcessStatus.CANCELLED):
+                logger.debug(
+                    f"Process {process_id} already finished (status={current.status.value}); skipping timeout"
+                )
                 return
             
             logger.warning(f"Process {process_id} timed out - marking as error")
@@ -708,9 +767,11 @@ class UnifiedProgressSystem:
             self._timeout_timers.pop(timer_key, None)
         
         # Also clean up file-based tracking
-        if self._file_based_enabled and self._output_dir:
+        if self._file_based_enabled:
+            progress_dir = self._progress_dir()
+            if progress_dir is None:
+                return
             try:
-                progress_dir = Path(self._output_dir) / ".progress_jobs"
                 job_dir = contained(progress_dir, process_id)
                 if job_dir.exists():
                     shutil.rmtree(job_dir)
@@ -731,31 +792,58 @@ class UnifiedProgressSystem:
     def get_job_status(self, process_id: str) -> Optional[Dict[str, Any]]:
         """One job's state by its id, or None when nothing knows it.
 
-        Live from this process's memory while it tracks the job; otherwise
-        from the metadata.json record the process running it writes under
-        OUTPUT_DIR/.progress_jobs, which is the only place a job running in
-        the Celery worker shows up here. Both go about a minute after the job
-        finishes (_cleanup_process). The id comes from a request, so the
-        record is only read from inside that directory.
+        Live from this process's memory while it tracks the job; the
+        metadata.json record the process running it writes under
+        OUTPUT_DIR/.progress_jobs is the only place a job running in the Celery
+        worker shows up here. When both exist the **newer** wins, so a worker's
+        completion is not shadowed by the stale "starting" event this process
+        created when it dispatched the task. Records are cleaned up about a
+        minute after the job finishes (_cleanup_process); before then the Redis
+        relay's ingest_event keeps memory current so the status survives the
+        file. The id comes from a request, so the record is only read from
+        inside that directory.
         """
+        live = self._live_job_status(process_id)
+        record = self._recorded_job_status(process_id)
+        if live is None:
+            return record
+        if record is None:
+            return live
+        record_is_newer = self._status_is_newer(record.get("updated_at"), live.get("updated_at"))
+        live_is_newer = self._status_is_newer(live.get("updated_at"), record.get("updated_at"))
+        if record_is_newer:
+            return record
+        if not live_is_newer and record.get("is_complete") and not live.get("is_complete"):
+            # Equal or unparseable timestamps: a terminal record beats a live
+            # non-terminal one. The stale reaper writes status=error + is_complete
+            # without advancing last_update_utc, so without this the live
+            # "processing" entry would win forever.
+            return record
+        return live
+
+    def _live_job_status(self, process_id: str) -> Optional[Dict[str, Any]]:
         event = self.get_process(process_id)
-        if event is not None:
-            status = event.status.value
-            return {
-                "job_id": process_id,
-                "status": status,
-                "progress": event.progress,
-                "message": event.message,
-                "process_type": event.process_type.value,
-                "is_complete": status in ("complete", "error", "cancelled"),
-                "updated_at": event.timestamp.isoformat(),
-                "additional_data": event.additional_data or {},
-                "source": "live",
-            }
-        if not self._output_dir:
+        if event is None:
+            return None
+        status = event.status.value
+        return {
+            "job_id": process_id,
+            "status": status,
+            "progress": event.progress,
+            "message": event.message,
+            "process_type": event.process_type.value,
+            "is_complete": status in ("complete", "error", "cancelled"),
+            "updated_at": event.timestamp.isoformat(),
+            "additional_data": event.additional_data or {},
+            "source": "live",
+        }
+
+    def _recorded_job_status(self, process_id: str) -> Optional[Dict[str, Any]]:
+        progress_dir = self._progress_dir()
+        if progress_dir is None:
             return None
         try:
-            metadata_file = contained(Path(str(self._output_dir)) / ".progress_jobs", process_id, "metadata.json")
+            metadata_file = contained(progress_dir, process_id, "metadata.json")
         except ValueError:
             return None
         try:
@@ -776,6 +864,96 @@ class UnifiedProgressSystem:
             "additional_data": record.get("additional_data") or {},
             "source": "record",
         }
+
+    @staticmethod
+    def _status_is_newer(candidate_iso: Optional[str], reference_iso: Optional[str]) -> bool:
+        """True when the candidate timestamp is strictly later than the reference.
+
+        Unparseable or missing timestamps return False, so live memory wins —
+        the safe choice while a job is still running in this process.
+        """
+        if not candidate_iso or not reference_iso:
+            return False
+        try:
+            candidate = datetime.fromisoformat(candidate_iso)
+            reference = datetime.fromisoformat(reference_iso)
+        except (TypeError, ValueError):
+            return False
+        if candidate.tzinfo is None and reference.tzinfo is not None:
+            candidate = candidate.replace(tzinfo=timezone.utc)
+        if reference.tzinfo is None and candidate.tzinfo is not None:
+            reference = reference.replace(tzinfo=timezone.utc)
+        return candidate > reference
+
+    def ingest_event(self, event_data: Dict[str, Any]) -> bool:
+        """Apply an event another process published, without re-emitting it.
+
+        Cross-process progress reaches Flask as a serialized dict (Redis
+        `guaardvark:progress`, or a polled metadata.json), not a ProgressEvent.
+        When this process already knows the job id — it created it at dispatch —
+        update the live entry so REST readers (`get_job_status` / `/…/status`)
+        see worker-side progress and completion instead of the dispatch-time
+        "starting" event. Unknown ids are ignored: this is a convergence path for
+        a job this process is already tracking, not a way to learn new work.
+
+        Never emits — the caller (the relay) has already delivered the event to
+        SocketIO clients; emitting here would duplicate it.
+        """
+        if not isinstance(event_data, dict):
+            return False
+        process_id = str(event_data.get("job_id") or "")
+        if not process_id:
+            return False
+
+        standard_fields = {"job_id", "progress", "message", "status", "process_type", "timestamp"}
+        additional = {k: v for k, v in event_data.items() if k not in standard_fields}
+
+        with self._lock:
+            current = self._active_processes.get(process_id)
+            if current is None:
+                return False
+
+            # A late/duplicate delivery must not walk a finished job backwards.
+            if not self._status_is_newer(event_data.get("timestamp"), current.timestamp.isoformat()):
+                return False
+
+            try:
+                status = ProcessStatus(event_data.get("status"))
+            except ValueError:
+                return False
+            try:
+                process_type = ProcessType(event_data.get("process_type"))
+            except ValueError:
+                process_type = current.process_type
+
+            try:
+                progress = int(event_data.get("progress") or 0)
+            except (TypeError, ValueError):
+                progress = current.progress
+
+            event = ProgressEvent(
+                process_id=process_id,
+                progress=progress,
+                message=str(event_data.get("message") or current.message),
+                status=status,
+                process_type=process_type,
+                additional_data={**(current.additional_data or {}), **additional},
+            )
+            # Keep the publisher's clock so a later event compares correctly.
+            published_at = event_data.get("timestamp")
+            if published_at:
+                try:
+                    event.timestamp = datetime.fromisoformat(published_at)
+                except (TypeError, ValueError):
+                    pass
+            self._active_processes[process_id] = event
+            self._process_history.setdefault(process_id, []).append(event)
+            # A terminal relayed event retires the local stuck-process timer, so
+            # the 3h video_render TTL cannot later overwrite "complete" with error.
+            if status in (ProcessStatus.COMPLETE, ProcessStatus.ERROR, ProcessStatus.CANCELLED):
+                self._cancel_timeout_timer(process_id)
+
+        return True
 
     def get_process_history(self, process_id: str) -> List[ProgressEvent]:
         """Get history for a specific process"""

@@ -5,7 +5,7 @@ import pytest
 import time
 import threading
 from unittest.mock import Mock, patch, MagicMock
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from backend.utils.unified_progress_system import (
     UnifiedProgressSystem,
@@ -502,4 +502,240 @@ class TestGlobalInstance:
         
         # Should return the same instance
         assert instance1 is instance2
-        assert isinstance(instance1, UnifiedProgressSystem) 
+        assert isinstance(instance1, UnifiedProgressSystem)
+
+
+class TestCrossProcessStatus:
+    """A job dispatched by Flask and run by a Celery worker (2026-10-05).
+
+    The worker reaches this singleton before create_app() initializes it, and
+    Flask's REST readers only had the dispatch-time "starting" event. These
+    pin the three pieces that make the worker's state visible: the output-dir
+    fallback, the newer-of-two status, and ingest from a relayed event.
+    """
+
+    @staticmethod
+    def _write_record(tmp_path, job_id, *, status, progress, message,
+                      is_complete, seconds_ahead, additional_data=None):
+        """Rewrite a job's metadata.json with a chosen age, as the worker would."""
+        import json
+        meta = tmp_path / ".progress_jobs" / job_id / "metadata.json"
+        record = json.loads(meta.read_text(encoding="utf-8"))
+        record.update({
+            "status": status,
+            "progress": progress,
+            "message": message,
+            "is_complete": is_complete,
+            "last_update_utc": (
+                datetime.now(timezone.utc) + timedelta(seconds=seconds_ahead)
+            ).isoformat(),
+            "additional_data": additional_data or {},
+        })
+        meta.write_text(json.dumps(record), encoding="utf-8")
+
+    def test_progress_dir_falls_back_to_config_when_uninitialized(self, monkeypatch, tmp_path):
+        system = UnifiedProgressSystem()
+        assert system._initialized is False
+        monkeypatch.setattr("backend.config.OUTPUT_DIR", str(tmp_path), raising=False)
+        assert system._progress_dir() == tmp_path / ".progress_jobs"
+        assert system._output_dir == str(tmp_path)
+
+    def test_progress_dir_ignores_config_after_initialize_without_output(self):
+        # initialize() with no output_dir is how the unit tests opt out of disk.
+        system = UnifiedProgressSystem()
+        system.initialize()
+        assert system._progress_dir() is None
+
+    def test_get_job_status_reads_a_workers_record(self, tmp_path):
+        writer = UnifiedProgressSystem()
+        writer.initialize(output_dir=str(tmp_path))
+        job_id = writer.create_process(ProcessType.VIDEO_RENDER, "Render (ffmpeg): clip")
+
+        reader = UnifiedProgressSystem()
+        reader.initialize(output_dir=str(tmp_path))
+        status = reader.get_job_status(job_id)
+
+        assert status["source"] == "record"
+        assert status["status"] == "start"
+
+    def test_get_job_status_prefers_the_newer_record_over_stale_live(self, tmp_path):
+        system = UnifiedProgressSystem()
+        system.initialize(output_dir=str(tmp_path))
+        job_id = system.create_process(ProcessType.VIDEO_RENDER, "Render (ffmpeg): clip")
+
+        # The worker finished and wrote a newer record; this process still holds
+        # the dispatch-time "starting" event in memory.
+        self._write_record(
+            tmp_path, job_id, status="complete", progress=100,
+            message="Render complete", is_complete=True, seconds_ahead=5,
+            additional_data={"document_id": 245},
+        )
+
+        status = system.get_job_status(job_id)
+        assert status["source"] == "record"
+        assert status["status"] == "complete"
+        assert status["progress"] == 100
+        assert status["additional_data"] == {"document_id": 245}
+
+    def test_get_job_status_keeps_live_when_it_is_newer(self, tmp_path):
+        system = UnifiedProgressSystem()
+        system.initialize(output_dir=str(tmp_path))
+        job_id = system.create_process(ProcessType.VIDEO_RENDER, "Render (ffmpeg): clip")
+        system.update_process(job_id, 40, "Rendering")
+
+        self._write_record(
+            tmp_path, job_id, status="start", progress=0,
+            message="Starting video_render...", is_complete=False, seconds_ahead=-60,
+        )
+
+        status = system.get_job_status(job_id)
+        assert status["source"] == "live"
+        assert status["progress"] == 40
+
+    def test_ingest_event_converges_a_tracked_job(self, tmp_path):
+        system = UnifiedProgressSystem()
+        system.initialize(output_dir=str(tmp_path))
+        job_id = system.create_process(ProcessType.VIDEO_RENDER, "Render (ffmpeg): clip")
+
+        future = (datetime.now(timezone.utc) + timedelta(seconds=5)).isoformat()
+        assert system.ingest_event({
+            "job_id": job_id,
+            "progress": 60,
+            "message": "Rendering",
+            "status": "processing",
+            "process_type": "video_render",
+            "timestamp": future,
+            "document_id": 245,
+        }) is True
+
+        event = system.get_process(job_id)
+        assert event.status == ProcessStatus.PROCESSING
+        assert event.progress == 60
+        # additional_data is spread at the top level of a published event.
+        assert system.get_job_status(job_id)["additional_data"]["document_id"] == 245
+
+    def test_ingest_event_ignores_unknown_and_out_of_order(self, tmp_path):
+        system = UnifiedProgressSystem()
+        system.initialize(output_dir=str(tmp_path))
+        job_id = system.create_process(ProcessType.VIDEO_RENDER, "Render (ffmpeg): clip")
+
+        assert system.ingest_event({"job_id": "video_render_nope", "status": "complete"}) is False
+
+        stale = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        assert system.ingest_event({
+            "job_id": job_id, "status": "complete", "progress": 100, "timestamp": stale,
+        }) is False
+        assert system.get_process(job_id).status == ProcessStatus.START
+
+    def test_ingest_event_does_not_emit(self, tmp_path, monkeypatch):
+        system = UnifiedProgressSystem()
+        system.initialize(output_dir=str(tmp_path))
+        job_id = system.create_process(ProcessType.VIDEO_RENDER, "Render (ffmpeg): clip")
+        emitted = []
+        monkeypatch.setattr(system, "_emit_event", lambda event: emitted.append(event))
+
+        system.ingest_event({
+            "job_id": job_id, "status": "processing", "progress": 10,
+            "process_type": "video_render",
+            "timestamp": (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat(),
+        })
+
+        assert emitted == []  # the relay already delivered it to clients
+
+    def test_terminal_status_survives_record_cleanup(self, tmp_path):
+        """R3: once the worker deletes the record, memory must still say complete."""
+        import shutil
+
+        system = UnifiedProgressSystem()
+        system.initialize(output_dir=str(tmp_path))
+        job_id = system.create_process(ProcessType.VIDEO_RENDER, "Render (ffmpeg): clip")
+
+        assert system.ingest_event({
+            "job_id": job_id, "status": "complete", "progress": 100,
+            "message": "Render complete", "process_type": "video_render",
+            "timestamp": (datetime.now(timezone.utc) + timedelta(seconds=5)).isoformat(),
+            "document_id": 247,
+        }) is True
+        shutil.rmtree(tmp_path / ".progress_jobs" / job_id)
+
+        status = system.get_job_status(job_id)
+        assert status["source"] == "live"
+        assert status["status"] == "complete"
+        assert status["additional_data"]["document_id"] == 247
+
+    def test_terminal_record_beats_live_on_an_equal_timestamp(self, tmp_path):
+        """The stale reaper writes error + is_complete without advancing its stamp."""
+        import json
+
+        system = UnifiedProgressSystem()
+        system.initialize(output_dir=str(tmp_path))
+        job_id = system.create_process(ProcessType.VIDEO_RENDER, "Render (ffmpeg): clip")
+        live = system.get_process(job_id)
+
+        self._write_record(
+            tmp_path, job_id, status="error", progress=0,
+            message="Job stalled", is_complete=True, seconds_ahead=0,
+        )
+        meta = tmp_path / ".progress_jobs" / job_id / "metadata.json"
+        record = json.loads(meta.read_text(encoding="utf-8"))
+        record["last_update_utc"] = live.timestamp.isoformat()
+        meta.write_text(json.dumps(record), encoding="utf-8")
+
+        status = system.get_job_status(job_id)
+        assert status["source"] == "record"
+        assert status["status"] == "error"
+
+    def test_additional_data_cannot_shadow_a_standard_field(self):
+        event = ProgressEvent(
+            process_id="job", progress=100, message="done",
+            status=ProcessStatus.COMPLETE, process_type=ProcessType.VIDEO_RENDER,
+            additional_data={"status": "done", "sample_id": 3},
+        )
+        payload = event.to_dict()
+        assert payload["status"] == "complete"
+        assert payload["sample_id"] == 3
+
+    def test_ingest_accepts_a_self_consistent_to_dict_payload(self, tmp_path):
+        system = UnifiedProgressSystem()
+        system.initialize(output_dir=str(tmp_path))
+        job_id = system.create_process(ProcessType.VIDEO_RENDER, "Render (ffmpeg): clip")
+        event = ProgressEvent(
+            process_id=job_id, progress=100, message="Regen complete",
+            status=ProcessStatus.COMPLETE, process_type=ProcessType.VIDEO_RENDER,
+            additional_data={"row_status": "done"},
+        )
+        event.timestamp = datetime.now(timezone.utc) + timedelta(seconds=5)
+        assert system.ingest_event(event.to_dict()) is True
+        assert system.get_process(job_id).status == ProcessStatus.COMPLETE
+
+    def test_ingest_terminal_cancels_the_timeout_timer(self, tmp_path):
+        system = UnifiedProgressSystem()
+        system.initialize(output_dir=str(tmp_path))
+        job_id = system.create_process(ProcessType.VIDEO_RENDER, "Render (ffmpeg): clip")
+        assert f"{job_id}_timeout" in system._timeout_timers
+
+        system.ingest_event({
+            "job_id": job_id, "status": "complete", "progress": 100,
+            "process_type": "video_render",
+            "timestamp": (datetime.now(timezone.utc) + timedelta(seconds=5)).isoformat(),
+        })
+        assert f"{job_id}_timeout" not in system._timeout_timers
+
+    def test_timeout_does_not_error_a_finished_job(self, tmp_path):
+        system = UnifiedProgressSystem()
+        system.initialize(output_dir=str(tmp_path))
+        job_id = system.create_process(ProcessType.VIDEO_RENDER, "Render (ffmpeg): clip")
+        system.complete_process(job_id, "Render complete")
+
+        system._timeout_stuck_process(job_id)
+        assert system.get_process(job_id).status == ProcessStatus.COMPLETE
+
+    def test_error_cannot_overwrite_a_finished_job(self, tmp_path):
+        """The timeout check-then-act window: error must not beat a completion."""
+        system = UnifiedProgressSystem()
+        system.initialize(output_dir=str(tmp_path))
+        job_id = system.create_process(ProcessType.VIDEO_RENDER, "Render (ffmpeg): clip")
+        system.complete_process(job_id, "Render complete")
+
+        assert system.error_process(job_id, "Process timed out after 5 minutes") is False
+        assert system.get_process(job_id).status == ProcessStatus.COMPLETE 
