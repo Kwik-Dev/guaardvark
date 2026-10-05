@@ -3,6 +3,8 @@ import contextlib
 import logging
 import os
 import re
+import subprocess
+import sys
 import uuid
 import time
 from typing import Optional, Dict, Any, List, Tuple
@@ -62,6 +64,179 @@ try:
 except ImportError as e:
     diffusion_available = False
     logger.warning(f"Diffusion dependencies not available: {e}")
+
+
+# --- The MPS probe runs in a CHILD process ---------------------------------
+#
+# It used to run in-process, inside `try: ... except Exception as e`, on the theory that
+# "a broken MPS build degrades to CPU instead of failing mid-generation". That cannot
+# work, and it cost three backend crashes in two days. When Metal rejects a command
+# buffer it calls __assert_rtn and the process aborts with SIGABRT — a native abort from
+# the Objective-C runtime, not a Python exception, so no `except` can ever see it. The
+# guard therefore turned the failure it existed to prevent into a worse one: instead of
+# one generation failing, the whole backend died and took chat, jobs and every other
+# in-flight request with it.
+#
+# Three crash reports, all one signature, all landing in this file's __init__:
+#
+#   abort -> __assert_rtn -> MTLReportFailure -> -[IOGPUMetalCommandBuffer validate]
+#   -> -[AGXG17XFamilyCommandBuffer commit] -> at::mps::MPSStream::synchronize
+#   -> MPSModule_deviceSynchronize -> cfunction_vectorcall_NOARGS -> slot_tp_init
+#
+#   Python-2026-10-04-101925.ips   -[_MTLCommandBuffer commit]
+#   Python-2026-10-04-162449.ips   -[IOGPUMetalCommandBuffer validate]
+#   Python-2026-10-05-132131.ips   -[IOGPUMetalCommandBuffer validate]
+#
+# So the probe now runs in a throwaway child: if Metal aborts, the child aborts and this
+# process reads the exit status as a verdict. The detection benefit survives; the blast
+# radius does not.
+
+MPS_PROBE_TIMEOUT = 180.0
+
+MPS_PROBE_SOURCE = r"""
+import sys
+
+try:
+    import torch
+except Exception as exc:
+    print(f"torch import failed: {exc}")
+    sys.exit(3)
+
+try:
+    if not (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
+        print("MPS is not available")
+        sys.exit(4)
+
+    # The ops that abort when Metal is unhappy. A one-element tensor keeps it cheap; the
+    # synchronize is the point, because that is where the command buffer is committed.
+    dummy = torch.zeros(1, device="mps")
+    _ = dummy + dummy
+    torch.mps.synchronize()
+except Exception as exc:
+    print(f"probe raised: {type(exc).__name__}: {exc}")
+    sys.exit(5)
+
+print("ok")
+sys.exit(0)
+"""
+
+
+def _interpret_probe(returncode: int, stdout: str, stderr: str) -> Tuple[bool, str]:
+    """Read a finished probe's result as ``(usable, detail)``.
+
+    The child writes its single verdict line to **stdout**, so the verdict is read from
+    there; stderr is torch's noise and is consulted only when stdout is empty — which is
+    exactly what a Metal abort leaves behind, the assertion text going to stderr. Keeping
+    the streams apart matters: interleaving them lets a late torch warning outrank "ok"
+    and turns a healthy probe into a CPU fallback.
+
+    Split out from the subprocess call so the verdict rules are testable without spawning
+    anything, and so the one rule that matters — a signal death is a verdict, not an
+    exception — is stated in one place.
+    """
+
+    def last_line(text: str) -> str:
+        for line in reversed((text or "").splitlines()):
+            if line.strip():
+                return line.strip()
+        return ""
+
+    verdict = last_line(stdout) or last_line(stderr)
+
+    if returncode == 0 and verdict == "ok":
+        return True, "ok"
+    if returncode < 0:
+        # Metal's __assert_rtn: SIGABRT (6) is the one we have actually seen, but any
+        # signal is treated the same way — the child died before it could answer.
+        reason = f"the probe process was killed by signal {-returncode}"
+        return False, f"{reason}: {verdict}" if verdict else reason
+    return False, verdict or f"the probe exited with code {returncode}"
+
+
+def probe_mps_in_subprocess(timeout: float = MPS_PROBE_TIMEOUT) -> Tuple[bool, str]:
+    """Run the MPS probe in a child process. Returns ``(usable, detail)``.
+
+    Never raises and never aborts: a child that dies of a Metal assertion, hangs, or fails
+    to start is a *result* here. ``detail`` is written to be read in a log line.
+    """
+    if not sys.executable:
+        return False, "the probe could not run: this interpreter has no sys.executable"
+
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", MPS_PROBE_SOURCE],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"the probe did not finish within {timeout:.0f}s"
+    except Exception as exc:  # noqa: BLE001 - a probe that cannot start is not a crash
+        return False, f"the probe could not start: {type(exc).__name__}: {exc}"
+
+    return _interpret_probe(proc.returncode, proc.stdout or "", proc.stderr or "")
+
+
+_mps_probe_lock = threading.Lock()
+_mps_probe_result: Optional[Tuple[bool, str]] = None
+
+
+def mps_usable() -> Tuple[bool, str]:
+    """The MPS probe's verdict, computed once per process.
+
+    Cached because the child pays a torch import and because the answer cannot change
+    mid-process; locked so two threads constructing a generator do not both spawn one.
+    """
+    global _mps_probe_result
+    if _mps_probe_result is None:
+        with _mps_probe_lock:
+            if _mps_probe_result is None:
+                usable, detail = probe_mps_in_subprocess()
+                if not usable:
+                    logger.warning(
+                        f"MPS probe (run in a child process, so an abort cannot take the "
+                        f"backend down) failed: {detail}"
+                    )
+                _mps_probe_result = (usable, detail)
+    return _mps_probe_result
+
+
+def _select_device() -> Tuple[str, str]:
+    """The device to generate on, and a human-readable reason for it.
+
+    CUDA is probed in-process because a CUDA error raises a Python exception, which is
+    catchable. MPS is probed in a child process because a Metal error aborts the process,
+    which is not — see the note above ``MPS_PROBE_SOURCE``.
+    """
+    if not diffusion_available:
+        return "cpu", "diffusion dependencies are not installed"
+
+    if torch.cuda.is_available():
+        try:
+            dummy = torch.zeros(1, device="cuda")
+            _ = dummy + dummy
+            torch.cuda.synchronize()
+            return "cuda", "CUDA is usable"
+        except Exception as e:  # noqa: BLE001 - a device that cannot be probed is not the device
+            logger.warning(
+                f"CUDA is available but not usable (e.g., PyTorch compatibility issue), "
+                f"falling back to CPU: {e}"
+            )
+            return "cpu", "CUDA reported available but its probe failed"
+
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        # Apple Silicon: Metal shares system memory with the CPU, so there is no separate
+        # VRAM pool. Z-Image/Krea 2 are DiTs whose weights (~20GB bf16) fit unified memory
+        # but NOT a CPU fp32 run — see the family guard in _generate().
+        usable, detail = mps_usable()
+        if usable:
+            return "mps", "MPS is usable"
+        # Logged here as well as in mps_usable(), which only speaks on the first call: a
+        # fallback that happens silently is how a two-day crash hunt starts.
+        logger.warning(f"MPS is available but its probe failed ({detail}), falling back to CPU")
+        return "cpu", f"MPS reports available but its probe failed ({detail})"
+
+    return "cpu", "no usable accelerator"
 
 
 # CUDA errors after which the driver has torn the context down. Every later CUDA
@@ -422,28 +597,7 @@ class OfflineImageGenerator:
         # Active character LoRA adapter names loaded on the current pipeline.
         self._loaded_lora_adapters: List[str] = []
 
-        self._device = "cpu"
-        if torch.cuda.is_available():
-            try:
-                dummy = torch.zeros(1, device='cuda')
-                _ = dummy + dummy
-                torch.cuda.synchronize()
-                self._device = "cuda"
-            except Exception as e:
-                logger.warning(f"CUDA is available but not usable (e.g., PyTorch compatibility issue), falling back to CPU: {e}")
-        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            # Apple Silicon: Metal shares system memory with the CPU, so there is no
-            # separate VRAM pool. Probe with a tiny op so a broken MPS build degrades
-            # to CPU instead of failing mid-generation. Z-Image/Krea 2 are DiTs whose
-            # weights (~20GB bf16) fit unified memory but NOT a CPU fp32 run — see the
-            # family guard in _generate().
-            try:
-                dummy = torch.zeros(1, device="mps")
-                _ = dummy + dummy
-                torch.mps.synchronize()
-                self._device = "mps"
-            except Exception as e:
-                logger.warning(f"MPS is available but not usable, falling back to CPU: {e}")
+        self._device, _device_reason = _select_device()
         
         self._generation_lock = threading.RLock()
         # One-shot / once-per-process: avoid WARNING spam when xformers is absent.
@@ -463,7 +617,7 @@ class OfflineImageGenerator:
         except Exception as e:  # noqa: BLE001 — a broken catalog must not stop image generation
             logger.error("user image catalog failed to load: %s", e)
 
-        logger.info(f"OfflineImageGenerator initialized - Device: {self._device}, Models dir: {self.models_dir}")
+        logger.info(f"OfflineImageGenerator initialized - Device: {self._device} ({_device_reason}), Models dir: {self.models_dir}")
 
     def _get_model_path(self, model_id: str) -> Path:
         uf = self.user_files.get(model_id)
