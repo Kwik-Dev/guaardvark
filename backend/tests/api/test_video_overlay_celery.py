@@ -1,4 +1,5 @@
 import pytest
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 try:
     from flask import Flask
@@ -67,6 +68,44 @@ def test_render_status_returns_progress_for_known_job(client, app, monkeypatch):
         assert res.json["data"]["progress"] == 50
         assert res.json["data"]["message"] == "Halfway there"
 
+
+def test_render_status_reflects_the_workers_record(client, app, monkeypatch, tmp_path):
+    """The REST endpoint must show a worker's completion, not the dispatch event.
+
+    Regression for the gap hit on 2026-10-05: captions-status stayed at
+    start/0 while the render finished and registered its Document, because the
+    endpoint read only this process's in-memory (dispatch-time) event.
+    """
+    import json
+
+    with app.app_context():
+        progress_system = get_unified_progress()
+        # Keep the shared singleton off the real repo directory.
+        monkeypatch.setattr(progress_system, "_output_dir", str(tmp_path))
+        monkeypatch.setattr(progress_system, "_initialized", True)
+
+        job_id = progress_system.create_process(ProcessType.VIDEO_RENDER, "Render (ffmpeg): clip")
+
+        # The worker wrote a newer record: complete, with the output Document.
+        meta = tmp_path / ".progress_jobs" / job_id / "metadata.json"
+        record = json.loads(meta.read_text(encoding="utf-8"))
+        record.update({
+            "status": "complete",
+            "progress": 100,
+            "message": "Render complete",
+            "is_complete": True,
+            "last_update_utc": (datetime.now(timezone.utc) + timedelta(seconds=5)).isoformat(),
+            "additional_data": {"document_id": 245},
+        })
+        meta.write_text(json.dumps(record), encoding="utf-8")
+
+        res = client.get(f"/api/video-overlay/render-status/{job_id}")
+        assert res.status_code == 200
+        assert res.json["data"]["status"] == "complete"
+        assert res.json["data"]["progress"] == 100
+        assert res.json["data"]["message"] == "Render complete"
+        assert res.json["data"]["document_id"] == 245
+
 def test_render_timeline_task_invokes_render_timeline_service(monkeypatch, app):
     import sys
     from types import ModuleType
@@ -89,8 +128,8 @@ def test_render_timeline_task_invokes_render_timeline_service(monkeypatch, app):
         tasks = create_video_render_tasks(mock_celery)
         render_task = tasks["render_timeline_task"]
         
-            # Mock backend.app.create_app to return the test app
-            # Already mocked via sys.modules
+        # Mock backend.app.create_app to return the test app
+        # Already mocked via sys.modules
         
         # Mock dependencies
         called_render = False

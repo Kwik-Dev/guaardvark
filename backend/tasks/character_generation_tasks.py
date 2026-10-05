@@ -950,12 +950,12 @@ def regen_sample(sample_id: int, prompt_override: str | None = None, seed: int |
             if row.status == "cancelled":
                 get_unified_progress().cancel_process(
                     job_id, "Regen cancelled",
-                    additional_data={"sample_id": sample_id, "status": row.status},
+                    additional_data={"sample_id": sample_id, "row_status": row.status},
                 )
             else:
                 get_unified_progress().complete_process(
                     job_id, "Regen complete",
-                    additional_data={"sample_id": sample_id, "status": row.status},
+                    additional_data={"sample_id": sample_id, "row_status": row.status},
                 )
         except Exception:
             pass

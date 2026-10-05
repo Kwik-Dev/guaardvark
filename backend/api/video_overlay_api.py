@@ -298,18 +298,24 @@ def render_timeline_endpoint():
 
 @video_overlay_bp.route("/render-status/<job_id>", methods=["GET"])
 def render_status(job_id):
-    """Polled by the frontend after dispatch; mirrors progress_system state."""
+    """Polled by the frontend after dispatch; mirrors progress_system state.
+
+    Reads `get_job_status`, whose record fallback is the only way this process
+    can see a render running in the Celery worker: `get_process` returns the
+    dispatch-time "starting" event and would report 0% until the job is cleaned
+    up. The response shape is unchanged.
+    """
     from backend.utils.unified_progress_system import get_unified_progress
     progress_system = get_unified_progress()
-    proc = progress_system.get_process(job_id)
-    if proc is None:
+    status = progress_system.get_job_status(job_id)
+    if status is None:
         return error_response("Job not found", 404, "JOB_NOT_FOUND")
     return success_response({
-        "job_id": job_id,
-        "status": proc.status.value if hasattr(proc.status, "value") else proc.status,
-        "progress": proc.progress,
-        "message": proc.message,
-        "document_id": (proc.additional_data or {}).get("document_id"),
+        "job_id": status["job_id"],
+        "status": status["status"],
+        "progress": status["progress"],
+        "message": status["message"],
+        "document_id": (status.get("additional_data") or {}).get("document_id"),
     })
 
 

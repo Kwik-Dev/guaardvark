@@ -740,7 +740,28 @@ def _initialize_app_components(app):
 
                                 # Skip terminal statuses — no need to re-emit completed/errored jobs
                                 job_status = metadata.get('status', 'unknown')
+
+                                # Build the payload once. A terminal record must
+                                # still converge this process's registry: with the
+                                # Redis relay down the file is the only source, and
+                                # a worker deletes it ~60s after the job ends. Not
+                                # emitting is fine (ingest_event never emits); not
+                                # ingesting would leave Flask at "starting" / 0%.
+                                # additional_data spreads first so a persisted
+                                # legacy record cannot shadow the canonical status
+                                # (same rule as ProgressEvent.to_dict).
+                                event_data = {
+                                    **metadata.get('additional_data', {}),
+                                    'job_id': metadata.get('job_id', 'unknown'),
+                                    'progress': metadata.get('progress', 0),
+                                    'message': metadata.get('message', ''),
+                                    'status': job_status,
+                                    'process_type': metadata.get('process_type', 'unknown'),
+                                    'timestamp': metadata.get('last_update_utc', metadata.get('timestamp', '')),
+                                }
+
                                 if job_status in TERMINAL_STATUSES:
+                                    unified_progress.ingest_event(event_data)
                                     last_modified_times[file_key] = current_mtime
                                     terminal_files.add(file_key)
                                     continue
@@ -749,16 +770,7 @@ def _initialize_app_components(app):
                                 active_jobs += 1
                                 terminal_files.discard(file_key)
 
-                                event_data = {
-                                    'job_id': metadata.get('job_id', 'unknown'),
-                                    'progress': metadata.get('progress', 0),
-                                    'message': metadata.get('message', ''),
-                                    'status': job_status,
-                                    'process_type': metadata.get('process_type', 'unknown'),
-                                    'timestamp': metadata.get('last_update_utc', metadata.get('timestamp', '')),
-                                    **metadata.get('additional_data', {})
-                                }
-
+                                unified_progress.ingest_event(event_data)
                                 socketio.emit("job_progress", event_data, to="global_progress")
                                 app.logger.info(f"Polled and emitted progress: {metadata.get('job_id')} at {event_data['progress']}%")
 
@@ -822,6 +834,10 @@ def _initialize_app_components(app):
                                 try:
                                     event_data = json.loads(msg['data'])
                                     process_id = event_data.get('job_id', '')
+                                    # Converge this process's live registry so REST
+                                    # readers see worker-side progress, not the
+                                    # dispatch-time "starting" event.
+                                    unified_progress.ingest_event(event_data)
                                     if process_id:
                                         socketio.emit('job_progress', event_data, to=process_id, namespace='/')
                                     socketio.emit('job_progress', event_data, to='global_progress', namespace='/')
