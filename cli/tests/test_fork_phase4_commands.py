@@ -44,8 +44,9 @@ def test_llm_set_posts_the_provider(fake_backend, cli_runner, isolated_home):
 def test_llm_cloud_on_refuses_without_yes_and_touches_nothing(fake_backend, cli_runner, isolated_home):
     """The gate that stops a script sending the user's prompts to a third party.
 
-    There is no generic /api/settings/<key> route, so `guaardvark settings set` cannot
-    reach this switch — this refusal is the only thing in front of it.
+    The generic `/api/settings/<key>` route writes only keys in the backend's settings
+    registry, and the LLM cloud switch is not one of them, so this refusal is the only
+    thing in front of it.
     """
     result = cli_runner.invoke(app, ["llm", "cloud", "on", "--json"])
 
