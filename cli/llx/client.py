@@ -8,6 +8,33 @@ from llx.config import get_server_url, get_api_key, get_timeout
 from llx.global_opts import get_global_timeout
 
 
+def error_message(data: Any, status_code: int = 0) -> str:
+    """The server's error as a readable string.
+
+    `error` is a *dict* on several routes (``{"code": "NOT_FOUND", "message": ...}``)
+    and a string on others, so the naive ``data.get("error")`` handed a dict straight to
+    ``LlxError`` and the user was shown a Python repr —
+    ``"{'code': 'NOT_FOUND', 'message': 'No such …"`` — instead of the message inside it.
+    Unwrap the common shapes; never return a non-string.
+    """
+    if isinstance(data, dict):
+        for key in ("error", "message"):
+            value = data.get(key)
+            if not value:
+                continue
+            if isinstance(value, str):
+                return value
+            if isinstance(value, dict):
+                inner = value.get("message") or value.get("error") or value.get("detail")
+                if isinstance(inner, str) and inner:
+                    return inner
+                return " ".join(f"{k}={v!r}" for k, v in value.items())[:300]
+            if isinstance(value, list):
+                return "; ".join(str(item) for item in value)[:300]
+            return str(value)
+    return f"HTTP {status_code}" if status_code else "Unknown error"
+
+
 class LlxError(Exception):
     def __init__(self, message: str, status_code: int = 0):
         self.message = message
@@ -43,8 +70,7 @@ class LlxClient:
             return {"raw": resp.text}
 
         if resp.status_code >= 400:
-            msg = data.get("error") or data.get("message") or f"HTTP {resp.status_code}"
-            raise LlxError(msg, resp.status_code)
+            raise LlxError(error_message(data, resp.status_code), resp.status_code)
 
         return data
 
