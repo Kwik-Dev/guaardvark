@@ -241,6 +241,22 @@ def shotcut_compose():
         if not resolved:
             return jsonify({"error": f"Document not found: {doc_key}"}), 404
         payload[path_key] = resolved
+    # The plugin falls back to a HARD-CODED 600 s when it has neither a trim end nor a source
+    # length (plugins/video_editor/mlt/timeline_compose.py:137), so an 85-second video renders
+    # as a 10-minute file. The editor page sends `video_source_duration_seconds`; nothing on
+    # the server ever did, so any other client -- `cli captions-burn --engine editor`, and
+    # whichever one comes next -- silently got the wrong length. The file is on this machine,
+    # so measure it here rather than make every client know.
+    if (payload.get("video_path") and not payload.get("video_trim_end")
+            and not payload.get("video_source_duration_seconds")):
+        try:
+            from backend.services.music_video_service import probe_duration
+            measured = probe_duration(payload["video_path"])
+        except Exception as e:  # noqa: BLE001 - an unmeasurable file is the plugin's problem
+            logger.warning("Could not measure %s: %s", payload.get("video_path"), e)
+            measured = 0.0
+        if measured > 0:
+            payload["video_source_duration_seconds"] = measured
     # This route can RENDER an mp4 (`render_mp4` in the body), and the plugin's `/shotcut/compose`
     # is synchronous, so the budget has to be the render budget. It used QUICK_TIMEOUT (10s),
     # which is the health/status budget: melt took ~14s on a 4-second 1080p clip and the proxy
