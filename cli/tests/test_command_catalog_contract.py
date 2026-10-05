@@ -1,6 +1,9 @@
 """Contracts between shared command catalog and slash router."""
 
+from typer.main import get_command
+
 from llx.command_catalog import COMMAND_TREE
+from llx.commands._fork import registry as fork_registry
 from llx.slash import SlashRouter
 
 
@@ -32,8 +35,25 @@ def test_catalog_commands_are_registered_in_router():
     assert "cast" in names
     assert "websearch" in names
     assert COMMAND_TREE["cast"] and COMMAND_TREE["cast"] == sorted(COMMAND_TREE["cast"])
-    assert COMMAND_TREE["music-video"] == ["list", "create", "status", "cancel", "delete"]
-    assert COMMAND_TREE["film-crew"] == ["list", "create", "status", "delete"]
+    # Fork extensions of upstream groups: completion and /help must list them, so the
+    # catalog equals the app's real subcommands (a missing OR a dead entry fails). Driven
+    # from the registry, so a future extension group is pinned too.
+    extended = dict(fork_registry.extended_groups())
+    assert extended, "no fork extension declares EXTENDS"
+    for group, app in extended.items():
+        subs = COMMAND_TREE[group]
+        assert set(subs) == set(get_command(app).commands), group
+        assert len(subs) == len(set(subs)), f"{group}: duplicate subcommand"
+    # The upstream workflow order is kept as a prefix, not re-sorted.
+    for group, upstream_prefix in [
+        ("film-crew", ["list", "create", "status", "delete"]),
+        ("music-video", ["list", "create", "status", "cancel", "delete"]),
+        ("audio", ["tts", "play", "music", "sfx", "voices"]),
+    ]:
+        assert COMMAND_TREE[group][: len(upstream_prefix)] == upstream_prefix, group
+    assert "approve-storyboard" in COMMAND_TREE["film-crew"]
+    assert "transcribe" in COMMAND_TREE["audio"]
+    assert "cuts" in COMMAND_TREE["music-video"]
 
 
 def test_router_subapp_dispatch_does_not_mutate_sys_argv():

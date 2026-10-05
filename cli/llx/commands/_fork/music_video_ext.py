@@ -11,6 +11,9 @@ the progress, `storyboard` is the frame.
 
 Read-only, so no D2 exception is needed. `music-video approve` — the gate that releases the
 spend — lives in `render_gates.py` (CLI_PLAN D6).
+
+The module-level `EXTENDS` names the upstream group these commands were added to, so the
+REPL catalog (`_fork/registry.py`) offers them to completion and `/help` as well.
 """
 from __future__ import annotations
 
@@ -23,6 +26,10 @@ from llx.client import LlxError, get_client
 from llx.commands.music_video import music_video_app
 
 from ._common import fail, json_mode, pick_list, resolve_server, success
+
+# The upstream group this module extends, so the REPL catalog can pick up the
+# subcommands it adds; see llx/commands/_fork/registry.py.
+EXTENDS = {"music-video": music_video_app}
 
 _BASE = "/api/music-video"
 

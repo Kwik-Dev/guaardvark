@@ -35,9 +35,13 @@ class TestSlashAndBareCompletion:
         assert "cast" in _names("/cas")
         assert "websearch" in _names("/webs")
         assert "list" in _names("/cast ")
-        # The upstream group's list stays as pinned; its fork extensions are a known
-        # completion gap (dispatch still works).
-        assert "approve-storyboard" not in _names("/film-crew ")
+
+    def test_fork_extensions_of_upstream_groups_complete(self):
+        """Subcommands the fork adds to an upstream group complete too (EXTENDS)."""
+        assert "approve-storyboard" in _names("/film-crew ")
+        assert "confirm-casting" in _names("/film-crew ")
+        assert "transcribe" in _names("/audio ")
+        assert "cuts" in _names("/music-video ")
 
     def test_subcommand_completion(self):
         names = _names("/jobs ")

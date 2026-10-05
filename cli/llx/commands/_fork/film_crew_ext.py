@@ -16,6 +16,9 @@ are read-only, so they cannot regress anything, and they need no D2 exception.
 
 The three commands that *start* a render live in `render_gates.py` (CLI_PLAN D6), kept
 separate so this module stays clean to the D2 static scan.
+
+The module-level `EXTENDS` names the upstream group these commands were added to, so the
+REPL catalog (`_fork/registry.py`) offers them to completion and `/help` as well.
 """
 from __future__ import annotations
 
@@ -28,6 +31,10 @@ from llx.client import LlxError, get_client
 from llx.commands.film_crew import film_crew_app
 
 from ._common import fail, json_mode, pick_list, resolve_server, success
+
+# The upstream group this module extends, so the REPL catalog can pick up the
+# subcommands it adds; see llx/commands/_fork/registry.py.
+EXTENDS = {"film-crew": film_crew_app}
 
 _BASE = "/api/production"
 

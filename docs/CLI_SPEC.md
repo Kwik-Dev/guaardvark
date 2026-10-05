@@ -261,8 +261,9 @@ the second. Shell-exclusive commands (`chat`, `ask`, `setup`, `completion`, `lau
 not REPL commands, and the REPL has commands the shell does not; `/web` (open the web UI)
 is upstream's, and is not the research group — that one is `/websearch`. Fork subcommands
 added to an *upstream* group (`/film-crew approve-storyboard`, `/audio transcribe`,
-`/music-video cuts`) dispatch but do not auto-complete: those groups' `COMMAND_TREE`
-entries list only the upstream subcommands.
+`/music-video cuts`) complete and appear in `/help` too: each extension module declares
+`EXTENDS = {group: upstream_app}` (`_fork/registry.py`), and the catalog derives the
+subcommands from that app.
 
 | Group | Commands |
 |---|---|
@@ -495,8 +496,11 @@ Rules that keep it cheap:
    command without any further edit: `command_catalog.py` merges `repl_catalog()` into
    `COMMAND_TREE`/`COMMAND_META` (one guarded block), and `slash.py` appends
    `repl_help_group()` to `_HELP_GROUPS` and registers `repl_apps()` (two guarded blocks).
-   The upstream contract test pins the catalog and the router to each other, so if a merge
-   ever stops running the test fails rather than the REPL silently losing groups.
+   A module that adds commands to an *upstream* group instead (no `COMMAND_NAME`) declares
+   `EXTENDS = {group_name: upstream_app}`; `extended_groups()` reads it so those
+   subcommands reach completion and `/help` too. The upstream contract test pins the
+   catalog and the router to each other, so if a merge ever stops running the test fails
+   rather than the REPL silently losing groups.
 4. Reuse `llx/client.py`; never re-implement transport.
 5. Keep the scope rules in §3: no editing surfaces, no review gates, no render triggers
    that bypass the Studio's approval. There are **two** documented exceptions, both

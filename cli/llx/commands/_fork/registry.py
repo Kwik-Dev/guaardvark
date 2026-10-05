@@ -45,10 +45,16 @@ surface is `llx/command_catalog.py`'s `COMMAND_TREE`, and
 names, so a fork group has to appear in both. Instead of editing those upstream files
 once per command, each merges this registry in one guarded block:
 
-* `command_catalog.py` does `COMMAND_TREE.update(repl_catalog()[0])` plus the same
-  for `COMMAND_META`, so the catalog can never drift from the mounted groups.
+* `command_catalog.py` unions `repl_catalog()[0]` into `COMMAND_TREE` (a new name is
+  added; an existing upstream group keeps its order and gains the fork's subcommands)
+  and fills gaps in `COMMAND_META`, so the catalog can never drift from the apps.
 * `slash.py` registers `repl_apps()` through its existing `_register_subapp` path and
   appends `repl_help_group()` to `_HELP_GROUPS`, so `/help` lists them too.
+
+A module that **extends an upstream group** (no `COMMAND_NAME`/`app`; importing it
+registers commands on the upstream app) declares `EXTENDS = {group_name: upstream_app}`.
+`extended_groups()` reads that, so the subcommands it adds reach completion and `/help`
+too — still without a hand-kept list of group names.
 
 Adding a fork group therefore still means adding one file — it reaches the shell and
 the REPL with no further edit. See `docs/CLI_SPEC.md` section 11.
@@ -87,6 +93,27 @@ def load_errors() -> List[Tuple[str, str]]:
     return list(_LOAD_ERRORS)
 
 
+def _import_module(name: str) -> Any:
+    """Import one candidate module, recording a failure in `load_errors()`; None on failure.
+
+    Shared by `typer_apps()` and `extended_groups()` so a broken fork module is reported
+    the same way whichever one imports it first. Deduplicated by module name, since both
+    walk the same candidate list.
+    """
+    try:
+        return importlib.import_module(f"{__package__}.{name}")
+    except Exception as exc:  # noqa: BLE001 - isolation is the point
+        message = f"{type(exc).__name__}: {exc}"
+        if not any(existing == name for existing, _ in _LOAD_ERRORS):
+            _LOAD_ERRORS.append((name, message))
+        # Say so out loud: a fork command that vanishes without explanation is
+        # the silent-failure pattern this repo keeps paying for.
+        logger.warning(
+            "fork command %r failed to import and will not be available: %s", name, message
+        )
+        return None
+
+
 def typer_apps() -> List[Tuple[Any, str]]:
     """`(typer_app, command_name)` pairs for `main.py` to mount.
 
@@ -101,16 +128,8 @@ def typer_apps() -> List[Tuple[Any, str]]:
     seen: dict[str, str] = {}
     del _LOAD_ERRORS[:]
     for name in _candidate_modules():
-        try:
-            module = importlib.import_module(f"{__package__}.{name}")
-        except Exception as exc:  # noqa: BLE001 - isolation is the point
-            message = f"{type(exc).__name__}: {exc}"
-            _LOAD_ERRORS.append((name, message))
-            # Say so out loud: a fork command that vanishes without explanation is
-            # the silent-failure pattern this repo keeps paying for.
-            logger.warning(
-                "fork command %r failed to import and will not be available: %s", name, message
-            )
+        module = _import_module(name)
+        if module is None:
             continue
         command_name = getattr(module, "COMMAND_NAME", None)
         app = getattr(module, "app", None)
@@ -146,6 +165,47 @@ def repl_apps() -> List[Tuple[Any, str]]:
     return typer_apps()
 
 
+def extended_groups() -> Dict[str, Any]:
+    """Upstream groups the fork extends, mapped to the upstream app object.
+
+    An extension module has no `COMMAND_NAME`/`app` (importing it registers extra
+    commands on an upstream app) and declares `EXTENDS = {group_name: upstream_app}`.
+    Read here so the REPL catalog knows which upstream groups gained subcommands,
+    without a second hand-kept list of group names.
+
+    Import errors are isolated per module, exactly as in `typer_apps()`.
+    """
+    groups: Dict[str, Any] = {}
+    for name in _candidate_modules():
+        module = _import_module(name)
+        if module is None:
+            continue
+        extends = getattr(module, "EXTENDS", None)
+        if not isinstance(extends, dict):
+            continue
+        for group, upstream_app in extends.items():
+            if isinstance(group, str) and group:
+                groups[group] = upstream_app
+    return groups
+
+
+def _subcommands(app: Any) -> List[str]:
+    """The subcommand names `app` registers, sorted; `[]` when not introspectable.
+
+    Note ``get_command(app).commands`` includes commands registered as `hidden=True`
+    (click keeps them), so a future hidden fork subcommand would surface in completion
+    and be required by the catalog contract test. That is a deliberate consequence of
+    deriving the list from the app rather than a hand-kept one.
+    """
+    from typer.main import get_command
+
+    try:
+        return sorted(getattr(get_command(app), "commands", {}) or {})
+    except Exception as exc:  # noqa: BLE001 - isolation is the point
+        logger.warning("fork app subcommands not introspectable: %s", exc)
+        return []
+
+
 def repl_catalog() -> Tuple[Dict[str, List[str]], Dict[str, str]]:
     """`(COMMAND_TREE entries, COMMAND_META entries)` for the fork groups.
 
@@ -153,24 +213,25 @@ def repl_catalog() -> Tuple[Dict[str, List[str]], Dict[str, str]]:
     (via `typer.main.get_command`) and the description from its help text, so the
     REPL catalog is *derived* rather than a second hand-kept list that can drift.
 
+    `tree` also carries every **upstream** group the fork extends
+    (`extended_groups()`), with the app's *complete* subcommand list. `command_catalog.py`
+    unions that with the group's existing upstream list, so the fork's own subcommands
+    reach completion and `/help` without a hand-kept entry. No `meta` entry is produced
+    for those groups — their upstream description stands.
+
     Introspection of one app is isolated: a malformed app yields an empty subcommand
     list rather than taking the catalog (and the whole REPL) down.
     """
     from collections import OrderedDict
 
-    from typer.main import get_command
-
     tree: Dict[str, List[str]] = OrderedDict()
     meta: Dict[str, str] = {}
     for app, name in typer_apps():
-        try:
-            group = get_command(app)
-            tree[name] = sorted(getattr(group, "commands", {}) or {})
-        except Exception as exc:  # noqa: BLE001 - isolation is the point
-            logger.warning("fork command %r subcommands not introspectable: %s", name, exc)
-            tree[name] = []
+        tree[name] = _subcommands(app)
         help_text = getattr(getattr(app, "info", None), "help", None) or ""
         meta[name] = " ".join(str(help_text).split())
+    for group, upstream_app in extended_groups().items():
+        tree[group] = _subcommands(upstream_app)
     return tree, meta
 
 

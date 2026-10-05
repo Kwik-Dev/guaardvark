@@ -127,7 +127,9 @@ def test_fork_groups_are_repl_commands_too():
 def test_repl_catalog_covers_every_group_with_sorted_subcommands():
     tree, meta = registry.repl_catalog()
     names = set(registry.repl_commands())
-    assert set(tree) == names
+    # tree covers the fork groups plus every upstream group the fork extends.
+    assert set(tree) == names | set(registry.extended_groups())
+    # meta is only the fork groups: an extended group keeps its upstream description.
     assert set(meta) == names
     for name, subs in tree.items():
         assert subs == sorted(subs), f"{name}: subcommands not sorted"
@@ -141,6 +143,58 @@ def test_repl_help_group_lists_the_same_names():
     title, names = registry.repl_help_group()
     assert title == "Fork Commands"
     assert names == registry.repl_commands()
+
+
+def test_extended_groups_and_their_subcommands_reach_the_catalog():
+    """A module extending an upstream group declares EXTENDS; the REPL catalog picks the
+    added subcommands up from the app itself, not from a hand-kept list."""
+    groups = registry.extended_groups()
+    assert {"audio", "film-crew", "music-video"} <= set(groups)
+
+    tree, meta = registry.repl_catalog()
+    for group in ("audio", "film-crew", "music-video"):
+        assert group in tree, group
+    assert "approve-storyboard" in tree["film-crew"]
+    assert "transcribe" in tree["audio"]
+    assert "cuts" in tree["music-video"]
+    # An extended group keeps its upstream description, so the registry emits no meta
+    # for it (command_catalog fills gaps rather than overwriting).
+    assert not ({"audio", "film-crew", "music-video"} & set(meta))
+
+
+def test_a_module_that_adds_to_an_upstream_app_declares_extends():
+    """A future extension module cannot silently stay out of completion /help.
+
+    The `*_ext.py` modules and `render_gates.py` add commands to an upstream app; each
+    must declare `EXTENDS` or the catalog cannot see them. This fails a module that
+    imports an upstream app without one. `captions.py` is not flagged: it extends the
+    fork's own `video-editor` group, which `repl_catalog()` derives in full.
+    """
+    import ast
+    import importlib
+    from pathlib import Path
+
+    package_dir = Path(registry.__file__).resolve().parent
+    checked = 0
+    for path in sorted(package_dir.glob("*.py")):
+        if path.name.startswith("_") or path.name in {"registry.py", "api_coverage.py"}:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        adds_to_upstream = any(
+            isinstance(node, ast.ImportFrom)
+            and node.module
+            and node.module.startswith("llx.commands.")
+            and not node.module.startswith("llx.commands._fork")
+            for node in ast.walk(tree)
+        )
+        module = importlib.import_module(f"llx.commands._fork.{path.stem}")
+        if not (adds_to_upstream or hasattr(module, "EXTENDS")):
+            continue
+        checked += 1
+        assert isinstance(getattr(module, "EXTENDS", None), dict), (
+            f"{path.name}: adds commands to an upstream app but declares no EXTENDS"
+        )
+    assert checked >= 4, f"expected the four extension modules, checked {checked}"
 
 
 # --- coverage maps ---------------------------------------------------------

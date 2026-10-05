@@ -13,6 +13,9 @@ group therefore costs one new file and zero upstream lines.
 Ordering matters and is safe: `main.py` imports every upstream command module at the top
 (before the fork loop runs), so `audio_app` exists by the time this is imported. The
 commands appear in `guaardvark --help` under `audio`.
+
+The module-level `EXTENDS` names the upstream group these commands were added to, so the
+REPL catalog (`_fork/registry.py`) offers them to completion and `/help` as well.
 """
 from __future__ import annotations
 
@@ -23,6 +26,10 @@ from llx.client import LlxError, get_client
 from llx.commands.audio import audio_app
 
 from ._common import fail, json_mode, pick_dict, pick_list, resolve_server, success, upload_files
+
+# The upstream group this module extends, so the REPL catalog can pick up the
+# subcommands it adds; see llx/commands/_fork/registry.py.
+EXTENDS = {"audio": audio_app}
 
 _VOICE_BASE = "/api/voice"
 _FOUNDRY_BASE = "/api/audio-foundry"

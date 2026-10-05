@@ -189,8 +189,16 @@ try:
     from llx.commands._fork import registry as _fork_registry
 
     _fork_tree, _fork_meta = _fork_registry.repl_catalog()
-    COMMAND_TREE.update(_fork_tree)
-    COMMAND_META.update(_fork_meta)
+    for _name, _subs in _fork_tree.items():
+        _existing = COMMAND_TREE.get(_name)
+        if _existing is None:
+            COMMAND_TREE[_name] = _subs
+        else:
+            # An upstream group the fork extends: keep the upstream order and append
+            # the fork's own subcommands so completion and /help list them too.
+            COMMAND_TREE[_name] = _existing + [s for s in _subs if s not in _existing]
+    for _name, _desc in _fork_meta.items():
+        COMMAND_META.setdefault(_name, _desc)
 except Exception as _exc:  # pragma: no cover - isolation is the point
     import logging as _logging
 

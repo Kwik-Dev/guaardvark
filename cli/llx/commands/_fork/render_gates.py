@@ -25,6 +25,9 @@ Why these three, and nothing else:
 
 The upstream groups are extended the same way the read-only halves are — no `COMMAND_NAME`,
 no `app`, commands registered on the upstream app objects at import.
+
+The module-level `EXTENDS` names the upstream groups this module adds to, so the REPL
+catalog (`_fork/registry.py`) offers the gates to completion and `/help` as well.
 """
 from __future__ import annotations
 
@@ -36,6 +39,10 @@ from llx.commands.film_crew import film_crew_app
 from llx.commands.music_video import music_video_app
 
 from ._common import fail, json_mode, resolve_server, success
+
+# The upstream groups this module extends, so the REPL catalog can pick up the
+# subcommands it adds; see llx/commands/_fork/registry.py.
+EXTENDS = {"film-crew": film_crew_app, "music-video": music_video_app}
 
 # Route templates, named rather than inlined so `_ALLOWED` in the contract test can match
 # each one exactly. `%d` rather than an f-string keeps each route a plain string literal,

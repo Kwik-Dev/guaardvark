@@ -57,8 +57,10 @@ cli/llx/commands/_fork/api_coverage.py    # FORK-OWNED: command -> API area map 
   `for mod, typer_app, name in fork_registry.typer_apps(): app.add_typer(typer_app, name=name)`.
 - `command_catalog.py` gains one merge of `fork_registry.repl_catalog()` into
   `COMMAND_TREE`/`COMMAND_META`; `slash.py` gains two guarded blocks — `repl_apps()`
-  registration and `repl_help_group()` in `_HELP_GROUPS`. The upstream contract test pins
-  catalog and router to each other, so the merges cannot drift.
+  registration and `repl_help_group()` in `_HELP_GROUPS`. A module that extends an
+  *upstream* group (the `*_ext.py` files) declares `EXTENDS = {group: upstream_app}`, and
+  the merge unions the app's subcommands into that group's existing catalog entry. The
+  upstream contract test pins catalog and router to each other, so the merges cannot drift.
 - Everything else — every new command module — lives under `cli/llx/commands/_fork/`.
 
 Net expected conflict on an upstream sync: **one import line + one add_typer loop in
