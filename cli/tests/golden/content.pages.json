@@ -1,0 +1,13 @@
+{
+  "data": {
+    "pages": [
+      {
+        "id": 4,
+        "status": "draft",
+        "title": "Release notes",
+        "uploaded_at": "2026-09-01"
+      }
+    ]
+  },
+  "status": "success"
+}

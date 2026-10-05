@@ -1,0 +1,12 @@
+{
+  "data": [
+    {
+      "end_s": 3.5,
+      "index": 0,
+      "prompt": "wide shot",
+      "section_label": "intro",
+      "start_s": 0.0
+    }
+  ],
+  "status": "success"
+}

@@ -1,0 +1,14 @@
+{
+  "data": {
+    "pages": [
+      {
+        "id": 8,
+        "site_id": 1,
+        "slug": "hello",
+        "status": "publish",
+        "title": "Hello"
+      }
+    ]
+  },
+  "status": "success"
+}

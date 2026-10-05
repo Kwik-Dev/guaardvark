@@ -1,0 +1,13 @@
+{
+  "data": {
+    "findings": [
+      {
+        "id": "f1",
+        "kind": "cycle",
+        "label": "import loop",
+        "severity": "high"
+      }
+    ]
+  },
+  "status": "success"
+}

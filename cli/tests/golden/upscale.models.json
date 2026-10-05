@@ -1,0 +1,11 @@
+{
+  "data": {
+    "models": [
+      {
+        "id": "hat-l",
+        "installed": true
+      }
+    ]
+  },
+  "status": "success"
+}

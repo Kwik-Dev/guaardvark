@@ -1,0 +1,8 @@
+{
+  "data": {
+    "job_id": "j1",
+    "progress": 40,
+    "status": "running"
+  },
+  "status": "success"
+}

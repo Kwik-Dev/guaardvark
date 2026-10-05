@@ -1,0 +1,13 @@
+{
+  "data": {
+    "datasets": [
+      {
+        "created_at": "<volatile:str>",
+        "id": 2,
+        "name": "Elara refs",
+        "path": "/data/elara"
+      }
+    ]
+  },
+  "status": "success"
+}

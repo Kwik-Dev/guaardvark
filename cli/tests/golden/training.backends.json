@@ -1,0 +1,12 @@
+{
+  "data": {
+    "backends": [
+      {
+        "enabled": true,
+        "id": "lora_trainer",
+        "status": "stopped"
+      }
+    ]
+  },
+  "status": "success"
+}

@@ -1,0 +1,11 @@
+{
+  "data": {
+    "transitions": [
+      {
+        "id": "fade",
+        "name": "Fade"
+      }
+    ]
+  },
+  "status": "success"
+}

@@ -1,0 +1,12 @@
+{
+  "data": {
+    "projects": [
+      {
+        "id": "abc123",
+        "isDirty": false,
+        "name": "Last Spark cut"
+      }
+    ]
+  },
+  "status": "success"
+}

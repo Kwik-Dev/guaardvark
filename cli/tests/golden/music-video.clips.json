@@ -1,0 +1,11 @@
+{
+  "data": [
+    {
+      "clip_path": "/out/cut0.mp4",
+      "index": 0,
+      "status": "complete",
+      "storyboard_path": "/out/sb0.png"
+    }
+  ],
+  "status": "success"
+}

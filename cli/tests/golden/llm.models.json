@@ -1,0 +1,11 @@
+{
+  "data": {
+    "models": [
+      {
+        "id": "llama3",
+        "source": "local"
+      }
+    ]
+  },
+  "status": "success"
+}

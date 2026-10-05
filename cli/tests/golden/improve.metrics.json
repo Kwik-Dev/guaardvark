@@ -1,0 +1,8 @@
+{
+  "data": {
+    "acceptance_rate": 0.75,
+    "accepted": 3,
+    "rejected": 1
+  },
+  "status": "success"
+}

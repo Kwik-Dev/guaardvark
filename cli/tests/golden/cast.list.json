@@ -1,0 +1,20 @@
+{
+  "data": {
+    "subjects": [
+      {
+        "id": 1,
+        "kind": "character",
+        "lora_path": "/models/elara.safetensors",
+        "name": "Elara",
+        "training_status": "ready"
+      },
+      {
+        "id": 5,
+        "kind": "prop",
+        "name": "Lumin Seed",
+        "training_status": "untrained"
+      }
+    ]
+  },
+  "status": "success"
+}

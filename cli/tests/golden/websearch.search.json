@@ -1,0 +1,13 @@
+{
+  "data": {
+    "query": "aardvark docs",
+    "results": [
+      {
+        "snippet": "the docs",
+        "title": "Docs",
+        "url": "https://example.test"
+      }
+    ]
+  },
+  "status": "success"
+}

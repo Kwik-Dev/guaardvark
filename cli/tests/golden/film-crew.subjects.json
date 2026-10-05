@@ -1,0 +1,12 @@
+{
+  "data": [
+    {
+      "cast_required": true,
+      "id": 1,
+      "kind": "character",
+      "lora_path": "",
+      "name": "Elara"
+    }
+  ],
+  "status": "success"
+}

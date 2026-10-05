@@ -1,0 +1,9 @@
+{
+  "data": {
+    "id": 1,
+    "kind": "character",
+    "name": "Elara",
+    "training_status": "ready"
+  },
+  "status": "success"
+}

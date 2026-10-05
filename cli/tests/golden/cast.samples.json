@@ -1,0 +1,13 @@
+{
+  "data": {
+    "samples": [
+      {
+        "approved": true,
+        "id": 11,
+        "seed": 42,
+        "status": "ready"
+      }
+    ]
+  },
+  "status": "success"
+}

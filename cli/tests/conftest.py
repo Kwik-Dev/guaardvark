@@ -22,9 +22,13 @@ here would never reach CI.
 from __future__ import annotations
 
 import fnmatch
+import json
+from pathlib import Path
 
 import httpx
 import pytest
+
+GOLDEN_DIR = Path(__file__).resolve().parent / "golden"
 
 # --- tiering ---------------------------------------------------------------
 
@@ -39,11 +43,21 @@ def pytest_configure(config):
     for name, description in _MARKERS:
         config.addinivalue_line("markers", f"{name}: {description}")
 
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--update-golden",
+        action="store_true",
+        default=False,
+        help="rewrite the golden JSON snapshots instead of asserting against them",
+    )
+
 _CONTRACT_PATTERNS = (
     "test_*json_contracts.py",
     "test_spec_parity.py",
     "test_command_catalog_contract.py",
     "test_plugins_gpu_json.py",
+    "test_*golden*.py",
 )
 _E2E_PATTERNS = ("test_*_e2e.py",)
 
@@ -189,3 +203,120 @@ def isolated_home(tmp_path, monkeypatch):
         if hasattr(config, name):
             monkeypatch.setattr(config, name, value, raising=False)
     return tmp_path
+
+
+# --- golden --json snapshots -----------------------------------------------
+
+# Keys whose value legitimately changes between runs (a clock, a measured span, the
+# server the CLI happened to talk to). Their *presence* is contract; their value is
+# not, so the value is replaced and a renamed/removed key still fails.
+_VOLATILE_KEYS = frozenset(
+    {
+        "timestamp",
+        "created_at",
+        "updated_at",
+        "started_at",
+        "finished_at",
+        "completed_at",
+        "duration",
+        "duration_seconds",
+        "elapsed",
+        "elapsed_seconds",
+        "server_url",
+        "base_url",
+        "config_file",
+        "config_dir",
+        "home",
+        "cwd",
+    }
+)
+
+
+def _normalize(value, paths):
+    """Recursively make a payload machine-independent. ``paths`` are temp-dir prefixes
+    the isolated home created, replaced so a golden file is identical on every box.
+
+    A volatile key's *value* is replaced, but the replacement names the value's type:
+    a script parsing ``created_at`` depends on it being a string, so a string becoming
+    an int must still fail.
+    """
+    if isinstance(value, dict):
+        return {
+            key: (f"<volatile:{type(item).__name__}>" if key in _VOLATILE_KEYS
+                  else _normalize(item, paths))
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_normalize(item, paths) for item in value]
+    if isinstance(value, str):
+        for prefix in paths:
+            if prefix and prefix in value:
+                return value.replace(prefix, "<tmp>")
+        return value
+    return value
+
+
+def _diff(expected, actual, path="$"):
+    """A path-annotated difference, so a shape regression names the key that moved."""
+    if isinstance(expected, dict) and isinstance(actual, dict):
+        lines = []
+        for key in sorted(set(expected) | set(actual)):
+            if key not in expected:
+                lines.append(f"  + {path}.{key} = {actual[key]!r}")
+            elif key not in actual:
+                lines.append(f"  - {path}.{key} (was {expected[key]!r})")
+            else:
+                lines.append(_diff(expected[key], actual[key], f"{path}.{key}"))
+        return "\n".join(line for line in lines if line)
+    if isinstance(expected, list) and isinstance(actual, list):
+        if len(expected) != len(actual):
+            return f"  ~ {path}: {len(expected)} item(s) -> {len(actual)} item(s)"
+        return "\n".join(
+            line for line in (_diff(e, a, f"{path}[{i}]") for i, (e, a) in enumerate(zip(expected, actual))) if line
+        )
+    if expected != actual:
+        return f"  ~ {path}: {expected!r} -> {actual!r}"
+    return ""
+
+
+@pytest.fixture
+def golden(pytestconfig, isolated_home):
+    """Compare a ``--json`` payload against ``cli/tests/golden/<name>.json``.
+
+    Pass a ``CliRunner`` result (the preferred form — it also asserts the exit code)
+    or an already-parsed payload. Rewrite the files deliberately with
+    ``pytest cli/tests --update-golden``; review the diff before committing it. The
+    point is to catch *shape* drift — a renamed or dropped key breaks every script
+    that reads it — which ad-hoc asserts only catch where someone remembered to look.
+    """
+    update = bool(pytestconfig.getoption("--update-golden"))
+    replacements = [str(isolated_home), str(isolated_home.parent)]
+
+    def _check(name, payload):
+        if hasattr(payload, "output"):  # a CliRunner result
+            assert payload.exit_code == 0, payload.output
+            try:
+                payload = json.loads(payload.output)
+            except (TypeError, ValueError):  # pragma: no cover - a broken command
+                raise AssertionError(f"{name}: --json did not emit JSON:\n{payload.output}")
+        normalized = _normalize(payload, replacements)
+        path = GOLDEN_DIR / f"{name}.json"
+        if update:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(normalized, indent=2, sort_keys=True) + "\n")
+            return normalized
+        assert path.exists(), (
+            f"no golden file for {name!r} ({path}). "
+            "Run `pytest cli/tests --update-golden`, then review and commit the file."
+        )
+        expected = json.loads(path.read_text())
+        if expected != normalized:
+            raise AssertionError(
+                f"golden mismatch for {name!r} ({path}):\n"
+                + _diff(expected, normalized)
+                + "\n\nIf this shape change is intended, run `pytest cli/tests --update-golden` "
+                "and commit the regenerated file."
+            )
+        return normalized
+
+    return _check

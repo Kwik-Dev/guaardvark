@@ -1,0 +1,27 @@
+{
+  "data": {
+    "drafts": [
+      {
+        "id": 5,
+        "platform": "reddit",
+        "status": "draft"
+      }
+    ],
+    "errors": {},
+    "held": [
+      {
+        "decision": "held",
+        "id": 7,
+        "kind": "code"
+      }
+    ],
+    "publishes": [
+      {
+        "id": 1,
+        "status": "pending",
+        "title": "Post"
+      }
+    ]
+  },
+  "status": "success"
+}

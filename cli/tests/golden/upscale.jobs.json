@@ -1,0 +1,13 @@
+{
+  "data": {
+    "jobs": [
+      {
+        "id": "j7",
+        "kind": "image",
+        "progress": 10,
+        "status": "running"
+      }
+    ]
+  },
+  "status": "success"
+}

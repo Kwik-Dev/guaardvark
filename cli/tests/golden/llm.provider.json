@@ -1,0 +1,8 @@
+{
+  "data": {
+    "cloud_active": false,
+    "cloud_models_enabled": false,
+    "provider": "ollama"
+  },
+  "status": "success"
+}

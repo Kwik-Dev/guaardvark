@@ -1,0 +1,13 @@
+{
+  "data": {
+    "connections": [
+      {
+        "id": 2,
+        "name": "Main channel",
+        "provider": "youtube",
+        "status": "connected"
+      }
+    ]
+  },
+  "status": "success"
+}

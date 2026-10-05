@@ -1,0 +1,11 @@
+{
+  "data": {
+    "providers": [
+      {
+        "auth": "oauth",
+        "id": "youtube"
+      }
+    ]
+  },
+  "status": "success"
+}

@@ -1,0 +1,12 @@
+{
+  "data": {
+    "jobs": [
+      {
+        "id": 3,
+        "status": "complete"
+      }
+    ],
+    "ready": true
+  },
+  "status": "success"
+}

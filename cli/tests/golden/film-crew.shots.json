@@ -1,0 +1,15 @@
+{
+  "data": [
+    {
+      "approved": true,
+      "description": "A lighthouse at dusk",
+      "id": 7,
+      "regen_count": 1,
+      "scene_number": 1,
+      "shot_number": 2,
+      "storyboard_image_path": "/out/sb7.png",
+      "video_clip_path": ""
+    }
+  ],
+  "status": "success"
+}

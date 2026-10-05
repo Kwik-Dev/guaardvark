@@ -1,0 +1,16 @@
+{
+  "data": {
+    "git": [],
+    "scans": [
+      {
+        "by": "guard",
+        "created_at": "<volatile:str>",
+        "decision": "held",
+        "id": 3,
+        "kind": "code",
+        "path": "/tmp/x.py"
+      }
+    ]
+  },
+  "status": "success"
+}

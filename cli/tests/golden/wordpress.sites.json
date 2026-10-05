@@ -1,0 +1,13 @@
+{
+  "data": {
+    "sites": [
+      {
+        "id": 1,
+        "is_connected": true,
+        "name": "Blog",
+        "url": "https://example.test"
+      }
+    ]
+  },
+  "status": "success"
+}
