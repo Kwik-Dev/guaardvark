@@ -130,7 +130,7 @@ def test_style_options_are_sent_only_when_given(fake_backend, cli_runner, isolat
 
     _run(cli_runner, [
         "video-editor", "captions-burn", "42", "--srt", "/tmp/cues.srt",
-        "--font-size", "36", "--color", "#ffcc00", "--audio", "9", "--backend", "mlt", "--json",
+        "--font-size", "36", "--color", "#ffcc00", "--audio", "9", "--engine", "mlt", "--json",
     ])
     styled = json.loads(fake_backend.calls[-1][2])
 
@@ -284,6 +284,70 @@ def test_a_cue_that_ends_before_it_starts_is_warned_about(fake_backend, cli_runn
 
     assert "1 cue(s) end at or before they start" in _streams(result)
     assert fake_backend.posted_paths() == [_IMPORT_PATH, _RENDER_PATH], "the good cue still renders"
+
+
+# --- the editor engine: the synchronous path (no queue, no drawtext) --------
+# This is the renderer that works on a machine whose ffmpeg has no drawtext, and the one
+# the Video Editor page itself uses. It takes a document id (the route resolves it) and
+# `render_mp4`, and it answers with the rendered file rather than a job id.
+_EDITOR_COMPOSE = "/api/video-editor/shotcut/compose"
+
+
+def _editor_reply(path: str = "/out/timeline_abc.mp4"):
+    return {"rendered_mp4": path, "rendered_mp4_doc_id": 77}
+
+
+def test_editor_engine_posts_to_the_synchronous_compose(fake_backend, cli_runner, isolated_home):
+    fake_backend.route("POST", _IMPORT_PATH, json=_IMPORTED)
+    fake_backend.route("POST", _EDITOR_COMPOSE, json=_editor_reply())
+
+    payload = json.loads(_run(cli_runner, [
+        "video-editor", "captions-burn", "42", "--srt", "/tmp/cues.srt",
+        "--engine", "editor", "--x", "480", "--y", "980", "--json",
+    ]).output)
+
+    assert fake_backend.posted_paths() == [_IMPORT_PATH, _EDITOR_COMPOSE], (
+        "the editor engine must not touch render-timeline, which needs the queue and drawtext"
+    )
+    body = json.loads(fake_backend.calls[-1][2])
+    assert body["document_id"] == 42, "the route resolves document_id to an absolute path"
+    assert body["render_mp4"] is True, "without this the plugin only writes the .mlt"
+    assert all(e["x"] == 480 and e["y"] == 980 for e in body["text_elements"])
+    assert "video_document_id" not in body and "backend" not in body
+    assert payload["data"]["rendered_mp4"] == "/out/timeline_abc.mp4"
+
+
+def test_editor_engine_refuses_a_caption_that_would_land_in_a_corner(fake_backend, cli_runner, isolated_home):
+    """MLT's default is the top-left corner, and only the caller knows the frame."""
+    fake_backend.default(json=_editor_reply())
+
+    result = _run(cli_runner, ["video-editor", "captions-burn", "42", "--srt", "/tmp/cues.srt",
+                               "--engine", "editor", "--json"], expect=2)
+
+    assert fake_backend.calls == []
+    assert "top-left" in result.output
+
+
+def test_position_is_refused_on_the_engines_that_ignore_it(fake_backend, cli_runner, isolated_home):
+    """MLT takes x/y; accepting --position silently would drop the placement."""
+    fake_backend.default(json=_editor_reply())
+
+    result = _run(cli_runner, ["video-editor", "captions-burn", "42", "--srt", "/tmp/cues.srt",
+                               "--position", "bottom-center", "--engine", "editor", "--json"], expect=2)
+
+    assert fake_backend.calls == []
+    assert "only honoured by the ffmpeg renderer" in result.output
+
+
+def test_editor_engine_names_the_rendered_file(fake_backend, cli_runner, isolated_home):
+    """Synchronous, so there is no job to poll -- the human branch must say where it landed."""
+    fake_backend.route("POST", _IMPORT_PATH, json=_IMPORTED)
+    fake_backend.route("POST", _EDITOR_COMPOSE, json=_editor_reply("/out/captioned.mp4"))
+
+    result = _run(cli_runner, ["video-editor", "captions-burn", "42", "--srt", "/tmp/cues.srt",
+                               "--engine", "editor", "--x", "10", "--y", "10"])
+
+    assert "/out/captioned.mp4" in _streams(result)
 
 
 # --- captions-status -------------------------------------------------------

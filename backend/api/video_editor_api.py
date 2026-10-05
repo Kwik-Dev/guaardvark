@@ -228,7 +228,27 @@ def auto_editor_trim():
 @video_editor_bp.route("/shotcut/compose", methods=["POST"])
 def shotcut_compose():
     payload = flask_request.get_json(silent=True) or {}
-    body, status_code = _proxy_post("/shotcut/compose", payload, timeout=QUICK_TIMEOUT)
+    # Accept document ids, like the neighbouring routes do (`/auto-editor/trim`, `/analyze`
+    # via _resolve_document; `/beat-sync/render` via _expand_paths). The plugin needs an
+    # absolute `video_path`, and the only path `/api/files/document/<id>` exposes is relative
+    # to the uploads root, so a client cannot build it -- which left this route usable only
+    # from the editor page, which already works in absolute paths. `cli captions-burn` needs
+    # a document id for the same reason every other CLI command takes one (2026-10-05).
+    for doc_key, path_key in (("document_id", "video_path"), ("audio_document_id", "audio_path")):
+        if payload.get(path_key) or not payload.get(doc_key):
+            continue
+        resolved = _resolve_document(payload.pop(doc_key))
+        if not resolved:
+            return jsonify({"error": f"Document not found: {doc_key}"}), 404
+        payload[path_key] = resolved
+    # This route can RENDER an mp4 (`render_mp4` in the body), and the plugin's `/shotcut/compose`
+    # is synchronous, so the budget has to be the render budget. It used QUICK_TIMEOUT (10s),
+    # which is the health/status budget: melt took ~14s on a 4-second 1080p clip and the proxy
+    # answered 504 while the plugin carried on and registered the output. The caller was told
+    # the render failed and the file existed anyway (2026-10-05) -- the silent-failure shape
+    # this repo keeps having to fix. QUICK_TIMEOUT stays for /health, /status, /config, /jobs.
+    timeout = RENDER_TIMEOUT if payload.get("render_mp4") else QUICK_TIMEOUT
+    body, status_code = _proxy_post("/shotcut/compose", payload, timeout=timeout)
     return jsonify(body), status_code
 
 

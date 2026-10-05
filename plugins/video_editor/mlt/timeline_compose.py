@@ -300,8 +300,15 @@ def _append_text_filters(
         _prop(filt, "olcolour", "0x000000ff")
         _prop(filt, "outline", "1")
         _prop(filt, "weight", "500")
-        # geometry: top-left origin, in pixels. Width 0 lets MLT auto-size.
-        _prop(filt, "geometry", f"{int(el.x)}/{int(el.y)}:0x0")
+        # geometry: top-left origin, in pixels, and the box MUST have a non-zero size.
+        # "WxH" of 0x0 draws NOTHING -- silently, with no melt warning. This read
+        # "Width 0 lets MLT auto-size" until 2026-10-05, when a rendered frame showed the
+        # source video and no caption; setting a real width made the text appear and the
+        # file grow (36319 -> 40101 bytes on the test clip). The box runs from here to the
+        # frame edge so a long caption is not clipped, and is two lines tall.
+        box_w = max(1, profile.width - int(el.x))
+        box_h = max(64, el.font_size * 2)
+        _prop(filt, "geometry", f"{int(el.x)}/{int(el.y)}:{box_w}x{box_h}")
         _prop(filt, "halign", "left")
         _prop(filt, "valign", "top")
         if el.rotation:

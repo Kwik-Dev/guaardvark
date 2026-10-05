@@ -229,7 +229,7 @@ upstream edit — see §11. Their read-only halves are covered by
 | `upscale` | `image, video, models, model-download, jobs, status, cancel` | Real-ESRGAN / HAT-L / SwinIR. `cancel` needs `--yes` |
 | `infographic` | `generate, models, model-download, download-status, status` | infographics |
 | `training` | `datasets, dataset, dataset-new, dataset-update, dataset-delete, backends` | training datasets; the run itself is `cast train` |
-| `video-editor` | `health, projects, project, project-new, project-delete, jobs, job, filters, transitions, render, analyze, captions-export, captions-import, shotcut`; **captions:** `captions-burn <video_doc> --srt F` / `--captions-doc ID` (puts the captions **on** the video), `captions-status <job_id>` | editor operations, not timeline authoring; `captions-burn` renders through the backend queue like any other render |
+| `video-editor` | `health, projects, project, project-new, project-delete, jobs, job, filters, transitions, render, analyze, captions-export, captions-import, shotcut`; **captions:** `captions-burn <video_doc> --srt F` / `--captions-doc ID` (puts the captions **on** the video), `captions-status <job_id>` | editor operations, not timeline authoring. `captions-burn --engine ffmpeg\|mlt\|editor` picks the renderer — see §3.18 |
 | `llm` | `provider, set, models, openai-model, mistral-model, test, cloud on\|off` | the chat provider and the master cloud switch — `cloud on` needs `--yes` |
 | `wordpress` | `sites, site, site-test, pages, pull-sitemap, pull-list, pull-page, pull-bulk, pull-status, process-queue, process-run` | sites and page pull; `process-run` publishes, so it needs `--yes` |
 
@@ -400,7 +400,7 @@ This is the authoritative "what the fork added that the terminal cannot do".
 | FFmpeg still-to-video with camera motion | ❌ | **no `video-editor` command exists** |
 | Configurable focus point (Ken Burns), pan directions | ❌ | Studio only |
 | Framing modes (letterbox / zoom-to-fill / match-image) | ❌ | Studio only |
-| Caption export/import + caption code editor | ⚠️ | export/import moved SRT in and out but never onto the video; `video-editor captions-burn` now burns it (2026-10-05), reusing the backend's own SRT parser and the timed `text_elements` of `/api/video-overlay/render-timeline`. The caption *code editor* stays in the Studio |
+| Caption export/import + caption code editor | ✅ | export/import moved SRT in and out but never onto the video; `video-editor captions-burn` now burns it (2026-10-05), reusing the backend's own SRT parser. `--engine` chooses the renderer: `ffmpeg` (needs a drawtext-capable ffmpeg), `mlt` (queued, via the plugin) or `editor` (the plugin's synchronous compose — **no queue and no drawtext**, which is the only one that works on a box whose ffmpeg has no font stack). The caption *code editor* stays in the Studio |
 | Text placement on a render | ✅ | `captions-burn --position bottom-center` (or `--x/--y` pixels). The named placement is new on the renderer side too: `video_timeline_render` now turns it into a drawtext expression, so it is correct at any frame size — the pixel default (320, 240) put a caption left-of-centre, mid-picture, on a 1920x1080 frame and `position` was previously ignored outside `/api/video-overlay/text` |
 | Drag-to-reorder in the Bin panel | ❌ | Studio only |
 | FFmpeg batch metadata / library counts | ❌ | Studio only |

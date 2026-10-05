@@ -48,6 +48,32 @@ from ._common import fail, json_mode, pick_dict, pick_list, resolve_server, succ
 from .video_editor import app as video_editor_app
 
 
+class CaptionEngine(str, Enum):
+    """Which renderer burns the captions.
+
+    Three names, three genuinely different renderers, because they are not interchangeable
+    on every machine:
+
+    ``ffmpeg``
+        The backend's own `filter_complex` render, through the job queue. Needs an ffmpeg
+        built with libfreetype (`drawtext`); Homebrew's `ffmpeg` formula deliberately has
+        no font stack -- the font libraries live in the separate `ffmpeg-full` formula.
+        ``--position`` works here, as a drawtext expression.
+    ``mlt``
+        The same route with ``backend=mlt``: dispatched to the queue, then the Video
+        Editor plugin renders it with MLT. Needs the `default` queue worker AND the plugin.
+    ``editor``
+        The Video Editor's own compose, which is a SYNCHRONOUS call straight to the plugin
+        -- no queue, nothing queued to wait for. This is the path the editor page itself
+        uses, and the one that works on a machine without a drawtext-capable ffmpeg.
+        ``--x/--y`` only: MLT places text at explicit pixels.
+    """
+
+    ffmpeg = "ffmpeg"
+    mlt = "mlt"
+    editor = "editor"
+
+
 class CaptionPosition(str, Enum):
     """The backend's named placements (video_timeline_render._POSITION_EXPRS).
 
@@ -86,7 +112,11 @@ def ve_captions_burn(
     x: int = typer.Option(None, "--x", help="Raw left pixel, for the backend's default placement"),
     y: int = typer.Option(None, "--y", help="Raw top pixel, for the backend's default placement"),
     audio: int = typer.Option(None, "--audio", help="Audio document id to lay over the video"),
-    backend: str = typer.Option(None, "--backend", help="'ffmpeg' (default) or 'mlt'"),
+    engine: CaptionEngine = typer.Option(
+        CaptionEngine.ffmpeg, "--engine",
+        help="Renderer: ffmpeg (needs drawtext), mlt (queue + plugin), or editor "
+             "(synchronous plugin call, no queue). See the command's long help.",
+    ),
     server: str = typer.Option(None, "--server", "-s"),
     json_out: bool = typer.Option(False, "--json", "-j"),
 ):
@@ -99,6 +129,16 @@ def ve_captions_burn(
     The captions are parsed by the backend's own SRT reader, so whatever
     `video-editor captions-export` produced goes straight back on. Place them with
     --position (recommended: it is frame-size independent) or with raw --x/--y pixels.
+
+    `--engine` picks the renderer, and which one works depends on the machine:
+
+    - `ffmpeg` (default) needs an ffmpeg built with libfreetype for `drawtext`. Homebrew's
+      regular `ffmpeg` formula has no font stack at all (the fonts live in `ffmpeg-full`),
+      so on such a machine this fails inside the queue with `No such filter: 'drawtext'`.
+    - `editor` is a synchronous call to the Video Editor plugin: no queue, no drawtext.
+      It is the path the editor page uses, and the one to reach for when ffmpeg cannot
+      draw text. Placement is `--x/--y` only.
+    - `mlt` is the queued variant of that plugin render; it needs the `default` worker too.
     """
     as_json = json_mode(json_out)
 
@@ -113,10 +153,28 @@ def ve_captions_burn(
             code="MISSING_INPUT",
         )
         raise typer.Exit(2)
-    if position and (x is not None or y is not None):
+    if engine is CaptionEngine.ffmpeg and position and (x is not None or y is not None):
         output.print_error(
-            "Give either --position or --x/--y, not both — the backend lets position win, "
-            "so the pixels would be silently ignored.",
+            "Give either --position or --x/--y, not both: on the ffmpeg renderer position "
+            "wins, so the pixels would be silently ignored.",
+            code="MISSING_INPUT",
+        )
+        raise typer.Exit(2)
+    if position and engine != CaptionEngine.ffmpeg:
+        output.print_error(
+            f"--position is only honoured by the ffmpeg renderer; --engine {engine.value} "
+            "places text at --x/--y (its own default is the top-left corner).",
+            code="MISSING_INPUT",
+        )
+        raise typer.Exit(2)
+    if engine == CaptionEngine.editor and position is None and x is None and y is None:
+        # The ffmpeg default is mid-picture; MLT's is the top-left corner. Neither is where a
+        # caption belongs, and only the caller knows the frame, so say so rather than let a
+        # caption land in a corner.
+        output.print_error(
+            "--engine editor places text at --x/--y, and its default is the top-left "
+            "corner, so give --x and --y (for 1920x1080, near the bottom is about "
+            "--x 480 --y 980).",
             code="MISSING_INPUT",
         )
         raise typer.Exit(2)
@@ -165,12 +223,21 @@ def ve_captions_burn(
                     element["y"] = y
             elements.append(element)
 
-        body = {"video_document_id": video_document_id, "text_elements": elements}
-        if audio is not None:
-            body["audio_document_id"] = audio
-        if backend:
-            body["backend"] = backend
-        data = client.post(f"{_OVERLAY_BASE}/render-timeline", json=body)
+        if engine is CaptionEngine.editor:
+            # Straight to the editor's own compose: synchronous, plugin-side, no Celery. The
+            # route resolves document_id -> absolute path (it needs a path, and a client
+            # cannot build one from the relative path the files API exposes).
+            body = {"document_id": video_document_id, "text_elements": elements, "render_mp4": True}
+            if audio is not None:
+                body["audio_document_id"] = audio
+            data = client.post(f"{_EDITOR_BASE}/shotcut/compose", json=body)
+        else:
+            body = {"video_document_id": video_document_id, "text_elements": elements}
+            if audio is not None:
+                body["audio_document_id"] = audio
+            if engine is CaptionEngine.mlt:
+                body["backend"] = "mlt"
+            data = client.post(f"{_OVERLAY_BASE}/render-timeline", json=body)
     except LlxError as exc:
         fail(exc)
 
@@ -183,6 +250,15 @@ def ve_captions_burn(
         output.print_warning(
             f"{never_visible} cue(s) end at or before they start and will never be visible."
         )
+    if engine is CaptionEngine.editor:
+        # This engine renders inline and names its output directly rather than handing back a
+        # tracked job, so there is nothing to poll -- say where the file is.
+        rendered = payload.get("rendered_mp4") or payload.get("rendered_path") or ""
+        output.print_success(
+            f"Burned {len(elements)} caption(s) onto document {video_document_id}"
+            f"{': ' + str(rendered) if rendered else '.'}"
+        )
+        return
     job = payload.get("job_id") or ""
     output.print_success(
         f"Burning {len(elements)} caption(s) onto document {video_document_id}"

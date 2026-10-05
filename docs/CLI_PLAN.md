@@ -330,8 +330,38 @@ Three decisions worth recording:
 Known to be broken on a machine whose ffmpeg lacks `--enable-libfreetype`: the renderer
 resolves ffmpeg with `shutil.which("ffmpeg")`, which checks presence and not capability, so a
 build with no `drawtext` filter fails inside the queue with `No such filter: 'drawtext'`.
-That is pre-existing and affects `/api/video-overlay/text` too, not just this command; a
-capability check would turn it into an actionable message and is the obvious follow-up.
+Homebrew's `ffmpeg` formula has **zero** font libraries by design — they live in the separate
+`ffmpeg-full` formula — so this is the common case on a Homebrew Mac. A capability check
+would turn it into an actionable message and is the obvious follow-up.
+
+**Two renderers, and only one of them needs ffmpeg.** Verified 2026-10-05 by rendering and
+looking at frames, not by reading code:
+
+| Engine | Route | Renderer | Needs `drawtext` | Needs the `default` worker |
+| `ffmpeg` (default) | `POST /api/video-overlay/render-timeline` | ffmpeg `drawtext` | yes | yes |
+| `mlt` | same, `backend=mlt` | MLT via the plugin, queued | no | yes |
+| `editor` | `POST /api/video-editor/shotcut/compose` | MLT via the plugin, **synchronous** | no | **no** |
+
+So on a Homebrew Mac the caption feature is reachable — `--engine editor` — without either
+of the two things that looked like blockers. `--position` is ffmpeg-only (MLT takes x/y), and
+the CLI refuses it on the other engines rather than letting the placement vanish.
+
+Two real bugs were found while verifying this, both fixed here:
+
+1. **`_append_text_filters` emitted `geometry ...:0x0`, which draws nothing** — silently,
+   with no melt warning, under a comment claiming "Width 0 lets MLT auto-size". A rendered
+   frame showed the source video and no caption; a real box width made the text appear and
+   the encoded file grow (36319 → 40101 bytes). This disabled text overlays for *every* MLT
+   render, including the Studio's editor page, and every existing assertion in
+   `test_timeline_compose.py` passed while it did — none of them checked the geometry.
+2. **`/api/video-editor/shotcut/compose` was proxied with `QUICK_TIMEOUT` (10s)** while it
+   can render an mp4. melt took ~14s on a 4-second 1080p clip, so the caller got a 504
+   while the plugin finished and registered the output. The render budget now applies when
+   `render_mp4` is set.
+
+The route also gained `document_id` resolution, like the routes beside it: it needs an
+absolute `video_path` and the files API only exposes a path relative to the uploads root, so
+a client could not supply one — and a document id is what every other CLI command takes.
 
 ## 4. Test framework renewal
 

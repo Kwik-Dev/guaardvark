@@ -111,6 +111,38 @@ def test_compose_text_overlay_filter_attached(tmp_path: Path):
     assert f.get("out") == "00:00:04.967"  # 149 frames at 30fps
 
 
+def test_compose_text_overlay_geometry_has_a_non_zero_size(tmp_path: Path):
+    """A `0x0` geometry draws NOTHING -- silently, with no melt warning.
+
+    `_append_text_filters` emitted `X/Y:0x0` under a comment claiming "Width 0 lets MLT
+    auto-size" until 2026-10-05. A rendered frame showed the source video and no caption;
+    giving the box a real width made the text appear and the encoded file grow
+    (36319 -> 40101 bytes on the test clip). Every other assertion in this file passed
+    while the overlay was invisible, which is why the geometry is the one that had to be
+    pinned: `argument`, `size`, `fgcolour` and the in/out times were all already correct.
+    """
+    out = tmp_path / "g.mlt"
+    timeline = Timeline(
+        video_path=str(tmp_path / "src.mp4"),
+        video_trim_end=10.0,
+        text_elements=[TextElement(text="Hi", font_size=72, font_color="#ffffff",
+                                   x=50, y=80, start_seconds=1.0, end_seconds=5.0)],
+    )
+    compose_timeline(timeline, out, _profile())
+    root = etree.parse(str(out)).getroot()
+    chain = next(c for c in root.iter("chain") if c.get("id") == "chain_video")
+    f = next(f for f in chain.iter("filter") if _prop(f, "mlt_service") == "dynamictext")
+
+    geometry = _prop(f, "geometry")
+    origin, _, box = geometry.partition(":")
+    width, _, height = box.partition("x")
+    assert origin == "50/80", geometry
+    assert int(width) > 0, f"a zero width draws nothing at all: {geometry!r}"
+    assert int(height) > 0, geometry
+    # The box runs from the origin to the frame edge, so a long caption is not clipped.
+    assert int(width) == _profile().width - 50, geometry
+
+
 def test_color_normalization():
     from plugins.video_editor.mlt.timeline_compose import _normalize_color
 
