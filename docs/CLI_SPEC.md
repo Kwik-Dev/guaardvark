@@ -430,7 +430,7 @@ This is the authoritative "what the fork added that the terminal cannot do".
 | Cast LoRA resolved from the user message in `generate_image` | ❌ | `images generate` has `--model`, `--count`, `--from-file` — **no `--subject`/cast flag** |
 | Cast generation on its own Celery queue | ❌ | backend |
 | Identity sync via vision + cloud consensus | ❌ | backend |
-| RunPod remote LoRA trainer | ⚠️ service only | `plugins start\|stop runpod_lora_trainer`; **no way to launch a training run** |
+| RunPod remote LoRA trainer | ⚠️ service only | `plugins start\|stop runpod_lora_trainer`; launching a run is `cast train --backend runpod --yes` |
 
 ### 10.7 UI / model management (CLOUD_PLUS_FEATURES §7)
 

@@ -11,6 +11,7 @@ Training a subject: `guaardvark cast train <subject> --yes`.
 from __future__ import annotations
 
 import typer
+from typer.core import TyperGroup
 
 from llx import output
 from llx.client import LlxError, get_client
@@ -18,7 +19,40 @@ from llx.client import LlxError, get_client
 from ._common import fail, json_mode, pick_dict, pick_list, resolve_server, success
 
 COMMAND_NAME = "training"
-app = typer.Typer(help="Training datasets (subject training lives in `cast train`).", no_args_is_help=True)
+
+# Names a reader might expect here, because CLI_PLAN 3.5 first sketched
+# `training start <subject>`. The run lives in `cast train` (one launcher, one --yes),
+# so these answer with that instead of a bare "No such command".
+_LAUNCHER_NAMES = {"start", "train", "launch", "run"}
+
+
+class _TrainingGroup(TyperGroup):
+    """A `training` group that names the real launcher for the sketched one."""
+
+    def resolve_command(self, ctx, args):
+        # `not ctx.resilient_parsing` mirrors Click's own guard: shell completion calls
+        # this with resilient_parsing=True and must not raise (a traceback on <TAB>).
+        if (
+            args
+            and args[0] in _LAUNCHER_NAMES
+            and self.get_command(ctx, args[0]) is None
+            and not ctx.resilient_parsing
+        ):
+            # ctx.fail raises the Click Typer itself uses (Typer vendors Click as
+            # typer._click, so excepting click.exceptions.UsageError would not catch it).
+            ctx.fail(
+                f"No such command {args[0]!r}. Subject training is "
+                "`guaardvark cast train <subject> --yes`; "
+                "`guaardvark training` only manages datasets."
+            )
+        return super().resolve_command(ctx, args)
+
+
+app = typer.Typer(
+    cls=_TrainingGroup,
+    help="Training datasets (subject training lives in `cast train`).",
+    no_args_is_help=True,
+)
 
 BASE = "/api/training_datasets"
 
