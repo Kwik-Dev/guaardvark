@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from llx.main import app
 
 
@@ -160,3 +162,49 @@ def test_training_backends_filters_the_plugin_list(fake_backend, cli_runner, iso
     payload = _run(cli_runner, ["training", "backends", "--json"])
 
     assert [b["id"] for b in payload["data"]["backends"]] == ["lora_trainer", "runpod_lora_trainer"]
+
+
+def test_training_start_names_the_real_launcher(cli_runner, isolated_home):
+    """`training start` is not a command; it must say where the run lives, not go silent."""
+    result = cli_runner.invoke(app, ["training", "start"])
+
+    assert result.exit_code == 2
+    assert "cast train" in result.output
+    assert "subject" in result.output.lower()
+
+
+@pytest.mark.parametrize("name", ["start", "train", "launch", "run"])
+def test_training_launcher_names_all_point_to_cast_train(name, cli_runner, isolated_home):
+    result = cli_runner.invoke(app, ["training", name])
+
+    assert result.exit_code == 2
+    assert "cast train" in result.output
+
+
+def test_training_help_still_lists_the_dataset_commands(cli_runner, isolated_home):
+    """The custom group must not disturb the real subcommands or their help."""
+    result = cli_runner.invoke(app, ["training", "--help"])
+
+    assert result.exit_code == 0
+    assert "datasets" in result.output
+    assert "backends" in result.output
+
+
+def test_training_guard_is_silent_under_resilient_parsing():
+    """Shell completion resolves with resilient_parsing=True; it must not raise."""
+    from typer.main import get_command
+
+    from llx.commands._fork import training
+
+    group = get_command(training.app)
+    ctx = group.make_context("training", ["start"], resilient_parsing=True)
+
+    assert group.resolve_command(ctx, ["start"]) == (None, None, [])
+
+
+def test_training_unrelated_typo_still_suggests(cli_runner, isolated_home):
+    """The launcher hint must not swallow Typer's normal near-miss suggestions."""
+    result = cli_runner.invoke(app, ["training", "backends2"])
+
+    assert result.exit_code == 2
+    assert "backends" in result.output

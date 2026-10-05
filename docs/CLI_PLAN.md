@@ -12,7 +12,7 @@ These change the shape of the work; everything else can proceed without them.
 
 | # | Decision | Options | Recommendation |
 |---|---|---|---|
-| **D1** | Do render/GPU-spend actions enter the CLI? | (a) stay plan-only · (b) allow render commands that use the existing job/gate system | **(b)** — `images generate` and `videos generate` already spend GPU; `video-editor render` and `training start` are the same class. Keep them going through the same GPU gate so the CLI cannot bypass it. |
+| **D1** | Do render/GPU-spend actions enter the CLI? | (a) stay plan-only · (b) allow render commands that use the existing job/gate system | **(b)** — `images generate` and `videos generate` already spend GPU; `video-editor render` and `cast train` are the same class. Keep them going through the same GPU gate so the CLI cannot bypass it. |
 | **D2** | Do **approval** actions enter the CLI? | (a) keep approvals Studio-only · (b) add explicit `approve`/`reject` subcommands | **Split**: read-only `approvals list/show` in the CLI; `approve`/`reject` **only** where a contract test already permits it (`outreach approve`). Do **not** add approvals for held code / inbound guard / film-crew storyboards, and keep `test_music_video_cli.py`'s "never POST approve" contract. |
 | **D3** | Where does fork code live? | (a) new modules + one registry line · (b) a separate pip package | **(a)** — see §2. |
 | **D4** | Is the CLI surface a fork-only concern? | (a) fork-only · (b) upstreamable | **Mixed** (§3 marks each): `upscaling`, `system-map`, `web-search`, `content-management`, `wordpress`, `connections`, `self-improvement`, `inbound-guard`, `infographic` are *upstream* features that upstream's own CLI also lacks — upstreamable in principle, but per fork policy **no PR is opened**. |
@@ -119,14 +119,17 @@ already exists server-side.
 
 ### 3.5 Training — `training` (Tier 3, GPU **and** paid cloud)
 
-`training datasets list|create|show|update|delete` · `training backends` ·
-`training start <subject> --backend local|runpod` · `training status` · `training cancel`
+`training datasets list|create|show|update|delete` · `training backends`.
+
+The run itself is **`cast train <subject> --backend local|runpod`** (shipped there in Phase 2),
+not `training start`: one launcher and one `--yes` gate is deliberate — two names for spending
+hours of GPU would be two places to keep the confirmation honest. `training start` (and
+`train`) answers with that pointer instead of a bare "No such command".
 
 Routes: `/api/training-datasets` CRUD; RunPod trainer via
 `plugins start runpod_lora_trainer` + its plugin routes.
 
-`training start --backend runpod` spends money → require `--yes` (or `--confirm`) and echo
-the estimated cost. Never default to a paid backend.
+`cast train --backend runpod` spends money → requires `--yes`. Never default to a paid backend.
 
 ### 3.6 Inbound guard — `guard` (Tier 1) `U`
 
@@ -307,7 +310,7 @@ that already has the backend stack (the `backend` job, or `cli-e2e` with
 |---|---|
 | `test_fork_cli_contract.py::test_no_approval_commands` | no CLI command POSTs to any `approve`/`reject` route except the allowlisted `outreach approve` (extends today's `test_music_video_cli.py`) |
 | `…::test_render_commands_go_through_the_gpu_gate` | every render-spending command passes `gpu_session`/job params (D1) |
-| `…::test_paid_backends_require_confirmation` | `training start --backend runpod` refuses without `--yes` |
+| `…::test_paid_backends_require_confirmation` | `cast train --backend runpod` refuses without `--yes` |
 | `test_error_paths.py::*` | backend unreachable / 4xx / 5xx / timeout → non-zero exit, structured error under `--json`, never a bare traceback or a success body with a missing id |
 
 ## 5. Phases, deliverables, acceptance
@@ -317,7 +320,7 @@ that already has the backend stack (the `backend` job, or `cli-e2e` with
 | **0** | Extension point (`_fork/registry.py`), test layout, fixtures, spec-parity test, `python` PATH fix | `pytest cli/tests` green locally **and** in the `cli` CI job; spec-parity test present and passing against all backend API areas, each declared `EXPOSED` / `PLANNED` / `NOT_EXPOSED` | M |
 | **1** | Read-only groups: `guard`, `improve`, `system-map`, `content`, `web`, `connections list/show`, `approvals list/show` | **Shipped.** Seven groups under `cli/llx/commands/_fork/`; `api_coverage` moved six areas from `PLANNED` to `EXPOSED` (43/7/47); the read-only tier is enforced by `cli/tests/test_fork_readonly_contract.py`, which scans the source for decision routes and runs every read-only command asserting no write was issued. Deviations: `connections` shipped in Phase 1 rather than Phase 4 (it was cheap and it is read-only in this form); `content page-delete` exists but requires `--yes`, and `connections oauth` / `system-map dispatch` were left out as Studio flows. | M |
 | **2** | `cast`, `upscale`, `infographic`, `audio transcribe`, `images --engine` | generation commands queue jobs and print job ids; no approval commands; golden + e2e per group | L |
-| **3** | `video-editor`, `training` | render/training go through the GPU gate; `training --backend runpod` requires `--yes`; contract tests for both | L |
+| **3** | `video-editor`, `training` | render/training go through the GPU gate; `cast train --backend runpod` requires `--yes`; contract tests for both | L |
 | **4** | `llm` (cloud providers), `models image *`, `wordpress`, `film-crew`/`music-video` read-only extensions | **Shipped.** `llm` (provider, set, models, openai-model, mistral-model, test, cloud on\|off), `wordpress` (sites, site, site-test, pages, pull-sitemap\|list\|page\|bulk\|status, process-queue, process-run), and `audio models` / `audio model-download` added to the upstream audio group. Deviations: the `images --engine` flag was dropped — `settings set chat_image_model` and `images generate --model` already cover it, so a flag would have been a third way to set one thing; image/video weight downloads were dropped because `/api/model` has no download route at all; `models image *` was dropped for the same reason (it would only duplicate `images models`). | M |
 | **5** | Docs: update `CLI_SPEC.md` §6/§7/§8/§9 from the code; refresh the README CLI section; regenerate coverage tables | `CLI_SPEC.md` regenerates clean from the appendix commands; spec-parity test proves no undocumented area | S |
 
