@@ -1,5 +1,6 @@
 import logging
 import os
+from collections import OrderedDict
 from datetime import datetime
 
 from flask import Blueprint, current_app, jsonify, request
@@ -11,12 +12,138 @@ except Exception:  # pragma: no cover - optional dependency
 from backend.models import Setting, SystemSetting, db
 from backend.utils.response_utils import error_response, success_response
 from backend.utils.password_validation import validate_password_strength
-from backend.utils.settings_utils import get_web_access, redact_exception
+from backend.utils.settings_utils import (
+    get_chat_image_model,
+    get_confine_tool_paths,
+    get_setting,
+    get_web_access,
+    redact_exception,
+    save_setting,
+    set_confine_tool_paths,
+)
 
 settings_bp = Blueprint("settings_api", __name__, url_prefix="/api/settings")
 
 
 _ADV_HANDLER_ID = None
+
+# Values that count as "on" when a setting arrives as a string. The CLI parses
+# "true"/"false" into a bool already, but a raw caller may not.
+_BOOL_TRUTHY = ("1", "true", "yes", "on")
+
+
+def _as_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in _BOOL_TRUTHY
+
+
+def _first_present(data, *names):
+    """First of ``names`` present in ``data``, else None.
+
+    The CLI posts ``{<key>: value}`` while some typed routes read a differently
+    named field (``web_access`` -> ``allow_web_search``), so accepting both is what
+    stops ``settings set web_access true`` from silently writing False.
+    """
+    if not isinstance(data, dict):
+        return None
+    for name in names:
+        if name in data:
+            return data[name]
+    return None
+
+
+def _write_bool_setting(db_key: str, enabled: bool) -> bool:
+    """Persist a boolean to the settings table and return it. Raises on failure.
+
+    One implementation for the typed routes and the registry setters, so a value
+    written through `/api/settings` and through `/api/settings/<key>` cannot differ.
+    """
+    row = db.session.get(Setting, db_key)
+    if row:
+        row.value = "true" if enabled else "false"
+    else:
+        db.session.add(Setting(key=db_key, value="true" if enabled else "false"))
+    db.session.commit()
+    return enabled
+
+
+def _apply_advanced_debug(enabled: bool) -> bool:
+    _write_bool_setting("advanced_debug", enabled)
+    _set_logging_level(enabled)
+    return enabled
+
+
+def _apply_confine_tool_paths(enabled: bool) -> bool:
+    set_confine_tool_paths(enabled)
+    return get_confine_tool_paths()
+
+
+def _apply_chat_image_model(model) -> str:
+    model = (str(model).strip() if model is not None else "") or "auto"
+    save_setting("chat_image_model", model)
+    return model
+
+
+def _apply_music_directory(path) -> str:
+    path = str(path or "").strip()
+    save_setting("music_directory", path)
+    return path
+
+
+def _view_data(view):
+    """The ``data`` a typed GET handler returns, for the `/api/settings` list.
+
+    Reuses the handler so the list cannot drift from the route's own read. A 4xx/5xx
+    handler yields None rather than raising into the list.
+    """
+    result = view()
+    response, status = result if isinstance(result, tuple) else (result, 200)
+    if status != 200:
+        return None
+    return (response.get_json() or {}).get("data")
+
+
+def _scalar(value):
+    """Unwrap a single-key dict: ``{"allow_web_search": True}`` -> ``True``."""
+    if isinstance(value, dict) and len(value) == 1:
+        return next(iter(value.values()))
+    return value
+
+
+def _index_profiles_summary():
+    """Profile list for `/api/settings`, without the route's per-projection stats.
+
+    The route calls `vector_store_stats`, which loads the embedding model and can
+    reach Ollama; a settings *list* must not pay that. Names and activation are what
+    a reader of the list needs; `guaardvark settings get index_profiles` still hits the
+    typed route and gets the full shape.
+    """
+    from backend.services.index_profiles import load_profiles
+    return {"profiles": [p.to_dict() for p in load_profiles()]}
+
+
+def _active_video_model_summary():
+    """Persisted video-model ids, without resolving each role for `/api/settings`.
+
+    The typed route resolves t2v/i2v/scene, which probes VRAM and can call out to
+    ComfyUI (up to three preflights). A settings *list* must not pay network/GPU cost
+    on every call -- and the CLI `set` reads the list before each write -- so this
+    returns only the persisted defaults. `guaardvark settings get active_video_model`
+    still hits the typed route and gets the resolved shape.
+    """
+    from backend.utils.settings_utils import (
+        get_active_video_model,
+        get_active_video_model_overrides,
+    )
+
+    overrides = get_active_video_model_overrides()
+    return {
+        "model": get_active_video_model(),
+        "i2v": overrides["i2v"],
+        "music_video": overrides["music_video"],
+        "film_crew": overrides["film_crew"],
+    }
 
 
 def _set_logging_level(enabled: bool) -> None:
@@ -54,18 +181,11 @@ def get_web_access_route():
 def set_web_access():
     if not request.is_json:
         return error_response("Request must be JSON")
-    data = request.get_json()
-    allow = bool(data.get("allow_web_search"))
+    data = request.get_json() or {}
+    # `web_access` is the canonical/CLI key; `allow_web_search` is the stored one.
+    allow = _as_bool(_first_present(data, "allow_web_search", "web_access"))
     try:
-        setting = db.session.get(Setting, "allow_web_search")
-        if setting:
-            setting.value = "true" if allow else "false"
-        else:
-            setting = Setting(
-                key="allow_web_search", value="true" if allow else "false"
-            )
-            db.session.add(setting)
-        db.session.commit()
+        _write_bool_setting("allow_web_search", allow)
     except Exception as e:
         db.session.rollback()
         current_app.logger.error(f"Failed to update web access setting: {e}")
@@ -167,11 +287,11 @@ def set_chat_image_model_route():
     """Set the chat image model (e.g. auto, zimage-turbo, sd-xl, kontext)."""
     if not request.is_json:
         return error_response("Request must be JSON")
-    model = (request.get_json().get("model") or "auto").strip() or "auto"
+    data = request.get_json() or {}
+    # `chat_image_model` is the canonical/CLI key; `model` is the Studio's field.
+    model = _first_present(data, "model", "chat_image_model")
     try:
-        from backend.utils.settings_utils import save_setting
-
-        save_setting("chat_image_model", model)
+        model = _apply_chat_image_model(model)
     except Exception as e:
         current_app.logger.error(f"Failed to update chat_image_model setting: {e}")
         return error_response("Failed to update setting", status_code=500)
@@ -329,19 +449,10 @@ def get_advanced_debug():
 def set_advanced_debug():
     if not request.is_json:
         return error_response("Request must be JSON")
-    data = request.get_json()
-    enabled = bool(data.get("advanced_debug"))
+    data = request.get_json() or {}
+    enabled = _as_bool(data.get("advanced_debug"))
     try:
-        setting = db.session.get(Setting, "advanced_debug")
-        if setting:
-            setting.value = "true" if enabled else "false"
-        else:
-            setting = Setting(
-                key="advanced_debug", value="true" if enabled else "false"
-            )
-            db.session.add(setting)
-        db.session.commit()
-        _set_logging_level(enabled)
+        _apply_advanced_debug(enabled)
     except Exception as e:
         db.session.rollback()
         current_app.logger.error(
@@ -362,10 +473,8 @@ def get_confine_tool_paths_route():
 def set_confine_tool_paths_route():
     if not request.is_json:
         return error_response("Request must be JSON")
-    from backend.utils.settings_utils import get_confine_tool_paths, set_confine_tool_paths
-
-    set_confine_tool_paths(bool(request.get_json().get("confine_tool_paths")))
-    return success_response({"confine_tool_paths": get_confine_tool_paths()})
+    enabled = _as_bool((request.get_json() or {}).get("confine_tool_paths"))
+    return success_response({"confine_tool_paths": _apply_confine_tool_paths(enabled)})
 
 
 @settings_bp.route("/llm_debug", methods=["GET"])
@@ -384,18 +493,10 @@ def get_llm_debug():
 def set_llm_debug():
     if not request.is_json:
         return error_response("Request must be JSON")
-    data = request.get_json()
-    enabled = bool(data.get("llm_debug"))
+    data = request.get_json() or {}
+    enabled = _as_bool(data.get("llm_debug"))
     try:
-        setting = db.session.get(Setting, "llm_debug")
-        if setting:
-            setting.value = "true" if enabled else "false"
-        else:
-            setting = Setting(
-                key="llm_debug", value="true" if enabled else "false"
-            )
-            db.session.add(setting)
-        db.session.commit()
+        _write_bool_setting("llm_debug", enabled)
     except Exception as e:
         db.session.rollback()
         current_app.logger.error(
@@ -423,18 +524,10 @@ def get_rules_enabled():
 def set_rules_enabled():
     if not request.is_json:
         return error_response("Request must be JSON")
-    data = request.get_json()
-    enabled = bool(data.get("rules_enabled"))
+    data = request.get_json() or {}
+    enabled = _as_bool(data.get("rules_enabled"))
     try:
-        setting = db.session.get(Setting, "rules_enabled")
-        if setting:
-            setting.value = "true" if enabled else "false"
-        else:
-            setting = Setting(
-                key="rules_enabled", value="true" if enabled else "false"
-            )
-            db.session.add(setting)
-        db.session.commit()
+        _write_bool_setting("rules_enabled", enabled)
     except Exception as e:
         db.session.rollback()
         current_app.logger.error(
@@ -463,18 +556,10 @@ def get_chat_thinking_default():
 def set_chat_thinking_default():
     if not request.is_json:
         return error_response("Request must be JSON")
-    data = request.get_json()
-    enabled = bool(data.get("chat_thinking_default"))
+    data = request.get_json() or {}
+    enabled = _as_bool(data.get("chat_thinking_default"))
     try:
-        setting = db.session.get(Setting, "chat_thinking_default")
-        if setting:
-            setting.value = "true" if enabled else "false"
-        else:
-            setting = Setting(
-                key="chat_thinking_default", value="true" if enabled else "false"
-            )
-            db.session.add(setting)
-        db.session.commit()
+        _write_bool_setting("chat_thinking_default", enabled)
     except Exception as e:
         db.session.rollback()
         current_app.logger.error(
@@ -500,18 +585,11 @@ def get_behavior_learning():
 def set_behavior_learning():
     if not request.is_json:
         return error_response("Request must be JSON")
-    data = request.get_json()
-    enabled = bool(data.get("behavior_learning_enabled"))
+    data = request.get_json() or {}
+    # `behavior_learning` is the canonical/CLI key; the store uses `behavior_learning_enabled`.
+    enabled = _as_bool(_first_present(data, "behavior_learning_enabled", "behavior_learning"))
     try:
-        setting = db.session.get(Setting, "behavior_learning_enabled")
-        if setting:
-            setting.value = "true" if enabled else "false"
-        else:
-            setting = Setting(
-                key="behavior_learning_enabled", value="true" if enabled else "false"
-            )
-            db.session.add(setting)
-        db.session.commit()
+        _write_bool_setting("behavior_learning_enabled", enabled)
     except Exception as e:
         db.session.rollback()
         current_app.logger.error(
@@ -884,21 +962,15 @@ def get_music_directory():
 def set_music_directory():
     if not request.is_json:
         return error_response("Request must be JSON")
-    data = request.get_json()
-    path = data.get("music_directory", "").strip()
+    data = request.get_json() or {}
+    path = _first_present(data, "music_directory", "value")
     try:
-        setting = db.session.get(Setting, "music_directory")
-        if setting:
-            setting.value = path
-        else:
-            setting = Setting(key="music_directory", value=path)
-            db.session.add(setting)
-        db.session.commit()
-        return success_response({"music_directory": path})
+        path = _apply_music_directory(path)
     except Exception as e:
         db.session.rollback()
         current_app.logger.error(f"Failed to update music_directory setting: {e}")
         return error_response(f"Failed to update setting: {e}", status_code=500)
+    return success_response({"music_directory": path})
 
 
 @settings_bp.route("/index_profiles", methods=["GET"])
@@ -992,3 +1064,187 @@ def rebuild_index_profile(name):
     except Exception as e:
         current_app.logger.error(f"Failed to rebuild profile {name}: {e}", exc_info=True)
         return error_response(f"Failed to rebuild profile: {e}", status_code=500)
+
+
+# --- the CLI's view of settings -------------------------------------------
+#
+# One canonical map of the settings the `guaardvark settings` command acts on. Each
+# entry's `get` reuses the typed GET handler above (so the list cannot drift from what
+# `/api/settings/<key>` returns); `set` is the shared writer for keys the CLI may set,
+# or None for a composite/Studio-only setting. `GET /api/settings` is the source of
+# truth the CLI lists, so a key here is exactly a key `list` shows and `get` can read.
+#
+# `rag_features` is the one key whose canonical name differs from its route path
+# (`/rag-features`); it is served by the generic `/api/settings/<key>` route below.
+SETTINGS_REGISTRY: "OrderedDict[str, dict]" = OrderedDict([
+    ("web_access", {
+        "get": lambda: _scalar(_view_data(get_web_access_route)),
+        "set": lambda v: _write_bool_setting("allow_web_search", _as_bool(v)),
+        "type": "bool",
+        "description": "Allow internet web search (stored as allow_web_search).",
+    }),
+    ("advanced_debug", {
+        "get": lambda: _scalar(_view_data(get_advanced_debug)),
+        "set": lambda v: _apply_advanced_debug(_as_bool(v)),
+        "type": "bool",
+        "description": "Verbose debug logging (also sets the root log level).",
+    }),
+    ("llm_debug", {
+        "get": lambda: _scalar(_view_data(get_llm_debug)),
+        "set": lambda v: _write_bool_setting("llm_debug", _as_bool(v)),
+        "type": "bool",
+        "description": "Log LLM request/response detail.",
+    }),
+    ("rules_enabled", {
+        "get": lambda: _scalar(_view_data(get_rules_enabled)),
+        "set": lambda v: _write_bool_setting("rules_enabled", _as_bool(v)),
+        "type": "bool",
+        "description": "Use RulesPage prompts in chat.",
+    }),
+    ("chat_thinking_default", {
+        "get": lambda: _scalar(_view_data(get_chat_thinking_default)),
+        "set": lambda v: _write_bool_setting("chat_thinking_default", _as_bool(v)),
+        "type": "bool",
+        "description": "Default chain-of-thought for thinking-capable chat models.",
+    }),
+    ("behavior_learning", {
+        "get": lambda: _scalar(_view_data(get_behavior_learning)),
+        "set": lambda v: _write_bool_setting("behavior_learning_enabled", _as_bool(v)),
+        "type": "bool",
+        "description": "Learn from chat behavior (stored as behavior_learning_enabled).",
+    }),
+    ("music_directory", {
+        "get": lambda: _scalar(_view_data(get_music_directory)),
+        "set": lambda v: _apply_music_directory(v),
+        "type": "str",
+        "description": "Folder scanned for local music.",
+    }),
+    ("confine_tool_paths", {
+        "get": lambda: _scalar(_view_data(get_confine_tool_paths_route)),
+        "set": lambda v: _apply_confine_tool_paths(_as_bool(v)),
+        "type": "bool",
+        "description": "Confine file tools to the project folder and allowed paths.",
+    }),
+    ("chat_image_model", {
+        "get": lambda: _scalar(_view_data(get_chat_image_model_route)),
+        "set": lambda v: _apply_chat_image_model(v),
+        "type": "str",
+        "description": "Image model for chat /imagine and image edits (default auto).",
+    }),
+    # Read-only here: composite or multi-field settings are edited in the Studio.
+    ("address_provider", {
+        "get": lambda: _view_data(get_address_provider),
+        "set": None,
+        "type": "json",
+        "description": "Address-suggestion provider and key status (Studio-only).",
+    }),
+    ("verbatim_prompts", {
+        "get": lambda: _view_data(get_verbatim_prompts),
+        "set": None,
+        "type": "json",
+        "description": "Send image/video prompts verbatim, no enrichment (Studio-only).",
+    }),
+    ("active_video_model", {
+        # Persisted ids only: the typed route's VRAM/ComfyUI resolution must not run
+        # on every list (and on every CLI `set`, which reads the list first).
+        "get": _active_video_model_summary,
+        "set": None,
+        "type": "json",
+        "description": "Global video model and per-pipeline overrides (Studio-only).",
+    }),
+    ("media_models", {
+        "get": lambda: _view_data(get_media_models),
+        "set": None,
+        "type": "json",
+        "description": "Stills / cast-train / max-quality model defaults (Studio-only).",
+    }),
+    ("branding", {
+        "get": lambda: _view_data(get_branding),
+        "set": None,
+        "type": "json",
+        "description": "System name and logo (Studio-only).",
+    }),
+    ("profile", {
+        "get": lambda: _view_data(get_profile),
+        "set": None,
+        "type": "json",
+        "description": "The running profile and the ones available (Studio-only).",
+    }),
+    ("ollama_lifecycle", {
+        "get": lambda: _view_data(get_ollama_lifecycle),
+        "set": None,
+        "type": "json",
+        "description": "How start.sh/stop.sh treat Ollama (Studio-only).",
+    }),
+    ("rag_features", {
+        "get": lambda: _view_data(get_rag_features),
+        "set": None,
+        "type": "json",
+        "description": "Enhanced context and advanced RAG flags (Studio-only).",
+    }),
+    ("index_profiles", {
+        "get": _index_profiles_summary,
+        "set": None,
+        "type": "json",
+        "description": "Index profiles and their activation (Studio-only).",
+    }),
+])
+
+
+@settings_bp.route("", methods=["GET"])
+def get_all_settings():
+    """Every setting the CLI acts on, with which keys it may set.
+
+    The CLI's `settings list`/`set` read this, so `list` shows exactly the keys
+    `get`/`set` accept, instead of a hand-kept subset kept in the CLI.
+    """
+    settings = {}
+    for key, spec in SETTINGS_REGISTRY.items():
+        try:
+            settings[key] = spec["get"]()
+        except Exception as e:
+            current_app.logger.error(f"Failed to read setting {key!r}: {e}")
+            settings[key] = None
+    return success_response({
+        "settings": settings,
+        "settable": {key: spec["set"] is not None for key, spec in SETTINGS_REGISTRY.items()},
+        "descriptions": {key: spec["description"] for key, spec in SETTINGS_REGISTRY.items()},
+    })
+
+
+@settings_bp.route("/<key>", methods=["GET"])
+def get_setting_by_key(key):
+    """Fallback read for a registry key whose canonical name is not a route path
+    (e.g. `rag_features` -> `/rag-features`). Typed routes win for their own paths."""
+    spec = SETTINGS_REGISTRY.get(key)
+    if spec is None:
+        return error_response(f"Unknown setting '{key}'", 404)
+    try:
+        return success_response({key: spec["get"]()})
+    except Exception as e:
+        current_app.logger.error(f"Failed to read setting {key!r}: {e}")
+        return error_response("Failed to read setting", status_code=500)
+
+
+@settings_bp.route("/<key>", methods=["POST"])
+def set_setting_by_key(key):
+    """Fallback write for a registry key with no typed POST. A composite setting
+    (``set`` is None) refuses rather than half-writing."""
+    spec = SETTINGS_REGISTRY.get(key)
+    if spec is None:
+        return error_response(f"Unknown setting '{key}'", 404)
+    if spec["set"] is None:
+        return error_response(
+            f"'{key}' is a composite setting and is edited in the Studio, not here", 400
+        )
+    if not request.is_json:
+        return error_response("Request must be JSON")
+    data = request.get_json() or {}
+    value = _first_present(data, key, "value")
+    try:
+        saved = spec["set"](value)
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(f"Failed to update setting {key!r}: {e}")
+        return error_response("Failed to update setting", status_code=500)
+    return success_response({key: saved})

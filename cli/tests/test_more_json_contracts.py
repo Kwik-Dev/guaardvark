@@ -22,6 +22,9 @@ class _FakeClient:
             return {"active_jobs": [{"id": "j1", "name": "Job 1", "type": "index", "status": "running"}]}
         if endpoint == "/api/entity-indexing/status":
             return {"entity_counts": {"clients": 3, "projects": 4}}
+        if endpoint == "/api/settings":
+            return {"data": {"settings": {"web_access": "ok"},
+                             "settable": {"web_access": True}}}
         if endpoint.startswith("/api/settings/"):
             key = endpoint.rsplit("/", 1)[-1]
             return {"data": {key: "ok"}}
