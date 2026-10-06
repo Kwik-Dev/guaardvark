@@ -135,6 +135,62 @@ class TestUnifiedRecallShim(unittest.TestCase):
         self.assertEqual(out, "")
 
 
+@unittest.skipUnless(_HAS_MEMORY_API, "memory_api unavailable (flask_sqlalchemy missing)")
+class _MemoryDbCase(unittest.TestCase):
+    """An in-memory SQLite app holding AgentMemory rows for recall tests."""
+
+    def setUp(self):
+        from flask import Flask
+        from backend.models import db
+        self.db = db
+        self.app = Flask(__name__)
+        self.app.config.update({"TESTING": True, "SQLALCHEMY_DATABASE_URI": "sqlite:///:memory:"})
+        db.init_app(self.app)
+        self.ctx = self.app.app_context()
+        self.ctx.push()
+        db.create_all()
+
+    def tearDown(self):
+        self.db.session.remove()
+        self.db.drop_all()
+        self.ctx.pop()
+
+    def _mem(self, mid, content, importance=0.7, mem_type="fact", source="chat"):
+        from backend.models import AgentMemory
+        m = AgentMemory(id=mid, content=content, source=source, type=mem_type,
+                        importance=importance, confidence=1.0, status="active")
+        self.db.session.add(m)
+        self.db.session.commit()
+        return m
+
+    def _recall_ids(self, query, **kwargs):
+        from backend.api.memory_api import _query_memories
+        return [m.id for m in _query_memories(query=query, count_access=False, **kwargs)]
+
+
+class TestRecallQueryKeywords(_MemoryDbCase):
+    """The SQL prefilter searches the question's keywords, not its filler."""
+
+    def test_query_terms_drop_punctuation_and_filler(self):
+        from backend.services.memory_contract import query_terms
+        self.assertEqual(query_terms("What is my name?"), ["name"])
+        self.assertEqual(query_terms("What's Sam's favourite colour?"), ["sam", "favourite", "colour"])
+        self.assertEqual(query_terms("how do I run start.sh, again?"), ["run", "start.sh", "again"])
+
+    def test_a_chat_captured_name_answers_what_is_my_name(self):
+        # 0.7 is what chat capture stores ("remember that my name is Sam").
+        self._mem("name", "my name is Sam", importance=0.7)
+        self._mem("other", "The team meeting is on Tuesday at noon", importance=0.7)
+        self.assertEqual(self._recall_ids("What is my name?"), ["name"])
+
+    def test_prefilter_uses_at_most_eight_keywords(self):
+        from backend.services.memory_contract import MAX_PREFILTER_TERMS
+        self.assertEqual(MAX_PREFILTER_TERMS, 8)
+        self._mem("ninth", "the word nine lives here", importance=0.7)
+        query = "one1 two2 three3 four4 five5 six6 seven7 eight8 nine"
+        self.assertEqual(self._recall_ids(query), [])
+
+
 @unittest.skipUnless(_HAS_SELF_IMPROVEMENT, "self_improvement_service unavailable (flask_sqlalchemy missing)")
 class TestSelfImprovementDefaults(unittest.TestCase):
     """Default-on analysis, default-blocked apply, user kill-switch unchanged.

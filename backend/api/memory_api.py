@@ -26,6 +26,7 @@ from sqlalchemy import or_
 
 from backend.models import db, AgentMemory, AgentMemoryAudit
 from backend.services.memory_contract import (
+    MAX_PREFILTER_TERMS,
     MEMORY_SOURCES,
     MEMORY_STATUSES,
     MEMORY_TYPES,
@@ -37,6 +38,7 @@ from backend.services.memory_contract import (
     normalize_memory_status,
     normalize_memory_type,
     normalize_tags,
+    query_terms,
     source_trust_weight,
     validate_lesson_payload,
 )
@@ -626,15 +628,13 @@ def _query_memories(
             if file_hints:
                 recall_query = f"{query or ''} {' '.join(file_hints)}".strip()
         if recall_query:
-            terms = list(recall_query.split())[:8]
             clauses = []
-            for term in terms:
-                if len(term) >= 3:
-                    search_term = f"%{term.lower()}%"
-                    clauses.extend([
-                        AgentMemory.content.ilike(search_term),
-                        AgentMemory.tags.ilike(search_term),
-                    ])
+            for term in query_terms(recall_query)[:MAX_PREFILTER_TERMS]:
+                search_term = f"%{term}%"
+                clauses.extend([
+                    AgentMemory.content.ilike(search_term),
+                    AgentMemory.tags.ilike(search_term),
+                ])
             if clauses:
                 q = q.filter(or_(*clauses))
 

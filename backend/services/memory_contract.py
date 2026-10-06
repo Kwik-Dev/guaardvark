@@ -138,14 +138,45 @@ def source_trust_weight(source: Any) -> float:
     return SOURCE_TRUST_WEIGHTS.get(str(source or "").lower(), 0.7)
 
 
-def query_tokens(text: str | None) -> set[str]:
+# Words a recall question is built from rather than about: "What is my name?"
+# is about "name". They are left out of the SQL prefilter and the match score.
+QUERY_STOPWORDS = frozenset(
+    "a about all also am an and any are as at be been but by can can't could did didn't do does doesn't "
+    "don't for from get had has have how i i'd i'll i'm i've if in into is isn't it its just know let me "
+    "my of on or our please remember should so tell than that the their them then there these they "
+    "they're this those to us was wasn't we we're were what when where which who whom why will with "
+    "won't would you you're your".split()
+)
+
+# How many keywords of a query the SQL prefilter ORs together.
+MAX_PREFILTER_TERMS = 8
+
+_QUERY_WORD = re.compile(r"[\w./'-]+")
+
+
+def query_terms(text: str | None) -> list[str]:
+    """The keywords of a recall query, lowercased, in order of first appearance.
+
+    Punctuation around a word is dropped ("name?" is "name") and so is a
+    possessive "'s" ("Sam's" is "sam"); dots, slashes and hyphens inside a
+    word are kept so file names and paths stay whole ("start.sh"). Words under
+    three characters and QUERY_STOPWORDS are left out.
+    """
     if not text:
-        return set()
-    return {
-        token.lower()
-        for token in re.findall(r"[a-zA-Z0-9_./-]{3,}", text)
-        if token.lower() not in {"the", "and", "for", "with", "that", "this"}
-    }
+        return []
+    terms: list[str] = []
+    for raw in _QUERY_WORD.findall(text.lower().replace("’", "'")):
+        word = raw.strip("./'-")
+        if word.endswith("'s"):
+            word = word[:-2]
+        if len(word) < 3 or word in QUERY_STOPWORDS or word in terms:
+            continue
+        terms.append(word)
+    return terms
+
+
+def query_tokens(text: str | None) -> set[str]:
+    return set(query_terms(text))
 
 
 def memory_match_score(content: str, tags: list[str], query: str | None) -> float:
