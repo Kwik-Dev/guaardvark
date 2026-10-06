@@ -241,6 +241,64 @@ def _bidi_navigate(url: str, settle_seconds: float = 2.0, nav_timeout: float = 1
             pass
 
 
+def bidi_evaluate_json(expression: str) -> tuple[Optional[dict], str]:
+    """Run ``expression`` in the agent Firefox's first tab and parse the JSON
+    string it returns.
+
+    Returns ``(data, "")``, or ``(None, why)`` when the browser cannot be
+    reached or the script returns nothing usable. The posters use it to read
+    the page after a submit. The session is always ended: Firefox caps active
+    BiDi sessions and refuses new ones once the cap is reached.
+    """
+    import json as _json
+    import websocket as _ws
+
+    try:
+        ws = _ws.create_connection(
+            f"ws://localhost:{BIDI_PORT}/session", timeout=3, suppress_origin=True,
+        )
+    except Exception as e:
+        return None, f"connect failed: {e}"
+
+    try:
+        ws.send(_json.dumps({"id": 1, "method": "session.new", "params": {"capabilities": {}}}))
+        if _json.loads(ws.recv()).get("type") != "success":
+            return None, "session.new failed"
+        ws.send(_json.dumps({"id": 2, "method": "browsingContext.getTree", "params": {}}))
+        contexts = _json.loads(ws.recv()).get("result", {}).get("contexts", [])
+        if not contexts:
+            return None, "no browsing context"
+        ws.send(_json.dumps({
+            "id": 3, "method": "script.evaluate",
+            "params": {
+                "expression": expression,
+                "target": {"context": contexts[0]["context"]},
+                "awaitPromise": False,
+            },
+        }))
+        raw = _json.loads(ws.recv())
+        if raw.get("type") == "error":
+            return None, f"evaluate error: {raw.get('message', '')[:200]}"
+        value = raw.get("result", {}).get("result", {}).get("value", "")
+        if not value:
+            return None, "empty evaluate result"
+        data = _json.loads(value)
+        if not isinstance(data, dict):
+            return None, "evaluate result is not an object"
+        return data, ""
+    except Exception as e:
+        return None, f"exception: {e}"
+    finally:
+        try:
+            ws.send(_json.dumps({"id": 99, "method": "session.end", "params": {}}))
+        except Exception:
+            pass
+        try:
+            ws.close()
+        except Exception:
+            pass
+
+
 def _human_pause(min_s: float = 0.3, max_s: float = 2.0) -> None:
     """Random sleep to avoid deterministic bot timing fingerprints.
     
@@ -636,76 +694,56 @@ def post_comment_via_servo(
     # the first 60 chars of our comment text appearing in a comment-tree
     # element.
     import json as _json
-    import websocket as _ws2
-    posted = False
-    verify_msg = "verify failed"
     needle = comment_text[:60].strip()
-    try:
-        ws = _ws2.create_connection(f"ws://localhost:{BIDI_PORT}/session", timeout=3, suppress_origin=True)
-        ws.send(_json.dumps({"id": 1, "method": "session.new", "params": {"capabilities": {}}}))
-        if _json.loads(ws.recv()).get("type") == "success":
-            ws.send(_json.dumps({"id": 2, "method": "browsingContext.getTree", "params": {}}))
-            ctxs = _json.loads(ws.recv()).get("result", {}).get("contexts", [])
-            if ctxs:
-                ctx_id = ctxs[0]["context"]
-                # Look for needle in any rendered comment OR for the
-                # composer being empty (no error message and no value)
-                # which also implies a successful post.
-                check_js = (
-                    "(() => {"
-                    "  const needle = " + _json.dumps(needle) + ";"
-                    "  const url = location.href;"
-                    "  // 1) Primary: needle appears in any element on the page"
-                    "  //    that smells like a comment body."
-                    "  const sels = ['[data-testid=\"comment\"]', 'shreddit-comment', '[id^=\"comment-tree-content-anchor\"]', 'div[role=\"region\"]'];"
-                    "  let foundInThread = false;"
-                    "  for (const s of sels) {"
-                    "    const els = document.querySelectorAll(s);"
-                    "    for (const el of els) {"
-                    "      if ((el.textContent || '').includes(needle)) { foundInThread = true; break; }"
-                    "    }"
-                    "    if (foundInThread) break;"
-                    "  }"
-                    "  // 2) Secondary: composer is empty AND no error message."
-                    "  let composerEmpty = false;"
-                    "  let errorVisible = false;"
-                    "  const composers = document.querySelectorAll('faceplate-textarea-input, textarea');"
-                    "  for (const c of composers) {"
-                    "    const ph = (c.getAttribute && c.getAttribute('placeholder')) || '';"
-                    "    if (/join the conversation|add a comment/i.test(ph)) {"
-                    "      composerEmpty = !((c.value || c.innerText || '').trim());"
-                    "      break;"
-                    "    }"
-                    "  }"
-                    "  const errEls = document.querySelectorAll('*');"
-                    "  for (const e of errEls) {"
-                    "    const t = (e.textContent || '');"
-                    "    if (/field is required|cannot be empty|something went wrong|too fast/i.test(t)) { errorVisible = true; break; }"
-                    "  }"
-                    "  return JSON.stringify({foundInThread, composerEmpty, errorVisible, url});"
-                    "})()"
-                )
-                ws.send(_json.dumps({
-                    "id": 3, "method": "script.evaluate",
-                    "params": {"expression": check_js, "target": {"context": ctx_id}, "awaitPromise": False},
-                }))
-                v = _json.loads(ws.recv()).get("result", {}).get("result", {}).get("value", "")
-                if v:
-                    d = _json.loads(v)
-                    posted = d.get("foundInThread", False) and not d.get("errorVisible", False)
-                    verify_msg = (
-                        f"foundInThread={d.get('foundInThread')} "
-                        f"composerEmpty={d.get('composerEmpty')} "
-                        f"errorVisible={d.get('errorVisible')} "
-                        f"url={d.get('url')}"
-                    )
-        try:
-            ws.send(_json.dumps({"id": 99, "method": "session.end", "params": {}}))
-        except Exception:
-            pass
-        ws.close()
-    except Exception as e:
-        verify_msg = f"verify exception: {e}"
+    # Look for needle in any rendered comment OR for the
+    # composer being empty (no error message and no value)
+    # which also implies a successful post.
+    # The pieces join into one line, so the script must not contain // comments.
+    check_js = (
+        "(() => {"
+        "  const needle = " + _json.dumps(needle) + ";"
+        "  const url = location.href;"
+        "  /* 1) Primary: needle appears in an element that looks like a comment body. */"
+        "  const sels = ['[data-testid=\"comment\"]', 'shreddit-comment', '[id^=\"comment-tree-content-anchor\"]', 'div[role=\"region\"]'];"
+        "  let foundInThread = false;"
+        "  for (const s of sels) {"
+        "    const els = document.querySelectorAll(s);"
+        "    for (const el of els) {"
+        "      if ((el.textContent || '').includes(needle)) { foundInThread = true; break; }"
+        "    }"
+        "    if (foundInThread) break;"
+        "  }"
+        "  /* 2) Secondary: composer is empty and no error message. */"
+        "  let composerEmpty = false;"
+        "  let errorVisible = false;"
+        "  const composers = document.querySelectorAll('faceplate-textarea-input, textarea');"
+        "  for (const c of composers) {"
+        "    const ph = (c.getAttribute && c.getAttribute('placeholder')) || '';"
+        "    if (/join the conversation|add a comment/i.test(ph)) {"
+        "      composerEmpty = !((c.value || c.innerText || '').trim());"
+        "      break;"
+        "    }"
+        "  }"
+        "  const errEls = document.querySelectorAll('*');"
+        "  for (const e of errEls) {"
+        "    const t = (e.textContent || '');"
+        "    if (/field is required|cannot be empty|something went wrong|too fast/i.test(t)) { errorVisible = true; break; }"
+        "  }"
+        "  return JSON.stringify({foundInThread, composerEmpty, errorVisible, url});"
+        "})()"
+    )
+    d, why = bidi_evaluate_json(check_js)
+    if d is None:
+        posted = False
+        verify_msg = f"verify failed: {why}"
+    else:
+        posted = bool(d.get("foundInThread", False)) and not d.get("errorVisible", False)
+        verify_msg = (
+            f"foundInThread={d.get('foundInThread')} "
+            f"composerEmpty={d.get('composerEmpty')} "
+            f"errorVisible={d.get('errorVisible')} "
+            f"url={d.get('url')}"
+        )
     logger.warning("post-submit verify: posted=%s %s", posted, verify_msg)
 
     if not posted:

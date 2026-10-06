@@ -74,6 +74,74 @@ def _preflight_logged_in(platform: str) -> tuple[bool, str]:
     return True, "ok"
 
 
+# Characters of the posted text looked for on the page after a submit.
+_PAGE_CHECK_CHARS = 60
+
+# Reads the page after a submit. Text is collected outside every composer
+# (textarea or contenteditable) and compared with all whitespace removed, so
+# line breaks rendered as <br> still match. Composers are counted separately:
+# one still holding text means the submit did not go through.
+_PAGE_CHECK_JS = r"""(() => {
+  const want = __NEEDLE__.replace(/\s+/g, '');
+  const COMPOSER = 'textarea, [contenteditable]:not([contenteditable="false"])';
+  const SKIP = 'script, style, noscript, template';
+  let outside = '';
+  const composers = [];
+  const walk = (root) => {
+    const w = document.createTreeWalker(
+      root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+        acceptNode: (n) => {
+          if (n.nodeType !== 1) return NodeFilter.FILTER_ACCEPT;
+          if (n.matches(COMPOSER)) { composers.push(n); return NodeFilter.FILTER_REJECT; }
+          if (n.matches(SKIP)) return NodeFilter.FILTER_REJECT;
+          return NodeFilter.FILTER_ACCEPT;
+        },
+      });
+    let n;
+    while ((n = w.nextNode())) {
+      if (n.nodeType === 3) outside += n.nodeValue;
+      else if (n.shadowRoot) walk(n.shadowRoot);
+    }
+  };
+  walk(document.body || document.documentElement);
+  outside = outside.replace(/\s+/g, '');
+  const held = composers.filter((c) => {
+    const t = c.tagName === 'TEXTAREA' ? c.value : (c.innerText || c.textContent);
+    return (t || '').replace(/\s+/g, '').length > 0;
+  });
+  return JSON.stringify({
+    text_on_page: !!want && outside.includes(want),
+    composers: composers.length,
+    composers_with_text: held.length,
+    url: location.href,
+  });
+})()"""
+
+
+def _text_published(text: str) -> tuple[bool, str]:
+    """Read the page and decide whether ``text`` was published.
+
+    Published means the first characters of the text are on the page outside
+    every composer, and no composer still holds text. Returns
+    ``(published, detail)``; an unreadable page is not published.
+    """
+    import json
+
+    from backend.services.social_outreach.reddit_outreach import bidi_evaluate_json
+
+    needle = (text or "").strip()[:_PAGE_CHECK_CHARS]
+    data, why = bidi_evaluate_json(_PAGE_CHECK_JS.replace("__NEEDLE__", json.dumps(needle)))
+    if data is None:
+        return False, f"page not readable ({why})"
+    on_page = bool(data.get("text_on_page"))
+    held = int(data.get("composers_with_text") or 0)
+    detail = (
+        f"text_on_page={on_page} composers_with_text={held} "
+        f"url={str(data.get('url') or '')[:200]}"
+    )
+    return on_page and held == 0, detail
+
+
 def post_via_agent_loop(
     platform: str,
     target_url: str,
@@ -93,6 +161,9 @@ def post_via_agent_loop(
     instruction. The loop is asked only to CLICK the composer and the submit
     control; the text is typed via screen.type_text(), bypassing the prompt (same
     hardening as self_share._submit_post_via_servo).
+
+    Success also needs the page read after the submit (``_text_published``);
+    otherwise the reason is ``submit_unverified: <what the page showed>``.
 
     ``before_submit`` is called once the text is typed and immediately before
     the step that publishes; when it returns False nothing is published and
@@ -165,4 +236,12 @@ def post_via_agent_loop(
     if not submit.success:
         return False, f"submit_failed: {submit.reason}"
 
+    # The loop's "done" means a click changed the screen, not that the text
+    # was published, so the page itself is read before this counts as posted.
+    time.sleep(SERVO_SETTLE_SECONDS)
+    published, detail = _text_published(text)
+    logger.info("general_poster: post-submit page check on %s: published=%s %s",
+                platform, published, detail)
+    if not published:
+        return False, f"submit_unverified: {detail}"
     return True, "ok"
