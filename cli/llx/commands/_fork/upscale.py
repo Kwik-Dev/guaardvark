@@ -28,11 +28,22 @@ def upscale_image(
     files: list[str] = typer.Argument(..., help="Image file(s) to upscale"),
     model: str = typer.Option(None, "--model", "-m"),
     scale: float = typer.Option(None, "--scale", help="e.g. 2 or 4"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show the request and resolved settings; send nothing"),
     server: str = typer.Option(None, "--server", "-s"),
     json_out: bool = typer.Option(False, "--json", "-j"),
 ):
     """Queue one or more stills. GPU work, gated by the backend."""
     json_out = json_mode(json_out)
+    fields = {k: v for k, v in (("model", model), ("scale", scale)) if v is not None}
+    if dry_run:
+        from .dry_run import render_request
+
+        # `upload_files` posts multipart through `client.http`, which the write capture in
+        # `dry_run` cannot see, so the request is rendered directly instead of intercepted.
+        render_request("upscale image", "POST", f"{BASE}/upscale/images",
+                       upload={"files": [("files", f) for f in files], "fields": fields},
+                       json_out=json_out)
+        return
     try:
         data = upload_files(
             get_client(resolve_server(server)),
@@ -57,6 +68,7 @@ def upscale_video(
     model: str = typer.Option(None, "--model", "-m"),
     scale: float = typer.Option(None, "--scale"),
     two_pass: bool = typer.Option(False, "--two-pass"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show the request and resolved settings; send nothing"),
     server: str = typer.Option(None, "--server", "-s"),
     json_out: bool = typer.Option(False, "--json", "-j"),
 ):
@@ -68,6 +80,13 @@ def upscale_video(
         "scale": scale,
         "two_pass": two_pass,
     }
+    if dry_run:
+        from .dry_run import preview
+
+        preview("upscale video",
+                lambda: get_client(resolve_server(server)).post(f"{BASE}/upscale/video", json=body),
+                inputs=("input_path",), explicit={"input_path"}, json_out=json_out)
+        return
     try:
         data = get_client(resolve_server(server)).post(f"{BASE}/upscale/video", json=body)
     except LlxError as exc:

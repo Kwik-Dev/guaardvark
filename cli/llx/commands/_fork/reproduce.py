@@ -255,7 +255,11 @@ def videos_reproduce(
             output.print_error(f"batch {batch_id} recorded images but none survived; cannot reproduce",
                                code="NO_RECORD")
             raise typer.Exit(2)
-        body = {"image_paths": paths, **params}
+        # The image-mode record keeps the prompt at the top level next to image_paths --
+        # `retry_data` is written as {mode, image_paths, prompt, params} and `params` does
+        # NOT carry it -- and the image endpoint reads `data["prompt"]`. Dropping it re-ran
+        # the batch with an empty prompt.
+        body = {"image_paths": paths, "prompt": retry.get("prompt") or "", **params}
         endpoint = "/api/batch-video/generate/image"
     else:
         prompts = retry.get("prompts") or []

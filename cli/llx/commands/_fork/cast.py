@@ -137,6 +137,7 @@ def cast_plan(
 def cast_generate(
     subject_id: int = typer.Argument(..., help="Subject id"),
     count: int | None = typer.Option(None, "--count", "-n", help="How many samples: 16 or 32"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show the request and resolved settings; send nothing"),
     server: str = typer.Option(None, "--server", "-s"),
     json_out: bool = typer.Option(False, "--json", "-j"),
 ):
@@ -152,6 +153,14 @@ def cast_generate(
         output.print_error(f"--count must be 16 or 32, got {count}.", code="BAD_ARGUMENT")
         raise typer.Exit(2)
     body = {"n": count} if count is not None else {}
+    if dry_run:
+        from .dry_run import preview
+
+        preview("cast generate",
+                lambda: get_client(resolve_server(server)).post(
+                    f"{BASE}/subjects/{subject_id}/generate", json=body),
+                inputs=("n",), explicit={"n"} if count is not None else set(), json_out=json_out)
+        return
     try:
         data = get_client(resolve_server(server)).post(f"{BASE}/subjects/{subject_id}/generate", json=body)
     except LlxError as exc:

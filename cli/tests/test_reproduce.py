@@ -53,6 +53,7 @@ def test_videos_reproduce_image_mode(fake_backend, cli_runner, isolated_home):
         "batch_id": "B3", "status": "completed", "total_videos": 1, "completed_videos": 1,
         "failed_videos": 0, "results": [],
         "retry_data": {"mode": "image", "image_paths": ["/tmp/a.png"],
+                       "prompt": "slow zoom in",
                        "params": {"model": "wan22-5b"}}})
 
     result = cli_runner.invoke(app, ["videos", "reproduce", "B3", "--json"])
@@ -60,6 +61,13 @@ def test_videos_reproduce_image_mode(fake_backend, cli_runner, isolated_home):
     payload = json.loads(result.output)
     assert payload["path"] == "/api/batch-video/generate/image"
     assert payload["body"]["image_paths"] == ["/tmp/a.png"]
+    # The image-mode record keeps the prompt at the top level; dropping it re-runs with an
+    # empty prompt. `videos from-image` has no --prompt flag, so the named line cannot be
+    # used and the field is named instead.
+    assert payload["body"]["prompt"] == "slow zoom in"
+    assert "prompt" in payload["inexpressible"]
+    assert payload["named_command_line"] is None
+    assert fake_backend.posted_paths() == []
 
 
 def test_music_video_reproduce_rebuilds_the_create(fake_backend, cli_runner, isolated_home):

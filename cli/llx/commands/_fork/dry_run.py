@@ -2,33 +2,34 @@
 
 Every generation command should be able to show the request it *would* send, with the
 resolved inputs and settings and their provenance, before anything is spent. This module
-is that preview, shared by the fork overrides in ``dry_run_gen.py``.
+is that preview, shared by the fork overrides in `dry_run_gen.py` and by the fork-owned
+command modules that gained `--dry-run` directly.
 
-Why a capture and not a second body-builder
--------------------------------------------
-A dry run has to show the request the command *actually* builds. Copying each command's
-body-building into a preview branch means two copies that drift the first time upstream
-adds a field, and the preview silently starts lying. So the preview runs the real upstream
-function with its two outbound write seams -- ``LlxClient._request`` for POST/PUT/PATCH/
-DELETE and ``LlxClient.upload`` / ``upload_with_progress`` for multipart -- intercepted for
-the duration of the call. The first write is recorded and aborts the command by raising
-``_Captured`` (a ``BaseException``, so no ``except Exception`` inside the command can
-swallow it). Nothing is sent.
+Two entry points:
+
+``preview(command, build, ...)``
+    Run the real upstream command with its write seams intercepted, and render whatever
+    request it tried to send. This is the default, and the reason it is a capture and not a
+    second body-builder: two copies drift the first time upstream adds a field, and the
+    preview silently starts lying.
+
+``render_request(command, method, path, body, ...)``
+    Render an already-built request. For commands whose transport the capture cannot see --
+    a multipart upload that posts through `client.http` rather than `LlxClient.upload` --
+    the body is built in the command and handed here.
 
 Reads are allowed, writes are not
 ---------------------------------
 Only writes are intercepted. A command may issue a read-only GET before its write to
-resolve the active model (``videos generate`` does exactly that); blocking it would make
-the resolved body unknowable. Reads are free, take no GPU lock and carry no request body,
-so the preview still sends nothing that changes state. Say so in the output rather than
-pretend otherwise.
+resolve the active model; blocking it would make the resolved body unknowable. Reads are
+free, take no GPU lock and carry no request body, so the preview still sends nothing that
+changes state. Say so in the output rather than pretend otherwise.
 
 Provenance
 ----------
 The caller passes the keys it received explicitly on the command line; every other key is
 labelled ``command default``. Server-side clamps are not knowable without a send, so the
-renderer says so instead of inventing a source. Callers that can name a model's declared
-floor may pass it in ``notes``.
+renderer says so instead of inventing a source.
 """
 from __future__ import annotations
 
@@ -124,8 +125,6 @@ def preview(
     ``build`` is the upstream command called with the user's arguments. It may raise
     ``_Captured`` (caught here) or a genuine error (propagated, already printed upstream).
     """
-    as_json = bool(json_out or get_global_json())
-    output.set_json_mode(as_json)
     with capture_writes() as captured:
         try:
             build()
@@ -139,13 +138,26 @@ def preview(
             code="DRY_RUN_NO_REQUEST",
         )
         raise typer.Exit(2)
+    render_request(command, method, captured.get("path", ""), captured.get("body"),
+                   captured.get("upload"), inputs=inputs, explicit=explicit,
+                   json_out=json_out, notes=notes)
 
-    # The upstream function ran under capture and set json mode from the True we passed it
-    # (so it would have rendered its own result). Re-assert our verdict for the preview.
+
+def render_request(
+    command: str,
+    method: str,
+    path: str,
+    body: Any = None,
+    upload: Any = None,
+    *,
+    inputs: Iterable[str] = (),
+    explicit: Iterable[str] = (),
+    json_out: bool = False,
+    notes: Iterable[str] = (),
+) -> None:
+    """Render an already-built request as a dry run. Sends nothing."""
+    as_json = bool(json_out or get_global_json())
     output.set_json_mode(as_json)
-
-    body = captured.get("body")
-    upload = captured.get("upload")
     in_map, set_map = _split(body, inputs, explicit)
 
     if as_json or output.is_pipe():
@@ -154,7 +166,7 @@ def preview(
                 "status": "dry-run",
                 "command": command,
                 "method": method,
-                "path": captured.get("path", ""),
+                "path": path,
                 "upload": upload,
                 "inputs": in_map,
                 "settings": set_map,
@@ -164,14 +176,15 @@ def preview(
         )
         return
 
-    console.print(f"[llx.warn]DRY RUN[/llx.warn] — nothing sent")
-    output.print_kv(
-        {"command": command, "request": f"{method} {captured.get('path', '')}"}
-    )
+    console.print("[llx.warn]DRY RUN[/llx.warn] — nothing sent")
+    output.print_kv({"command": command, "request": f"{method} {path}"})
     if upload:
-        rows = [{"field": "file", "value": upload["file"]}]
-        rows += [{"field": k, "value": v} for k, v in (upload.get("fields") or {}).items()]
-        output.print_table(rows, columns=["field", "value"], title="Upload (multipart)")
+        rows = [{"field": k, "value": _fmt(v)} for k, v in (upload.get("fields") or {}).items()]
+        for name, value in (upload.get("files") or []):
+            rows.append({"field": name, "value": value})
+        if upload.get("file"):
+            rows.insert(0, {"field": "file", "value": upload["file"]})
+        output.print_table(rows, columns=["field", "value"], title="Upload (multipart)" if not upload.get("file") else "Upload")
     if in_map:
         output.print_table(
             [{"input": k, "value": _fmt(v["value"]), "source": v["source"]} for k, v in in_map.items()],

@@ -222,6 +222,7 @@ def ve_render(
     min_clip_seconds: float = typer.Option(1.2, "--min-clip-seconds"),
     tightness: int = typer.Option(100, "--tightness"),
     seed: int = typer.Option(None, "--seed"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show the request and resolved settings; send nothing"),
     server: str = typer.Option(None, "--server", "-s"),
     json_out: bool = typer.Option(False, "--json", "-j"),
 ):
@@ -252,6 +253,14 @@ def ve_render(
             }
             if seed is not None:
                 body["seed"] = seed
+        if dry_run:
+            from .dry_run import preview
+
+            preview("video-editor render",
+                    lambda: get_client(resolve_server(server)).post(f"{BASE}/beat-sync/render", json=body),
+                    inputs=("audio_path", "video_paths"),
+                    explicit={"audio_path", "video_paths"}, json_out=json_out)
+            return
         data = get_client(resolve_server(server)).post(f"{BASE}/beat-sync/render", json=body)
     except LlxError as exc:
         fail(exc)

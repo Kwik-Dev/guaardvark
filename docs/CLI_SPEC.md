@@ -248,13 +248,18 @@ upstream edit — see §11. Their read-only halves are covered by
 
 Generation commands must show what they would send, and be replayable:
 
-- **`--dry-run`** on every generation command prints the resolved request — inputs, each
-  setting with its provenance (`explicit` / `command default`), the request method, path
-  and body — and sends **no write**. It may issue read-only GETs, because a command
-  resolves the active model before it builds its body. Implemented by
-  `cli/llx/commands/_fork/dry_run.py`, which runs the **real** upstream command with its
-  write seams (`LlxClient._request`, `upload`, `upload_with_progress`) intercepted, so the
-  preview cannot drift from what is actually sent. A second body-builder would.
+- **`--dry-run`** on every generation command: `images generate`, `generate image`,
+  `videos generate`, `videos from-image`, `music-video create`, `film-crew create`,
+  `audio music|sfx|tts`, `infographic generate`, plus the render commands in fork modules —
+  `cast generate`, `upscale image`, `upscale video`, `video-editor render`,
+  `video-editor captions-burn`. It prints the resolved request — inputs, each setting with
+  its provenance (`explicit` / `command default`), the request method, path and body — and
+  sends **no write**. It may issue read-only GETs, because a command resolves the active
+  model before it builds its body. Implemented by `cli/llx/commands/_fork/dry_run.py`,
+  which runs the **real** upstream command with its write seams (`LlxClient._request`,
+  `upload`, `upload_with_progress`) intercepted, so the preview cannot drift from what is
+  actually sent. A second body-builder would. A command whose transport the capture cannot
+  see (a multipart upload through `client.http`) renders the request directly instead.
 - **Recorded settings** — `images status` / `videos status` show `retry_data` (prompts +
   params), `music-video status` shows cast + treatment + settings, `film-crew status`
   shows `settings_json`. `--json` already carried these; the human views now show them,

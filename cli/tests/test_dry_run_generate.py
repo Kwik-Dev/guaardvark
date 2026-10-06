@@ -86,3 +86,36 @@ def test_without_dry_run_the_command_still_writes(fake_backend, cli_runner, isol
 
     assert result.exit_code == 0, result.output
     assert fake_backend.posted_paths() == ["/api/batch-image/generate/prompts"]
+
+
+# The remaining generation/render commands live in fork-owned modules and gained
+# `--dry-run` directly. Same negative contract: no write.
+EXTRA_CASES = [
+    ("cast generate", ["cast", "generate", "1", "--count", "16"],
+     "POST", "/api/cast-library/subjects/1/generate"),
+    ("upscale video", ["upscale", "video", "/tmp/x.mp4"],
+     "POST", "/api/upscaling/upscale/video"),
+    ("upscale image", ["upscale", "image", "/tmp/a.png"],
+     "POST", "/api/upscaling/upscale/images"),
+    ("video-editor render", ["video-editor", "render", "--audio", "/a.wav", "--video", "/b.mp4"],
+     "POST", "/api/video-editor/beat-sync/render"),
+    ("video-editor captions-burn", ["video-editor", "captions-burn", "17", "--srt", "/tmp/x.srt"],
+     "POST", "/api/video-editor/captions/import"),
+]
+
+
+@pytest.mark.parametrize("_id,argv,method,path", EXTRA_CASES, ids=[c[0] for c in EXTRA_CASES])
+def test_extra_generation_dry_runs_send_no_write(_id, argv, method, path,
+                                                 fake_backend, cli_runner, isolated_home):
+    fake_backend.default(status=200, json={})
+
+    result = cli_runner.invoke(app, [*argv, "--dry-run", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["status"] == "dry-run"
+    assert payload["method"] == method and payload["path"] == path
+    assert payload["body"] is not None or payload["upload"] is not None
+    assert fake_backend.posted_paths() == [], (
+        f"{_id}: --dry-run wrote to {fake_backend.posted_paths()}"
+    )

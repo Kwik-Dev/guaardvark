@@ -117,6 +117,7 @@ def ve_captions_burn(
         help="Renderer: ffmpeg (needs drawtext), mlt (queue + plugin), or editor "
              "(synchronous plugin call, no queue). See the command's long help.",
     ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show the request and resolved settings; send nothing"),
     server: str = typer.Option(None, "--server", "-s"),
     json_out: bool = typer.Option(False, "--json", "-j"),
 ):
@@ -183,6 +184,22 @@ def ve_captions_burn(
     if font_size is not None and font_size < 1:
         output.print_error(f"--font-size must be at least 1, got {font_size}.", code="MISSING_INPUT")
         raise typer.Exit(2)
+
+    if dry_run:
+        from .dry_run import preview
+
+        # The caption import is itself a write and the compose body is built from the
+        # captions the backend parses out of it, so the preview can only show the first
+        # write; the render request does not exist until that call has answered.
+        import_body = {"path": srt} if srt else {"document_id": captions_doc}
+        preview("video-editor captions-burn",
+                lambda: get_client(resolve_server(server)).post(
+                    f"{_EDITOR_BASE}/captions/import", json=import_body),
+                inputs=("path", "document_id"), explicit={"path", "document_id"},
+                json_out=json_out,
+                notes=("the caption import is the first write; the compose body is built from "
+                       "the captions the backend parses, so it cannot be shown before that call",))
+        return
 
     try:
         client = get_client(resolve_server(server))
