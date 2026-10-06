@@ -262,6 +262,16 @@ def _offline_family_values(field: str) -> dict:
             if _image_limits_for(fam).get("engine") == "offline"}
 
 
+def _has_word(text: str, terms) -> bool:
+    """True when any term appears in ``text`` as a whole word or phrase.
+
+    Prompt keyword checks use this instead of substring tests, which matched
+    "man" in manga/manager/germany, "face" in surface and "painter" in painterly.
+    Plural forms are not implied: list each one a check should accept.
+    """
+    return any(re.search(r"\b" + re.escape(t) + r"\b", text) for t in terms)
+
+
 class OfflineImageGenerator:
 
     def __init__(self):
@@ -1819,26 +1829,21 @@ class OfflineImageGenerator:
         # plural "men" inside "element"/"embellishment", flagging single-person
         # costume prompts as multi-person scenes — which then steered enhancement
         # toward group phrasing and produced multi-character images.
-        def _has_word(terms: List[str]) -> bool:
-            return any(
-                re.search(r"\b" + re.escape(t) + r"\b", prompt_lower) for t in terms
-            )
-
         single_indicators = ['a', 'an', 'one', 'single', 'solo', 'alone', 'lone']
         multiple_indicators = ['two', 'three', 'four', 'multiple', 'several', 'many',
                                'group of', 'couple', 'pair of', 'crowd', 'trio', 'duo']
 
-        has_single = _has_word(single_indicators)
-        has_multiple = _has_word(multiple_indicators)
+        has_single = _has_word(prompt_lower, single_indicators)
+        has_multiple = _has_word(prompt_lower, multiple_indicators)
 
         person_plurals = ['men', 'women', 'people', 'workers', 'builders', 'chefs', 'doctors',
                          'teachers', 'children', 'boys', 'girls', 'employees', 'professionals']
-        has_plural_subject = _has_word(person_plurals)
+        has_plural_subject = _has_word(prompt_lower, person_plurals)
 
         person_singulars = ['man', 'woman', 'person', 'child', 'boy', 'girl']
         has_and_conjunction = False
         if ' and ' in prompt_lower:
-            distinct_singulars = [s for s in person_singulars if _has_word([s])]
+            distinct_singulars = [s for s in person_singulars if _has_word(prompt_lower, [s])]
             if len(distinct_singulars) > 1:
                 has_and_conjunction = True
 
@@ -1873,19 +1878,34 @@ class OfflineImageGenerator:
 
         detection["subject_count_info"] = self._detect_subject_count(prompt)
 
-        person_words = ['man', 'woman', 'person', 'people', 'worker', 'builder', 'chef', 'doctor',
-                       'teacher', 'child', 'boy', 'girl', 'human', 'employee', 'staff', 'professional',
-                       'craftsman', 'mechanic', 'plumber', 'electrician', 'carpenter', 'painter']
-        if any(word in prompt_lower for word in person_words):
+        # Whole words only (see _has_word); every accepted plural is listed.
+        person_words = ['man', 'men', 'woman', 'women', 'person', 'persons', 'people',
+                        'worker', 'workers', 'builder', 'builders', 'chef', 'chefs',
+                        'doctor', 'doctors', 'teacher', 'teachers', 'child', 'children',
+                        'boy', 'boys', 'girl', 'girls', 'human', 'humans',
+                        'employee', 'employees', 'staff', 'professional', 'professionals',
+                        'craftsman', 'craftsmen', 'mechanic', 'mechanics', 'plumber', 'plumbers',
+                        'electrician', 'electricians', 'carpenter', 'carpenters',
+                        'painter', 'painters',
+                        # Compounds the old substring test caught through "man"/"woman".
+                        'businessman', 'businessmen', 'businesswoman', 'businesswomen',
+                        'fireman', 'firemen', 'policeman', 'policemen',
+                        'policewoman', 'policewomen', 'fisherman', 'fishermen',
+                        'gentleman', 'gentlemen', 'salesman', 'salesmen',
+                        'workman', 'workmen', 'handyman', 'handymen',
+                        'repairman', 'repairmen', 'sportsman', 'sportsmen']
+        if _has_word(prompt_lower, person_words):
             detection["has_person"] = True
 
-        face_words = ['portrait', 'face', 'headshot', 'selfie', 'close-up', 'closeup', 'head shot']
-        if any(word in prompt_lower for word in face_words):
+        face_words = ['portrait', 'portraits', 'face', 'faces', 'headshot', 'headshots',
+                      'selfie', 'selfies', 'close-up', 'close-ups', 'closeup', 'closeups',
+                      'head shot', 'head shots']
+        if _has_word(prompt_lower, face_words):
             detection["has_face"] = True
 
-        hand_words = ['hand', 'holding', 'grabbing', 'gripping', 'carrying', 'lifting', 'pointing',
-                     'touching', 'typing', 'writing', 'drawing', 'using']
-        if any(word in prompt_lower for word in hand_words):
+        hand_words = ['hand', 'hands', 'holding', 'grabbing', 'gripping', 'carrying', 'lifting',
+                      'pointing', 'touching', 'typing', 'writing', 'drawing', 'using']
+        if _has_word(prompt_lower, hand_words):
             detection["has_hands"] = True
 
         action_map = {
@@ -1905,12 +1925,12 @@ class OfflineImageGenerator:
                 detection["detected_actions"].append(action_type)
 
         interaction_words = ['with', 'using', 'holding', 'beside', 'operating', 'gripping', 'manipulating']
-        if detection["has_person"] and any(word in prompt_lower for word in interaction_words):
+        if detection["has_person"] and _has_word(prompt_lower, interaction_words):
             detection["has_interaction"] = True
 
         spatial_words = ['next to', 'behind', 'in front of', 'beside', 'between', 'under', 'over',
                         'sitting on', 'standing by', 'leaning against', 'near']
-        if any(word in prompt_lower for word in spatial_words):
+        if _has_word(prompt_lower, spatial_words):
             detection["has_spatial"] = True
 
         if detection["has_face"] and detection["has_person"]:
@@ -1921,11 +1941,17 @@ class OfflineImageGenerator:
             detection["recommended_preset"] = "person_working"
         elif detection["has_person"]:
             detection["recommended_preset"] = "person_full_body"
-        elif any(word in prompt_lower for word in ['landscape', 'scenery', 'nature', 'mountain', 'beach', 'forest', 'sunset', 'sunrise']):
+        elif _has_word(prompt_lower, ['landscape', 'landscapes', 'scenery', 'nature',
+                                      'mountain', 'mountains', 'beach', 'beaches',
+                                      'forest', 'forests', 'sunset', 'sunsets',
+                                      'sunrise', 'sunrises']):
             detection["recommended_preset"] = "landscape"
-        elif any(word in prompt_lower for word in ['product', 'item', 'object', 'merchandise', 'bottle', 'package']):
+        elif _has_word(prompt_lower, ['product', 'products', 'item', 'items', 'object', 'objects',
+                                      'merchandise', 'bottle', 'bottles', 'package', 'packages']):
             detection["recommended_preset"] = "product_photo"
-        elif any(word in prompt_lower for word in ['infographic', 'diagram', 'chart', 'icon', 'vector', 'flat']):
+        elif _has_word(prompt_lower, ['infographic', 'infographics', 'diagram', 'diagrams',
+                                      'chart', 'charts', 'icon', 'icons', 'vector', 'vectors',
+                                      'flat']):
             detection["recommended_preset"] = "infographic_preset"
 
         if detection["has_person"] and detection["has_hands"] and detection["has_action"]:
