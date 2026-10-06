@@ -80,6 +80,26 @@ class TestWholeWordKeywords:
             "what is the weather", ["what is the", "weather", "the"])
         assert found == ["what is the", "weather"]
 
+    @pytest.mark.parametrize("text, keyword", [
+        ("summarize the agreements", "agreement"),
+        ("any matches tonight", "match"),
+        ("two lists", "list"),
+    ])
+    def test_plural_of_a_longer_keyword_matches(self, classifier, text, keyword):
+        _confidence, found = classifier._check_keywords(text, [keyword])
+        assert found == [keyword]
+
+    @pytest.mark.parametrize("text, keyword", [
+        ("what is his name", "hi"),
+        ("they wons", "won"),
+    ])
+    def test_short_keyword_takes_no_plural(self, classifier, text, keyword):
+        assert classifier._check_keywords(text, [keyword]) == (0.0, [])
+
+    def test_plural_document_question_is_still_a_document_search(self, classifier):
+        intent, _confidence, _meta = classifier.classify_intent("summarize the agreements")
+        assert intent == IntentType.RAG_SEARCH
+
     def test_country_question_is_not_a_record_count(self, classifier):
         intent, _confidence, _meta = classifier.classify_intent("how many countries are in the EU")
         assert intent != IntentType.DATABASE_QUERY

@@ -24,13 +24,16 @@ def whole_word_pattern(keywords: Iterable[str]) -> "re.Pattern[str]":
 
     An apostrophe counts as part of a word, so "won" does not match "won't"
     (nor "now" "know", "rain" "train"), while a possessive "'s" may follow
-    ("today's"). Longer keywords are tried first, so a phrase is found whole
-    rather than as a word inside it. Words of a phrase may be separated by
-    any run of whitespace.
+    ("today's"). A plural "s"/"es" may follow a keyword whose last word has
+    four or more letters ("agreements", "matches"), never a short one ("hi"
+    is not found in "his"). Longer keywords are tried first, so a phrase is
+    found whole rather than as a word inside it. Words of a phrase may be
+    separated by any run of whitespace.
     """
     alternatives = sorted({k.strip().lower() for k in keywords if k.strip()}, key=len, reverse=True)
     body = "|".join(r"\s+".join(re.escape(word) for word in k.split()) for k in alternatives)
-    return re.compile(rf"(?<![\w'’])({body})(?:['’]s)?(?![\w'’])", re.IGNORECASE)
+    plural = r"(?:(?<=[^\W\d_]{4})e?s)?"
+    return re.compile(rf"(?<![\w'’])({body}){plural}(?:['’]s)?(?![\w'’])", re.IGNORECASE)
 
 
 def find_keywords(pattern: "re.Pattern[str]", text: str) -> List[str]:
