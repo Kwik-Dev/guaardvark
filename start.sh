@@ -3448,6 +3448,16 @@ else
 fi
 echo ""
 
+# Said once, after the first start that gets this far; the marker keeps it from
+# repeating. Text only: nothing is sent anywhere.
+FIRST_START_MARKER="${HOME}/.guaardvark/first_start_note_shown"
+if [ "$TEST_MODE" -eq 0 ] && [ ! -e "$FIRST_START_MARKER" ]; then
+    echo -e "  ${VADER_GRAY}If Guaardvark is useful to you, a star on GitHub helps other people find it:${VADER_RESET}"
+    echo -e "  ${VADER_WHITE}https://github.com/guaardvark/guaardvark${VADER_RESET}"
+    echo ""
+    mkdir -p "${HOME}/.guaardvark" && : > "$FIRST_START_MARKER" 2>/dev/null || true
+fi
+
 # Advisory GPU-stack verification — never blocks boot.
 # Checks that each venv (backend + isolated audio/video) can run a real CUDA
 # kernel and that Ollama is not forced into CPU-offload. Writes
