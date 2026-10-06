@@ -143,6 +143,7 @@ def test_dry_run_human_branch_handles_an_upload(fake_backend, cli_runner, isolat
 
     assert result.exit_code == 0, result.output
     assert "DRY RUN" in result.output
+    assert "Request body" in result.output
     assert fake_backend.posted_paths() == []
 
 
@@ -162,13 +163,23 @@ def test_dry_run_human_branch_handles_a_multipart_upload(fake_backend, cli_runne
 
 def test_dry_run_json_has_no_garbage_for_an_upload(fake_backend, cli_runner,
                                                    isolated_home, tmp_path):
+    """A file-path `--song` is two writes: the upload, then the create. The create inputs
+    and settings are client-known and must be shown; only the returned document id is a
+    placeholder. Hiding them was the bug this test used to pin."""
     fake_backend.default(status=200, json={})
     song = tmp_path / "hook.mp3"
     song.write_bytes(b"ID3")
 
     result = cli_runner.invoke(app, ["music-video", "create", "--song", str(song),
-                                     "--style", "x", "--dry-run", "--json"])
+                                     "--style", "neon noir", "--model", "wan22-5b",
+                                     "--cast", "1", "--lora-consistency", "--dry-run", "--json"])
 
     payload = json.loads(result.output)
-    assert payload["inputs"] == {} and payload["settings"] == {}
+    assert payload["upload"]["path"] == "/api/files/upload"
     assert payload["upload"]["file"].endswith("hook.mp3")
+    assert payload["path"] == "/api/music-video"
+    assert payload["body"]["style_prompt"] == "neon noir"
+    assert payload["body"]["settings"]["subject_ids"] == [1]
+    assert payload["body"]["settings"]["i2v_model"] == "wan22-5b"
+    assert "document id" in payload["body"]["song_document_id"]
+    assert fake_backend.posted_paths() == []

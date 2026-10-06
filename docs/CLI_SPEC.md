@@ -261,6 +261,10 @@ Generation commands must show what they would send, and be replayable:
   `upload`, `upload_with_progress`) intercepted, so the preview cannot drift from what is
   actually sent. A second body-builder would. A command whose transport the capture cannot
   see (a multipart upload through `client.http`) renders the request directly instead.
+  When a create needs an upload first (`music-video create --song <file>`), the preview
+  shows **both** writes: the upload, then the create body with every client-known input and
+  setting — only `song_document_id` is a placeholder, because it is the id the upload
+  returns.
 - **Recorded settings** — `images status` / `videos status` show `retry_data` (prompts +
   params), `music-video status` shows cast + treatment + settings, `film-crew status`
   shows `settings_json`. `--json` already carried these; the human views now show them,

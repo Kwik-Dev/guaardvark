@@ -25,7 +25,7 @@ from llx.commands.music_video import music_video_app
 from llx.global_opts import get_global_json
 from llx.theme import make_console
 
-from .dry_run import preview
+from .dry_run import preview, render_request
 
 console = make_console()
 
@@ -130,16 +130,20 @@ def music_video_create(
                     inputs=_MV_INPUTS, explicit=explicit, json_out=json_out)
             return
 
-        def build():
-            api = _mv_client(server)
-            song_id = _music_video._song_document_id(api, song)
-            api.post("/api/music-video", json=_mv_body(song_id, style, _title(name, song),
-                                                       settings, treatment))
-
-        preview("music-video create", build, inputs=_MV_INPUTS, explicit=explicit,
-                json_out=json_out,
-                notes=("--song is a file path: the preview stops at the upload, because the "
-                       "create body needs the document id the upload would return",))
+        # Two writes follow: the song upload, then the create body. `song_document_id` is the
+        # id the upload returns, so only it can be a placeholder -- the style, name, treatment,
+        # model, cast and every setting are client-known now, and hiding them behind the
+        # upload was the thing that made this mode useless.
+        create_body = _mv_body(0, style, _title(name, song), settings, treatment)
+        create_body["song_document_id"] = "<document id returned by the upload>"
+        render_request(
+            "music-video create", "POST", "/api/music-video", create_body,
+            upload={"path": "/api/files/upload", "file": song,
+                    "fields": {"folder_path": "", "tags": "music-video-song", "auto_index": "false"}},
+            inputs=_MV_INPUTS, explicit=explicit - {"song_document_id"}, json_out=json_out,
+            notes=("nothing is sent. Two writes: the song upload first, then this create body; "
+                   "song_document_id is the id the upload returns.",),
+        )
         return
 
     json_out = json_out or get_global_json()

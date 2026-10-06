@@ -186,12 +186,16 @@ def render_request(
     console.print("[llx.warn]DRY RUN[/llx.warn] — nothing sent")
     output.print_kv({"command": command, "request": f"{method} {path}"})
     if upload:
-        rows = [{"field": k, "value": _fmt(v)} for k, v in (upload.get("fields") or {}).items()]
+        rows = []
+        if upload.get("path"):
+            rows.append({"field": "request", "value": f"POST {upload['path']}"})
+        if upload.get("file"):
+            rows.append({"field": "file", "value": upload["file"]})
+        rows += [{"field": k, "value": _fmt(v)} for k, v in (upload.get("fields") or {}).items()]
         for name, value in (upload.get("files") or []):
             rows.append({"field": name, "value": value})
-        if upload.get("file"):
-            rows.insert(0, {"field": "file", "value": upload["file"]})
-        output.print_table(rows, columns=["field", "value"], title="Upload (multipart)" if not upload.get("file") else "Upload")
+        output.print_table(rows, columns=["field", "value"],
+                           title="Upload" if not upload.get("files") else "Upload (multipart)")
     if in_map:
         output.print_table(
             [{"input": k, "value": _fmt(v["value"]), "source": v["source"]} for k, v in in_map.items()],

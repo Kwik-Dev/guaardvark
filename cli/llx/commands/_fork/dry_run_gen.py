@@ -69,7 +69,10 @@ def images_generate(
                                             model=model, server=server, json_out=True),
             inputs=("prompts",),
             explicit=_explicit(model=model) | {"prompts"},
-            json_out=json_out)
+            json_out=json_out,
+            notes=("the model is resolved on send (the active image model when --model is "
+                   "omitted) and server-side clamps are applied then; only client-known fields "
+                   "are shown here",))
 
 
 @generate_app.command("image")
@@ -86,7 +89,9 @@ def generate_image(
             lambda: _generate.generate_image(prompt=prompt, server=server, json_out=True),
             inputs=("prompts",),
             explicit={"prompts"},
-            json_out=json_out)
+            json_out=json_out,
+            notes=("the model is resolved on send (the active image model) and server-side "
+                   "clamps are applied then; only client-known fields are shown here",))
 
 
 @generate_app.command("csv")
