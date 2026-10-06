@@ -1,12 +1,13 @@
-"""grade_draft_externally says whether a grade actually came back.
+"""grade_draft_externally says whether the grader's answers actually came back.
 
-``checked`` is True only when the grader model answered with a grade; a missing
+``checked`` is True only when the grader model answered its questions; a missing
 model or a failed call is unchecked (and still ``skipped``, for older readers).
 The Ollama HTTP call and the model lookup are stand-ins.
 """
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -146,3 +147,23 @@ def test_concise_is_counted_from_the_draft(words, concise):
     assert result["concise"] == concise
     assert result["grade"] == pytest.approx((3 + concise) / 4)
     assert result["passed"] is True
+
+
+# ---- the prompt asks only for what is read ----------------------------------------------
+
+def test_the_prompt_asks_only_for_the_three_answers():
+    prompt = external_grader.GRADER_SYSTEM
+    for question in external_grader.RUBRIC_QUESTIONS:
+        assert f"{question}:" in prompt
+    assert "concise" not in prompt
+    assert "grade" not in prompt.replace("grader", "")
+    example = json.loads(prompt[prompt.index("{"):prompt.rindex("}") + 1])
+    assert set(example) == {*external_grader.RUBRIC_QUESTIONS, "reason"}
+
+
+def test_a_reply_in_the_asked_shape_is_checked():
+    result = _grade('{"engages": 1, "on_topic": 1, "appropriate_tone": 1, "reason": "fits"}')
+
+    assert result["checked"] is True
+    assert result["passed"] is True
+    assert result["grade"] == pytest.approx(1.0)
