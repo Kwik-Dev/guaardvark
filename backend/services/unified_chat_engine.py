@@ -475,7 +475,31 @@ _IMAGE_GEN_INTENT_RE = re.compile(
     r"generate\s+(an?\s+)?image|create\s+(an?\s+)?image|make\s+an?\s+image"
     r"|make\s+a\s+picture|generate\s+a\s+photo|render\s+(an?\s+)?image"
     r"|make\s+a\s+video|create\s+a\s+video|generate\s+(a\s+)?video"
-    r"|generate\s+a\s+gif|generate_image|/imagine|\bdraw\b|\banimate\b",
+    r"|generate\s+a\s+gif|generate_image|/imagine",
+    re.IGNORECASE,
+)
+
+# Without a picture noun, "draw", "sketch" and "animate" ask for one only when they open
+# the message ("draw me a duck"), and never before an idiom ("draw a conclusion").
+_DRAW_VERB = (
+    r"(?:draw|sketch|animate)\b(?!\s+(?:(?:a|an|the|some|any|my|our)\s+)?"
+    r"(?:conclusions?|lines?|attention|parallels?|comparisons?|distinctions?|inspiration"
+    r"|blood|breath|straws?|lots|up|on|upon|from|out|near|back)\b)"
+)
+_DRAW_REQUEST_RE = re.compile(
+    r"^\s*(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)?" + _DRAW_VERB,
+    re.IGNORECASE,
+)
+# Anywhere in the message: enough to offer the image tools to the chat model,
+# which then decides ("I'd like you to draw a cat").
+_DRAW_MENTION_RE = re.compile(r"\b" + _DRAW_VERB, re.IGNORECASE)
+
+# A create verb with the picture noun at most three words after it ("make me a
+# quick picture"), so "make sure the image path is right" is not a request.
+_CREATE_PICTURE_RE = re.compile(
+    r"\b(?:generate|draw|sketch|make|create|render|paint|visuali[sz]e)\s+(?:me\s+|us\s+)?"
+    r"(?:(?!sure\b|certain\b)[\w-]+\s+){0,3}?"
+    r"(?:image|picture|photo|illustration|gif|animation|video)s?\b",
     re.IGNORECASE,
 )
 
@@ -513,6 +537,38 @@ _IMAGE_GEN_NEGATIVE_PATTERNS = (
     r"\bdescribe (this|the|that) (image|photo|picture)\b",
     r"\b(analyze|explain) (this|the|that) (image|photo|picture)\b",
 )
+# Image requests only: a how-to question or front-end work ("how do I animate a
+# CSS button", "make an image responsive") is a question for the chat model.
+_IMAGE_REQUEST_NEGATIVE_PATTERNS = _IMAGE_GEN_NEGATIVE_PATTERNS + (
+    r"^\s*how\s+(?:do|can|could|should|would|does|to)\b",
+    r"\b(?:css|html|javascript|jsx?|tsx|react|svg|keyframes?|hover|tailwind|stylesheet)\b",
+)
+
+# Edit verbs for a picture already on screen ("add a scarf", "make it bigger").
+_IMAGE_EDIT_VERB_RE = re.compile(
+    r"\b(add|put|place|insert|remove|delete|erase|change|replace|swap|recolou?r|"
+    r"brighten|darken|enlarge|shrink|resize|rescale|scale|zoom|increase|decrease|"
+    r"crop|rotate|flip|blur|sharpen|fix|adjust|edit|retouch|restyle|repaint|dress|"
+    r"turn\s+.+\binto\b|wear(?:ing|s)?|make\s+(?:it|him|her|them|this|the|that|his|its)|"
+    r"give\s+(?:him|her|them|it|the|this))\b",
+    re.IGNORECASE,
+)
+# The same verbs fit text and code ("fix the grammar", "add error handling"); with
+# one of these topics and no picture word, the message is not about the image.
+_TEXT_OR_CODE_TOPIC_RE = re.compile(
+    r"\b(grammar|spelling|typos?|sentences?|paragraphs?|wording|essay|email|code|function"
+    r"|method|bugs?|errors?|exceptions?|tests?|query|sql|regex|script|variable|config|json"
+    r"|yaml|csv|date\s+format)\b",
+    re.IGNORECASE,
+)
+_PICTURE_WORD_RE = re.compile(
+    r"\b(image|picture|photo|pic|render|background|foreground|sky|scene)\b", re.IGNORECASE,
+)
+# Names an existing picture outright: "the last image", "that photo".
+_NAMES_THE_IMAGE_RE = re.compile(
+    r"\b(?:the|that|this|last|previous)\s+(?:image|picture|photo|pic|render)\b", re.IGNORECASE,
+)
+_REFERS_BACK_RE = re.compile(r"\b(?:it|this)\b", re.IGNORECASE)
 # For chat context, only expose the tools the LLM should actually call
 # agent_mode_start/stop are internal — the LLM should use agent_task_execute directly
 AGENT_CONTROL_TOOLS = ["agent_task_execute", "agent_screen_capture"]
@@ -718,18 +774,21 @@ TOOL_CONTEXT_KEYWORDS = {
 }
 
 
-def _has_explicit_image_gen_intent(msg_lower: str) -> bool:
+def _has_explicit_image_gen_intent(msg_lower: str, draw_anywhere: bool = False) -> bool:
     """True when the message explicitly asks to create new image/video media."""
-    if _IMAGE_GEN_INTENT_RE.search(msg_lower):
+    if _IMAGE_GEN_INTENT_RE.search(msg_lower) or _CREATE_PICTURE_RE.search(msg_lower):
         return True
-    if re.search(r"\b(generate|draw|make|create|render|visuali[sz]e)\b", msg_lower):
-        if re.search(r"\b(image|picture|photo|illustration|gif|animation|video)\b", msg_lower):
-            return True
-    return False
+    draw_re = _DRAW_MENTION_RE if draw_anywhere else _DRAW_REQUEST_RE
+    return bool(draw_re.search(msg_lower))
 
 
-def user_wants_image_generation(message: str) -> bool:
-    """Strict gate: create new media vs describe/reference existing images or prompts."""
+def _is_new_image_request(msg_lower: str, draw_anywhere: bool = False) -> bool:
+    if not _has_explicit_image_gen_intent(msg_lower, draw_anywhere):
+        return False
+    return not any(re.search(pat, msg_lower) for pat in _IMAGE_REQUEST_NEGATIVE_PATTERNS)
+
+
+def _image_generation_gate(message: str, draw_anywhere: bool) -> bool:
     if not message or not message.strip():
         return False
     from backend.tools.video_pipeline_tools import is_music_video_request, is_film_crew_request
@@ -740,12 +799,48 @@ def user_wants_image_generation(message: str) -> bool:
         return True
     if _media_requires_explicit_command():
         return False
-    if not _has_explicit_image_gen_intent(msg_lower):
+    return _is_new_image_request(msg_lower, draw_anywhere)
+
+
+def user_wants_image_generation(message: str) -> bool:
+    """Strict gate: create new media vs describe/reference existing images or prompts.
+
+    A match starts an image job with no model in the loop, so a mid-sentence
+    "draw" does not count here; see _wants_image_tools.
+    """
+    return _image_generation_gate(message, draw_anywhere=False)
+
+
+def _wants_image_tools(message: str) -> bool:
+    """Whether to offer the image tools to the chat model.
+
+    Wider than user_wants_image_generation: "I'd like you to draw a cat" does not
+    start a job directly, but the model needs generate_image to act on it.
+    """
+    return _image_generation_gate(message, draw_anywhere=True)
+
+
+def user_wants_image_edit(message: str, has_recent_image: bool,
+                          has_stale_image: bool = False) -> bool:
+    """True when the message asks to change a picture the session already has.
+
+    has_recent_image: a picture is attached to this turn, or one was made since the
+    last plain chat turn. has_stale_image: the session has an older picture, which
+    a follow-up edits only when it names it ("change the sky in the last image").
+    """
+    if not message or not (has_recent_image or has_stale_image):
         return False
-    for pat in _IMAGE_GEN_NEGATIVE_PATTERNS:
-        if re.search(pat, msg_lower):
-            return False
-    return True
+    if not _IMAGE_EDIT_VERB_RE.search(message):
+        return False
+    if _TEXT_OR_CODE_TOPIC_RE.search(message) and not _PICTURE_WORD_RE.search(message):
+        return False
+    msg_lower = message.lower()
+    names_image = bool(_NAMES_THE_IMAGE_RE.search(msg_lower))
+    # "Draw me a cat wearing a top hat" has an edit verb but asks for a new picture.
+    new_request = bool(_SLASH_MEDIA_RE.match(msg_lower)) or _is_new_image_request(msg_lower)
+    if new_request and not names_image and not _REFERS_BACK_RE.search(msg_lower):
+        return False
+    return has_recent_image or names_image
 
 
 # Create-verb within reach of "video" — "generate a video of X", "make me a short
@@ -870,7 +965,7 @@ def select_tools_for_context(message: str, all_tool_names: List[str], max_tools:
     matched_categories = set()
     for category, (keywords, tools) in TOOL_CONTEXT_KEYWORDS.items():
         if category == "image":
-            if not user_wants_image_generation(message):
+            if not _wants_image_tools(message):
                 continue
         elif not any(kw in msg_lower for kw in keywords):
             continue
@@ -892,7 +987,7 @@ def select_tools_for_context(message: str, all_tool_names: List[str], max_tools:
         excluded_from_padding = set(BROWSER_TOOLS + WEB_TOOLS + DESKTOP_TOOLS)
         # Also exclude agent_mode_start/stop — LLM should not call these directly
         excluded_from_padding.update(["agent_mode_start", "agent_mode_stop", "agent_status"])
-    if not user_wants_image_generation(message):
+    if not _wants_image_tools(message):
         excluded_from_padding.update(IMAGE_TOOLS)
 
     # Only pad with extra tools if keywords actually matched a category
@@ -1192,7 +1287,7 @@ def _pin_image_generation_tools(
     TOOL_CONTEXT_KEYWORDS (same phrases select_tools_for_context uses).
     """
     keywords, tools = TOOL_CONTEXT_KEYWORDS["image"]
-    should_pin = user_wants_image_generation(message)
+    should_pin = _wants_image_tools(message)
     if not should_pin and session_id and _SESSION_PENDING_IMAGE_PROMPT.get(session_id):
         if _is_image_retry_message(message):
             should_pin = True
@@ -1207,6 +1302,16 @@ def _pin_image_generation_tools(
 # new attachment ("make the horse bigger") re-edits the previous result. Process-global
 # keyed by session_id; lost on restart (then a re-attach is needed), which is fine.
 _SESSION_LAST_EDIT: Dict[str, str] = {}
+# Sessions whose last turn produced that picture. A plain chat turn ends the focus;
+# after that a follow-up edits the picture only when it names it ("the last image").
+_SESSION_IMAGE_FOCUS: set = set()
+
+
+def _remember_session_image(session_id: str, path: str) -> None:
+    _SESSION_LAST_EDIT[session_id] = path
+    _SESSION_IMAGE_FOCUS.add(session_id)
+
+
 # Pending image prompt after GPU-busy or failed generate_image — enables "try again" retry.
 _SESSION_PENDING_IMAGE_PROMPT: Dict[str, str] = {}
 # Pending edit (instruction + source image path) after GPU-busy edit_image failure.
@@ -2173,6 +2278,9 @@ class UnifiedChatEngine:
             gen_result = self._try_image_generate_direct(message, session_id, emit_fn, request_id, options)
             if gen_result is not None:
                 return gen_result
+
+        # The chat model has this turn, so the conversation has moved off the last picture.
+        _SESSION_IMAGE_FOCUS.discard(session_id)
 
         # Resolve the per-request "thinking" preference for thinking-capable models
         # (gemma4:12b, qwen3, deepseek-r1, ...). Precedence: explicit per-chat override
@@ -3763,7 +3871,7 @@ class UnifiedChatEngine:
                     if _fn:
                         _local = os.path.join(OUTPUT_DIR, "generated_images", _fn)
                         if os.path.exists(_local):
-                            _SESSION_LAST_EDIT[session_id] = _local
+                            _remember_session_image(session_id, _local)
                 except Exception:
                     pass
 
@@ -4014,27 +4122,24 @@ class UnifiedChatEngine:
         calling the edit tool, so the dispatch is not left to the model. Returns a
         result dict when handled, else None to fall through to normal chat (so
         'what is this?' still routes to the vision/describe path)."""
-        if not re.search(
-            r"\b(add|put|place|insert|remove|delete|erase|change|replace|swap|recolou?r|"
-            r"brighten|darken|enlarge|shrink|resize|rescale|scale|zoom|increase|decrease|"
-            r"crop|rotate|flip|blur|sharpen|fix|adjust|edit|retouch|restyle|repaint|dress|"
-            r"turn\s+.+\binto\b|wear(?:ing|s)?|make\s+(?:it|him|her|them|this|the|that|his|its)|"
-            r"give\s+(?:him|her|them|it|the|this))\b",
-            message or "", re.IGNORECASE):
-            return None
-        if not self.registry.get_tool("edit_image"):
-            return None
         # Source image: a freshly attached image, else this session's last result
         # (FOLLOW-UP edits — "the horse is too small, make it bigger"). Bail to normal
         # chat if there is nothing to edit.
-        if getattr(self, "_image_data", None):
-            img_path = self._materialize_attached_image()
-            followup = False
-        else:
-            img_path = _SESSION_LAST_EDIT.get(session_id)
-            if img_path and not os.path.exists(img_path):
-                img_path = None
-            followup = True
+        attached = bool(getattr(self, "_image_data", None))
+        last = None if attached else _SESSION_LAST_EDIT.get(session_id)
+        if last and not os.path.exists(last):
+            last = None
+        focus = session_id in _SESSION_IMAGE_FOCUS
+        if not user_wants_image_edit(
+            message,
+            has_recent_image=attached or bool(last and focus),
+            has_stale_image=bool(last and not focus),
+        ):
+            return None
+        if not self.registry.get_tool("edit_image"):
+            return None
+        img_path = self._materialize_attached_image() if attached else last
+        followup = not attached
         if not img_path:
             return None
         instruction = (message or "").strip()
@@ -4103,7 +4208,7 @@ class UnifiedChatEngine:
                 if _fn:
                     _local = os.path.join(OUTPUT_DIR, "generated_images", _fn)
                     if os.path.exists(_local):
-                        _SESSION_LAST_EDIT[session_id] = _local
+                        _remember_session_image(session_id, _local)
             except Exception:
                 pass
         if result.success and image_url:
