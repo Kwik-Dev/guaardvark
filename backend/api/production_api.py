@@ -386,6 +386,27 @@ def approve_storyboard(prod_id):
 
     from backend.models import ProductionShot
     shots = ProductionShot.query.filter_by(production_id=prod_id).all()
+
+    # A frame the curator flagged is approved only when the caller says so
+    # explicitly, after the person has seen the list.
+    flagged = [s for s in shots if _curator_flagged(s)]
+    body = request.get_json(silent=True) or {}
+    if flagged and body.get("confirm_flagged") is not True:
+        listed = ", ".join(f"{s.scene_number}.{s.shot_number}" for s in flagged)
+        return jsonify({
+            "error": (
+                f"{len(flagged)} shot(s) were flagged by the curator: {listed}. "
+                "Approve again with confirm_flagged to render them anyway."
+            ),
+            "flagged_shots": [
+                {
+                    "id": s.id, "scene_number": s.scene_number, "shot_number": s.shot_number,
+                    "reason": (s.curator_advice or {}).get("reason"),
+                }
+                for s in flagged
+            ],
+        }), 409
+
     for s in shots:
         s.approved = True
         s.approved_by = "person"
@@ -401,8 +422,16 @@ def approve_storyboard(prod_id):
         "production_id": prod_id,
         "current_stage": prod.current_stage,
         "shots_approved": len(shots),
+        "flagged_approved": [s.id for s in flagged],
         **dispatch,
     })
+
+
+def _curator_flagged(shot) -> bool:
+    """True when the curator flagged this frame and no person has approved it."""
+    if (shot.curator_advice or {}).get("verdict") != "flag":
+        return False
+    return not (shot.approved and shot.approved_by == "person")
 
 
 @bp.post("/<int:prod_id>/storyboard/shot/<int:shot_id>/regenerate")

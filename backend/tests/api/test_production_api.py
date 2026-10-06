@@ -551,3 +551,64 @@ def test_storyboard_approve_marks_the_shots_as_the_person_s(client, app, monkeyp
             s = db.session.get(ProductionShot, sid)
             assert s.approved is True
             assert s.approved_by == "person"
+
+
+_FLAG_ADVICE = {"verdict": "flag", "reason": "distorted face", "confidence": 20}
+
+
+def test_storyboard_approve_refuses_flagged_shots_without_a_yes(client, app, monkeypatch):
+    prod_id, (ok_id, flagged_id) = _awaiting_storyboard(app, [
+        {"approved": True, "approved_by": "curator"},
+        {"approved": False, "curator_advice": _FLAG_ADVICE},
+    ])
+    from backend.services.production_service import ProductionService
+    dispatched = []
+    monkeypatch.setattr(ProductionService, "dispatch_agent",
+                        lambda self, pid, agent: dispatched.append((pid, agent)))
+
+    resp = client.post(f"/api/production/{prod_id}/storyboard/approve")
+    assert resp.status_code == 409
+    data = resp.get_json()
+    assert [s["id"] for s in data["flagged_shots"]] == [flagged_id]
+    assert data["flagged_shots"][0]["reason"] == "distorted face"
+    assert dispatched == []
+    with app.app_context():
+        from backend.models import ProductionShot
+        assert db.session.get(Production, prod_id).current_stage == "awaiting_approval"
+        assert db.session.get(ProductionShot, flagged_id).approved is False
+
+
+def test_storyboard_approve_renders_flagged_shots_when_confirmed(client, app, monkeypatch):
+    prod_id, (ok_id, flagged_id) = _awaiting_storyboard(app, [
+        {"approved": True, "approved_by": "curator"},
+        {"approved": False, "curator_advice": _FLAG_ADVICE},
+    ])
+    from backend.services.production_service import ProductionService
+    dispatched = []
+    monkeypatch.setattr(ProductionService, "dispatch_agent",
+                        lambda self, pid, agent: dispatched.append((pid, agent)))
+
+    resp = client.post(f"/api/production/{prod_id}/storyboard/approve", json={"confirm_flagged": True})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["current_stage"] == "rendering"
+    assert data["flagged_approved"] == [flagged_id]
+    assert dispatched == [(prod_id, "editor")]
+    with app.app_context():
+        from backend.models import ProductionShot
+        s = db.session.get(ProductionShot, flagged_id)
+        assert s.approved is True and s.approved_by == "person"
+
+
+def test_storyboard_approve_is_one_click_when_nothing_is_flagged(client, app, monkeypatch):
+    prod_id, _ = _awaiting_storyboard(app, [
+        {"approved": True, "approved_by": "curator",
+         "curator_advice": {"verdict": "approve", "reason": "clean", "confidence": 90}},
+        {"approved": True, "approved_by": "person", "curator_advice": _FLAG_ADVICE},
+    ])
+    from backend.services.production_service import ProductionService
+    monkeypatch.setattr(ProductionService, "dispatch_agent", lambda self, pid, agent: None)
+
+    resp = client.post(f"/api/production/{prod_id}/storyboard/approve")
+    assert resp.status_code == 200
+    assert resp.get_json()["flagged_approved"] == []
