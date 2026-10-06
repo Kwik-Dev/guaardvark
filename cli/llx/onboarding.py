@@ -156,5 +156,8 @@ def run_onboarding(
     if model:
         console.print(f"[llx.dim]Model: {model}[/llx.dim]")
     console.print(f"[llx.dim]Mode: {mode}[/llx.dim]")
+    if not auto_yes:
+        console.print("[llx.dim]If Guaardvark is useful to you, a star on GitHub helps other people "
+                      "find it: https://github.com/guaardvark/guaardvark[/llx.dim]")
 
     return cfg
