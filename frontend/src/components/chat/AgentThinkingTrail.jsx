@@ -17,6 +17,8 @@ const AgentThinkingTrail = ({ steps }) => {
   }
 
   if (!steps || steps.length === 0) return null;
+  const stepCount = steps.filter((s) => s.kind !== "note").length;
+  const noteCount = steps.length - stepCount;
 
   return (
     <Box
@@ -52,7 +54,8 @@ const AgentThinkingTrail = ({ steps }) => {
             flex: 1,
           }}
         >
-          Agent thinking — {steps.length} step{steps.length === 1 ? "" : "s"}
+          Agent thinking — {stepCount} step{stepCount === 1 ? "" : "s"}
+          {noteCount > 0 ? `, ${noteCount} note${noteCount === 1 ? "" : "s"} from you` : ""}
         </Typography>
         <IconButton size="small" sx={{ p: 0 }}>
           {expanded ? (
@@ -67,6 +70,8 @@ const AgentThinkingTrail = ({ steps }) => {
         <Box sx={{ px: 1.5, pb: 1, pt: 0.25 }}>
           {steps.map((step, idx) => {
             const reasoning = (step.reasoning || "").trim();
+            // A note the user sent mid-run: shown as theirs, where the agent read it.
+            const isNote = step.kind === "note";
             return (
               <Box
                 key={`thinking-step-${idx}`}
@@ -83,13 +88,15 @@ const AgentThinkingTrail = ({ steps }) => {
                     fontWeight: 600,
                     fontFamily: "monospace",
                     fontSize: "0.65rem",
-                    color: "text.primary",
+                    color: isNote ? "warning.main" : "text.primary",
                     display: "block",
                     mb: 0.25,
                   }}
                 >
-                  Step {step.iteration ?? idx + 1}
-                  {step.label ? ` — ${step.label}` : ""}
+                  {isNote
+                    ? `You, before step ${step.iteration ?? idx + 1}`
+                    : `Step ${step.iteration ?? idx + 1}`}
+                  {!isNote && step.label ? ` — ${step.label}` : ""}
                 </Typography>
                 <Box
                   component="pre"

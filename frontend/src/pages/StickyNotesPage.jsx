@@ -73,6 +73,20 @@ const LAYOUT_MODE_ICONS = {
   collapsed: ViewList,
 };
 
+// The drag placeholder is the grid cell, so a minimized note has to occupy
+// the header bar. Row math matches react-grid-layout's pixel height:
+// rows * rowHeight + (rows - 1) * margin. 40px is the note header.
+function minimizedBarRows(rowHeight, margin) {
+  const target = 40;
+  let rows = 1;
+  while (rows < 12) {
+    const px = Math.round(rowHeight * rows + Math.max(0, rows - 1) * margin);
+    if (px >= target) return rows;
+    rows += 1;
+  }
+  return rows;
+}
+
 const NOTE_COLORS = [
   "rgba(0, 128, 128, 0.15)",   // teal glass (primary)
   "rgba(30, 30, 30, 0.95)",    // dark carbon
@@ -227,7 +241,7 @@ const StickyNote = React.memo(
           display: "flex",
           flexDirection: "column",
           height: isMinimized ? "auto" : "100%",
-          minHeight: isMinimized ? "50px" : "120px",
+          minHeight: isMinimized ? 0 : "120px",
           overflow: "hidden",
           borderRadius: "8px",
           backgroundColor: color,
@@ -527,7 +541,6 @@ const StickyNotesPage = () => {
     COLS_COUNT,
     ROW_HEIGHT_PX,
     cardMinGridW,
-    cardMinGridH,
     cardGridW,
     cardGridH,
   } = gridSettings;
@@ -537,7 +550,6 @@ const StickyNotesPage = () => {
   const [notes, setNotes] = useState({});
   const [noteColors, setNoteColors] = useState({});
   const [minimizedCards, setMinimizedCards] = useState({});
-  const [originalDimensions, setOriginalDimensions] = useState({});
   const [_cardZIndex, setCardZIndex] = useState({});
   const [maxZIndex, setMaxZIndex] = useState(0);
   const [layoutMode, setLayoutMode] = useState("normal");
@@ -553,6 +565,12 @@ const StickyNotesPage = () => {
   const gridContainerRef = useRef(null);
   const [gridWidth, setGridWidth] = useState(dashboardWidth);
   const isTogglingRef = useRef(false);
+  // Minimized flags at drag start. The header double-click toggles the flag
+  // on the second mousedown, which can land before or after onDragStart, and
+  // the drag reports the bar height. Pre-flip bits are merged in so expand
+  // still stores the full height.
+  const dragMinRef = useRef(null);
+  const draggingRef = useRef(false);
   const noteRefs = useRef({});
   const editRangeRef = useRef(null);
   const saveTimeoutRef = useRef(null);
@@ -616,10 +634,19 @@ const StickyNotesPage = () => {
   const [layout, setLayout] = useState([]);
   useEffect(() => { layoutRef.current = layout; }, [layout]);
   const normalLayoutRef = useRef(null);
+  // Last mode this effect applied. A title edit used to rebuild the packed
+  // layouts and this effect then called setLayout, which parks every note
+  // on the left. Normal mode only restores when the mode actually changes.
+  const appliedModeRef = useRef(null);
+
+  // Id list only. A title or body edit keeps this string stable so the
+  // packed layouts below are not rebuilt — rebuilding them pulls dragged
+  // notes back to the left edge on Enter.
+  const noteIdsKey = Object.keys(notes).join("\0");
 
   // Compact layout (derived)
   const compactLayout = useMemo(() => {
-    const noteIds = Object.keys(notes);
+    const noteIds = noteIdsKey ? noteIdsKey.split("\0") : [];
     const compactW = Math.round(cardGridW * 0.71);
     const compactH = Math.round(cardGridH * 0.71);
     const colWidthPx = gridWidth / COLS_COUNT;
@@ -636,11 +663,11 @@ const StickyNotesPage = () => {
       isDraggable: true,
       isResizable: false,
     }));
-  }, [notes, cardGridW, cardGridH, gridWidth, COLS_COUNT, cardMinGridW]);
+  }, [noteIdsKey, cardGridW, cardGridH, gridWidth, COLS_COUNT, cardMinGridW]);
 
   // Collapsed layout (derived)
   const collapsedLayout = useMemo(() => {
-    const noteIds = Object.keys(notes);
+    const noteIds = noteIdsKey ? noteIdsKey.split("\0") : [];
     const colWidthPx = gridWidth / COLS_COUNT;
     const barW = Math.round(300 / colWidthPx);
     const barH = Math.round(50 / ROW_HEIGHT_PX);
@@ -656,7 +683,7 @@ const StickyNotesPage = () => {
       isDraggable: true,
       isResizable: false,
     }));
-  }, [notes, gridWidth, COLS_COUNT, ROW_HEIGHT_PX, cardMinGridW]);
+  }, [noteIdsKey, gridWidth, COLS_COUNT, ROW_HEIGHT_PX, cardMinGridW]);
 
   // ── Load saved state ─────────────────────────────────────────────────────
 
@@ -745,14 +772,14 @@ const StickyNotesPage = () => {
 
   useEffect(() => {
     if (!initialStateLoaded) return;
-    isTogglingRef.current = true;
-    if (layoutMode === "compact") {
-      setLayout(compactLayout);
-    } else if (layoutMode === "collapsed") {
-      setLayout(collapsedLayout);
-    } else {
-      setLayout(normalLayoutRef.current || []);
+    const modeChanged = appliedModeRef.current !== layoutMode;
+    appliedModeRef.current = layoutMode;
+    if (layoutMode === "normal") {
+      if (modeChanged) setLayout(normalLayoutRef.current || []);
+      return;
     }
+    isTogglingRef.current = true;
+    setLayout(layoutMode === "compact" ? compactLayout : collapsedLayout);
     requestAnimationFrame(() => {
       isTogglingRef.current = false;
     });
@@ -919,10 +946,27 @@ const StickyNotesPage = () => {
 
   // ── Event handlers ───────────────────────────────────────────────────────
 
-  const onLayoutChange = useCallback(
-    (newLayout) => {
-      if (isTogglingRef.current) return;
-      const validLayout = newLayout.filter((item) => item !== undefined);
+  const commitGridLayout = useCallback(
+    (newLayout, fromDrag) => {
+      draggingRef.current = false;
+      if (isTogglingRef.current) {
+        dragMinRef.current = null;
+        return;
+      }
+      const prevById = new Map((layoutRef.current || []).map((item) => [item.i, item]));
+      const minimizedAtStart = fromDrag
+        ? (dragMinRef.current || minimizedCardsRef.current)
+        : minimizedCardsRef.current;
+      dragMinRef.current = null;
+      // Minimized notes are handed to the grid at bar height. Keep the stored
+      // height so expand still opens the size the note had before.
+      const validLayout = newLayout.filter((item) => item && item.i).map((item) => {
+        const prev = prevById.get(item.i);
+        if (!prev) return item;
+        const next = { ...prev, x: item.x, y: item.y, w: item.w };
+        if (!minimizedAtStart[item.i]) next.h = item.h;
+        return next;
+      });
       if (layoutMode === "normal") normalLayoutRef.current = validLayout;
       setLayout(validLayout);
       // Flush any pending debounced save to prevent content loss
@@ -960,37 +1004,22 @@ const StickyNotesPage = () => {
       isTogglingRef.current = true;
 
       const prevMin = minimizedCardsRef.current;
+      const snap = { ...(dragMinRef.current || {}) };
+      snap[noteId] = !!prevMin[noteId];
+      dragMinRef.current = snap;
       const newMin = { ...prevMin, [noteId]: !prevMin[noteId] };
       minimizedCardsRef.current = newMin;
       setMinimizedCards(newMin);
 
-      const newOrig = { ...originalDimensions };
-      const adjusted = (layoutRef.current || []).map((item) => {
-        if (item.i === noteId) {
-          if (newMin[noteId]) {
-            newOrig[noteId] = { w: item.w, h: item.h };
-            return { ...item, h: cardMinGridH };
-          }
-          const orig = newOrig[noteId];
-          if (orig) {
-            delete newOrig[noteId];
-            return { ...item, w: orig.w, h: orig.h };
-          }
-          return item;
-        }
-        return item;
-      });
-
-      setOriginalDimensions(newOrig);
-      setLayout(adjusted);
-      layoutRef.current = adjusted;
-      normalLayoutRef.current = adjusted;
-      saveState(adjusted, noteColorsRef.current, newMin, undefined, liveNotes);
+      // Leave x/y/w/h alone. The grid renders a bar-height copy while the
+      // flag is set, and the stored height is what expand opens.
+      saveState(layoutRef.current, noteColorsRef.current, newMin, undefined, liveNotes);
       requestAnimationFrame(() => {
         isTogglingRef.current = false;
+        if (!draggingRef.current) dragMinRef.current = null;
       });
     },
-    [saveState, cardMinGridH, originalDimensions, cancelDebouncedSave, flushNoteDom],
+    [saveState, cancelDebouncedSave, flushNoteDom],
   );
 
   const handleCardClick = useCallback(
@@ -1408,6 +1437,7 @@ const StickyNotesPage = () => {
             title={`Layout: ${LAYOUT_MODE_LABELS[layoutMode]} (click to cycle)`}
           >
             <IconButton
+              aria-label={`Layout: ${LAYOUT_MODE_LABELS[layoutMode]}`}
               onClick={handleCycleLayoutMode}
               size="small"
               sx={{ opacity: 0.6 }}
@@ -1480,9 +1510,13 @@ const StickyNotesPage = () => {
               },
               "&.react-draggable-dragging": {
                 transition: "none !important",
-                outline: `2px solid ${theme.palette.primary.main}`,
-                borderRadius: "4px",
                 opacity: 0.9,
+                // Outline the note, not the grid cell, so a minimized bar
+                // does not drag an expanded-card frame.
+                "& > div": {
+                  outline: `2px solid ${theme.palette.primary.main}`,
+                  borderRadius: "4px",
+                },
               },
             },
             // Global handles sit above the card. Keep the corner and the top/right
@@ -1507,9 +1541,16 @@ const StickyNotesPage = () => {
         >
           {(() => {
             // Filter layout to match visible children — prevents RGL from dropping hidden note positions
-            const visibleLayout = layout.filter(
-              (item) => notes[item.i] && (filteredNoteIds === null || filteredNoteIds.has(item.i)),
-            );
+            const barRows = minimizedBarRows(ROW_HEIGHT_PX, CARD_MARGIN_PX);
+            const visibleLayout = layout
+              .filter(
+                (item) => notes[item.i] && (filteredNoteIds === null || filteredNoteIds.has(item.i)),
+              )
+              .map((item) =>
+                minimizedCards[item.i]
+                  ? { ...item, h: barRows, minH: barRows, maxH: barRows }
+                  : item,
+              );
             const isSearching = filteredNoteIds !== null;
             return (
             <ReactGridLayout
@@ -1529,8 +1570,17 @@ const StickyNotesPage = () => {
               allowOverlap={true}
               draggableHandle=".note-header"
               draggableCancel="button, input, textarea, select, option, .non-draggable, .note-content"
-              onDragStop={isSearching ? undefined : onLayoutChange}
-              onResizeStop={isSearching ? undefined : onLayoutChange}
+              onDragStart={isSearching ? undefined : () => {
+                draggingRef.current = true;
+                const live = { ...minimizedCardsRef.current };
+                // A toggle on this same press may already have stored the
+                // pre-flip flag. That bit wins over the live map.
+                dragMinRef.current = dragMinRef.current
+                  ? { ...live, ...dragMinRef.current }
+                  : live;
+              }}
+              onDragStop={isSearching ? undefined : (next) => commitGridLayout(next, true)}
+              onResizeStop={isSearching ? undefined : (next) => commitGridLayout(next, false)}
               resizeHandles={["s", "w", "e", "n", "sw", "nw", "se", "ne"]}
             >
             {visibleLayout
@@ -1553,7 +1603,9 @@ const StickyNotesPage = () => {
                     style={{
                       transition:
                         "transform 0.2s ease-out, box-shadow 0.2s ease-out",
-                      height: "100%",
+                      height: isMinimized ? "auto" : "100%",
+                      maxHeight: "100%",
+                      overflow: "hidden",
                     }}
                     onMouseDown={() => handleCardClick(noteId)}
                     onContextMenu={(e) => {

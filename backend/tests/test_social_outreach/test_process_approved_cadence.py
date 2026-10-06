@@ -1,6 +1,14 @@
 """Cadence + status guards for process-approved and approve/reject APIs."""
 from unittest.mock import patch
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _posting_needs_web_access(web_access_on):
+    """These tests post; posting is gated on web access being on."""
+
+
 
 def _use_test_app_context(monkeypatch, app):
     """Celery ticks call backend.app — bind them to the pytest app/db instead."""
@@ -164,3 +172,24 @@ def test_claim_approved_to_processing(app, client):
 
     r2 = client.post(f"/api/social-outreach/claim/{rid}")
     assert r2.status_code == 409
+
+
+def test_nothing_posts_with_web_access_off(app, monkeypatch):
+    from backend.models import Setting, SocialOutreachLog, db
+    from backend.tasks.social_outreach_tasks import tick_process_approved_drafts
+
+    _use_test_app_context(monkeypatch, app)
+    with app.app_context():
+        db.session.get(Setting, "allow_web_search").value = "false"
+        db.session.add(SocialOutreachLog(
+            platform="youtube", action="comment", status="approved", draft_text="hello",
+            target_url="https://www.youtube.com/watch?v=test123", target_thread_id="test123",
+        ))
+        db.session.commit()
+    with patch("backend.services.social_outreach.kill_switch.is_enabled", return_value=True), \
+         patch("backend.services.social_outreach.youtube_outreach.post_youtube_comment_via_servo") as mock_post:
+        out = tick_process_approved_drafts.run()
+    assert out == {"processed": 0, "reason": "web_access_off"}
+    mock_post.assert_not_called()
+    with app.app_context():
+        assert SocialOutreachLog.query.one().status == "approved"

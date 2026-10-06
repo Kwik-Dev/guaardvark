@@ -81,6 +81,56 @@ def kill():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@agent_control_bp.route("/steer", methods=["POST"])
+def steer():
+    """A note for the running task, read at its next step; the task keeps going.
+
+    Body: {"message": str, "session_id": str}. Answers {"queued": true} when
+    the running task took the note (also when the note was "stop", which ends
+    the task as the kill switch does), {"queued": false, "reason": ...} when
+    there is no running task for that chat. A queued note is saved to the
+    chat's history so it shows after a reload.
+    """
+    data = request.get_json(silent=True) or {}
+    message = (data.get("message") or "").strip()
+    session_id = (data.get("session_id") or "").strip() or None
+    if not message:
+        return jsonify({"success": False, "error": "message is required"}), 400
+    try:
+        from backend.services.agent_control_service import get_agent_control_service
+        out = get_agent_control_service().add_steer_note(message, session_id=session_id)
+    except Exception as e:
+        logger.error(f"Error queuing a note for the agent: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+    if out.get("queued") and session_id:
+        _save_note_to_history(session_id, message, stopping=bool(out.get("stopping")))
+    return jsonify({"success": True, **out})
+
+
+def _save_note_to_history(session_id: str, message: str, stopping: bool = False) -> None:
+    """The note as a user turn in the chat, marked so the UI shows it as one."""
+    try:
+        from datetime import datetime
+        from backend.models import db, LLMMessage, LLMSession
+        if db.session.get(LLMSession, session_id) is None:
+            return
+        db.session.add(LLMMessage(
+            session_id=session_id,
+            role="user",
+            content=message,
+            extra_data={"messageType": "agent_note", "agentNote": "stopping" if stopping else "sent"},
+            timestamp=datetime.now(),
+        ))
+        db.session.commit()
+    except Exception as e:
+        logger.warning(f"Agent note not saved to chat history: {e}")
+        try:
+            from backend.models import db
+            db.session.rollback()
+        except Exception:
+            pass
+
+
 @agent_control_bp.route("/execute", methods=["POST"])
 def execute_task():
     """Execute a task using vision-based agent control."""

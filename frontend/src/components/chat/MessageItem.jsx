@@ -34,6 +34,8 @@ import AgentThinkingTrail from "./AgentThinkingTrail";
 import OrchestratorPlanView from "../orchestrator/OrchestratorPlanView";
 import ImageLightbox from "../images/ImageLightbox";
 import NarrateButton from "../common/NarrateButton";
+import { agentNoteCaption } from "./agentNoteCaptions";
+
 
 const UPLOAD_BASE_URL = BASE_URL + "/uploads";
 
@@ -753,6 +755,14 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate }
             {typeof message.content === 'string' ? message.content : JSON.stringify(message.content, null, 2)}
           </ReactMarkdown>
         </Box>
+        )}
+        {isUser && message.agentNote && (
+          <Typography
+            variant="caption"
+            sx={{ display: "block", mt: 0.25, opacity: 0.85, fontStyle: "italic" }}
+          >
+            {agentNoteCaption(message.agentNote)}
+          </Typography>
         )}
         {message.truncated === true && (
           <Typography

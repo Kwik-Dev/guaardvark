@@ -20,7 +20,7 @@ import ChatBubbleOutlineIcon from "@mui/icons-material/ChatBubbleOutline";
 import HearingIcon from "@mui/icons-material/Hearing";
 import Tooltip from "@mui/material/Tooltip";
 import { useFloatingChatStore } from "../../stores/useFloatingChatStore";
-import UnifiedChatService from "../../api/unifiedChatService";
+import UnifiedChatService, { steerAgent } from "../../api/unifiedChatService";
 import StreamingMessage from "./StreamingMessage";
 import FloatingChatMessage from "./FloatingChatMessage";
 import { useUnifiedProgress } from "../../contexts/UnifiedProgressContext";
@@ -191,6 +191,10 @@ const FloatingChatCard = () => {
   const [resizeStart, setResizeStart] = useState({ x: 0, y: 0, w: 0, h: 0 });
   const [inputText, setInputText] = useState("");
   const [attachment, setAttachment] = useState(null);
+  // True while this chat's request is a live screen-agent run; the input
+  // then takes notes for the running task instead of new messages.
+  const [agentWorking, setAgentWorking] = useState(false);
+  const noteMode = isSending && agentWorking;
   const [attachmentMaxBytes, setAttachmentMaxBytes] = useState(null);
 
   const lastClickRef = useRef(0);
@@ -506,7 +510,45 @@ const FloatingChatCard = () => {
   };
 
   // Send with slash command interception
+  // Agent steps mark the run as live; it ends when sending does.
+  useEffect(() => {
+    const socket = socketRef?.current;
+    if (!socket || !sessionId) return;
+    const handleAgentStep = (data) => {
+      if (!data || data.session_id !== sessionId || data.source !== "agent_loop") return;
+      setAgentWorking(true);
+    };
+    socket.on("chat:thinking", handleAgentStep);
+    return () => {
+      socket.off("chat:thinking", handleAgentStep);
+    };
+  }, [socketRef?.current, sessionId]);
+  useEffect(() => {
+    if (!isSending) setAgentWorking(false);
+  }, [isSending]);
+
+  // A note for the running agent: shown at once, then handed to the task.
+  const handleChimeIn = async () => {
+    const text = inputText.trim();
+    if (!text) return;
+    pushHistory(text);
+    setInputText("");
+    const id = `note_${Date.now()}`;
+    addMessage({ id, role: "user", content: text, timestamp: new Date().toISOString(), agentNote: "sending" });
+    try {
+      const res = await steerAgent(sessionId, text);
+      updateMessage(id, { agentNote: res.queued ? (res.stopping ? "stopping" : "sent") : "late" });
+    } catch (err) {
+      console.error("FloatingChat: agent note failed:", err);
+      updateMessage(id, { agentNote: "failed" });
+    }
+  };
+
   const handleFloatingSend = async () => {
+    if (noteMode) {
+      await handleChimeIn();
+      return;
+    }
     if (slashCmds.isCommand) {
       const result = await slashCmds.executeCommand(inputText);
       if (result?.handled) {
@@ -914,7 +956,11 @@ const FloatingChatCard = () => {
               </Tooltip>
               <TextField
                 size="small"
-                placeholder="Type your message, paste an image, or use voice..."
+                placeholder={
+                  noteMode
+                    ? "Add a note for the agent — it keeps working"
+                    : "Type your message, paste an image, or use voice..."
+                }
                 value={inputText}
                 onChange={(e) => {
                   setInputText(e.target.value);
@@ -935,7 +981,7 @@ const FloatingChatCard = () => {
                     }
                   }
                 }}
-                disabled={isSending}
+                disabled={isSending && !noteMode}
                 multiline
                 maxRows={3}
                 inputRef={inputRef}
@@ -947,6 +993,20 @@ const FloatingChatCard = () => {
                   },
                 }}
               />
+              {noteMode && (
+                <Tooltip title="Send note to the agent (it keeps working)">
+                  <span>
+                    <IconButton
+                      onClick={handleChimeIn}
+                      disabled={!inputText.trim()}
+                      size="small"
+                      color="warning"
+                    >
+                      <SendIcon />
+                    </IconButton>
+                  </span>
+                </Tooltip>
+              )}
               <IconButton
                 onClick={isSending ? handleStop : handleFloatingSend}
                 disabled={!inputText.trim() && !attachment && !isSending}

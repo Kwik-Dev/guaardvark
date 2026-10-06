@@ -745,6 +745,11 @@ user_pref("browser.startup.homepage", "https://www.google.com/");
 user_pref("media.autoplay.default", 5);
 FIREFOXJS
             fi
+            # The template has no web access block; put the current one back.
+            local py="$GUAARDVARK_ROOT/backend/venv/bin/python"
+            [ -x "$py" ] || py="$(command -v python3)"
+            (cd "$GUAARDVARK_ROOT" && "$py" -m backend.utils.agent_web_gate apply --profile "$profile_dir") \
+                || echo "  WARN: could not apply the web access block"
             # Clean stale lock files
             rm -f "$profile_dir/lock" "$profile_dir/.parentlock" 2>/dev/null
             ;;

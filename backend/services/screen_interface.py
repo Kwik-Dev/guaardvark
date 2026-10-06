@@ -92,6 +92,12 @@ class ScreenInterface(ABC):
         attempt a click+click stand-in."""
         raise NotImplementedError("drag requires backend-specific support")
 
+    def stroke(self, points, button: str = "left", step_px: int = 6) -> Dict[str, Any]:
+        """Press at the first point, move through the rest in order, release:
+        one continuous mouse stroke, for drawing lines and curves. Backends
+        without it raise NotImplementedError."""
+        raise NotImplementedError("stroke requires backend-specific support")
+
     def hover(self, x: int, y: int, settle_ms: int = 200) -> Dict[str, Any]:
         """Move cursor and wait for hover-triggered UI (tooltips, menus) to
         render. Default just moves; backends should override to add the

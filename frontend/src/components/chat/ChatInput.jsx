@@ -44,7 +44,7 @@ import {
 } from "../../utils/chatAttachment";
 
 const ChatInput = forwardRef(
-  ({ onSendMessage, onStop, disabled = false, sessionId = "default", codeGenMode = false, onVoiceStateChange = () => { }, onAddMessage, onUpdateMessage, onClearMessages, onPlanCreated, projectId, composerError, onClearComposerError }, ref) => {
+  ({ onSendMessage, onStop, disabled = false, chimeIn = false, onChimeIn, sessionId = "default", codeGenMode = false, onVoiceStateChange = () => { }, onAddMessage, onUpdateMessage, onClearMessages, onPlanCreated, projectId, composerError, onClearComposerError }, ref) => {
     const [inputText, setInputText] = useState("");
     const fileRef = useRef(null);
     const inputRef = useRef(null);
@@ -937,10 +937,26 @@ Please try a different image or check if the vision model is properly loaded.`;
       };
     }, []);
 
+    // While the screen agent is working, the box stays open and what is
+    // typed goes to the running task as a note instead of a new message.
+    const noteMode = disabled && chimeIn && typeof onChimeIn === "function";
+
     const handleSend = async () => {
       // Capture what the user typed for terminal-style history before any
       // branch consumes/clears it.
       pushHistory(inputText);
+
+      if (noteMode) {
+        const note = (inputText || inputRef.current?.value || "").trim();
+        if (!note) return;
+        onChimeIn(note);
+        setInputText("");
+        if (inputRef.current) {
+          inputRef.current.value = "";
+          inputRef.current.focus();
+        }
+        return;
+      }
 
       // Check if there are images to analyze
       if (imageState.images.length > 0) {
@@ -1244,7 +1260,9 @@ Please try a different image or check if the vision model is properly loaded.`;
             fullWidth
             size="small"
             placeholder={
-              agentModeActive
+              noteMode
+                ? "Add a note for the agent — it reads it at its next step and keeps going"
+                : agentModeActive
                 ? "Describe a screen action — every message is a task while in agent mode"
                 : imageState.images.length > 0
                   ? "Ask about this image..."
@@ -1268,7 +1286,7 @@ Please try a different image or check if the vision model is properly loaded.`;
             onKeyPress={handleKeyPress}
             inputRef={inputRef}
             multiline
-            disabled={disabled || imageState.analyzing}
+            disabled={(disabled && !noteMode) || imageState.analyzing}
             sx={{ 
               minHeight: "40px",
               ...(agentModeActive && {
@@ -1287,6 +1305,21 @@ Please try a different image or check if the vision model is properly loaded.`;
               })
             }}
           />
+
+          {/* Send-note button, beside Stop, while the agent is working */}
+          {noteMode && (
+            <Tooltip title="Send note to the agent (it keeps working)">
+              <span>
+                <IconButton
+                  color="warning"
+                  onClick={handleSend}
+                  disabled={!inputText.trim()}
+                >
+                  <SendIcon />
+                </IconButton>
+              </span>
+            </Tooltip>
+          )}
 
           {/* Send button */}
           <Tooltip

@@ -185,6 +185,43 @@ class LocalScreenBackend(ScreenInterface):
             logger.error(f"{action_name} at ({x}, {y}) failed: {e}")
             return {"success": False, "error": str(e)}
 
+    def stroke(self, points, button: str = "left", step_px: int = 6) -> Dict[str, Any]:
+        """Press at the first point, move through the rest, release.
+
+        Between points the pointer moves in steps of about ``step_px`` so a
+        paint program sees a continuous line rather than a jump; 10 ms
+        between moves.
+        """
+        pts = [(int(p[0]), int(p[1])) for p in points]
+        if not pts:
+            return {"success": False, "error": "stroke needs at least one point"}
+        btn = self._BTN_MAP.get(button, "1")
+        try:
+            r = self._xdotool("mousemove", "--screen", "0", str(pts[0][0]), str(pts[0][1]))
+            if r.returncode != 0:
+                return {"success": False, "error": r.stderr.strip() or "mousemove failed"}
+            r = self._xdotool("mousedown", btn)
+            if r.returncode != 0:
+                return {"success": False, "error": r.stderr.strip() or "mousedown failed"}
+            try:
+                for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+                    n = max(1, int(max(abs(x1 - x0), abs(y1 - y0)) / max(1, step_px)))
+                    for i in range(1, n + 1):
+                        t = i / n
+                        self._xdotool("mousemove", "--screen", "0",
+                                      str(int(round(x0 + (x1 - x0) * t))),
+                                      str(int(round(y0 + (y1 - y0) * t))))
+                        time.sleep(0.01)
+            finally:
+                # Always release: a held button wedges the X session.
+                r = self._xdotool("mouseup", btn)
+            if r.returncode != 0:
+                return {"success": False, "error": r.stderr.strip() or "mouseup failed"}
+            return {"success": True, "action": "stroke", "points": len(pts)}
+        except Exception as e:
+            logger.error(f"Stroke failed: {e}")
+            return {"success": False, "error": str(e)}
+
     def drag(self, from_x: int, from_y: int, to_x: int, to_y: int,
              button: str = "left", duration_ms: int = 300) -> Dict[str, Any]:
         """Press at (from), interpolate smoothly to (to) over duration_ms,

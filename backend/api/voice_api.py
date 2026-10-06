@@ -502,6 +502,36 @@ def get_system_status():
             "error": str(e)
         }), 500
 
+def _kill_switch_web_access_off() -> dict:
+    """Turn web access off and make the agent browser follow. Never raises:
+    a failure here is reported, the rest of the kill switch still runs."""
+    out = {"allow_web_search": None}
+    try:
+        from backend.models import Setting, db
+        setting = db.session.get(Setting, "allow_web_search")
+        if setting:
+            setting.value = "false"
+        else:
+            db.session.add(Setting(key="allow_web_search", value="false"))
+        db.session.commit()
+        out["allow_web_search"] = False
+    except Exception as e:
+        try:
+            from backend.models import db
+            db.session.rollback()
+        except Exception:
+            pass
+        logger.error(f"Kill switch could not turn web access off: {e}")
+        out["error"] = f"could not turn web access off: {e}"
+    try:
+        from backend.utils.agent_web_gate import enforce
+        out["agent_browser"] = enforce(False, "kill switch")
+    except Exception as e:
+        logger.error(f"Kill switch could not close the agent browser: {e}")
+        out["agent_browser_error"] = str(e)
+    return out
+
+
 @voice_bp.route("/kill-all-processes", methods=["POST"])
 def kill_all_llm_processes():
     """Kill all active LLM processes (EMERGENCY KILL SWITCH)."""
@@ -516,10 +546,16 @@ def kill_all_llm_processes():
         
         # Get system status after killing
         after_status = process_monitor.get_system_status()
-        
+
+        # The kill switch also cuts outside access: web access goes off (it
+        # stays off until turned back on in Settings), the running screen
+        # task stops and the agent browser closes.
+        web_off = _kill_switch_web_access_off()
+
         return jsonify({
             "status": "success",
-            "message": "All LLM processes terminated",
+            "message": "All LLM processes terminated; web access turned off",
+            "web_access": web_off,
             "killed_processes": result["killed_processes"],
             "failed_processes": result["failed_processes"],
             "total_killed": result["total_killed"],

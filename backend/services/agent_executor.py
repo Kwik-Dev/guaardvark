@@ -401,7 +401,7 @@ class AgentExecutor:
 
             # Tool execution guard: circuit breaker + duplicate detection
             from backend.services.tool_execution_guard import ToolExecutionGuard
-            self._guard = ToolExecutionGuard(max_failures_per_tool=2)
+            self._guard = ToolExecutionGuard(max_failures_per_tool=2, scope="for the rest of this task")
 
             # Inject memory via the architecture (memory_contract + get_memories_for_context + FactsRegistry learnings).
             # Lean on durable AgentMemory (fact/lesson/belief) scored by contract, not legacy in-mem manager.

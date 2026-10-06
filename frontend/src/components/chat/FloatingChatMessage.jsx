@@ -12,6 +12,7 @@ import { alpha } from "@mui/material/styles";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import CheckIcon from "@mui/icons-material/Check";
 import ThinkingCard from "./ThinkingCard";
+import { agentNoteCaption } from "./agentNoteCaptions";
 
 /**
  * FloatingChatMessage - Renders an individual message item inside FloatingChatCard.
@@ -161,6 +162,14 @@ const FloatingChatMessage = ({ message, msg, formatTime }) => {
             >
               {m.content || ""}
             </Typography>
+            {m.agentNote && (
+              <Typography
+                variant="caption"
+                sx={{ display: "block", fontSize: "0.68rem", fontStyle: "italic", opacity: 0.85 }}
+              >
+                {agentNoteCaption(m.agentNote)}
+              </Typography>
+            )}
           </Box>
         </Box>
         {formattedTime && (

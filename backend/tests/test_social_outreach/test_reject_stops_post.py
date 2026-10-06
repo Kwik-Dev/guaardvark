@@ -18,6 +18,12 @@ from backend.tasks import social_outreach_tasks as tasks
 from backend.tools import outreach_tools
 from backend.utils.backend_http import BackendError, BackendResponse
 
+
+@pytest.fixture(autouse=True)
+def _posting_needs_web_access(web_access_on):
+    """These tests post; posting is gated on web access being on."""
+
+
 REDDIT_THREAD = "https://www.reddit.com/r/x/comments/abc/t/"
 
 

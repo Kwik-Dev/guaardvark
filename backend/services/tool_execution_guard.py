@@ -63,6 +63,7 @@ class ToolExecutionGuard:
         dedupe_completed: bool = True,
         breaker_cooldown_s: Optional[float] = None,
         history_limit: Optional[int] = None,
+        scope: str = "for this session",
     ):
         """
         dedupe_completed: True blocks a repeat of any call already made in the
@@ -73,7 +74,11 @@ class ToolExecutionGuard:
             A number lets one call through after that many seconds; if that
             call fails too, the breaker trips again.
         history_limit: how many call records to keep (None keeps all).
+        scope: how long this guard lives, as the block message words it. The
+            chat engine makes one guard per reply, so its blocks end with
+            the reply ("for the rest of this reply"), not the chat session.
         """
+        self._scope = scope
         self._max_failures = max_failures_per_tool
         self._max_failures_slow = max(max_failures_per_tool * 2, 4)  # Higher threshold for slow tools
         self._max_duplicates = max_duplicate_calls
@@ -138,7 +143,7 @@ class ToolExecutionGuard:
                 else:
                     fallback = FALLBACK_MAP.get(tool_name, "Try a different approach.")
                     pause = (
-                        "is disabled for this session" if remaining is None
+                        f"is disabled {self._scope}" if remaining is None
                         else f"is paused for {remaining:.0f} s"
                     )
                     reason = (

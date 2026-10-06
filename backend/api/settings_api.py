@@ -177,6 +177,14 @@ def get_web_access_route():
     return success_response({"allow_web_search": allow})
 
 
+def _screen_agent_running() -> bool:
+    try:
+        from backend.services.agent_control_service import get_agent_control_service
+        return bool(getattr(get_agent_control_service(), "_active", False))
+    except Exception:
+        return False
+
+
 @settings_bp.route("/web_access", methods=["POST"])
 def set_web_access():
     if not request.is_json:
@@ -184,13 +192,26 @@ def set_web_access():
     data = request.get_json() or {}
     # `web_access` is the canonical/CLI key; `allow_web_search` is the stored one.
     allow = _as_bool(_first_present(data, "allow_web_search", "web_access"))
+    if allow and _screen_agent_running():
+        # The agent's browser can open this app's own Settings page, and with
+        # web access off its first move was to go there (2026-10-03). Turning
+        # web access on is for a person, with the agent idle.
+        return error_response(
+            "Web access can't be turned on while the screen agent is running a task. "
+            "Stop the agent first.",
+            status_code=409,
+        )
     try:
         _write_bool_setting("allow_web_search", allow)
     except Exception as e:
         db.session.rollback()
         current_app.logger.error(f"Failed to update web access setting: {e}")
         return error_response("Failed to update setting", status_code=500)
-    return success_response({"allow_web_search": allow})
+    # The screen agent's browser follows the setting too; without this it
+    # kept reaching any site with web access off.
+    from backend.utils.agent_web_gate import enforce
+    agent_browser = enforce(allow, "Settings: web access")
+    return success_response({"allow_web_search": allow, "agent_browser": agent_browser})
 
 
 @settings_bp.route("/address_provider", methods=["GET"])

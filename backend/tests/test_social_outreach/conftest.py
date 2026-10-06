@@ -31,3 +31,13 @@ def db_session(app):
     """Database session that rolls back after test."""
     with app.app_context():
         yield db.session
+
+
+@pytest.fixture
+def web_access_on(app):
+    """Posting reaches an outside site, so it needs web access (Settings) on."""
+    from backend.models import Setting
+    with app.app_context():
+        db.session.add(Setting(key="allow_web_search", value="true"))
+        db.session.commit()
+    yield

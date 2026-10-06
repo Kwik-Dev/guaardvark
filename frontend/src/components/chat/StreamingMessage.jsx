@@ -159,6 +159,7 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
             iteration: data.iteration,
             label: data.status || "",
             reasoning: data.reasoning,
+            ...(data.kind ? { kind: data.kind } : {}),
           },
         ]);
       }

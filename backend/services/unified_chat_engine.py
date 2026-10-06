@@ -1977,7 +1977,7 @@ class UnifiedChatEngine:
     def _run_chat(self, session_id: str, message: str, options: Dict[str, Any],
                   emit_fn: Callable, request_id: str, steps: List) -> Dict[str, Any]:
         """Internal chat execution with app context assumed."""
-        from backend.utils.agent_output_parser import parse_tool_calls_xml, format_tool_result_for_llm
+        from backend.utils.agent_output_parser import parse_tool_calls_xml, format_tool_result_for_llm, failure_text
 
         # A host that supplies its own routing (options["skip_direct_intercepts"])
         # bypasses the pattern-matched shortcuts and lets the model choose.
@@ -2368,7 +2368,7 @@ class UnifiedChatEngine:
 
         # Tool execution guard: circuit breaker + duplicate detection
         from backend.services.tool_execution_guard import ToolExecutionGuard
-        guard = ToolExecutionGuard(max_failures_per_tool=2)
+        guard = ToolExecutionGuard(max_failures_per_tool=2, scope="for the rest of this reply")
 
         # LLM Debug: log system prompt and user message
         log_system_prompt("unified_chat", system_prompt, session_id=session_id)
@@ -2938,7 +2938,7 @@ class UnifiedChatEngine:
                 # Record result with guard for circuit breaker tracking
                 guard.record_result(tool_name, params, result.success, result.error, iteration)
                 log_tool_result("unified_chat", tool_name, result.success,
-                                out if result.success else (result.error or ""), iteration=iteration)
+                                out if result.success else failure_text(result), iteration=iteration)
 
                 if result.success:
                     tools_called = True
@@ -2952,7 +2952,7 @@ class UnifiedChatEngine:
                     "params": params,
                     "success": result.success,
                     "duration_ms": duration_ms,
-                    "output_preview": out[:preview_limit] if result.success else result.error,
+                    "output_preview": out[:preview_limit] if result.success else failure_text(result)[:preview_limit],
                 }
                 if job_i in artifacts_by_index:
                     step_call["artifact"] = artifacts_by_index[job_i]
@@ -2963,7 +2963,7 @@ class UnifiedChatEngine:
                     fallback = guard.suggest_fallback(tool_name)
                     fallback_msg = f" Alternative: {fallback}" if fallback else ""
                     formatted += (
-                        f"\n[TOOL ERROR: {tool_name} failed: {result.error}. "
+                        f"\n[TOOL ERROR: {tool_name} failed: {failure_text(result)[:300]}. "
                         f"Do NOT retry with the same parameters.{fallback_msg}]"
                     )
                 # Cap tool result text to reduce context bloat between iterations.

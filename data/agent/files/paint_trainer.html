@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Paint trainer — dots 0, strokes 0</title>
+<!--
+  A blank canvas for the screen agent's exact-point actions. A click leaves
+  a dot, a press-move-release draws a line. The window title carries the
+  count, for a runner to read with `xdotool getwindowname`:
+    "Paint trainer — dots N, strokes M"
+  Clear with the button or the C key. No network requests.
+-->
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #fff; font-family: Arial, sans-serif; }
+  #bar { position: fixed; top: 0; left: 0; right: 0; height: 36px; background: #eee; border-bottom: 1px solid #ccc;
+    display: flex; align-items: center; gap: 12px; padding: 0 12px; font-size: 14px; color: #333; z-index: 2; }
+  #clear { padding: 4px 10px; }
+  canvas { position: absolute; top: 37px; left: 0; cursor: crosshair; }
+</style>
+</head>
+<body>
+<div id="bar">Pencil · <span id="count">dots 0, strokes 0</span> <button id="clear" type="button">Clear</button></div>
+<canvas id="c"></canvas>
+<script>
+(function () {
+  "use strict";
+  var c = document.getElementById("c"), g = c.getContext("2d");
+  var dots = 0, strokes = 0, down = false, moved = false, last = null;
+  function size() { c.width = window.innerWidth; c.height = window.innerHeight - 37; }
+  function score() {
+    var s = "dots " + dots + ", strokes " + strokes;
+    document.getElementById("count").textContent = s;
+    document.title = "Paint trainer — " + s;
+  }
+  function at(e) { var r = c.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
+  c.addEventListener("mousedown", function (e) { down = true; moved = false; last = at(e); });
+  c.addEventListener("mousemove", function (e) {
+    if (!down) return;
+    var p = at(e);
+    g.strokeStyle = "#000"; g.lineWidth = 4; g.lineCap = "round";
+    g.beginPath(); g.moveTo(last.x, last.y); g.lineTo(p.x, p.y); g.stroke();
+    if (Math.abs(p.x - last.x) + Math.abs(p.y - last.y) > 0) moved = true;
+    last = p;
+  });
+  window.addEventListener("mouseup", function () {
+    if (!down) return;
+    down = false;
+    if (moved) { strokes += 1; } else {
+      g.fillStyle = "#000"; g.beginPath(); g.arc(last.x, last.y, 4, 0, 6.3); g.fill(); dots += 1;
+    }
+    score();
+  });
+  function clear() { g.clearRect(0, 0, c.width, c.height); dots = 0; strokes = 0; score(); }
+  document.getElementById("clear").addEventListener("click", clear);
+  document.addEventListener("keydown", function (e) { if (e.key === "c" || e.key === "C") clear(); });
+  window.addEventListener("resize", size);
+  size(); score();
+})();
+</script>
+</body>
+</html>

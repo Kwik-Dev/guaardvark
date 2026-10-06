@@ -32,10 +32,11 @@
     "description": "Add a comment to a YouTube video",
     "prerequisite": "Must be on a YouTube video page, signed in",
     "steps": [
-      {"status": "IN_PROGRESS", "action": "scroll", "scroll_amount": 5, "reasoning": "Hypothesis: Comments section is below the viewport. Scrolling to locate interaction site.", "expected_effect": "Comment section becomes visible"},
-      {"status": "IN_PROGRESS", "action": "click", "target_description": "the Add a comment text field", "reasoning": "Focus the comment input area.", "expected_effect": "Comment field is focused and expanded"},
-      {"status": "IN_PROGRESS", "action": "type", "text": "{comment_text}", "reasoning": "Enter the comment text.", "expected_effect": "Text appears in the comment field"},
-      {"status": "IN_PROGRESS", "action": "click", "target_description": "the Comment button", "reasoning": "Post the comment.", "expected_effect": "Comment is submitted and visible in the thread"},
+      {"status": "IN_PROGRESS", "action": "hotkey", "keys": ["Escape"], "reasoning": "Drop focus from the player or search box so keys reach the page.", "expected_effect": "Nothing focused on the page"},
+      {"status": "IN_PROGRESS", "action": "scroll", "scroll_amount": -5, "reasoning": "The comments are below the video. Negative scrolls down.", "expected_effect": "The 'Add a comment' box comes into view"},
+      {"status": "IN_PROGRESS", "action": "click", "target_description": "the Add a comment text field", "reasoning": "Focus the comment box before typing; typed keys anywhere else are YouTube shortcuts.", "expected_effect": "Comment box expands with Cancel and Comment buttons"},
+      {"status": "IN_PROGRESS", "action": "type", "text": "{comment_text}", "reasoning": "Enter the comment text into the focused box.", "expected_effect": "Text appears in the comment box"},
+      {"status": "IN_PROGRESS", "action": "hotkey", "keys": ["ctrl", "Return"], "reasoning": "Ctrl+Enter submits the YouTube comment box.", "expected_effect": "Comment is submitted and visible in the thread"},
       {"status": "COMPLETE", "action": "done", "reasoning": "Comment appears in the list. Task complete.", "success_proof": "The new comment text is visible in the comment thread"}
     ]
   },

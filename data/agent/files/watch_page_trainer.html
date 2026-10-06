@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Watch trainer — posted 0, shortcut keys 0</title>
+<!--
+  A video watch page for the screen agent, laid out like the sites it gets
+  sent to: the comment box sits below the fold, the "video" keeps moving, and
+  keys typed while no text field has focus act as single-key shortcuts
+  (k pause, c captions, t theater, f full screen, i miniplayer, m mute,
+  j/l seek, / search). Posting a comment needs: scroll down, click the
+  "Add a comment" box, type, then Comment or Ctrl+Enter.
+
+  The score is in the window title so a runner can read it with
+  `xdotool getwindowname` without touching the page:
+    "Watch trainer — posted N, shortcut keys M[, last: <text>]"
+  Nothing leaves the machine; the page has no network requests.
+-->
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: Arial, sans-serif; background: #0f0f0f; color: #f1f1f1; }
+  #masthead { position: fixed; top: 0; left: 0; right: 0; height: 56px; background: #0f0f0f;
+    display: flex; align-items: center; gap: 16px; padding: 0 16px; z-index: 10; }
+  #logo { font-weight: 800; font-size: 20px; color: #ff4e45; white-space: nowrap; }
+  #search { flex: 1; max-width: 520px; margin: 0 auto; height: 38px; border-radius: 19px;
+    border: 1px solid #303030; background: #121212; color: #fff; padding: 0 16px; font-size: 15px; }
+  #search:focus { outline: none; border-color: #3ea6ff; }
+  #page { padding: 72px 24px 40px; max-width: 960px; }
+  #player { position: relative; width: 100%; height: 470px; background: #000; border-radius: 12px; overflow: hidden; }
+  #player.theater { height: 560px; }
+  #player canvas { width: 100%; height: 100%; display: block; }
+  #captions { position: absolute; bottom: 36px; left: 0; right: 0; text-align: center; display: none; }
+  #captions span { background: rgba(0,0,0,.75); padding: 4px 8px; font-size: 20px; }
+  #player-state { position: absolute; top: 12px; right: 14px; font-size: 13px; color: #ccc; }
+  h1 { font-size: 20px; margin: 14px 0 8px; }
+  .channel { display: flex; align-items: center; gap: 10px; color: #aaa; font-size: 14px; }
+  .avatar { width: 36px; height: 36px; border-radius: 50%; background: #3a6; display: inline-block; }
+  #description { background: #272727; border-radius: 12px; padding: 12px; margin: 14px 0; font-size: 14px; line-height: 1.5; }
+  #comments { margin-top: 380px; }
+  #comments h2 { font-size: 20px; margin-bottom: 18px; }
+  #composer { display: flex; gap: 14px; align-items: flex-start; margin-bottom: 28px; }
+  #composer-body { flex: 1; }
+  #placeholder { width: 100%; padding: 10px 2px; border: none; border-bottom: 1px solid #555;
+    background: transparent; color: #aaa; font-size: 15px; text-align: left; cursor: text; }
+  #comment-text { display: none; width: 100%; min-height: 32px; padding: 6px 2px; border: none;
+    border-bottom: 2px solid #fff; background: transparent; color: #fff; font-size: 15px; resize: none; font-family: inherit; }
+  #comment-text:focus { outline: none; }
+  #composer-buttons { display: none; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+  #composer-buttons button { border: none; border-radius: 18px; padding: 9px 16px; font-size: 14px; cursor: pointer; }
+  #cancel { background: transparent; color: #fff; }
+  #submit { background: #3ea6ff; color: #0f0f0f; }
+  #submit:disabled { background: #272727; color: #717171; cursor: default; }
+  .comment { display: flex; gap: 14px; margin-bottom: 22px; font-size: 14px; }
+  .comment .who { font-weight: bold; font-size: 13px; margin-bottom: 4px; }
+  .comment.mine .who { color: #3ea6ff; }
+  #results { display: none; padding: 72px 24px; }
+  #results .row { height: 120px; margin-bottom: 16px; border-radius: 12px; background: #222; display: flex;
+    align-items: center; padding: 0 20px; font-size: 18px; color: #ccc; }
+  #mini { display: none; position: fixed; right: 16px; bottom: 16px; width: 300px; height: 170px;
+    background: #000; border-radius: 10px; overflow: hidden; z-index: 20; }
+  #mini canvas { width: 100%; height: 100%; }
+  #full { display: none; position: fixed; inset: 0; background: #000; z-index: 30; }
+  #full canvas { width: 100%; height: 100%; }
+  #score { position: fixed; left: 12px; bottom: 10px; font-size: 12px; color: #777; z-index: 40; }
+</style>
+</head>
+<body>
+<div id="masthead">
+  <div id="logo">▶ WatchTube</div>
+  <input id="search" type="text" placeholder="Search" autocomplete="off">
+</div>
+
+<div id="watch">
+  <div id="page">
+    <div id="player">
+      <canvas id="video" width="640" height="360"></canvas>
+      <div id="captions"><span>a one-click installer for local AI tools</span></div>
+      <div id="player-state">playing</div>
+    </div>
+    <h1>Free AI Video Generator on Your PC (No Subscriptions, No Limits)</h1>
+    <div class="channel"><span class="avatar"></span> Local Tools Weekly · 912K subscribers</div>
+    <div id="description">
+      How to run open-source video models on your own GPU, with no account and no cloud.
+      Chapters: install, first render, longer clips, upscaling.
+    </div>
+
+    <div id="comments">
+      <h2>214 Comments</h2>
+      <div id="composer">
+        <span class="avatar" style="background:#a64"></span>
+        <div id="composer-body">
+          <button id="placeholder" type="button">Add a comment...</button>
+          <textarea id="comment-text" rows="1"></textarea>
+          <div id="composer-buttons">
+            <button id="cancel" type="button">Cancel</button>
+            <button id="submit" type="button" disabled>Comment</button>
+          </div>
+        </div>
+      </div>
+      <div id="thread">
+        <div class="comment"><span class="avatar"></span><div><div class="who">@pixelpusher</div>Ran this on a 12 GB card, works fine at 480p.</div></div>
+        <div class="comment"><span class="avatar" style="background:#46a"></span><div><div class="who">@quietfox</div>The upscaling chapter saved me a lot of time.</div></div>
+        <div class="comment"><span class="avatar" style="background:#a4a"></span><div><div class="who">@renderbot</div>Does it handle longer clips than 5 seconds?</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="results">
+  <div class="row">Search results</div>
+  <div class="row">Another video you might like</div>
+  <div class="row">Another video you might like</div>
+</div>
+<div id="mini"><canvas id="mini-video" width="300" height="170"></canvas></div>
+<div id="full"><canvas id="full-video" width="640" height="360"></canvas></div>
+<div id="score"></div>
+
+<script>
+(function () {
+  "use strict";
+  var posted = 0, shortcuts = 0, last = "";
+  var playing = true, t = 0;
+  var $ = function (id) { return document.getElementById(id); };
+
+  function score() {
+    var s = "Watch trainer — posted " + posted + ", shortcut keys " + shortcuts;
+    if (last) s += ", last: " + last.slice(0, 60);
+    document.title = s;
+    $("score").textContent = "posted " + posted + " · shortcut keys " + shortcuts;
+  }
+
+  // The "video": a moving pattern, so the page always has an area that
+  // changes by itself, as a playing video does.
+  function draw(canvas) {
+    var c = canvas.getContext("2d"), w = canvas.width, h = canvas.height;
+    var g = c.createLinearGradient(0, 0, w, h);
+    g.addColorStop(0, "hsl(" + (t % 360) + ",60%,30%)");
+    g.addColorStop(1, "hsl(" + ((t + 120) % 360) + ",60%,45%)");
+    c.fillStyle = g; c.fillRect(0, 0, w, h);
+    c.fillStyle = "rgba(255,255,255,.8)";
+    for (var i = 0; i < 6; i++) {
+      var x = (t * 3 + i * 110) % (w + 60) - 30, y = h / 2 + Math.sin((t + i * 40) / 20) * h / 3;
+      c.beginPath(); c.arc(x, y, 18, 0, 6.3); c.fill();
+    }
+  }
+  function tick() {
+    if (playing) t += 1;
+    draw($("video")); draw($("mini-video")); draw($("full-video"));
+    requestAnimationFrame(tick);
+  }
+
+  function inTextField(el) {
+    return el && (el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && el.type === "text"));
+  }
+
+  function openComposer() {
+    $("placeholder").style.display = "none";
+    $("comment-text").style.display = "block";
+    $("composer-buttons").style.display = "flex";
+    $("comment-text").focus();
+  }
+  function closeComposer() {
+    $("comment-text").value = "";
+    $("submit").disabled = true;
+    $("comment-text").style.display = "none";
+    $("composer-buttons").style.display = "none";
+    $("placeholder").style.display = "block";
+  }
+  function post() {
+    var text = $("comment-text").value.trim();
+    if (!text) return;
+    var div = document.createElement("div");
+    div.className = "comment mine";
+    div.innerHTML = '<span class="avatar" style="background:#a64"></span><div><div class="who">@you</div></div>';
+    div.lastChild.appendChild(document.createTextNode(text));
+    $("thread").insertBefore(div, $("thread").firstChild);
+    posted += 1; last = text;
+    closeComposer(); score();
+  }
+
+  $("placeholder").addEventListener("click", openComposer);
+  $("cancel").addEventListener("click", closeComposer);
+  $("submit").addEventListener("click", post);
+  $("comment-text").addEventListener("input", function () {
+    $("submit").disabled = !this.value.trim();
+  });
+  $("comment-text").addEventListener("keydown", function (e) {
+    if (e.key === "Enter" && e.ctrlKey) { e.preventDefault(); post(); }
+  });
+
+  // Single-key shortcuts, only when no text field has focus.
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") {
+      $("full").style.display = "none";
+      if (document.activeElement) document.activeElement.blur();
+      return;
+    }
+    if (inTextField(document.activeElement) || e.ctrlKey || e.altKey || e.metaKey) return;
+    var k = e.key.toLowerCase(), hit = true;
+    if (k === "k" || k === " ") { playing = !playing; $("player-state").textContent = playing ? "playing" : "paused"; }
+    else if (k === "c") { var cap = $("captions"); cap.style.display = cap.style.display === "block" ? "none" : "block"; }
+    else if (k === "t") { $("player").classList.toggle("theater"); }
+    else if (k === "f") { $("full").style.display = $("full").style.display === "block" ? "none" : "block"; }
+    else if (k === "i") { $("watch").style.display = "none"; $("results").style.display = "block"; $("mini").style.display = "block"; window.scrollTo(0, 0); }
+    else if (k === "m") { $("player-state").textContent = "muted"; }
+    else if (k === "j" || k === "l" || (k >= "0" && k <= "9")) { t += (k === "j" ? -50 : 50); }
+    else if (k === "/") { e.preventDefault(); $("search").focus(); }
+    else hit = false;
+    if (hit) { shortcuts += 1; score(); }
+  });
+
+  score();
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

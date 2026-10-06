@@ -20,6 +20,12 @@ from backend.tools import outreach_tools
 from backend.utils.backend_http import BackendError, BackendResponse
 
 
+@pytest.fixture(autouse=True)
+def _posting_needs_web_access(web_access_on):
+    """These tests post; posting is gated on web access being on."""
+
+
+
 @pytest.fixture
 def draft_post(app, client, monkeypatch, tmp_path):
     """outreach_draft_post on the MCP path, wired to the test app's routes."""

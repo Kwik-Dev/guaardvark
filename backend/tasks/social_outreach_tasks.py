@@ -258,6 +258,11 @@ def tick_process_approved_drafts(self) -> dict:
         return {"processed": 0, "reason": "kill_switch_off"}
 
     def _run():
+        # Posting reaches an outside site, so web access (Settings) gates it
+        # like the scouting does; approved rows stay approved until it is on.
+        from backend.utils.settings_utils import web_access_block_reason
+        if web_access_block_reason("post approved outreach drafts"):
+            return {"processed": 0, "reason": "web_access_off"}
         from backend.models import SocialOutreachLog
         from backend.services.social_outreach import kill_switch, transitions
         from backend.services.social_outreach.reddit_outreach import post_comment_via_servo as reddit_post_comment, record_post_via_backend

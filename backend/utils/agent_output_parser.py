@@ -463,6 +463,20 @@ def _cap(text: str) -> str:
     return text
 
 
+def failure_text(result) -> str:
+    """Why a tool failed, in words: its error, else what it returned.
+
+    A failed result with output and no error used to reach the model as
+    "Error: None"; the screen agent's "Task failed: timeout" sat unread in
+    the output, and the model told the user the tool had been blocked.
+    """
+    error = str(result.error).strip() if result.error else ""
+    if error:
+        return error
+    output = str(result.output).strip() if result.output is not None else ""
+    return output or "the tool failed and gave no reason"
+
+
 def format_tool_result_for_llm(tool_name: str, result, format: str = 'json') -> str:
     """
     Format tool result for LLM observation.
@@ -492,7 +506,11 @@ def format_tool_result_for_llm(tool_name: str, result, format: str = 'json') -> 
             if result.metadata and tool_name not in ("generate_image", "generate_animation"):
                 obs["metadata"] = _compact_metadata(result.metadata)
         else:
-            obs["error"] = _cap(str(result.error))
+            obs["error"] = _cap(failure_text(result))
+            # A tool that failed can still have said why at length (the
+            # screen agent puts its stop reason and last steps there).
+            if result.output and result.error:
+                obs["output"] = _cap(relativize_local_paths(str(result.output)))
         return json.dumps(obs, default=str)
 
     # Legacy XML format (kept for unified_chat_engine)
@@ -512,7 +530,9 @@ def format_tool_result_for_llm(tool_name: str, result, format: str = 'json') -> 
     else:
         output = f"<observation tool='{tool_name}'>\n"
         output += f"Status: Failed\n"
-        output += f"Error: {result.error}\n"
+        output += f"Error: {_cap(failure_text(result))}\n"
+        if result.output and result.error:
+            output += f"Output:\n{_cap(relativize_local_paths(str(result.output)))}\n"
         output += "</observation>"
 
     return output

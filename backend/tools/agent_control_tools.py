@@ -36,6 +36,27 @@ def _prune_old_screenshots(directory: str, max_keep: int = MAX_SCREENSHOTS):
         pass  # non-critical housekeeping
 
 
+def _describe_steps(steps) -> str:
+    """One line per screen-agent step: what it did, where, and how it went."""
+    lines = []
+    for st in steps:
+        a = getattr(st, "action", None)
+        if a is None:
+            continue
+        r = getattr(st, "result", None) or {}
+        what = (a.target_description or a.text or "+".join(a.keys or []) or "").strip()
+        where = ""
+        if a.coordinates and tuple(a.coordinates) != (0, 0):
+            where = f" at ({a.coordinates[0]}, {a.coordinates[1]})"
+        if getattr(st, "failed", False):
+            how = r.get("refusal") or r.get("reason") or "failed"
+            status = f"FAILED: {how}"
+        else:
+            status = "ok, screen changed" if r.get("verified") else "ok, no visible change"
+        lines.append(f"- {a.action_type} {what[:60]!r}{where} — {status}")
+    return "\n".join(lines)
+
+
 def _ensure_agent_display():
     """Start the virtual display if needed and set DISPLAY for mss/xdotool."""
     from backend.utils.platform import os_name, screen_agent_available
@@ -179,12 +200,20 @@ class AgentTaskExecuteTool(BaseTool):
             if result.success:
                 output_parts.append(f"Task completed successfully in {len(result.steps)} steps ({round(result.total_time_seconds, 1)}s).")
             else:
-                output_parts.append(f"Task failed: {result.reason}")
+                output_parts.append(
+                    f"Task failed after {len(result.steps)} steps "
+                    f"({round(result.total_time_seconds, 1)}s): {result.reason}")
+                # Where the attempt actually went, so the caller can say what
+                # happened instead of guessing at a cause.
+                recent = _describe_steps(result.steps[-8:])
+                if recent:
+                    output_parts.append("Last steps:\n" + recent)
             if post_analysis:
                 output_parts.append(f"\nWhat I see on screen now:\n{post_analysis}")
 
             return ToolResult(
                 success=result.success,
+                error=None if result.success else f"Task failed: {result.reason}",
                 output="\n".join(output_parts),
                 metadata={
                     "steps": len(result.steps),

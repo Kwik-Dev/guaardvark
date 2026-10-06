@@ -43,7 +43,7 @@ import {
 } from "../api/sessionStateService";
 import { useAgentRouter } from "../hooks/useAgentRouter";
 import { routeAndExecute } from "../api/toolsService";
-import UnifiedChatService from "../api/unifiedChatService";
+import UnifiedChatService, { steerAgent } from "../api/unifiedChatService";
 import StreamingMessage from "../components/chat/StreamingMessage";
 import { useUnifiedProgress } from "../contexts/UnifiedProgressContext";
 import extractSpeakableText from "../utils/extractSpeakableText";
@@ -138,6 +138,10 @@ const ChatPage = () => {
   const [budgetTelemetry, setBudgetTelemetry] = useState(null);  // Phase 2.1: surface from TierTelemetry when agent mode
   const [unifiedChatService, setUnifiedChatService] = useState(null);
   const [isStreamingMessage, setIsStreamingMessage] = useState(false);
+  // True while this chat's request is a live screen-agent run (its loop has
+  // sent at least one step). The input stays open then and takes notes for
+  // the running task instead of new messages.
+  const [agentWorking, setAgentWorking] = useState(false);
 
   const [, setAgentLoopExecuting] = useState(false);
   const [, setAgentLoopMessageId] = useState(null);
@@ -198,6 +202,9 @@ const ChatPage = () => {
   const showBudget = useAppStore.getState().getSessionMode(sessionId) === "agent" && budgetTelemetry;
 
   const [isSending, setIsSending] = useState(false);
+  useEffect(() => {
+    if (!isSending) setAgentWorking(false);
+  }, [isSending]);
   const chatInputRef = useRef(null);
   const historyLoadedRef = useRef(false); // Track if we've already loaded history
   const historyLoadingRef = useRef(false); // Prevent concurrent history fetches
@@ -307,11 +314,18 @@ const ChatPage = () => {
       debugLog('[ChatPage] RAW-SOCKET chat:complete safety net: clearing isSending/isStreamingMessage for session=', data.session_id);
       setIsStreamingMessage(false);
       setIsSending(false);
+      setAgentWorking(false);
       streamingServiceRef.current = null;
     };
+    const handleAgentStep = (data) => {
+      if (!data || data.session_id !== sessionId || data.source !== "agent_loop") return;
+      setAgentWorking(true);
+    };
     socket.on("chat:complete", handleComplete);
+    socket.on("chat:thinking", handleAgentStep);
     return () => {
       socket.off("chat:complete", handleComplete);
+      socket.off("chat:thinking", handleAgentStep);
     };
   }, [socketRef?.current, sessionId]);
 
@@ -751,6 +765,7 @@ const ChatPage = () => {
                   // message.agentThinkingSteps directly.
                   toolCalls: hydratedSteps,
                   agentThinkingSteps: msg.agentThinkingSteps ?? msg.extra_data?.agentThinkingSteps,
+                  agentNote: msg.agentNote ?? msg.extra_data?.agentNote,
                   generatedImages: msg.generatedImages ?? msg.extra_data?.generatedImages,
                   thinking: msg.thinking ?? msg.extra_data?.thinking,
                   truncated: msg.truncated ?? msg.extra_data?.truncated,
@@ -851,6 +866,7 @@ const ChatPage = () => {
 
     setIsSending(false);
     setIsStreamingMessage(false);
+    setAgentWorking(false);
     streamingServiceRef.current = null;
     // Abort the backend chat + kill any running agent task
     fetch(`/api/chat/unified/${sessionId}/abort`, { method: 'POST' }).catch(() => {});
@@ -1122,6 +1138,33 @@ const ChatPage = () => {
       }
     },
     []
+  );
+
+  // A note typed while the agent works: shown in the thread at once, then
+  // handed to the running task. If the task has already finished, the
+  // bubble says so rather than the note silently going nowhere.
+  const handleChimeIn = useCallback(
+    async (text) => {
+      const id = `note_${Date.now()}`;
+      setMessages((prev) => [
+        ...prev,
+        { id, role: "user", content: text, timestamp: new Date().toISOString(), agentNote: "sending" },
+      ]);
+      const mark = (agentNote) =>
+        setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, agentNote } : m)));
+      try {
+        const res = await steerAgent(sessionId, text);
+        if (res.queued) {
+          mark(res.stopping ? "stopping" : "sent");
+        } else {
+          mark("late");
+        }
+      } catch (e) {
+        console.error("Agent note failed:", e);
+        mark("failed");
+      }
+    },
+    [sessionId]
   );
 
   const handleSendMessage = useCallback(
@@ -2427,6 +2470,8 @@ const ChatPage = () => {
         onSendMessage={handleSendMessage}
         onStop={handleStop}
         disabled={isSending}
+        chimeIn={isSending && agentWorking}
+        onChimeIn={handleChimeIn}
         sessionId={sessionId}
         projectId={projectId}
         composerError={composerError}

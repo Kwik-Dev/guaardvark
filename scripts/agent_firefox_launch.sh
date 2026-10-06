@@ -61,6 +61,17 @@ for lf in "$PROFILE_DIR/lock" "$PROFILE_DIR/.parentlock"; do
     [ -e "$lf" ] && rm -f "$lf"
 done
 
+# Web access (Settings) applies to this browser too: the managed block in
+# user.js either connects directly or refuses every outside request, local
+# pages excepted. Read from the running backend; unreachable means blocked.
+apply_web_gate() {
+    local py="$GUAARDVARK_ROOT/backend/venv/bin/python"
+    [ -x "$py" ] || py="$(command -v python3)"
+    (cd "$GUAARDVARK_ROOT" && "$py" -m backend.utils.agent_web_gate apply --profile "$1") \
+        || echo "  WARN: could not apply the web access block to $1"
+}
+apply_web_gate "$PROFILE_DIR"
+
 # CDP (Chrome DevTools Protocol) is opt-in. Google's sign-in flow probes for
 # the CDP signature independently of navigator.webdriver and shows "This
 # browser or app may not be secure" when it's on — see
