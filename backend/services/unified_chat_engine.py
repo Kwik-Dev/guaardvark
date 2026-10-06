@@ -1178,16 +1178,16 @@ def _pin_image_edit_tools(has_image: bool, selected: List[str], all_tool_names: 
     return extra + list(selected) if extra else selected
 
 
-_IMAGE_RETRY_PHRASES = (
-    "try again", "retry", "please retry", "try once more", "retry please",
+# The whole message is the retry ("try again", "retry please"); a question that
+# contains the word ("how do I retry a failed HTTP request?") is not one.
+_IMAGE_RETRY_RE = re.compile(
+    r"(?:please\s+)?(?:try\s+again|retry|try\s+once\s+more)(?:,?\s+please|\s+now)?\s*[.!?]*",
+    re.IGNORECASE,
 )
 
 
 def _is_image_retry_message(message: str) -> bool:
-    msg = (message or "").strip().lower()
-    if not msg:
-        return False
-    return any(phrase in msg for phrase in _IMAGE_RETRY_PHRASES)
+    return bool(_IMAGE_RETRY_RE.fullmatch((message or "").strip()))
 
 
 # Identity generate: new scene, same face. Must not steal "put a hat on this person".

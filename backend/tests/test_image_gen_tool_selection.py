@@ -353,6 +353,33 @@ class TestImageRetry:
             uce._SESSION_PENDING_IMAGE_PROMPT.pop(sid, None)
             uce._SESSION_PENDING_IMAGE_EDIT.pop(sid, None)
 
+    @pytest.mark.parametrize("message,is_retry", [
+        ("try again", True),
+        ("retry please", True),
+        ("Try again.", True),
+        ("how do I retry a failed HTTP request?", False),
+        ("can you try again with a blue sky", False),
+    ])
+    def test_only_a_short_retry_line_is_a_retry(self, message, is_retry):
+        from backend.services.unified_chat_engine import _is_image_retry_message
+        assert _is_image_retry_message(message) is is_retry
+
+    def test_a_question_about_retrying_does_not_re_render(self, monkeypatch):
+        import backend.services.unified_chat_engine as uce
+
+        sid = "retry-question"
+        calls = []
+        retry = self._retry_engine(monkeypatch, calls)
+        try:
+            uce._SESSION_PENDING_IMAGE_PROMPT[sid] = "a castle at dusk"
+            result = retry._try_image_generate_retry(
+                "how do I retry a failed HTTP request?", sid, {}, lambda *a: None, "req",
+            )
+            assert result is None
+            assert calls == []
+        finally:
+            uce._SESSION_PENDING_IMAGE_PROMPT.pop(sid, None)
+
 
 class TestVideoRequests:
     """A new clip starts only from a request for one, never from a question that mentions video."""
