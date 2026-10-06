@@ -8,9 +8,11 @@ against the same closed label set, then:
   1. On mismatch → one auto-regen with a strengthened framing lead (same planned slot).
   2. Always relabel the sample to what vision sees on the final image (honest UI).
 
-Never raises for vision failures. A check that could not run (missing image, vision
-error or timeout, unparseable reply, unknown label) returns match=None, "angle
-unverified": never counted as a match, so generate continues without claiming it.
+Never raises for vision failures. A check that could not run or whose reply could
+not be read (missing image, vision error or timeout, unparseable reply) returns
+ok=False and match=None, "angle unverified": never counted as a match, so generate
+continues without claiming it. When vision read the image but the plan has no
+known label, match is None as well, with the observed label still reported.
 """
 from __future__ import annotations
 
@@ -229,7 +231,9 @@ def verify_sample_angle(
     """Classify still and compare to plan. Does not mutate DB or regenerate.
 
     ``match`` is True or False only when the classifier read the image and both
-    labels are known; otherwise it is None (angle unverified).
+    labels are known; otherwise it is None. ``ok`` says whether the image was
+    read at all: ok=False is an unverified angle, while ok=True with match=None
+    means the plan had no known label to compare against.
     """
     clf = classify_image_angle(image_path, analyzer=analyzer)
     observed = clf.get("angle")

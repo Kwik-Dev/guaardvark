@@ -201,6 +201,24 @@ def test_a_regen_that_cannot_be_checked_is_unverified(tmp_path, monkeypatch):
     assert row.angle_state == "unverified"
 
 
+def test_an_unplanned_angle_takes_the_observed_label_as_verified(tmp_path, monkeypatch):
+    import backend.tasks.character_generation_tasks as cg
+    img = _tiny_png(tmp_path / "u.png")
+    render = MagicMock()
+    monkeypatch.setattr(cg, "_render_cast_still", render)
+    az = MagicMock()
+    az.analyze.return_value = _vision_reply("profile left")
+    row = _planned_row(angle="")
+
+    out = _verify_row(cg, row, img, az)
+
+    render.assert_not_called()
+    assert out["observed"] == "profile left"
+    assert row.angle == "profile left"
+    assert row.framing == "close-up"
+    assert row.angle_state == "verified"
+
+
 def test_a_checked_angle_is_verified(tmp_path):
     import backend.tasks.character_generation_tasks as cg
     img = _tiny_png(tmp_path / "v.png")

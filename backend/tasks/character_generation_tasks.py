@@ -203,11 +203,13 @@ def _verify_angle_relabel_regen(
     """Vision-check still vs planned angle; one regen on mismatch; relabel to what
     the final image shows.
 
-    Returns {match, regenerated, planned, observed, model}. ``match`` is None when
-    the final image's angle could not be checked ("angle unverified"): no regen,
-    the planned label stays, and ``row.angle_state`` is left 'unverified' so the
-    training gate keeps the sample out of its framing tally. Non-fatal on vision
-    errors.
+    Returns {match, regenerated, planned, observed, model}. When the check could
+    not run or its reply could not be read ("angle unverified"), observed and
+    match are None: no regen, the planned label stays, and ``row.angle_state`` is
+    left 'unverified' so the training gate keeps the sample out of its framing
+    tally. When vision read the image but the plan has no known label, match is
+    None too, and the sample takes the observed label as verified. Non-fatal on
+    vision errors.
     """
     from backend.services.character_angle_verify import (
         ANGLE_UNVERIFIED,
@@ -244,14 +246,17 @@ def _verify_angle_relabel_regen(
         )
         return result
 
+    def _read(v: dict) -> bool:
+        return bool(v.get("ok") and v.get("observed"))
+
     v1 = _check()
     result["model"] = v1.get("model")
-    if v1.get("match") is None:
+    if not _read(v1):
         return _unverified(v1.get("error"))
-    result["observed"] = v1.get("observed")
-    result["match"] = v1["match"]
+    result["observed"] = v1["observed"]
+    result["match"] = v1.get("match")
 
-    if v1["match"] is False:
+    if v1.get("match") is False:
         log.info(
             "Character Generator: angle mismatch sample %s planned=%r observed=%r — regen once",
             row.index, planned, v1.get("observed"),
@@ -284,11 +289,11 @@ def _verify_angle_relabel_regen(
             result["regenerated"] = True
             v2 = _check()
             result["model"] = v2.get("model") or result["model"]
-            if v2.get("match") is None:
+            if not _read(v2):
                 # The regen replaced the pixels v1 described, so its label no longer applies.
                 return _unverified(v2.get("error"))
-            result["observed"] = v2.get("observed")
-            result["match"] = v2["match"]
+            result["observed"] = v2["observed"]
+            result["match"] = v2.get("match")
 
     # Honest UI label = what the final pixels show
     apply_relabel(row, result["observed"])
