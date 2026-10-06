@@ -171,7 +171,7 @@ def _no_dispatch_and_no_gpu(monkeypatch):
     monkeypatch.setattr(ProductionService, "dispatch_agent", lambda self, prod_id, agent: None)
     monkeypatch.setattr(
         "backend.services.video_model_registry.resolve_active_video_model",
-        lambda role, explicit=None, surface=None: (explicit or "wan22-5b", None),
+        lambda role, explicit=None, surface=None, comfyui_down_ok=False: (explicit or "wan22-5b", None),
     )
 
 
