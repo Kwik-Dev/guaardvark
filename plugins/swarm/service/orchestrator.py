@@ -109,6 +109,9 @@ class SwarmOrchestrator:
         self._retries: dict[str, int] = {}
         self.max_retries = 2
 
+        # main backend API, set at launch; handed to the diagnostic agent
+        self._backend_url = ""
+
         # threading for async operation
         self._thread: threading.Thread | None = None
         self._cancel_event = threading.Event()
@@ -207,10 +210,7 @@ class SwarmOrchestrator:
             backend_url=backend_url
         )
 
-        self._diagnostic_agent = None
-        if self.config.enable_diagnostic_agent:
-            from .diagnostic_agent import DiagnosticAgent
-            self._diagnostic_agent = DiagnosticAgent(backend_url)
+        self._backend_url = backend_url
 
         # Set up inter-agent communication bus
         from .communication_bus import CommunicationBus
@@ -527,11 +527,7 @@ class SwarmOrchestrator:
             logger.debug(f"Could not record base HEAD for {task.id}: {e}")
 
         # spawn the agent
-        config_dict = {
-            "command": backend_config.command,
-            "args": backend_config.args,
-            "model": backend_config.model,
-        }
+        config_dict = self._backend_call_config(backend_config)
         process = backend.spawn(wt_info.worktree_path, task, config_dict)
 
         task.status = SwarmStatus.RUNNING
@@ -604,12 +600,13 @@ class SwarmOrchestrator:
                     })
                 else:
                     # Retries exhausted — try one last-ditch diagnosis if enabled
-                    if self._diagnostic_agent and task.worktree_path:
+                    diagnostic_agent = self._diagnostic_agent_for(task) if task.worktree_path else None
+                    if diagnostic_agent:
                         logger.warning(f"Task '{task_id}' retries exhausted — invoking DiagnosticAgent...")
                         self._emit_event("task_diagnostic_start", task_id, {"reason": "retries_exhausted"})
-                        
+
                         logs = self.get_task_logs(task_id, lines=200)
-                        fixed = self._diagnostic_agent.run_diagnosis(
+                        fixed = diagnostic_agent.run_diagnosis(
                             task.worktree_path,
                             task.title,
                             task.description,
@@ -721,6 +718,42 @@ class SwarmOrchestrator:
                 logger.debug(f"Initialized backend: {name}")
             else:
                 logger.warning(f"Unknown backend '{name}' in config — skipping")
+
+    @staticmethod
+    def _backend_call_config(backend_config) -> dict[str, Any]:
+        """The per-call settings a backend's spawn() and command_prefix() read."""
+        return {
+            "command": backend_config.command,
+            "args": backend_config.args,
+            "model": backend_config.model,
+        }
+
+    def _diagnostic_agent_for(self, task: SwarmTask):
+        """A DiagnosticAgent on the backend that ran this task, or None.
+
+        Off unless enable_diagnostic_agent is set. It never switches backend,
+        so a task that ran locally is diagnosed locally, and a backend that
+        needs internet is never used while the swarm is in Flight Mode.
+        """
+        if not self.config.enable_diagnostic_agent or not task.backend_name:
+            return None
+        backend_config = self.config.backends.get(task.backend_name)
+        backend = self._backends.get(task.backend_name)
+        if backend_config is None or backend is None:
+            return None
+        flight_mode = self.config.flight_mode or bool(self.result and self.result.flight_mode)
+        if flight_mode and (backend_config.requires_internet or backend.requires_internet):
+            logger.info(
+                f"No diagnosis for '{task.id}': {task.backend_name} needs internet "
+                f"and the swarm is in Flight Mode"
+            )
+            return None
+        try:
+            command = backend.command_prefix(self._backend_call_config(backend_config))
+        except NotImplementedError:
+            return None
+        from .diagnostic_agent import DiagnosticAgent
+        return DiagnosticAgent(self._backend_url, command)
 
     def _find_task(self, task_id: str) -> SwarmTask | None:
         if not self.result:
