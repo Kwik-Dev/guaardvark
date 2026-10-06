@@ -33,7 +33,7 @@ Work the whole sync **read-only first**, then present numbers, then act.
 ## Preflight (read-only)
 
 ```bash
-cd /Users/ymmtny/GitHub/guaardvark
+cd "$(git rev-parse --show-toplevel)"   # the checkout root
 git remote -v                     # confirm origin=Kwik-Dev, upstream=guaardvark
 git fetch upstream --tags
 git rev-list --left-right --count main...upstream/main         # want "0  <N>"
@@ -189,14 +189,14 @@ What actually catches merge damage, in order of value:
 # backend
 cd /tmp/cloudplus-sync/backend
 python3 -m py_compile <changed .py files>                      # fast, catches syntax
-ln -s /Users/ymmtny/GitHub/guaardvark/backend/venv venv
+ln -s <repo>/backend/venv venv                                 # <repo> = this checkout's root
 ./venv/bin/python -m pytest tests/api/test_cast_library_api.py \
     tests/services/test_comfyui_idle_model_free.py \
     tests/services/test_character_still_pipeline.py -q         # the files you resolved
 
 # frontend
 cd /tmp/cloudplus-sync/frontend
-ln -s /Users/ymmtny/GitHub/guaardvark/frontend/node_modules node_modules
+ln -s <repo>/frontend/node_modules node_modules                # <repo> = this checkout's root
 npx eslint . --ext js,jsx                                     # catches merge artifacts
 npx vite build
 npx vitest run
