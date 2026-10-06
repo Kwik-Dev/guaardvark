@@ -11,7 +11,7 @@ history test uses an in-memory SQLite app. No network, no live database.
 """
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -100,8 +100,9 @@ class TestOfferWebSearch:
             raise AssertionError("classified again")
 
         monkeypatch.setattr(ic.intent_classifier, "classify_intent", _no_second_classification)
-        assert offer_web_search("is it on?", intent_type=IntentType.WEB_SEARCH)["action"] == "search"
-        assert offer_web_search("is it on?", intent_type=IntentType.DATABASE_QUERY) is None
+        question = "what's the score of the game tonight?"
+        assert offer_web_search(question, intent_type=IntentType.WEB_SEARCH)["action"] == "search"
+        assert offer_web_search(question, intent_type=IntentType.DATABASE_QUERY) is None
 
 
 # ── Unified chat ────────────────────────────────────────────────────────────
@@ -300,7 +301,7 @@ class TestEnhancedChatOffer:
     def offered(self, eca, monkeypatch):
         calls = []
 
-        def _offer(message, intent_type=None):
+        def _offer(message, intent_type=None, reply=None):
             calls.append((message, intent_type))
             return {"action": "search", "query": message}
 
@@ -326,7 +327,7 @@ class TestEnhancedChatOffer:
         assert offered == []
 
     def test_a_failing_offer_leaves_the_reply_alone(self, eca, monkeypatch):
-        def _broken(message, intent_type=None):
+        def _broken(message, intent_type=None, reply=None):
             raise RuntimeError("classifier unavailable")
 
         monkeypatch.setattr(eca, "offer_web_search", _broken)
@@ -416,3 +417,41 @@ def history_client(eca):
 def test_history_keeps_the_offer_under_its_reply(history_client):
     message = history_client.get("/api/enhanced-chat/s1/history").get_json()["messages"][0]
     assert message["web_search_offer"] == {"action": "search", "query": "who won the game last night?"}
+
+
+# The chip sits under the reply, so it must not appear for ordinary questions:
+# the web-search keywords alone fire on "check my code" or "find my invoice".
+@pytest.mark.parametrize("message", [
+    "check my code",
+    "find my invoice from March",
+    "how do I update my python packages",
+    "make me a song about now",
+    "what is the capital of France",
+    "who is Ada Lovelace",
+])
+def test_ordinary_questions_get_no_offer(message):
+    from backend.utils import intent_classifier as ic
+    with patch("backend.utils.settings_utils.get_web_access", return_value=True):
+        assert ic.offer_web_search(message) is None
+
+
+@pytest.mark.parametrize("message", [
+    "who won the game last night?",
+    "what's the weather in Boston today",
+    "bitcoin price today",
+])
+def test_current_information_questions_get_the_offer(message):
+    from backend.utils import intent_classifier as ic
+    with patch("backend.utils.settings_utils.get_web_access", return_value=True):
+        assert ic.offer_web_search(message) == {"action": ic.WEB_SEARCH_OFFER_SEARCH, "query": message}
+
+
+@pytest.mark.parametrize("reply, offered", [
+    ("As of my last update in 2024, the population was about 8 billion.", True),
+    ("I don't have access to real-time information, so I can't give the current price.", True),
+    ("Paris is the capital of France.", False),
+])
+def test_a_reply_that_lacks_current_facts_brings_the_offer(reply, offered):
+    from backend.utils import intent_classifier as ic
+    with patch("backend.utils.settings_utils.get_web_access", return_value=True):
+        assert (ic.offer_web_search("what is the population of earth", reply=reply) is not None) is offered

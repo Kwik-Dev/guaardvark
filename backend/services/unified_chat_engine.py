@@ -3507,7 +3507,7 @@ class UnifiedChatEngine:
             except Exception:
                 logger.exception("[UNIFIED_ENGINE] finalize_fn failed; keeping the model's draft")
 
-        web_search_offer = self._web_search_offer(message, steps, session_id)
+        web_search_offer = self._web_search_offer(message, steps, session_id, reply=accumulated_response)
 
         # 7. Emit complete
         emit_fn("chat:complete", {
@@ -3582,7 +3582,7 @@ class UnifiedChatEngine:
         }
 
     def _web_search_offer(self, message: str, steps: List[Dict[str, Any]],
-                          session_id: str) -> Optional[Dict[str, str]]:
+                          session_id: str, reply: Optional[str] = None) -> Optional[Dict[str, str]]:
         """The reply's offer to search the web for ``message`` (offer_web_search),
         or None. Nothing is offered once a web tool has answered this turn, for
         facts a host supplied for the turn, or for a stopped turn."""
@@ -3594,7 +3594,7 @@ class UnifiedChatEngine:
                     return None
         try:
             from backend.utils.intent_classifier import offer_web_search
-            return offer_web_search(message)
+            return offer_web_search(message, reply=reply)
         except Exception as e:
             logger.debug(f"Web search offer skipped: {e}")
             return None

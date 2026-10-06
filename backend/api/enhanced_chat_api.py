@@ -1648,7 +1648,8 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
     # _perform_web_search_safe outcomes that sent nothing to the search engine.
     _WEB_SEARCH_NOT_SENT = ("disabled", "skipped_length")
 
-    def _web_search_offer(self, message: str, intent_type, web_search_result: Optional[Dict[str, Any]]) -> Optional[Dict[str, str]]:
+    def _web_search_offer(self, message: str, intent_type, web_search_result: Optional[Dict[str, Any]],
+                          reply: Optional[str] = None) -> Optional[Dict[str, str]]:
         """The reply's offer to search the web for ``message`` (offer_web_search),
         or None. A turn that sent a search offers nothing."""
         if offer_web_search is None:
@@ -1656,7 +1657,7 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
         if web_search_result and web_search_result.get("strategy_used") not in self._WEB_SEARCH_NOT_SENT:
             return None
         try:
-            return offer_web_search(message, intent_type=intent_type)
+            return offer_web_search(message, intent_type=intent_type, reply=reply)
         except Exception as e:
             logger.debug(f"Web search offer skipped: {e}")
             return None
@@ -3491,6 +3492,11 @@ You are analyzing code files. When responding to questions about code:
                     logger.info("Used emergency response for context overflow")
                     simple_mode = True
                     rag_context = []
+
+            # The reply can show the model lacks current facts; ask again with it.
+            if not simple_mode:
+                web_search_offer = self._web_search_offer(message, intent_type, web_search_result,
+                                                          reply=full_response)
 
             # Save assistant response
             logger.info(f"Enhanced chat: Saving assistant response...")
