@@ -2531,27 +2531,39 @@ class AgentControlService:
     def _check_early_done(task: str, display: Optional[str] = None) -> str:
         """Check if the task goal is obviously met based on desktop state.
 
-        Returns a reason string if done, empty string if not.
+        Returns a reason string if done, empty string if not or if the
+        desktop state could not be read.
         Fast check (<20ms) — no vision model, just xdotool queries.
         """
         import re as _re
         task_lower = task.lower()
         desktop = AgentControlService._get_desktop_state(display=display)
+        # An unread desktop lists no windows, which would look like every app had closed.
+        if desktop.startswith("Desktop state: unknown"):
+            return ""
+        titles = "\n".join(
+            line for line in desktop.splitlines() if line.lstrip().startswith("- ")
+        ).lower()
 
         # "Close X" tasks: if no windows are open, we're done
-        if _re.search(r'\b(?:close|quit|exit|kill|shut\s*down|stop)\b', task_lower):
+        if _re.search(r'\b(?:close|quit|exit|kill|shut\s*down)\b', task_lower):
             if "No application windows open" in desktop:
                 return "no windows open — target closed"
 
-            # If closing a specific app, check if that app is gone
-            for app in ("firefox", "chrome", "chromium", "browser", "terminal"):
-                if app in task_lower and app.capitalize() not in desktop.lower():
+            # Terminal titles read "user@host: ~", so a terminal can't be told apart by title.
+            for app, window_names in (
+                ("firefox", ("firefox",)),
+                ("chromium", ("chromium", "chrome")),
+                ("chrome", ("chrome", "chromium")),
+                ("browser", ("firefox", "chromium", "chrome")),
+            ):
+                if app in task_lower and not any(name in titles for name in window_names):
                     return f"{app} no longer visible"
 
         # "Open X" tasks: if the target app is now visible
         if _re.search(r'\b(?:open|start|launch)\b', task_lower):
             for app in ("firefox", "chrome", "chromium", "terminal"):
-                if app in task_lower and app.lower() in desktop.lower():
+                if app in task_lower and app in titles:
                     return f"{app} is now open"
 
         return ""

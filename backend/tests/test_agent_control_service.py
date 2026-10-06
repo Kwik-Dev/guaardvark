@@ -805,3 +805,44 @@ class TestSeenMeansListed(unittest.TestCase):
         svc._stuck_target, svc._stuck_target_count = "Subscribe button", 2
         svc._record_expectation_contradictions([], "WORLD_OBSERVED:\n- Red Subscribe buttons row\n")
         self.assertEqual(svc._expectation_log, [])
+
+
+class TestCheckEarlyDone(unittest.TestCase):
+    """A screen task ends early only when the window list shows its goal is
+    met; a desktop that could not be read never ends one."""
+
+    FIREFOX = "Desktop state — currently open:\n  - Google — Mozilla Firefox (1280x720 at (0,0))"
+    CHROMIUM = "Desktop state — currently open:\n  - New Tab - Chromium (1280x720 at (0,0))"
+    EMPTY = "Desktop state: No application windows open. Desktop is empty."
+    UNKNOWN = "Desktop state: unknown (query failed)"
+
+    def _check(self, task, desktop):
+        from backend.services.agent_control_service import AgentControlService as A
+        with patch.object(A, "_get_desktop_state", staticmethod(lambda display=None: desktop)):
+            return A._check_early_done(task)
+
+    def test_close_firefox_not_done_while_open(self):
+        self.assertEqual(self._check("close firefox", self.FIREFOX), "")
+
+    def test_close_firefox_done_when_gone(self):
+        self.assertEqual(self._check("close firefox", self.CHROMIUM), "firefox no longer visible")
+
+    def test_close_browser_not_done_while_chromium_open(self):
+        self.assertEqual(self._check("close the browser", self.CHROMIUM), "")
+
+    def test_close_chrome_not_done_while_chromium_open(self):
+        self.assertEqual(self._check("close chrome", self.CHROMIUM), "")
+
+    def test_stop_is_not_close_verb(self):
+        self.assertEqual(self._check("find the bus stop on the map", self.EMPTY), "")
+        self.assertEqual(self._check("stop the video", self.EMPTY), "")
+
+    def test_unknown_state_never_done(self):
+        for task in ("close firefox", "close all windows", "open firefox"):
+            self.assertEqual(self._check(task, self.UNKNOWN), "", task)
+
+    def test_close_all_empty_desktop_done(self):
+        self.assertEqual(self._check("close all windows", self.EMPTY), "no windows open — target closed")
+
+    def test_open_firefox_done_when_visible(self):
+        self.assertEqual(self._check("open firefox", self.FIREFOX), "firefox is now open")
