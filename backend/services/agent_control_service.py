@@ -4059,6 +4059,9 @@ Reply ONLY with JSON:
         # becomes visible." left "becomes" over, missed the window check and
         # went to the vision model, which said no for 12s with Firefox up.
         "become", "becomes", "appeared", "displayed", "shown",
+        # "URL address bar": browser chrome, not page content. With a blank
+        # page loaded the eye said no to it for 15s while Firefox was up.
+        "address",
         # Generic UI ACTION/label words — present on countless pages, so a match on
         # these alone must not confirm that a specific effect actually happened.
         "submit", "comment", "reply", "post", "send", "search", "save", "cancel",
