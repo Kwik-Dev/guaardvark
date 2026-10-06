@@ -191,6 +191,40 @@ class TestRecallQueryKeywords(_MemoryDbCase):
         self.assertEqual(self._recall_ids(query), [])
 
 
+class TestWholeWordRecall(_MemoryDbCase):
+    """A memory is recalled for a query only when it shares a whole word."""
+
+    QUESTION = "what do I know about art?"
+
+    def test_art_does_not_match_start(self):
+        from backend.services.memory_contract import memory_match_score
+        self.assertEqual(memory_match_score("start the backend with start.sh", [], self.QUESTION), 0.0)
+        self.assertGreater(memory_match_score("I collect art deco posters", [], self.QUESTION), 0.0)
+
+    def test_plurals_possessives_paths_and_tags_still_match(self):
+        from backend.services.memory_contract import memory_match_score
+        self.assertGreater(memory_match_score("Two notebooks on the desk", [], "notebook"), 0.0)
+        self.assertGreater(memory_match_score("Sam's laptop is grey", [], "sam"), 0.0)
+        self.assertGreater(memory_match_score("start the backend with start.sh", [], "run start.sh"), 0.0)
+        self.assertGreater(memory_match_score("Use the llama cache", ["tokenizer"], "tokenizer"), 0.0)
+
+    def test_a_memory_sharing_no_word_with_the_query_is_left_out(self):
+        self._mem("start", "start the backend with start.sh", mem_type="note")
+        self._mem("art", "I collect art deco posters")
+        # A fact at 0.85 or above is always-on: it joins every recall.
+        self._mem("always", "The office wifi network is called Lighthouse", importance=0.9)
+
+        ids = self._recall_ids(self.QUESTION)
+        self.assertIn("art", ids)
+        self.assertIn("always", ids)
+        self.assertNotIn("start", ids)
+        self.assertEqual(self._recall_ids(self.QUESTION, include_always_on=False), ["art"])
+
+    def test_a_query_with_no_keyword_still_lists_top_memories(self):
+        self._mem("meeting", "The team meeting is on Tuesday at noon")
+        self.assertEqual(self._recall_ids("what is it?"), ["meeting"])
+
+
 @unittest.skipUnless(_HAS_SELF_IMPROVEMENT, "self_improvement_service unavailable (flask_sqlalchemy missing)")
 class TestSelfImprovementDefaults(unittest.TestCase):
     """Default-on analysis, default-blocked apply, user kill-switch unchanged.

@@ -19,7 +19,10 @@ from __future__ import annotations
 import json
 import math
 import re
+from functools import lru_cache
 from typing import Any
+
+from backend.services.intent_service import find_keywords, whole_word_pattern
 
 MEMORY_TYPES = {
     "fact",
@@ -179,12 +182,23 @@ def query_tokens(text: str | None) -> set[str]:
     return set(query_terms(text))
 
 
+@lru_cache(maxsize=256)
+def _keywords_pattern(tokens: frozenset[str]):
+    return whole_word_pattern(tokens)
+
+
 def memory_match_score(content: str, tags: list[str], query: str | None) -> float:
+    """The share of the query's keywords found in a memory's content or tags.
+
+    Keywords match whole words ("art" is not found in "start"); a possessive
+    ("Sam's"), and a plural of a keyword of four or more letters, still count,
+    as `whole_word_pattern` defines. 0.0 means the memory shares no keyword.
+    """
     tokens = query_tokens(query)
     if not tokens:
         return 0.0
     haystack = f"{content or ''} {' '.join(tags or [])}".lower()
-    hits = sum(1 for token in tokens if token in haystack)
+    hits = len(find_keywords(_keywords_pattern(frozenset(tokens)), haystack))
     if hits == 0:
         return 0.0
     return min(1.0, hits / max(3, len(tokens)))

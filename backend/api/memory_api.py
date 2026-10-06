@@ -582,6 +582,12 @@ def _query_memories(
     read-only search passes False.
 
     min_importance drops rows below that importance, always-on rows included.
+
+    A query with keywords recalls only rows that share at least one of them as
+    a whole word (memory_match_score above 0); the ILIKE prefilter alone would
+    let "art" through on "start", and importance and recency would fill the
+    remaining slots with unrelated rows. Always-on rows are exempt. A query
+    with no keyword ("what is it?") ranks rows as if none were given.
     """
     try:
         q = db.session.query(AgentMemory)
@@ -704,6 +710,11 @@ def _query_memories(
             ).limit(3).all()
 
         ranked = sorted(candidates, key=score, reverse=True)
+        if query_terms(recall_query):
+            ranked = [
+                memory for memory in ranked
+                if memory_match_score(memory.content or "", normalize_tags(memory.tags), recall_query) > 0
+            ]
         selected = []
         seen = set()
         for memory in always_on + ranked:
