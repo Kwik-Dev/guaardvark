@@ -2459,6 +2459,16 @@ class AgentControlService:
         try:
             import re as _re
 
+            # A display that cannot be opened makes every search below come back
+            # empty, which would read as "no windows open".
+            probe = subprocess.run(
+                ["xdotool", "getdisplaygeometry"],
+                capture_output=True, text=True, timeout=2, env=env,
+            )
+            if probe.returncode != 0:
+                logger.debug(f"Desktop state: display {display} not reachable: {probe.stderr.strip()[:120]}")
+                return "Desktop state: unknown (display not reachable)"
+
             # Search for known application windows by name
             app_searches = ["Firefox", "Chromium", "Chrome", "Terminal",
                             "Files", "Text Editor", "LibreOffice"]

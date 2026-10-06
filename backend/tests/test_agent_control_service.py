@@ -846,3 +846,11 @@ class TestCheckEarlyDone(unittest.TestCase):
 
     def test_open_firefox_done_when_visible(self):
         self.assertEqual(self._check("open firefox", self.FIREFOX), "firefox is now open")
+
+    def test_unreachable_display_reads_as_unknown(self):
+        from backend.services.agent_control_service import AgentControlService as A
+        failed = MagicMock(returncode=1, stdout="", stderr="Error: Can't open display: (null)")
+        with patch("subprocess.run", return_value=failed) as run:
+            state = A._get_desktop_state(display=":99")
+        self.assertTrue(state.startswith("Desktop state: unknown"), state)
+        self.assertEqual(run.call_count, 1)
