@@ -22,7 +22,9 @@ def run_lora_smoke_test(
 
     Uses the same identity-core prompt shape as Cast LoRA generate. Retries once
     after a short wait when the GPU is still cooling down post-train.
-    Also scores identity vs training refs when available. Non-fatal on failure.
+    Also checks identity against the training refs, through a method that has
+    been proven on labelled pairs; when none has, the result carries no score and
+    says why (see identity_method_data). Non-fatal on failure.
     """
     token = (trigger_word or "").strip() or f"subject_{subject_id}"
     out_dir = Path(lora_path).parent / "smoke"
@@ -139,19 +141,26 @@ def _run_smoke_once(
     if not still.success or not still.image_path or not Path(still.image_path).is_file():
         return {"ok": False, "error": still.error or "smoke image missing", "base_model_id": bid}
 
-    identity = {}
     refs = [p for p in (ref_image_paths or []) if p and Path(p).is_file()][:8]
+    identity: dict = {
+        "score": None, "method": None, "status": "not_measured",
+        "reason": "no reference photos on disk",
+    }
     if refs:
         try:
-            from backend.services.video_consistency_metrics import score_smoke_vs_refs
-            m = score_smoke_vs_refs(refs, still.image_path)
-            identity = m.get("identity") or {}
+            from backend.services.video_consistency_metrics import score_smoke_identity
+            identity = score_smoke_identity(refs, still.image_path)
             log.info(
-                "lora smoke identity for subject %s: score=%s method=%s",
-                subject_id, identity.get("score"), identity.get("method"),
+                "lora smoke identity for subject %s: status=%s score=%s method=%s reason=%s",
+                subject_id, identity.get("status"), identity.get("score"),
+                identity.get("method"), identity.get("reason"),
             )
         except Exception as e:
             log.debug("smoke identity score skipped: %s", e)
+            identity = {
+                "score": None, "method": None, "status": "not_measured",
+                "reason": "the identity check could not run",
+            }
 
     try:
         from backend.models import db, Subject
@@ -163,6 +172,9 @@ def _run_smoke_once(
                 "path": still.image_path,
                 "score": identity.get("score"),
                 "method": identity.get("method"),
+                "status": identity.get("status") or "not_measured",
+                "reason": identity.get("reason"),
+                "threshold": identity.get("threshold"),
                 "base_model_id": bid or still.metadata.get("base_model_id"),
                 "family": still.metadata.get("family"),
                 "lora_strength": still.metadata.get("lora_strength"),
