@@ -30,7 +30,7 @@ regeneration commands are in the appendix.
 | REPL commands | **89** (a superset — the shared shell groups, the fork groups, and the local file/agent tooling) |
 | Backend blueprints it can reach | ~60 of 82 `url_prefix` areas; **22** with no trace at all |
 | Studio pages | **42** page components; ~22 have a CLI equivalent |
-| **Fork commits touching `cli/` before this branch** | **0** — `cli/` was untouched upstream-owned code. `cli/llx/commands/_fork/` and the two hooks in `main.py` are the first deliberate divergence; the REPL support adds one guarded merge in `command_catalog.py` and two in `slash.py`; see §11. |
+| **Fork commits touching `cli/` before this branch** | **0** — `cli/` was untouched upstream-owned code. The first deliberate divergence is `cli/llx/commands/_fork/` plus two hooks in `main.py`; REPL support adds one guarded merge in `command_catalog.py` and two in `slash.py`; `commands/settings.py` makes the settings reads canonical (and `set` refuses Studio-only keys); and `commands/system.py` guards the `status` celery leg so a 503 renders the panel instead of exiting 1. Five small edits in total — see §11. |
 
 ---
 
@@ -369,7 +369,7 @@ This is the authoritative "what the fork added that the terminal cannot do".
 
 | Feature | CLI | How it is reached today |
 |---|---|---|
-| OpenAI-compatible chat provider / multi-provider escalation | ⚠️ indirect | `models set` + `chat`; the `llm_provider` API has **no command** |
+| OpenAI-compatible chat provider / multi-provider escalation | ✅ | the `llm` group drives `llm_provider`: `llm provider`, `llm set <provider>`, `llm openai-model`, `llm mistral-model`, `llm models`, `llm test`, `llm cloud on\|off`. The escalation policy itself is backend-side and transparent to `chat` |
 | Master cloud switch gating `get_default_llm` | ❌ | `settings` only if it is a settings key |
 | UTF-8 forcing in cloud streaming | ⚠️ | backend, transparent when chat runs |
 | Music-prompt rewriter respects cloud consent | ⚠️ | backend, transparent |
@@ -406,7 +406,7 @@ This is the authoritative "what the fork added that the terminal cannot do".
 
 | Feature | CLI | Note |
 |---|---|---|
-| FFmpeg still-to-video with camera motion | ❌ | **no `video-editor` command exists** |
+| FFmpeg still-to-video with camera motion | ❌ | `video-editor` ships (`health`, `projects`, `render`, `analyze`, `captions-burn`, `shotcut`), but it operates on an existing project: authoring a still-to-video timeline with camera motion is Studio-only. `video-editor render --from-file <payload.json>` can render one once something else authored it |
 | Configurable focus point (Ken Burns), pan directions | ❌ | Studio only |
 | Framing modes (letterbox / zoom-to-fill / match-image) | ❌ | Studio only |
 | Caption export/import + caption code editor | ✅ | export/import moved SRT in and out but never onto the video; `video-editor captions-burn` now burns it (2026-10-05), reusing the backend's own SRT parser. `--engine` chooses the renderer: `ffmpeg` (needs a drawtext-capable ffmpeg), `mlt` (queued, via the plugin) or `editor` (the plugin's synchronous compose — **no queue and no drawtext**, which is the only one that works on a box whose ffmpeg has no font stack). The caption *code editor* stays in the Studio |
@@ -419,14 +419,14 @@ This is the authoritative "what the fork added that the terminal cannot do".
 | Feature | CLI | Note |
 |---|---|---|
 | MPS support + remote-capable Audio Foundry | ✅ | `audio tts\|music\|sfx` use it |
-| STT via external whisper.cpp server | ❌ | **no transcribe/STT command** exists |
+| STT via external whisper.cpp server | ✅ | `audio transcribe <file>` (whisper.cpp, via the voice speech-to-text route). Which whisper.cpp server it uses is a backend setting, not a command |
 | Cloud music-prompt rewriter + generation progress | ⚠️ | `audio music` triggers it; progress via `jobs watch` |
 
 ### 10.6 Cast / LoRA (CLOUD_PLUS_FEATURES §6)
 
 | Feature | CLI | Note |
 |---|---|---|
-| Per-run shot count (16/32) for character generation | ❌ | **no `cast` command** |
+| Per-run shot count (16/32) for character generation | ✅ | `cast generate <subject_id> --count 16` (or `32`) sends the count under `n`, the key the route reads; anything else is refused locally (exit 2, `BAD_ARGUMENT`) before any GPU work. Omitted, the backend plans its own default. `cast` ships the full group: `list`, `show`, `samples`, `plan`, `generate`, `cancel`, `approve`, `train`, `train-cancel`, `make-default`, `delete`, `import-lora` |
 | Cast LoRA resolved from the user message in `generate_image` | ❌ | `images generate` has `--model`, `--count`, `--from-file` — **no `--subject`/cast flag** |
 | Cast generation on its own Celery queue | ❌ | backend |
 | Identity sync via vision + cloud consensus | ❌ | backend |
@@ -457,24 +457,60 @@ rewrites: configuration and documentation, with no CLI surface by definition.
 
 ### 10.10 The gap in one list
 
-Highest-value `cloud-plus` capabilities with **no CLI surface at all**:
+Capabilities the CLI **deliberately does not wrap**. The authoritative list is
+`NOT_EXPOSED` in `cli/llx/commands/_fork/api_coverage.py`: every entry carries its own
+reason, and `cli/tests/test_spec_parity.py` fails when a backend API area has neither a
+command nor a declared reason — so this section cannot drift from the code the way the
+old enumeration did (it still listed Cast Library, RunPod training, the video editor and
+the Film Crew render gate long after all four shipped).
 
-1. **Cast Library** — list/inspect subjects, LoRAs, samples (`cast-library`).
-2. **RunPod LoRA training** — launch/monitor a training run (`training_datasets`).
-3. **ComfyUI engine selection** — covered by `settings set chat_image_model comfyui` (persistent)
-   or `images generate --model comfyui` (per-request). Verify before adding a flag.
-4. **Video editor** — FFmpeg stills, framing, captions, bin reorder (`video-editor`).
-5. **Film Crew / music-video render control** — ✅ render (`film-crew confirm-casting`,
-   `film-crew approve-storyboard`, `music-video approve`, all `--yes`); ✅ resume/retry of a
-   failed production stays Studio-side, but `POST /api/production/<id>/retry` is reachable
-   through `api request`; ⚠️ I2V model choice is settable at creation
-   (`music-video create --model`, which persists `settings.i2v_model`) but **not** changed
-   afterwards — the approval panel's dropdown is the Studio's.
-6. **Upscaling** (`upscaling`).
-7. **System Map** (`system-map`) and **code execution** (`code-execution`).
-8. **Approvals** — the held-changes review queue.
-9. **STT / transcription**.
-10. **Inbound guard** posture and held changes.
+Since CLI_PLAN D5 every entry below is still *reachable* through
+`guaardvark api request <METHOD> <PATH> --yes`. "Not exposed" means "no named command
+should exist for this", never "unreachable".
+
+Grouped by the reason the table records. The bullets between them name **all 47**
+`NOT_EXPOSED` keys, and the per-bullet counts sum to 47 (the trailing command names in a
+bullet are the user surface that reaches it, not further keys). The complete, authoritative
+copy is the map itself — this is the reading of it.
+
+- **Studio-only surfaces (`CLI_PLAN` D2)** (10) — editing and review UIs the CLI holds out
+  of scope: `code_execution`, `video_overlay`, `entity_links`, `addresses` (contacts),
+  `claude_advisor`, `self_code`, `csv_compare` / `excel`, `google_indexing`, and the
+  in-app `docs` browser.
+- **Internals** (25) — `brain`, `cache`, `cache_stats`,
+  `celery_monitor`, `chat_sessions`, `code_search`, `cluster`, `distributed`, `doc_query`,
+  `enhanced_context_generation`, `file_operations`, `gpu_orchestrator`, `hierarchy`,
+  `index_mgmt`, `metadata_indexing`, `node`, `orchestrator`, `output`, `query`, `retrieve`,
+  `search`, `task_scheduler`, `unified_generation` / `unified_jobs_resource` (the
+  generation and job plumbing), and `upload`. Where a reason already names the command that
+  serves the CLI need, it says so (`chat`, `health`, `plugins`, `tasks`, `gpu`, `jobs`,
+  `search`, `files`, `index`); the other nine are plain internals or diagnostics that no
+  command surfaces — `cache`, `cache_stats`, `cluster`, `distributed`,
+  `enhanced_context_generation`, `file_operations`, `index_mgmt`, `metadata_indexing`,
+  `retrieve`.
+- **Superseded or covered elsewhere** (3) — `simple_chat` (the `chat` group), `reboot`
+  (`start` / `stop`), `system` (`meta`, read through `status` and `health`).
+- **Studio plumbing, maintenance and developer harnesses** (8) — `image` (raw image
+  serving), `log` (the Studio log viewer; the CLI reads the log directory directly), `state`
+  (UI session state), `diagnostics`, `admin_filename_cleanup`, `outputs` (external plugin
+  registration, called by plugins and never by the CLI), `progress_test` (developer progress
+  harness) and `rag_debug`.
+- **Auth** (1) — `auth` is web session login; the CLI authenticates with an API key.
+
+A second, smaller category is **reachable but not named, by design** — a named alternative
+already covers the need, or the operation is the Studio's:
+
+- **ComfyUI engine selection** — `settings set chat_image_model comfyui` (persistent) or
+  `images generate --model comfyui` (per-request).
+- **Music-video I2V model after creation** — `music-video create --model` sets it up front
+  (persisting `settings.i2v_model`); changing it later is the approval panel's dropdown, so
+  the CLI names no command, but the route is
+  `api request POST /api/music-video/<id>/plan --data '{"i2v_model": "<id>"}' --yes`
+  while the production is `awaiting_approval`. D2 keeps review-panel editing Studio-side.
+- **Film Crew production retry** — `POST /api/production/<id>/retry` via `api request`.
+- **Video-editor timeline authoring** — the designed path is
+  `video-editor render --from-file <timeline.json>`; the CLI renders a timeline, it does
+  not author one.
 
 ---
 
@@ -488,7 +524,10 @@ Rules that keep it cheap:
 1. Add a **new module** under `cli/llx/commands/_fork/` exporting `COMMAND_NAME` and a
    `typer.Typer` named `app`. `_fork/registry.py` discovers it automatically — do not
    edit a shared list, and do not touch `llx/main.py` beyond the two lines that are
-   already there.
+   already there. Those two lines, the three guarded REPL merges (`command_catalog.py`,
+   two in `slash.py`), and the two guarded upstream commands (`commands/settings.py`,
+   `commands/system.py`) are the fork's full footprint and the only places an upstream
+   sync can conflict; each carries an in-code comment naming the fork and why it is there.
 2. Declare the backend API area it drives in `cli/llx/commands/_fork/api_coverage.py`.
    `cli/tests/test_spec_parity.py` fails until you do — that is what keeps §9 and §10 of
    this document from drifting out of date.
