@@ -211,7 +211,18 @@ def status(
         client = get_client(server)
         health_data = client.get("/api/health")
         model_data = client.get("/api/model/status")
-        celery_data = client.get("/api/health/celery")
+
+        # Fork divergence (CLI_SPEC §11): a worker that is stopped, busy or on the wrong queue
+        # answers this leg with 503 -- which is precisely what someone runs `status` to find
+        # out, so the refusal must not cost them the rest of the panel. Degrade to an explicit
+        # offline record (not an empty dict) so a script can tell "no workers" from "could not
+        # ask". A connection failure means the server itself is gone, and still exits 1.
+        try:
+            celery_data = client.get("/api/health/celery")
+        except LlxConnectionError:
+            raise
+        except LlxError as e:
+            celery_data = {"status": "down", "error": e.message}
 
         try:
             metrics_data = client.get("/api/meta/metrics")
@@ -249,9 +260,20 @@ def status(
 
         celery_status = celery_data.get("status", "unknown")
         workers = celery_data.get("workers", [])
+        celery_error = celery_data.get("error")
         c_icon = ICON_ONLINE if celery_status == "up" else ICON_OFFLINE
         c_style = "llx.status.online" if celery_status == "up" else "llx.status.offline"
-        celery_line = f"[llx.kv.key]Celery:[/llx.kv.key]  {len(workers)} workers  [{c_style}]{c_icon} {celery_status}[/{c_style}]"
+        if "workers" not in celery_data:
+            # Only the guard above synthesizes a celery body without a `workers` key; the
+            # backend's own 503 and busy bodies always carry one. So this is the leg that
+            # refused outright -- no count is known, and "0 workers" would be a lie.
+            celery_line = (f"[llx.kv.key]Celery:[/llx.kv.key]  [{c_style}]{c_icon} {celery_status}[/{c_style}]"
+                           f"  [llx.dim]{celery_error}[/llx.dim]")
+        else:
+            celery_line = f"[llx.kv.key]Celery:[/llx.kv.key]  {len(workers)} workers  [{c_style}]{c_icon} {celery_status}[/{c_style}]"
+            if celery_error:
+                # A busy worker is a 200 with both a real count and an error; show both.
+                celery_line += f"  [llx.dim]{celery_error}[/llx.dim]"
 
         metrics = metrics_data.get("data", metrics_data) if metrics_data else {}
         gpu_mem = metrics.get("gpu_mem")
