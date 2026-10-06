@@ -56,7 +56,11 @@ class IntentClassifier:
             'all clients', 'all projects', 'all documents',
             'tell me how many', 'how many clients', 'how many projects', 'how many documents'
         ]
-        
+        # A record query needs both: a count/list phrase and an app record noun.
+        # Either alone is ordinary chat ("show me a joke", "my project files").
+        self.database_count_phrases = ['how many', 'count', 'list', 'show me', 'number of', 'total']
+        self.database_record_nouns = ['clients', 'projects', 'documents', 'files', 'tasks']
+
         # Document search patterns  
         self.document_keywords = [
             'document', 'contract', 'agreement', 'uploaded', 'file content',
@@ -118,7 +122,12 @@ class IntentClassifier:
             return IntentType.COMMAND, 0.95, metadata
 
         # 2. Database Query Detection (keyword-based - specific to this app)
-        db_confidence, db_keywords = self._check_keywords(message_lower, self.database_keywords)
+        _, count_phrases = self._check_keywords(message_lower, self.database_count_phrases)
+        _, record_nouns = self._check_keywords(message_lower, self.database_record_nouns)
+        if count_phrases and record_nouns:
+            db_confidence, db_keywords = self._check_keywords(message_lower, self.database_keywords)
+        else:
+            db_confidence, db_keywords = 0.0, []
         if db_confidence > 0.6:
             metadata['keywords_found'] = db_keywords
             logger.info(f"Intent: DATABASE_QUERY detected - keywords: {db_keywords}")

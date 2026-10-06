@@ -85,6 +85,31 @@ class TestWholeWordKeywords:
         assert intent != IntentType.DATABASE_QUERY
 
 
+class TestDatabaseQueryNeedsVerbAndRecord:
+    """The database fast path answers with a record count or listing, so it
+    needs a count/list phrase and an app record noun, both as whole words."""
+
+    @pytest.mark.parametrize("message", [
+        "show me a joke",
+        "list three ideas for a blog post",
+        "what files do I have about taxes",
+    ])
+    def test_one_without_the_other_is_not_a_record_query(self, classifier, message):
+        intent, _confidence, _meta = classifier.classify_intent(message)
+        assert intent != IntentType.DATABASE_QUERY
+
+    @pytest.mark.parametrize("message", [
+        "how many projects do I have",
+        "list my clients",
+        "total number of tasks",
+    ])
+    def test_count_or_list_of_records_is_a_record_query(self, classifier, message):
+        intent, confidence, _meta = classifier.classify_intent(message)
+        assert intent == IntentType.DATABASE_QUERY
+        # enhanced chat takes the fast path only above this confidence
+        assert confidence > 0.6
+
+
 class TestEnhancedChatSimpleMessage:
     """Simple mode skips documents, web search and the intent classifier, so
     only a whole-message greeting or acknowledgement qualifies."""
