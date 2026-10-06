@@ -959,3 +959,29 @@ class TestAssessObstacles(unittest.TestCase):
         for i in range(2):
             self._assess(self.CONSENT, i)
         self.assertEqual(self._assess("example.com wants to use your camera", 2), "handled")
+
+    def _escalate(self, decision_json):
+        from types import SimpleNamespace
+        from backend.services.agent_control_service import AgentControlService
+        analyzer = MagicMock()
+        analyzer.text_query.return_value = SimpleNamespace(success=True, description=decision_json)
+        with patch.object(AgentControlService, "_get_thinking_model", staticmethod(lambda: "thinker")), \
+             patch("backend.services.servo_controller.ServoController") as servo:
+            outcome = self.svc._assess_obstacles(
+                "A dialog asks: Are you sure you want to delete your account?", analyzer, self.screen, 0)
+        analyzer.text_query.assert_called_once()
+        return outcome, servo
+
+    def test_an_escalation_click_on_a_banned_target_is_not_sent(self):
+        self.svc._banned_targets = {"delete account button": "Delete account button"}
+        self.svc._not_found_counts = {"delete account button": 3}
+        outcome, servo = self._escalate(
+            '{"action": "click", "target_description": "Delete account button", "reasoning": "confirm"}')
+        self.assertEqual(outcome, "clear")
+        servo.assert_not_called()
+        self.screen.hotkey.assert_not_called()
+
+    def test_an_allowed_escalation_hotkey_is_sent(self):
+        outcome, _ = self._escalate('{"action": "hotkey", "keys": ["Escape"], "reasoning": "dismiss"}')
+        self.assertEqual(outcome, "escalated")
+        self.screen.hotkey.assert_called_once_with("Escape")

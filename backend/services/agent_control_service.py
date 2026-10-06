@@ -3306,6 +3306,17 @@ class AgentControlService:
         if thinking_result.success:
             logger.debug(f"[AGENT][STEP {iteration+1}][ASSESS][THINKING] {thinking_result.description[:200]}")
             decision = self._parse_decision(thinking_result.description)
+            if ((decision.action.action_type == "click" and decision.action.target_description)
+                    or (decision.action.action_type == "hotkey" and decision.action.keys)):
+                # The same checks a THINK step gets: banned targets, cooldowns.
+                refusal = self._refusal_for(
+                    decision.action, training_mode=getattr(self, "_training_mode", False))
+                if refusal:
+                    logger.warning(
+                        f"[AGENT][STEP {iteration+1}][ASSESS] Escalation "
+                        f"{decision.action.action_type} not sent: {refusal}"
+                    )
+                    return "clear"
             if decision.action.action_type == "click" and decision.action.target_description:
                 from backend.services.servo_controller import ServoController
                 from backend.services.training_data_collector import TrainingDataCollector
