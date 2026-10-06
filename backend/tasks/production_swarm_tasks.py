@@ -98,9 +98,10 @@ def _default_ollama_llm(*, system: str, user: str, model: str = "gemma4:e4b") ->
     return response["message"]["content"]
 
 
-# The storyboard curator is advice only: when on, it pre-ticks the shot cards it
-# judges usable, and a person still starts the render. Off unless set to 1.
-FILM_AUTOCURATE_DEFAULT = "0"
+# The storyboard curator runs by default and is advice only: it checks every
+# frame, pre-ticks the ones it judges usable with its reason, and a person still
+# starts the render. Set GUAARDVARK_FILM_AUTOCURATE=0 to skip it.
+FILM_AUTOCURATE_DEFAULT = "1"
 
 
 def _film_autocurate_enabled() -> bool:

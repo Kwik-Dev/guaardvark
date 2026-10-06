@@ -697,12 +697,12 @@ def test_run_editor_without_a_video_model_has_no_scene_renderer(app, production)
         assert MockEditor.call_args.kwargs["scene_renderer"] is None
 
 
-def test_film_autocurate_is_off_by_default(monkeypatch):
+def test_film_autocurate_is_on_by_default_and_can_be_turned_off(monkeypatch):
     from backend.tasks.production_swarm_tasks import _film_autocurate_enabled
     monkeypatch.delenv("GUAARDVARK_FILM_AUTOCURATE", raising=False)
-    assert _film_autocurate_enabled() is False
-    monkeypatch.setenv("GUAARDVARK_FILM_AUTOCURATE", "1")
     assert _film_autocurate_enabled() is True
+    monkeypatch.setenv("GUAARDVARK_FILM_AUTOCURATE", "0")
+    assert _film_autocurate_enabled() is False
 
 
 def test_run_curator_all_pass_keeps_the_storyboard_gate(app, production):
