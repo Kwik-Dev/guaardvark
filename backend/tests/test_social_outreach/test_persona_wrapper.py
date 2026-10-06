@@ -43,3 +43,14 @@ def test_comment_prompt_has_the_pitch_sheet_and_no_recon_hint():
     assert "video_gen" not in user_msg["content"]
     assert persona.find_relevant_feature("ollama question") == "local_ai"
     assert "local_ai" not in user_msg["content"]
+
+
+def test_without_a_pitch_file_the_sheet_is_built_from_the_feature_blurbs():
+    """A fresh install has no PITCH.md; the framing still promises a pitch sheet,
+    so one is built from the one-line pitch and every feature blurb."""
+    with patch("backend.services.social_outreach.persona._load_pitch_md", return_value=""):
+        system = persona._compose_outward_facing_system()
+    assert "--- PITCH SHEET ---" in system
+    assert persona.GUAARDVARK_PITCH in system
+    for blurb in persona.FEATURE_BLURBS.values():
+        assert blurb in system

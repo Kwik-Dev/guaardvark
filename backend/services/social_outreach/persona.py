@@ -210,11 +210,22 @@ Return JSON: {"draft": "<reply text>", "grade": 0.0-1.0, "reason": "<one line>"}
 )
 
 
+def _pitch_sheet() -> str:
+    """PITCH.md when present; otherwise a sheet from the one-line pitch and
+    FEATURE_BLURBS, so a fresh install's drafter still reads the facts the
+    framing calls the source of truth."""
+    pitch = _load_pitch_md().strip()
+    if pitch:
+        return pitch
+    features = "\n".join(f"- {blurb}" for blurb in FEATURE_BLURBS.values())
+    return f"{GUAARDVARK_PITCH}\n\nWhat it does:\n{features}"
+
+
 def _compose_outward_facing_system() -> str:
     """Build the system message: framing + PITCH.md. Re-read on every call
     via the mtime-cached loader, so edits to PITCH.md propagate without
     restarting the worker."""
-    pitch = _load_pitch_md().strip()
+    pitch = _pitch_sheet()
     if not pitch:
         return _OUTWARD_FACING_FRAMING
     return f"{_OUTWARD_FACING_FRAMING}\n\n--- PITCH SHEET ---\n{pitch}\n"
@@ -222,7 +233,7 @@ def _compose_outward_facing_system() -> str:
 
 def _compose_reply_system() -> str:
     """Same idea as _compose_outward_facing_system but for replies-on-own-video."""
-    pitch = _load_pitch_md().strip()
+    pitch = _pitch_sheet()
     if not pitch:
         return _REPLY_FRAMING
     return f"{_REPLY_FRAMING}\n\n--- PITCH SHEET (factual reference only) ---\n{pitch}\n"
@@ -230,7 +241,7 @@ def _compose_reply_system() -> str:
 
 def _compose_share_system() -> str:
     """Same idea as _compose_outward_facing_system but for self-share posts."""
-    pitch = _load_pitch_md().strip()
+    pitch = _pitch_sheet()
     if not pitch:
         return _SHARE_FRAMING_SYSTEM
     return f"{_SHARE_FRAMING_SYSTEM}\n\n--- PITCH SHEET ---\n{pitch}\n"
