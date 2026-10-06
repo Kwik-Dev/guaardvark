@@ -567,9 +567,12 @@ class RAGEvalHarness:
             chunk_hashes = [pair["source_chunk_hash"]]
 
         if chunk_hashes:
+            # Pair hashes are of chunker output; indexed chunks carry a context
+            # prefix in their text and the chunker output in metadata.
+            from backend.utils.contextual_prepender import source_text
             relevant_ids = list(chunk_hashes)
             for r in results:
-                text = r.get("text", "") or ""
+                text = source_text(r.get("text", ""), r.get("metadata"))
                 retrieved_ids.append(hashlib.sha256(text.encode()).hexdigest())
         else:
             doc_id = pair.get("source_doc_id")
