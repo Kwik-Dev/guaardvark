@@ -299,6 +299,61 @@ class TestImageFocus:
             uce._SESSION_IMAGE_FOCUS.discard(sid)
 
 
+class TestImageRetry:
+    """A "try again" after a failed render applies to the next turn only."""
+
+    @staticmethod
+    def _retry_engine(monkeypatch, calls):
+        import backend.services.unified_chat_engine as uce
+
+        class Registry:
+            def get_tool(self, name):
+                return object() if name in ("generate_image", "edit_image") else None
+
+        monkeypatch.setattr(uce, "resolve_chat_image_model", lambda *a, **k: "test-model")
+        monkeypatch.setattr(uce, "inject_chat_image_model", lambda tool, params, options=None: params)
+        engine = uce.UnifiedChatEngine.__new__(uce.UnifiedChatEngine)
+        engine.registry = Registry()
+        engine._run_direct_tool_execution = (
+            lambda tool, params, *a, **k: calls.append((tool, params)) or {"success": True}
+        )
+        return engine
+
+    def test_pending_retry_expires_after_a_chat_turn(self, monkeypatch, tmp_path):
+        import backend.services.unified_chat_engine as uce
+        from backend.tests.test_unified_chat_host_hooks import (
+            _engine as chat_engine,
+            _run as chat_turn,
+        )
+
+        sid = "sess-host"  # the session chat_turn runs in
+        picture = tmp_path / "last.png"
+        picture.write_bytes(b"png")
+        calls = []
+        retry = self._retry_engine(monkeypatch, calls)
+
+        def try_again():
+            for attempt in (retry._try_image_generate_retry, retry._try_image_edit_retry):
+                attempt("try again", sid, {}, lambda *a: None, "req")
+
+        try:
+            uce._SESSION_PENDING_IMAGE_PROMPT[sid] = "a castle at dusk"
+            uce._SESSION_PENDING_IMAGE_EDIT[sid] = {"instruction": "add a moat", "image": str(picture)}
+            try_again()
+            assert [tool for tool, _ in calls] == ["generate_image", "edit_image"]
+
+            chat_turn(chat_engine(monkeypatch), "hello there, how are you today", {})
+            assert sid not in uce._SESSION_PENDING_IMAGE_PROMPT
+            assert sid not in uce._SESSION_PENDING_IMAGE_EDIT
+
+            calls.clear()
+            try_again()
+            assert calls == []
+        finally:
+            uce._SESSION_PENDING_IMAGE_PROMPT.pop(sid, None)
+            uce._SESSION_PENDING_IMAGE_EDIT.pop(sid, None)
+
+
 class TestCommandOnlyMode:
     """chat_media_requires_command: only an explicit command may create media."""
 

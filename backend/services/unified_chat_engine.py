@@ -2250,8 +2250,11 @@ class UnifiedChatEngine:
             if gen_result is not None:
                 return gen_result
 
-        # The chat model has this turn, so the conversation has moved off the last picture.
+        # The chat model has this turn, so the conversation has moved off the last picture,
+        # and a "try again" offered after a failed render applied to the turn before this one.
         _SESSION_IMAGE_FOCUS.discard(session_id)
+        _SESSION_PENDING_IMAGE_PROMPT.pop(session_id, None)
+        _SESSION_PENDING_IMAGE_EDIT.pop(session_id, None)
 
         # Resolve the per-request "thinking" preference for thinking-capable models
         # (gemma4:12b, qwen3, deepseek-r1, ...). Precedence: explicit per-chat override
