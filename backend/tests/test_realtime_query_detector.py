@@ -59,7 +59,9 @@ class TestIsRealtimeQuery:
 
 
 class TestShouldUseWebSearch:
-    """enhanced_chat_api's detector shares the word-boundary rule."""
+    """enhanced_chat_api's detector shares the word-boundary rule, and searches
+    only a short message with a link, a domain or a current-info word: the
+    message is the query, so anything else would send the user's text out."""
 
     @pytest.fixture
     def manager(self):
@@ -80,3 +82,42 @@ class TestShouldUseWebSearch:
     @patch("backend.utils.settings_utils.get_web_access", return_value=False)
     def test_bare_domain_triggers(self, _access, manager):
         assert manager._should_use_web_search("summarise example.com for me") is True
+
+    # Web access on: the setting decides whether a search may run, not whether
+    # a message looks like one.
+
+    @patch("backend.utils.settings_utils.get_web_access", return_value=True)
+    def test_word_count_does_not_trigger(self, _access, manager):
+        assert manager._should_use_web_search(
+            "please summarise this paragraph for me"
+        ) is False
+
+    @patch("backend.utils.settings_utils.get_web_access", return_value=True)
+    def test_question_does_not_trigger(self, _access, manager):
+        assert manager._should_use_web_search("why is my build slow?") is False
+
+    @patch("backend.utils.settings_utils.get_web_access", return_value=True)
+    def test_long_paste_does_not_trigger(self, _access, manager):
+        paste = ("The contract below was signed today. " * 9)[:301]
+        assert len(paste) == 301
+        assert manager._should_use_web_search(paste) is False
+        assert manager._should_use_web_search(paste[:300]) is True
+
+    @patch("backend.utils.settings_utils.get_web_access", return_value=True)
+    def test_url_triggers(self, _access, manager):
+        assert manager._should_use_web_search("open https://example.com") is True
+
+    @patch("backend.utils.settings_utils.get_web_access", return_value=True)
+    def test_current_info_word_triggers(self, _access, manager):
+        assert manager._should_use_web_search("weather in Boston now") is True
+
+    def test_long_query_never_reaches_search(self, manager):
+        query = ("latest news on " * 30)[:400]
+        assert len(query) == 400
+        with patch("backend.utils.settings_utils.get_web_access", return_value=True), \
+                patch("backend.api.web_search_api.enhanced_web_search") as search:
+            result = manager._perform_web_search_safe(query)
+        search.assert_not_called()
+        assert result["success"] is False
+        assert result["strategy_used"] == "skipped_length"
+        assert result["user_message"]

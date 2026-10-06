@@ -1591,58 +1591,32 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
     )
     # Bare domains ("example.com") without a scheme; scheme URLs are matched separately.
     _DOMAIN_RE = re.compile(r"\b[\w-]+\.(?:com|org|net)\b")
+    _URL_RE = re.compile(r"(?:https?://|www\.)[^\s]+")
+    # The search query is the user's message as typed, so anything longer than
+    # this is a paste or a brief rather than a query and is never sent.
+    _WEB_SEARCH_MAX_CHARS = 300
 
     def _should_use_web_search(self, message: str) -> bool:
-        """CHANGE 3: More permissive detection - trigger on any question or query that might need current info"""
-        message_lower = message.lower().strip()
+        """Return True only for a short message with a link, a domain or a
+        current-info word. Question shape, a trailing "?" and word count are
+        not signals: most chat messages have them, and a search sends the
+        message itself to the search engine. Pass the user's own text, not a
+        copy with the time context prepended, whose date words would match."""
+        if not message or len(message) > self._WEB_SEARCH_MAX_CHARS:
+            logger.debug(f"Web search skipped (message_len={len(message or '')})")
+            return False
 
-        # URL pattern detection
-        import re
-        has_url = bool(re.search(r'(?:https?://|www\.)[^\s]+', message))
-
-        # Check for current information indicators
-        needs_current_info = bool(
-            self._CURRENT_INFO_RE.search(message_lower)
+        message_lower = message.lower()
+        result = bool(
+            self._URL_RE.search(message)
             or self._DOMAIN_RE.search(message_lower)
+            or self._CURRENT_INFO_RE.search(message_lower)
         )
 
-        # Question words that often need current information - EXPANDED
-        question_patterns = [
-            r'what.*(?:is|are|was|were)',
-            r'how.*(?:is|are|was|were|to|do|does|did)',
-            r'when.*(?:did|will|is|was|are)',
-            r'where.*(?:is|are|was|were|can|to)',
-            r'who.*(?:is|are|was|were)',
-            r'why.*(?:is|are|was|were|do|does|did)',
-            r'can you.*(?:find|check|search|get|tell)',
-            r'please.*(?:find|check|search|get|tell)'
-        ]
-
-        has_question_pattern = any(re.search(pattern, message_lower) for pattern in question_patterns)
-
-        # Check if message ends with question mark
-        has_question_mark = message.strip().endswith('?')
-
-        # CHANGE 3: More permissive - trigger on questions, current info indicators, URLs, or longer queries
-        # Also check if web access is enabled - if so, be more aggressive about searching
-        from backend.utils.settings_utils import get_web_access
-        web_access_enabled = get_web_access()
-        
-        # If web access is enabled, be more permissive
-        if web_access_enabled:
-            # Trigger on any question, current info indicator, URL, or query with 4+ words
-            result = has_url or needs_current_info or has_question_pattern or has_question_mark or len(message.split()) >= 4
-        else:
-            # If disabled, only trigger on clear indicators
-            result = has_url or needs_current_info or has_question_pattern
-
         if result:
-            logger.info(
-                f"Web search enabled for message (message_len={len(message)}, "
-                f"web_access_setting={web_access_enabled})"
-            )
+            logger.info(f"Web search enabled for message (message_len={len(message)})")
         else:
-            logger.debug(f"Web search SKIPPED for: '{message[:50]}...'")
+            logger.debug(f"Web search skipped (message_len={len(message)})")
 
         return result
 
@@ -1672,6 +1646,23 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
                     "error": "Web search disabled in settings",
                     "strategy_used": "disabled",
                     "user_message": "I cannot search the web as web access is disabled in system settings. You can enable it in Settings > Allow LLM Web Search. I'll use my training knowledge to help you instead.",
+                    "fallback_available": True
+                }
+
+            # Also covers callers that skip _should_use_web_search, such as the
+            # intent classifier's force_web_search.
+            if len(query) > self._WEB_SEARCH_MAX_CHARS:
+                logger.info(f"Web search skipped, query too long (query_len={len(query)})")
+                return {
+                    "success": False,
+                    "error": "Message too long to search",
+                    "strategy_used": "skipped_length",
+                    "user_message": (
+                        f"I did not search the web: the message is longer than "
+                        f"{self._WEB_SEARCH_MAX_CHARS} characters, and a search would send all of it "
+                        "to the search engine. Ask a short question to search. "
+                        "I'll use my training knowledge to help you instead."
+                    ),
                     "fallback_available": True
                 }
 
@@ -2911,7 +2902,7 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
 
             # Check if web search is needed (from intent classifier OR pattern detection)
             force_web_search = intent_metadata.get('force_web_search', False) if 'intent_metadata' in locals() else False
-            should_web_search = force_web_search or self._should_use_web_search(enhanced_message)
+            should_web_search = force_web_search or self._should_use_web_search(message)
 
             if not simple_mode and should_web_search:
                 logger.info(f"Web search triggered (message_len={len(message)})")
@@ -2930,7 +2921,7 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
             else:
                 logger.debug(
                     "Web search not triggered "
-                    f"(simple_mode={simple_mode}, should_use={self._should_use_web_search(enhanced_message) if not simple_mode else False})"
+                    f"(simple_mode={simple_mode}, should_use={self._should_use_web_search(message) if not simple_mode else False})"
                 )
 
             # Retrieve relevant RAG context if enabled and not in simple mode
