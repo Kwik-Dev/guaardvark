@@ -53,6 +53,41 @@ class TestWorkstationPinning:
         assert "map_codebase" in selected
 
 
+class TestWholeWordKeywords:
+    """Keyword pins match whole words, so a keyword inside another word offers nothing."""
+
+    @staticmethod
+    def _all_tools():
+        from backend.services.unified_chat_engine import CORE_TOOLS, TOOL_CONTEXT_KEYWORDS
+        names = list(CORE_TOOLS)
+        for _keywords, tools in TOOL_CONTEXT_KEYWORDS.values():
+            names += [t for t in tools if t not in names]
+        return names
+
+    def test_supermarket_offers_no_outreach_tools(self):
+        from backend.services.unified_chat_engine import OUTREACH_TOOLS
+        selected = select_tools_for_context("best supermarket near me", self._all_tools())
+        assert not set(selected) & set(OUTREACH_TOOLS)
+
+    @pytest.mark.parametrize("message", ["my gpu is hot", "my gpus are hot"])
+    def test_gpu_still_offers_the_workstation_tools(self, message):
+        names = self._all_tools()
+        assert set(WORKSTATION_TOOLS) <= set(select_tools_for_context(message, names))
+        assert set(WORKSTATION_TOOLS) <= set(_pin_workstation_tools(message, [], names))
+
+    @pytest.mark.parametrize("message,keywords,hit", [
+        ("what did we talk about last week", ["ast"], False),
+        ("change the display brightness", ["play"], False),
+        ("play some music", ["play"], True),
+        ("open main.py and read it", [".py"], True),
+        ("list tools please", ["ls "], False),
+        ("ls -la", ["ls "], True),
+    ])
+    def test_mentions_keyword(self, message, keywords, hit):
+        from backend.services.unified_chat_engine import _mentions_keyword
+        assert _mentions_keyword(message, keywords) is hit
+
+
 class TestInspectGpuCallsLiveModules:
     def test_aggregates_lock_orchestrator_nvidia(self, monkeypatch):
         from backend.tools import workstation_tools as wt

@@ -474,8 +474,10 @@ _CREATE_PICTURE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# An explicit slash command is always honoured, even in command-only mode.
-_SLASH_MEDIA_RE = re.compile(r"^\s*/(imagine|image|video)\b", re.IGNORECASE)
+# An explicit slash command is always honoured, even in command-only mode:
+# /imagine and /image make a picture, /video a clip.
+_SLASH_IMAGE_RE = re.compile(r"^\s*/(?:imagine|image)\b", re.IGNORECASE)
+_SLASH_VIDEO_RE = re.compile(r"^\s*/video\b", re.IGNORECASE)
 
 
 def _media_requires_explicit_command() -> bool:
@@ -508,10 +510,12 @@ _IMAGE_GEN_NEGATIVE_PATTERNS = (
     r"\bdescribe (this|the|that) (image|photo|picture)\b",
     r"\b(analyze|explain) (this|the|that) (image|photo|picture)\b",
 )
+# "How do I ...", "how to ...": asks how something is done, not for it to be done.
+_HOW_TO_QUESTION_RE = re.compile(r"^\s*how\s+(?:do|can|could|should|would|does|to)\b", re.IGNORECASE)
 # Image requests only: a how-to question or front-end work ("how do I animate a
 # CSS button", "make an image responsive") is a question for the chat model.
 _IMAGE_REQUEST_NEGATIVE_PATTERNS = _IMAGE_GEN_NEGATIVE_PATTERNS + (
-    r"^\s*how\s+(?:do|can|could|should|would|does|to)\b",
+    _HOW_TO_QUESTION_RE.pattern,
     r"\b(?:css|html|javascript|jsx?|tsx|react|svg|keyframes?|hover|tailwind|stylesheet)\b",
 )
 
@@ -766,9 +770,14 @@ def _image_generation_gate(message: str, draw_anywhere: bool) -> bool:
     if is_music_video_request(message) or is_film_crew_request(message):
         return False
     msg_lower = message.lower()
-    if _SLASH_MEDIA_RE.match(msg_lower):
+    if _SLASH_IMAGE_RE.match(msg_lower):
         return True
     if _media_requires_explicit_command():
+        return False
+    if (not draw_anywhere and _VIDEO_INTENT_RE.search(msg_lower)
+            and not _STILL_OR_ANIMATION_NOUN_RE.search(msg_lower)):
+        # Making a video is user_wants_video_generation's call; a message it turned
+        # down ("why does it take so long to generate a video?") is not a picture request.
         return False
     return _is_new_image_request(msg_lower, draw_anywhere)
 
@@ -806,9 +815,14 @@ def user_wants_image_edit(message: str, has_recent_image: bool,
     if _TEXT_OR_CODE_TOPIC_RE.search(message) and not _PICTURE_WORD_RE.search(message):
         return False
     msg_lower = message.lower()
+    # "/video make it rain" and "make a video of it" ask for a video; the video
+    # step animates the picture in focus instead.
+    if _SLASH_VIDEO_RE.match(msg_lower) or user_wants_video_generation(message):
+        return False
     names_image = bool(_NAMES_THE_IMAGE_RE.search(msg_lower))
     # "Draw me a cat wearing a top hat" has an edit verb but asks for a new picture.
-    new_request = bool(_SLASH_MEDIA_RE.match(msg_lower)) or _is_new_image_request(msg_lower)
+    new_request = (bool(_SLASH_IMAGE_RE.match(msg_lower) or _SLASH_VIDEO_RE.match(msg_lower))
+                   or _is_new_image_request(msg_lower))
     if new_request and not names_image and not _REFERS_BACK_RE.search(msg_lower):
         return False
     return has_recent_image or names_image
@@ -818,6 +832,37 @@ def user_wants_image_edit(message: str, has_recent_image: bool,
 # video showing Y". Bare references ("what is in this video of my trip") don't match.
 _VIDEO_INTENT_RE = re.compile(
     r"\b(generate|create|make|render|produce)\b[^.?!]{0,40}\bvideo\b", re.IGNORECASE
+)
+
+# A request for a new clip opens the message or one of its sentences, optionally
+# after "please" / "can you", with "video" at most five words after the verb as
+# its object: "make a video of a fox", "can you generate a short cinematic video
+# of rain". "Why does it take so long to generate a video?", "make sure the video
+# plays", "make a list of video ideas" and "make a video call" only mention one.
+_VIDEO_REQUEST_RE = re.compile(
+    r"(?:^|[.!?;:,]\s+)\s*(?:(?:ok(?:ay)?|now|so|also|then|and|hey)\s+)?"
+    r"(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)?"
+    r"(?:(?:i(?:'d|\s+would)\s+like|i\s+(?:want|need))\s+you\s+to\s+|let'?s\s+)?"
+    r"(?:generate|create|make|render|produce)\s+(?:me\s+|us\s+)?"
+    r"(?:(?!(?:sure|certain|the|this|that|these|those|my|your|our|his|her|its|their"
+    r"|of|for|to|about|with|from|in|on|at|into|and|or|than|then)\b)[\w'-]+\s+){0,8}?"
+    r"video\b(?!\s+(?:games?|calls?|chats?|conferenc\w*|cards?|edit\w*|players?|codecs?"
+    r"|drivers?|scripts?|files?|formats?)\b)",
+    re.IGNORECASE,
+)
+# Video software named in the message: making a video there is the user's own job.
+_VIDEO_SOFTWARE_PATTERN = (
+    r"\b(?:premiere\s+pro|after\s+effects|davinci|final\s+cut|imovie|capcut|camtasia|filmora"
+    r"|kdenlive|shotcut|openshot|obs\s+studio|clipchamp|ffmpeg|handbrake|movie\s+maker"
+    r"|vegas\s+pro)\b"
+    r"|\b(?:in|with|using)\s+(?:adobe\s+)?(?:premiere|resolve|obs|canva|blender|powerpoint)\b"
+)
+# How-to and front-end questions (as for images) plus questions about video software.
+_VIDEO_REQUEST_NEGATIVE_PATTERNS = _IMAGE_REQUEST_NEGATIVE_PATTERNS + (_VIDEO_SOFTWARE_PATTERN,)
+# A picture or animation named alongside "video" keeps a message open to the image path.
+_STILL_OR_ANIMATION_NOUN_RE = re.compile(
+    r"\b(?:image|picture|photo|illustration|drawing|painting|gif|animation|animated|animate)s?\b",
+    re.IGNORECASE,
 )
 
 # Strip "generate a video of…" / "/video " chrome so the video model gets pure scene text.
@@ -844,15 +889,17 @@ def user_wants_video_generation(message: str) -> bool:
     if is_music_video_request(message) or is_film_crew_request(message):
         return False
     msg_lower = message.lower()
-    if _SLASH_MEDIA_RE.match(msg_lower):
+    if _SLASH_VIDEO_RE.match(msg_lower):
         return True
+    if _SLASH_IMAGE_RE.match(msg_lower):
+        return False
     if _media_requires_explicit_command():
         return False
-    if not (_VIDEO_INTENT_RE.search(msg_lower) or msg_lower.startswith("video of ")):
+    if not (_VIDEO_REQUEST_RE.search(msg_lower) or msg_lower.startswith("video of ")):
         return False
     if any(w in msg_lower for w in ("gif", "animate", "animation", "animated")):
         return False
-    for pat in _IMAGE_GEN_NEGATIVE_PATTERNS:
+    for pat in _VIDEO_REQUEST_NEGATIVE_PATTERNS:
         if re.search(pat, msg_lower):
             return False
     return True
@@ -923,6 +970,42 @@ def ollama_eof_user_message(error_str: str, model_name: str, *, has_media: bool 
     )
 
 
+_KEYWORD_RE_CACHE: Dict[tuple, re.Pattern] = {}
+
+
+def _keyword_regex(keywords) -> re.Pattern:
+    """One regex for a keyword list, each keyword matched as whole words."""
+    key = tuple(keywords)
+    pattern = _KEYWORD_RE_CACHE.get(key)
+    if pattern is None:
+        parts = []
+        for kw in key:
+            kw = (kw or "").lower()
+            if not kw:
+                continue
+            # Edges that are punctuation or space (".py", "/vision", "ls ") match as written.
+            left = r"(?<!\w)" if (kw[0].isalnum() or kw[0] == "_") else ""
+            if kw[-1].isalpha():
+                right = r"s?(?!\w)"  # a plural counts: "gpus", "files"
+            elif kw[-1].isalnum() or kw[-1] == "_":
+                right = r"(?!\w)"
+            else:
+                right = ""
+            parts.append(left + re.escape(kw) + right)
+        pattern = re.compile("|".join(parts) or r"(?!)")
+        _KEYWORD_RE_CACHE[key] = pattern
+    return pattern
+
+
+def _mentions_keyword(msg_lower: str, keywords) -> bool:
+    """True when one of the keywords is in the message as whole words.
+
+    "supermarket" does not contain the outreach keyword "market", "display" not
+    the media keyword "play", "last" not the repo keyword "ast".
+    """
+    return bool(_keyword_regex(keywords).search(msg_lower or ""))
+
+
 def select_tools_for_context(message: str, all_tool_names: List[str], max_tools: int = 25) -> List[str]:
     """Select most relevant tools based on message content."""
     # No tools for conversational messages
@@ -938,7 +1021,7 @@ def select_tools_for_context(message: str, all_tool_names: List[str], max_tools:
         if category == "image":
             if not _wants_image_tools(message):
                 continue
-        elif not any(kw in msg_lower for kw in keywords):
+        elif not _mentions_keyword(msg_lower, keywords):
             continue
         keyword_matched = True
         matched_categories.add(category)
@@ -983,7 +1066,7 @@ def _pin_repo_intel_tools(message: str, selected: List[str], all_tool_names: Lis
     so a downstream cap never truncates them). Cheap: 3 tools, ~60 prompt tokens.
     """
     msg = (message or "").lower()
-    if not any(kw in msg for kw in REPO_INTEL_KEYWORDS):
+    if not _mentions_keyword(msg, REPO_INTEL_KEYWORDS):
         return selected
     available = set(all_tool_names)
     pinned = [t for t in REPO_INTEL_TOOLS if t in available and t not in selected]
@@ -1048,7 +1131,7 @@ def _pin_knowledge_nav_tools(message: str, selected: List[str], all_tool_names: 
     Cheap: four tools, ~80 prompt tokens, and only on a clear keyword match.
     """
     msg = (message or "").lower()
-    if not any(kw in msg for kw in KNOWLEDGE_NAV_KEYWORDS):
+    if not _mentions_keyword(msg, KNOWLEDGE_NAV_KEYWORDS):
         return selected
     available = set(all_tool_names)
     pinned = [t for t in KNOWLEDGE_NAV_TOOLS_PINNED if t in available and t not in selected]
@@ -1117,7 +1200,7 @@ def _pin_workstation_tools(message: str, selected: List[str], all_tool_names: Li
     matches — same pattern as _pin_repo_intel_tools.
     """
     msg = (message or "").lower()
-    if not any(kw in msg for kw in WORKSTATION_KEYWORDS):
+    if not _mentions_keyword(msg, WORKSTATION_KEYWORDS):
         return selected
     available = set(all_tool_names)
     pinned = [t for t in WORKSTATION_TOOLS if t in available and t not in selected]
@@ -1142,16 +1225,16 @@ def _pin_image_edit_tools(has_image: bool, selected: List[str], all_tool_names: 
     return extra + list(selected) if extra else selected
 
 
-_IMAGE_RETRY_PHRASES = (
-    "try again", "retry", "please retry", "try once more", "retry please",
+# The whole message is the retry ("try again", "retry please"); a question that
+# contains the word ("how do I retry a failed HTTP request?") is not one.
+_IMAGE_RETRY_RE = re.compile(
+    r"(?:please\s+)?(?:try\s+again|retry|try\s+once\s+more)(?:,?\s+please|\s+now)?\s*[.!?]*",
+    re.IGNORECASE,
 )
 
 
 def _is_image_retry_message(message: str) -> bool:
-    msg = (message or "").strip().lower()
-    if not msg:
-        return False
-    return any(phrase in msg for phrase in _IMAGE_RETRY_PHRASES)
+    return bool(_IMAGE_RETRY_RE.fullmatch((message or "").strip()))
 
 
 # Identity generate: new scene, same face. Must not steal "put a hat on this person".
@@ -1186,17 +1269,21 @@ def user_wants_identity_generate(message: str) -> bool:
     """True for 'this person as …' / 'put this person in …'; false for 'put a hat on this person'."""
     if not (message or "").strip():
         return False
-    if _EDIT_ON_PERSON_RE.search(message):
+    if _HOW_TO_QUESTION_RE.search(message) or _EDIT_ON_PERSON_RE.search(message):
         return False
     return bool(_IDENTITY_INTENT_RE.search(message))
 
 
+# The named photo tools run with no model in the loop, so "how do I remove the
+# background in GIMP?" must not start one.
 def user_wants_background_remove(message: str) -> bool:
-    return bool(_BG_REMOVE_RE.search(message or ""))
+    message = message or ""
+    return bool(_BG_REMOVE_RE.search(message)) and not _HOW_TO_QUESTION_RE.search(message)
 
 
 def user_wants_outpaint(message: str) -> bool:
-    return bool(_OUTPAINT_RE.search(message or ""))
+    message = message or ""
+    return bool(_OUTPAINT_RE.search(message)) and not _HOW_TO_QUESTION_RE.search(message)
 
 
 def parse_outpaint_pad(message: str) -> dict:
@@ -2250,8 +2337,11 @@ class UnifiedChatEngine:
             if gen_result is not None:
                 return gen_result
 
-        # The chat model has this turn, so the conversation has moved off the last picture.
+        # The chat model has this turn, so the conversation has moved off the last picture,
+        # and a "try again" offered after a failed render applied to the turn before this one.
         _SESSION_IMAGE_FOCUS.discard(session_id)
+        _SESSION_PENDING_IMAGE_PROMPT.pop(session_id, None)
+        _SESSION_PENDING_IMAGE_EDIT.pop(session_id, None)
 
         # Resolve the per-request "thinking" preference for thinking-capable models
         # (gemma4:12b, qwen3, deepseek-r1, ...). Precedence: explicit per-chat override
@@ -4048,10 +4138,16 @@ class UnifiedChatEngine:
 
         return None  # Not a media command
 
-    def _chat_image_source(self, session_id: str) -> Optional[str]:
-        """Attached photo this turn, else the last image this session produced."""
+    def _chat_image_source(self, session_id: str, message: str = "") -> Optional[str]:
+        """Attached photo this turn, else the last image this session produced.
+
+        The last image counts while it is in focus (made since the last plain chat
+        turn) or when the message names it ("the last image"), as for follow-up edits.
+        """
         if getattr(self, "_image_data", None):
             return self._materialize_attached_image()
+        if session_id not in _SESSION_IMAGE_FOCUS and not _NAMES_THE_IMAGE_RE.search(message or ""):
+            return None
         img_path = _SESSION_LAST_EDIT.get(session_id)
         if img_path and os.path.exists(img_path):
             return img_path
@@ -4061,7 +4157,7 @@ class UnifiedChatEngine:
                                 emit_fn: Callable, request_id: str,
                                 options: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         """Identity / background-remove / outpaint intercepts. Run before generic edit."""
-        img_path = self._chat_image_source(session_id)
+        img_path = self._chat_image_source(session_id, message)
         if not img_path:
             return None
 
@@ -4289,10 +4385,29 @@ class UnifiedChatEngine:
             return None
 
         prompt = _VIDEO_CHROME_RE.sub("", message).strip() or message.strip()
-        logger.info("Video-gen direct (natural lang): generate_video(prompt=%r)", prompt[:80])
+        params = {"prompt": prompt}
+        first_frame = self._video_first_frame(message, session_id)
+        if first_frame:
+            params["first_image"] = first_frame
+        logger.info("Video-gen direct (natural lang): generate_video(prompt=%r, first_image=%s)",
+                    prompt[:80], bool(first_frame))
         return self._run_direct_tool_execution(
-            "generate_video", {"prompt": prompt}, session_id, emit_fn, request_id, message, options
+            "generate_video", params, session_id, emit_fn, request_id, message, options
         )
+
+    def _video_first_frame(self, message: str, session_id: str) -> Optional[str]:
+        """The picture a video request animates, when it points back at one
+        ("/video make it rain", "make a video of this"): an image attached to
+        this turn, else the session's last picture while it is in focus. A
+        request that names its own scene gets no first frame."""
+        if not _REFERS_BACK_RE.search(message or ""):
+            return None
+        if getattr(self, "_image_data", None):
+            return self._materialize_attached_image()
+        last = _SESSION_LAST_EDIT.get(session_id)
+        if last and session_id in _SESSION_IMAGE_FOCUS and os.path.exists(last):
+            return last
+        return None
 
     def _pipeline_usage_notice(
         self, session_id: str, emit_fn: Callable, request_id: str,
