@@ -435,6 +435,8 @@ class AgentControlService:
         # clicking until the screen next changes (key -> name as written).
         self._not_found_counts: Dict[str, int] = {}
         self._banned_targets: Dict[str, str] = {}
+        # Per task: obstacles of each type handled or escalated by ASSESS.
+        self._obstacle_counts: Dict[str, int] = {}
         # Where the field being typed into was clicked; the typed text has to
         # show up near it.
         self._field_point: Optional[Tuple[int, int]] = None
@@ -969,6 +971,7 @@ class AgentControlService:
             self._same_strategy_failures = 0
             self._not_found_counts = {}
             self._banned_targets = {}
+            self._obstacle_counts = {}
             self._field_point = None
 
         # Attempts per click target this task: the second try at the same
@@ -3184,6 +3187,10 @@ class AgentControlService:
             logger.error(f"Action execution error: {e}", exc_info=True)
             return {"success": False, "error": str(e)}
 
+    # Obstacles of one type ASSESS handles per task before leaving the screen
+    # to THINK: a banner Escape did not close the first two times stays open.
+    _OBSTACLE_TRIES_PER_TYPE = 2
+
     def _assess_obstacles(self, scene_description: str, analyzer, screen, iteration: int) -> str:
         """
         ASSESS phase: detect and handle obstacles before the main THINK step.
@@ -3205,7 +3212,7 @@ class AgentControlService:
                       "dialog is blocking", "dialog is covering", "modal is open",
                       "are you sure you want to"],
             "restore": ["restore session", "restore previous", "open previous tabs", "previous session"],
-            "cookie": ["cookie", "accept cookies", "cookie consent", "gdpr"],
+            "cookie": ["accept cookies", "cookie consent", "gdpr"],
             "error": ["page not found", "404", "server error", "500", "connection refused"],
         }
 
@@ -3218,6 +3225,18 @@ class AgentControlService:
         if not detected_type:
             return "clear"
 
+        tries = self._obstacle_counts.get(detected_type, 0)
+        if tries >= self._OBSTACLE_TRIES_PER_TYPE:
+            logger.info(
+                f"[AGENT][STEP {iteration+1}][ASSESS] {detected_type} obstacle already handled "
+                f"{tries}x this task; leaving it to THINK"
+            )
+            return "clear"
+
+        def _counted(outcome: str) -> str:
+            self._obstacle_counts[detected_type] = tries + 1
+            return outcome
+
         logger.info(f"[AGENT][STEP {iteration+1}][ASSESS] Obstacle detected: {detected_type}")
 
         # Stage 1: Fast model handles known obstacles with simple actions
@@ -3226,7 +3245,7 @@ class AgentControlService:
             screen.hotkey("Escape")
             _time.sleep(0.5)
             logger.info(f"[AGENT][STEP {iteration+1}][ASSESS] Tried Escape for permission dialog")
-            return "handled"
+            return _counted("handled")
 
         elif detected_type == "restore":
             # Restore session bars: click the X dismiss button (far right)
@@ -3237,13 +3256,13 @@ class AgentControlService:
             screen.click(1000, 100)
             _time.sleep(0.5)
             logger.info(f"[AGENT][STEP {iteration+1}][ASSESS] Dismissed restore session bar")
-            return "handled"
+            return _counted("handled")
 
         elif detected_type == "cookie":
             screen.hotkey("Escape")
             _time.sleep(0.5)
             logger.info(f"[AGENT][STEP {iteration+1}][ASSESS] Tried Escape for cookie banner")
-            return "handled"
+            return _counted("handled")
 
         elif detected_type == "error":
             # 404 or connection error — this is informational, not blocking
@@ -3270,7 +3289,7 @@ class AgentControlService:
             # No thinking model available, try Escape as fallback
             screen.hotkey("Escape")
             _time.sleep(0.5)
-            return "handled"
+            return _counted("handled")
 
         # Ask the thinking model to reason about the obstacle
         escalation_prompt = (
@@ -3303,12 +3322,12 @@ class AgentControlService:
             else:
                 screen.hotkey("Escape")
             _time.sleep(0.5)
-            return "escalated"
+            return _counted("escalated")
 
         # Thinking model also failed — last resort Escape
         screen.hotkey("Escape")
         _time.sleep(0.5)
-        return "handled"
+        return _counted("handled")
 
     def _refresh_dom_snapshot(self) -> None:
         """Pull a fresh DOM snapshot from Firefox once per iteration.

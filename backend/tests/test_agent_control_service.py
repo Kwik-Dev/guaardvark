@@ -927,3 +927,35 @@ class TestCheckEarlyDone(unittest.TestCase):
             state = A._get_desktop_state(display=":99")
         self.assertTrue(state.startswith("Desktop state: unknown"), state)
         self.assertEqual(run.call_count, 1)
+
+
+class TestAssessObstacles(unittest.TestCase):
+    """ASSESS leaves a page that only mentions cookies alone, and hands an
+    obstacle it has already tried twice this task to THINK."""
+
+    CONSENT = "A cookie consent banner covers the bottom of the page with Accept and Reject buttons."
+
+    def setUp(self):
+        from backend.services.agent_control_service import AgentControlService
+        self.svc = AgentControlService()
+        self.screen = MagicMock()
+        sleep = patch("time.sleep")
+        sleep.start()
+        self.addCleanup(sleep.stop)
+
+    def _assess(self, scene, iteration=0):
+        return self.svc._assess_obstacles(scene, MagicMock(), self.screen, iteration)
+
+    def test_a_page_about_cookies_is_clear(self):
+        self.assertEqual(self._assess("a recipe page about chocolate chip cookies"), "clear")
+        self.screen.hotkey.assert_not_called()
+
+    def test_a_consent_banner_is_handled_twice_then_left_to_think(self):
+        outcomes = [self._assess(self.CONSENT, i) for i in range(3)]
+        self.assertEqual(outcomes, ["handled", "handled", "clear"])
+        self.assertEqual(self.screen.hotkey.call_count, 2)
+
+    def test_the_cap_is_per_obstacle_type(self):
+        for i in range(2):
+            self._assess(self.CONSENT, i)
+        self.assertEqual(self._assess("example.com wants to use your camera", 2), "handled")
