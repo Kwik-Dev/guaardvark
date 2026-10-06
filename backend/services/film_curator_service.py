@@ -1,11 +1,13 @@
-"""Layer 3 of the film-orchestrator plan — the auto-curator.
+"""Layer 3 of the film-orchestrator plan — the storyboard curator.
 
 The production pipeline parks at the `awaiting_approval` stage with one storyboard
-frame per shot and `ProductionShot.approved=False`, waiting for a human to bless
-each one. That's the "flip switches all day" problem. This module lets the
-multimodal brain do the blessing: Gemma-4 *looks* at each storyboard frame, judges
-whether it's on-model and coherent for that shot's character, and sets `approved`
-automatically — escalating to the human ONLY the shots it's unsure about.
+frame per shot and `ProductionShot.approved=False`, waiting for a person to approve
+the storyboard. This module gives that person a head start: Gemma-4 *looks* at each
+frame, judges whether it's on-model and coherent for that shot's character, stores
+its verdict and reason on the shot (`curator_advice`), and pre-ticks `approved`
+(with `approved_by='curator'`) on the frames it judges usable. It is advice only —
+the stage stays at `awaiting_approval` and the render starts when the person
+approves.
 
 Design notes:
   - Follows the codebase's see→think split (utils/vision_analyzer): the VISION model
@@ -19,6 +21,8 @@ Design notes:
   - SAFE BY DEFAULT: anything we can't confidently approve stays approved=False and
     goes to the human. A garbage/unparseable LLM reply → NOT approved. False
     negatives cost a human glance; false positives would render a broken shot.
+  - Never clears an approval: shots already approved are skipped, so a rerun cannot
+    undo what a person ticked on the storyboard.
   - Idempotent: no-ops unless the production is actually at `awaiting_approval`.
 """
 
@@ -130,12 +134,15 @@ def judge_shot(shot, *, analyzer=None, decider=None, threshold: int = DEFAULT_TH
 
 
 def auto_curate(prod_id: int, *, analyzer=None, decider=None,
-                threshold: int = DEFAULT_THRESHOLD, do_advance: bool = True) -> dict:
-    """Judge every shot of a production parked at `awaiting_approval`, set
-    `approved`, and (if all pass and do_advance) advance the stage to `rendering`.
+                threshold: int = DEFAULT_THRESHOLD, do_advance: bool = False) -> dict:
+    """Judge each not-yet-approved shot of a production parked at
+    `awaiting_approval` and set `approved` on the ones that pass; shots already
+    approved are left as they are and count as approved. Only when do_advance
+    is set and every shot passes does the stage move on to `rendering`; the
+    Film Crew task leaves it off so the person's approval stays the only way to
+    start the render.
 
-    Returns a summary dict. Does NOT dispatch the editor task — the caller
-    (run_curator) does, keeping celery out of this testable unit. Idempotent:
+    Returns a summary dict and never dispatches the editor task. Idempotent:
     no-ops unless the production is at `awaiting_approval`.
     """
     from backend.models import Production, ProductionShot, db
@@ -153,8 +160,21 @@ def auto_curate(prod_id: int, *, analyzer=None, decider=None,
 
     results = []
     for shot in shots:
+        if shot.approved:
+            # An approval already on the card stands, whoever set it; the curator
+            # only advises on shots still waiting for one.
+            results.append({"shot": shot.shot_number, "approved": True, "approve": True,
+                            "confidence": None, "reason": "already approved", "kept": True})
+            continue
         v = judge_shot(shot, analyzer=analyzer, decider=decider, threshold=threshold)
-        shot.approved = v["approved"]
+        shot.curator_advice = {
+            "verdict": "approve" if v["approved"] else "flag",
+            "reason": v["reason"],
+            "confidence": v["confidence"],
+        }
+        if v["approved"]:
+            shot.approved = True
+            shot.approved_by = "curator"
         results.append({"shot": shot.shot_number, **v})
         logger.info("Curator shot %s: %s conf=%s (%s)",
                     shot.shot_number, "APPROVE" if v["approved"] else "FLAG",
@@ -166,7 +186,6 @@ def auto_curate(prod_id: int, *, analyzer=None, decider=None,
 
     advanced = False
     if do_advance and not flagged:
-        # Every shot passed — no human needed. Advance the gate to rendering.
         svc = ProductionService(db.session)
         advanced = svc.advance_if_predecessor(prod_id, expected_predecessor="awaiting_approval")
 

@@ -1329,8 +1329,13 @@ try:
                 # Generated samples graduate into Training Data after successful train.
                 ("subject_samples", "promoted_to_training", "ALTER TABLE subject_samples ADD COLUMN IF NOT EXISTS promoted_to_training BOOLEAN NOT NULL DEFAULT FALSE"),
                 ("subject_samples", "promoted_at", "ALTER TABLE subject_samples ADD COLUMN IF NOT EXISTS promoted_at TIMESTAMP"),
+                # Whether a sample's angle label was read from the image or is unverified.
+                ("subject_samples", "angle_state", "ALTER TABLE subject_samples ADD COLUMN IF NOT EXISTS angle_state VARCHAR(16)"),
                 ("production_shots", "scene_mood", "ALTER TABLE production_shots ADD COLUMN IF NOT EXISTS scene_mood VARCHAR(64)"),
                 ("production_shots", "character_name", "ALTER TABLE production_shots ADD COLUMN IF NOT EXISTS character_name VARCHAR(255)"),
+                # Storyboard curator advice per shot, and who ticked the approval.
+                ("production_shots", "approved_by", "ALTER TABLE production_shots ADD COLUMN IF NOT EXISTS approved_by VARCHAR(16)"),
+                ("production_shots", "curator_advice", "ALTER TABLE production_shots ADD COLUMN IF NOT EXISTS curator_advice JSON"),
                 # Local source folder for swarm/agent code runs (added Phase 2).
                 ("websites", "local_path", "ALTER TABLE websites ADD COLUMN IF NOT EXISTS local_path VARCHAR(2048)"),
                 # Autoresearch 2.0 (2026-08-10): honest eval pairs + experiment

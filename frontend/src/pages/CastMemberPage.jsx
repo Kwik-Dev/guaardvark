@@ -1293,6 +1293,11 @@ const CastMemberPage = () => {
                         </Tooltip>
                         <StatusChip status={s.status} />
                       </Box>
+                      {s.angle_state === 'unverified' && (
+                        <Tooltip title="The vision check could not read this image, so the angle is the planned one and does not count toward framing coverage.">
+                          <Chip size="small" variant="outlined" color="warning" label="angle unverified" sx={{ mt: 0.5 }} />
+                        </Tooltip>
+                      )}
                     </CardContent>
                     <CardActions sx={{ pt: 0, justifyContent: 'space-between' }}>
                       <Tooltip title={s.approved ? 'Approved — click to un-approve' : 'Approve this sample'}>

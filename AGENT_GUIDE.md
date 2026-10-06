@@ -112,7 +112,7 @@ the user's own words.
 |---|---|---|
 | Music video: cut plan approved | `POST /api/music-video/<id>/approve` | number of cuts, seconds per clip, model, total time; offer storyboards first |
 | Film Crew: casting confirmed | `POST /api/production/<id>/casting/confirm` | every subject and how it is cast (existing LoRA, new LoRA, as described) |
-| Film Crew: storyboard approved | `POST /api/production/<id>/storyboard/approve` | shot count and render cost |
+| Film Crew: storyboard approved | `POST /api/production/<id>/storyboard/approve` | shot count, render cost, and any shots the curator flagged |
 | Voice clone | upload via `/api/audio-foundry/voice-clips/upload` | whose voice, and that they consented; refuse public figures |
 | LoRA of a person | `POST /api/cast-library/subjects/<id>/train` | whose face, and that they consented |
 | Model or LoRA download | `/models/download`, `/models/user` with `install` | size and licence |

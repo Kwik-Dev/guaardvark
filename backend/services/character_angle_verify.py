@@ -8,7 +8,11 @@ against the same closed label set, then:
   1. On mismatch → one auto-regen with a strengthened framing lead (same planned slot).
   2. Always relabel the sample to what vision sees on the final image (honest UI).
 
-Never raises for vision failures — returns match=True (skip) so generate continues.
+Never raises for vision failures. A check that could not run or whose reply could
+not be read (missing image, vision error or timeout, unparseable reply) returns
+ok=False and match=None, "angle unverified": never counted as a match, so generate
+continues without claiming it. When vision read the image but the plan has no
+known label, match is None as well, with the observed label still reported.
 """
 from __future__ import annotations
 
@@ -18,6 +22,11 @@ from pathlib import Path
 from typing import Any, Optional
 
 log = logging.getLogger(__name__)
+
+# SubjectSample.angle_state values. 'verified': the label was read from the final
+# image. 'unverified': the check could not run and the planned label stands.
+ANGLE_VERIFIED = "verified"
+ANGLE_UNVERIFIED = "unverified"
 
 # Closed set — must stay aligned with character_generator_service._ANGLE_WEIGHTS labels.
 CANONICAL_ANGLES = (
@@ -53,6 +62,20 @@ _ANGLE_ALIASES = {
     "wide shot": "full-body front",
 }
 
+# Fuzzy lookup tries the longest label first, on word boundaries, so a longer
+# label wins over a shorter one inside it: "full-body three-quarter left" is
+# full-body three-quarter (not three-quarter left), and "full body, front-facing"
+# is full-body front (not the alias "front"). A trailing "s" is allowed so plurals
+# such as "headshots" or "wide shots" still match.
+_FUZZY_LABELS = tuple(
+    (re.compile(rf"\b{re.escape(label)}s?\b"), canon)
+    for label, canon in sorted(
+        [(c, c) for c in CANONICAL_ANGLES] + list(_ANGLE_ALIASES.items()),
+        key=lambda pair: len(pair[0]),
+        reverse=True,
+    )
+)
+
 _CLASSIFY_PROMPT = (
     "Classify the camera framing of the MAIN person in this image. "
     "Reply with EXACTLY one label from this list and nothing else:\n"
@@ -73,12 +96,8 @@ def normalize_angle(label: str | None) -> Optional[str]:
         return t
     if t in _ANGLE_ALIASES:
         return _ANGLE_ALIASES[t]
-    # Fuzzy contains
-    for canon in CANONICAL_ANGLES:
-        if canon in t:
-            return canon
-    for alias, canon in _ANGLE_ALIASES.items():
-        if alias in t:
+    for pattern, canon in _FUZZY_LABELS:
+        if pattern.search(t):
             return canon
     if "profile" in t and "left" in t:
         return "profile left"
@@ -96,14 +115,13 @@ def normalize_angle(label: str | None) -> Optional[str]:
     return None
 
 
-def angles_match(planned: str | None, observed: str | None) -> bool:
-    """True when labels agree (after normalize). Unknown observed → treat as match (don't regen)."""
+def angles_match(planned: str | None, observed: str | None) -> Optional[bool]:
+    """True when labels agree (after normalize), False when they differ, None when
+    either label is unknown: nothing was compared, so it is not a match."""
     p = normalize_angle(planned)
     o = normalize_angle(observed)
-    if o is None:
-        return True
-    if p is None:
-        return True
+    if o is None or p is None:
+        return None
     if p == o:
         return True
     # Soft: full-body front vs three-quarter both count as full-body coverage for regen skip?
@@ -211,10 +229,16 @@ def verify_sample_angle(
     *,
     analyzer=None,
 ) -> dict[str, Any]:
-    """Classify still and compare to plan. Does not mutate DB or regenerate."""
+    """Classify still and compare to plan. Does not mutate DB or regenerate.
+
+    ``match`` is True or False only when the classifier read the image and both
+    labels are known; otherwise it is None. ``ok`` says whether the image was
+    read at all: ok=False is an unverified angle, while ok=True with match=None
+    means the plan had no known label to compare against.
+    """
     clf = classify_image_angle(image_path, analyzer=analyzer)
     observed = clf.get("angle")
-    match = angles_match(planned_angle, observed) if clf.get("ok") else True
+    match = angles_match(planned_angle, observed) if clf.get("ok") else None
     return {
         "ok": clf.get("ok", False),
         "match": match,

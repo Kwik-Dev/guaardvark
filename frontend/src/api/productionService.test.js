@@ -43,6 +43,15 @@ describe('productionService', () => {
     expect(axios.post).toHaveBeenCalledWith(expect.stringContaining('/production/1/storyboard/approve'));
   });
 
+  it('approveStoryboard sends confirm_flagged only when asked', async () => {
+    axios.post.mockResolvedValue({ data: { success: true } });
+    await approveStoryboard(1, { confirmFlagged: true });
+    expect(axios.post).toHaveBeenCalledWith(
+      expect.stringContaining('/production/1/storyboard/approve'),
+      { confirm_flagged: true }
+    );
+  });
+
   it('regenerateShot calls POST /api/production/:id/storyboard/shot/:shotId/regenerate', async () => {
     const payload = { prompt_override: 'new prompt' };
     axios.post.mockResolvedValue({ data: { success: true } });
