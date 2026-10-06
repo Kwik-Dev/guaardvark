@@ -2,7 +2,7 @@
 package that is not installed, a password, damage, an old format. It does not
 report such a file as empty, as unsupported, or as having no worksheets.
 
-Files are built in a temporary uploads folder; no image is processed and
+Files are built in a temporary uploads folder; the vision model is stubbed and
 nothing touches the network."""
 
 import pytest
@@ -166,6 +166,71 @@ def test_telling_the_containers_apart(tmp_path):
     (tmp_path / "locked.xlsx").write_bytes(ENCRYPTED_OFFICE)
     assert is_encrypted_office_file(str(tmp_path / "locked.xlsx"))
     assert not is_encrypted_office_file(str(tmp_path / "b.xls"))
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+NO_VISION = {"success": False, "error": "No vision models available in Ollama"}
+
+
+@pytest.fixture
+def ocr(monkeypatch):
+    """Replace the OCR call the image processor makes."""
+    from backend.services import image_content_service
+
+    def use(extract):
+        monkeypatch.setattr(image_content_service.image_extractor,
+                            "extract_text_from_image", extract)
+    return use
+
+
+def _ocr_crash(path):
+    raise RuntimeError("model crashed")
+
+
+@pytest.mark.parametrize("extract,reason", [
+    (lambda path: NO_VISION, "OCR extraction failed: No vision models available in Ollama"),
+    (_ocr_crash, "OCR processing error: model crashed"),
+])
+def test_an_ocr_failure_gives_empty_text_and_the_reason_in_metadata(tmp_path, ocr, extract, reason):
+    (tmp_path / "scan.png").write_bytes(PNG)
+    ocr(extract)
+    processed = create_file_processor().process_file(str(tmp_path / "scan.png"))
+    assert processed.text_content == ""
+    assert processed.metadata.extraction_error == reason
+    assert processed.metadata.word_count == 0
+
+
+def test_no_ocr_service_gives_empty_text_and_the_reason_in_metadata(tmp_path):
+    from backend.utils.enhanced_file_processor import FileFormat
+    (tmp_path / "scan.png").write_bytes(PNG)
+    processor = create_file_processor()
+    processor.processors[FileFormat.PNG].service_available = False
+    processed = processor.process_file(str(tmp_path / "scan.png"))
+    assert processed.text_content == ""
+    assert processed.metadata.extraction_error == "OCR service not available"
+
+
+def test_an_ocr_failure_is_indexed_as_no_text_not_as_the_failure(tmp_path, ocr):
+    from backend.utils.file_processor_adapter import process_file_to_llamaindex
+    (tmp_path / "scan.png").write_bytes(PNG)
+    ocr(lambda path: NO_VISION)
+    docs = process_file_to_llamaindex(str(tmp_path / "scan.png"))
+    assert len(docs) == 1
+    assert "failed" not in docs[0].text and "vision" not in docs[0].text
+    assert docs[0].metadata["extraction_error"] == (
+        "OCR extraction failed: No vision models available in Ollama")
+
+
+def test_the_legacy_image_reader_keeps_the_failure_out_of_the_text(tmp_path, ocr, monkeypatch):
+    from backend.services.indexing_service import get_documents_from_file
+    monkeypatch.setattr("backend.utils.file_processor_adapter.is_enhanced_processing_available",
+                        lambda path: False)
+    (tmp_path / "scan.png").write_bytes(PNG)
+    ocr(lambda path: NO_VISION)
+    docs = get_documents_from_file(str(tmp_path / "scan.png"))
+    assert len(docs) == 1
+    assert "failed" not in docs[0].text and "vision" not in docs[0].text
+    assert docs[0].metadata["extraction_error"] == "No vision models available in Ollama"
 
 
 def test_the_encryption_marker_is_found_across_a_read_boundary(tmp_path):

@@ -138,6 +138,9 @@ class FileMetadata:
     image_dimensions: Optional[Tuple[int, int]] = None
     extraction_confidence: Optional[float] = None
     vision_model_used: Optional[str] = None
+    # Why no text could be read from the file. The text is then empty: a
+    # reason written into the text would be indexed and retrieved as content.
+    extraction_error: Optional[str] = None
 
 @dataclass
 class ProcessedContent:
@@ -574,20 +577,21 @@ class ImageProcessor(FileProcessor):
                         else:
                             logger.info(f"Successfully extracted {len(text_content)} characters from {file_path}")
                     else:
-                        # OCR failed but service was available
-                        error_msg = extraction_result.get('error', 'Unknown error')
-                        text_content = f"Image file: {Path(file_path).name} (OCR extraction failed: {error_msg})"
-                        metadata.word_count = len(text_content.split())
+                        error_msg = extraction_result.get('error') or 'Unknown error'
+                        text_content = ""
+                        metadata.word_count = 0
+                        metadata.extraction_error = f"OCR extraction failed: {error_msg}"
                         logger.warning(f"Image extraction failed for {file_path}: {error_msg}")
-                        
+
                 except Exception as e:
                     logger.error(f"Error during OCR extraction for {file_path}: {e}")
-                    text_content = f"Image file: {Path(file_path).name} (OCR processing error: {str(e)})"
-                    metadata.word_count = len(text_content.split())
+                    text_content = ""
+                    metadata.word_count = 0
+                    metadata.extraction_error = f"OCR processing error: {e}"
             else:
-                # Service not available - create basic description
-                text_content = f"Image file: {Path(file_path).name} (OCR service not available - basic image file indexing)"
-                metadata.word_count = len(text_content.split())
+                text_content = ""
+                metadata.word_count = 0
+                metadata.extraction_error = "OCR service not available"
                 logger.debug(f"Processed image {file_path} without OCR - service not available")
             
             return ProcessedContent(
@@ -598,16 +602,15 @@ class ImageProcessor(FileProcessor):
             
         except Exception as e:
             logger.error(f"Error processing image file {file_path}: {e}")
-            # Return basic content even on error
-            text_content = f"Image file: {Path(file_path).name} (processing error: {str(e)})"
             metadata = FileMetadata(
                 format=FileFormat.JPG,  # Default
                 size_bytes=0,
                 mime_type="image/unknown",
-                word_count=len(text_content.split())
+                word_count=0,
+                extraction_error=f"processing error: {e}",
             )
             return ProcessedContent(
-                text_content=text_content,
+                text_content="",
                 metadata=metadata
             )
 
