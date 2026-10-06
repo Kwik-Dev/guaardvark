@@ -545,6 +545,19 @@ def _mark_recalled(memories) -> None:
     db.session.commit()
 
 
+def _count_recalled(memories) -> None:
+    """_mark_recalled for prompt builders: a failed count never costs the
+    prompt its memories."""
+    unique = list({id(m): m for m in memories}.values())
+    if not unique:
+        return
+    try:
+        _mark_recalled(unique)
+    except Exception as e:
+        db.session.rollback()
+        logger.debug(f"Could not count recalled memories: {e}")
+
+
 def _query_memories(
     sources=None,
     types=None,
@@ -579,7 +592,8 @@ def _query_memories(
 
     count_access records the returned rows as recalled (access_count and
     last_accessed_at, which feed the "recalled before" rank reason). A
-    read-only search passes False.
+    read-only search passes False, and so do the prompt builders, which count
+    only the rows that fit their budget.
 
     min_importance drops rows below that importance, always-on rows included.
 
@@ -850,6 +864,8 @@ def _get_memories_for_context_inner(
     workspace_root: str = None,
     cli_working_memory: dict | None = None,
 ) -> str:
+    # Counted after rendering: only the rows whose lines fit the budget were
+    # recalled, and "recalled before" should not favour rows the model never saw.
     memories = _query_memories(
         limit=limit,
         query=query,
@@ -858,6 +874,7 @@ def _get_memories_for_context_inner(
         user_id=user_id,
         workspace_root=workspace_root,
         cli_working_memory=cli_working_memory,
+        count_access=False,
     )
     _LAST_SELECTED.ids = []
 
@@ -998,7 +1015,9 @@ def _get_memories_for_context_inner(
         if body:
             sections.append("\n".join(["Confirmed by your feedback (keep doing this):"] + body))
 
-    _LAST_SELECTED.ids = [m.id for m in memories if m.id in shown]
+    shown_rows = [m for m in memories if m.id in shown]
+    _LAST_SELECTED.ids = [m.id for m in shown_rows]
+    _count_recalled(shown_rows)
     if not sections:
         return ""
     return "\n\n".join(sections)
@@ -1048,12 +1067,14 @@ def _get_lessons_for_agent_prompt_inner(
     project_id=None,
     workspace_root: str = None,
 ) -> str:
+    # As in chat recall, a row counts as recalled only when its block fits.
     lesson_rows = _query_memories(
         sources=["lesson_summary", "manual"],
         limit=max_rows,
         session_id=session_id,
         project_id=project_id,
         workspace_root=workspace_root,
+        count_access=False,
     )
     rows = list(lesson_rows)
     if include_belief_updates:
@@ -1063,6 +1084,7 @@ def _get_lessons_for_agent_prompt_inner(
             session_id=session_id,
             project_id=project_id,
             workspace_root=workspace_root,
+            count_access=False,
         )
         seen_ids = {r.id for r in rows}
         rows.extend(r for r in belief_rows if r.id not in seen_ids)
@@ -1070,6 +1092,7 @@ def _get_lessons_for_agent_prompt_inner(
     # No early return on empty rows: the corrections block below can still
     # have something to say, and the final check covers the all-empty case.
     sections = []
+    shown_rows = []
     total = 0
     for row in rows:
         content = (row.content or "").strip()
@@ -1099,6 +1122,7 @@ def _get_lessons_for_agent_prompt_inner(
         if total + len(block) > max_chars:
             break
         sections.append(block)
+        shown_rows.append(row)
         total += len(block) + 2
 
     # Corrections from the user's thumbs, appended after the lessons and
@@ -1110,6 +1134,7 @@ def _get_lessons_for_agent_prompt_inner(
             session_id=session_id,
             project_id=project_id,
             workspace_root=workspace_root,
+            count_access=False,
         )
     except Exception:
         fb_rows = []
@@ -1123,10 +1148,12 @@ def _get_lessons_for_agent_prompt_inner(
         if total + len(line) > max_chars:
             break
         fb_lines.append(line)
+        shown_rows.append(r)
         total += len(line) + 1
     if fb_lines:
         sections.append("### Corrections from feedback\n" + "\n".join(fb_lines))
 
+    _count_recalled(shown_rows)
     if not sections:
         return ""
     return "## Lessons & Notes (cross-session memory — apply when relevant)\n" + "\n\n".join(sections)
