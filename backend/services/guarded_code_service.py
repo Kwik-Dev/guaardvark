@@ -909,8 +909,13 @@ def stage_pending_fix(
     severity: str = "medium",
     run_id: int | None = None,
     repo_root: str | Path | None = None,
+    reviewed_by: str | None = None,
+    review_notes: str | None = None,
 ) -> int:
     """Create a PendingFix after validating path/lock/protection, without writing.
+
+    reviewed_by/review_notes record a review that happened before staging
+    (e.g. Uncle Claude's), or why there was none; a person still applies it.
 
     Note: Lock is not enforced on staging since it is purely a proposal and does
     not write to the repo. The lock check is strictly enforced during apply.
@@ -965,6 +970,8 @@ def stage_pending_fix(
         fix_description=description,
         severity=severity,
         status="proposed",
+        reviewed_by=reviewed_by,
+        review_notes=review_notes,
     )
     db.session.add(pending)
     db.session.commit()

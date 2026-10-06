@@ -24,6 +24,24 @@ VALID_DIRECTIVES = [
 ]
 
 
+def _not_reviewed(reason: str) -> Dict[str, Any]:
+    """A review_change result for a review that did not happen.
+
+    approved is None, never True, so a caller cannot read a missing review
+    as an approval; directive "not_reviewed" says the same to anything that
+    only looks at the directive.
+    """
+    return {
+        "approved": None,
+        "reviewed": False,
+        "suggestions": [],
+        "risk_level": "unknown",
+        "directive": "not_reviewed",
+        "reason": reason,
+        "offline_fallback": True,
+    }
+
+
 class ClaudeAdvisorService:
     """Singleton service for Claude API mentor integration."""
 
@@ -251,24 +269,10 @@ class ClaudeAdvisorService:
         reasoning: str,
     ) -> Dict[str, Any]:
         if not self.is_available():
-            return {
-                "approved": True,
-                "suggestions": [],
-                "risk_level": "unknown",
-                "directive": "proceed_with_caution",
-                "reason": "Uncle Claude unavailable — proceeding with caution",
-                "offline_fallback": True,
-            }
+            return _not_reviewed("Uncle Claude unavailable")
 
         if not self._check_budget():
-            return {
-                "approved": True,
-                "suggestions": [],
-                "risk_level": "unknown",
-                "directive": "proceed_with_caution",
-                "reason": "Token budget exceeded — proceeding with caution",
-                "offline_fallback": True,
-            }
+            return _not_reviewed("Uncle Claude token budget exceeded")
 
         try:
             review_prompt = (
@@ -311,29 +315,16 @@ class ClaudeAdvisorService:
             if result.get("directive") not in VALID_DIRECTIVES:
                 result["directive"] = "proceed_with_caution"
 
+            result["reviewed"] = True
             result["offline_fallback"] = False
             return result
 
         except json.JSONDecodeError as e:
             logger.warning(f"Failed to parse Claude guardian response: {e}")
-            return {
-                "approved": True,
-                "suggestions": [],
-                "risk_level": "unknown",
-                "directive": "proceed_with_caution",
-                "reason": f"Could not parse guardian response: {e}",
-                "offline_fallback": True,
-            }
+            return _not_reviewed(f"Could not parse guardian response: {e}")
         except Exception as e:
             logger.error(f"Claude guardian review failed: {e}", exc_info=True)
-            return {
-                "approved": True,
-                "suggestions": [],
-                "risk_level": "unknown",
-                "directive": "proceed_with_caution",
-                "reason": f"Guardian error: {str(e)}",
-                "offline_fallback": True,
-            }
+            return _not_reviewed(f"Guardian error: {str(e)}")
 
     # ── Tier 3: Update Advisor ──────────────────────────────────────────
 

@@ -506,28 +506,44 @@ class EditCodeTool(BaseTool):
 
         # Guardian review (Uncle Claude) — only during self-improvement (skip if dry_run)
         if ctx.get("_self_improvement_context") and not dry_run:
+            # Only approved=True counts as a review that passed. Anything else
+            # (unavailable, over budget, unparseable, error) is recorded as
+            # "not reviewed" on the staged fix; a person applies it either way.
+            reviewed_by = None
+            review_notes = None
             try:
                 from backend.services.claude_advisor_service import get_claude_advisor
                 advisor = get_claude_advisor()
-                if advisor.is_available():
-                    review = advisor.review_change(
-                        file_path=filepath,
-                        current_content=open(filepath).read()[:3000] if os.path.exists(filepath) else "",
-                        proposed_diff=f"- {old_text[:500]}\n+ {new_text[:500]}",
-                        reasoning=ctx.get("_reasoning", "Autonomous code change"),
-                    )
-                    if not review.get("approved", True):
-                        directive = review.get("directive", "reject")
-                        if directive in ("halt_self_improvement", "lock_codebase", "halt_family"):
+                review = advisor.review_change(
+                    file_path=filepath,
+                    current_content=open(filepath).read()[:3000] if os.path.exists(filepath) else "",
+                    proposed_diff=f"- {old_text[:500]}\n+ {new_text[:500]}",
+                    reasoning=ctx.get("_reasoning", "Autonomous code change"),
+                )
+                approved = review.get("approved")
+                if approved is False:
+                    directive = review.get("directive", "reject")
+                    if directive in ("halt_self_improvement", "lock_codebase", "halt_family"):
+                        # A failure here must not turn the rejection into a staged fix.
+                        try:
                             _handle_uncle_directive(directive, review.get("reason", ""))
-                        return ToolResult(
-                            success=False,
-                            error=f"Uncle Claude rejected this change: {review.get('reason', 'No reason given')}. "
-                                  f"Suggestions: {', '.join(review.get('suggestions', []))}",
-                            metadata={"guardian_review": review}
-                        )
+                        except Exception as directive_error:
+                            logger.error(f"Uncle Claude directive {directive} was not applied: "
+                                         f"{directive_error}", exc_info=True)
+                    return ToolResult(
+                        success=False,
+                        error=f"Uncle Claude rejected this change: {review.get('reason', 'No reason given')}. "
+                              f"Suggestions: {', '.join(review.get('suggestions', []))}",
+                        metadata={"guardian_review": review}
+                    )
+                if approved is True:
+                    reviewed_by = "uncle_claude"
+                    review_notes = review.get("reason") or None
+                else:
+                    review_notes = f"not reviewed: {review.get('reason') or 'no verdict returned'}"
             except Exception as e:
-                logger.warning(f"Guardian review failed, proceeding with caution: {e}")
+                logger.warning(f"Guardian review failed; staging as not reviewed: {e}")
+                review_notes = f"not reviewed: {e}"
 
             # Stage diff to pending_fixes instead of applying directly.
             try:
@@ -537,6 +553,8 @@ class EditCodeTool(BaseTool):
                     new_text,
                     ctx.get("_reasoning", "Autonomous fix"),
                     run_id=ctx.get("_run_id"),
+                    reviewed_by=reviewed_by,
+                    review_notes=review_notes,
                 )
                 return ToolResult(
                     success=True,
