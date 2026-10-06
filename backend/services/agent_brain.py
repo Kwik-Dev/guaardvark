@@ -25,6 +25,7 @@ from backend.services.brain_state import (
     ReflexResult,
 )
 from backend.services.step_budget import StepBudget, TierTelemetry
+from backend.utils.llm_debug_logger import log_decision
 from backend.services.unified_chat_engine import (
     begin_turn,
     end_turn,
@@ -1246,6 +1247,11 @@ class AgentBrain:
                         f"[narration] reply named '{narrated[0]}' without calling it "
                         "(logged, not executed)"
                     )
+                    # backend.log keeps WARNING and up; the per-session trail in
+                    # llm_debug.log (Settings > LLM debug) is where this is read.
+                    log_decision("agent_brain", "NARRATED_TOOL_NOT_RUN", {
+                        "session_id": session_id, "tool": narrated[0],
+                    })
 
             result["tier"] = 2
             return result

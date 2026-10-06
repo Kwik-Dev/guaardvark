@@ -247,6 +247,19 @@ class TestTier2NarrationNoExecute:
         assert "narration_intercepted" not in result
         assert "chat:response" not in _emitted_events(emit_fn)
 
+    def test_narration_is_written_to_the_session_decision_trail(self, brain_with_tools):
+        with patch("backend.services.agent_brain.log_decision") as log_decision:
+            _run_instinct(
+                brain_with_tools,
+                {"response": SEARCH_REPLY, "steps": []},
+                SEARCH_MESSAGE,
+            )
+        log_decision.assert_called_once_with(
+            "agent_brain", "NARRATED_TOOL_NOT_RUN",
+            {"session_id": "s1", "tool": "web_search"},
+        )
+        brain_with_tools.state.tool_registry.execute_tool.assert_not_called()
+
     def test_generate_image_narration_does_not_execute(self, brain_with_tools):
         reply = "Let me use the generate_image tool to draw that"
         message = "a sunset over mountains"
