@@ -65,9 +65,10 @@ _ANGLE_ALIASES = {
 # Fuzzy lookup tries the longest label first, on word boundaries, so a longer
 # label wins over a shorter one inside it: "full-body three-quarter left" is
 # full-body three-quarter (not three-quarter left), and "full body, front-facing"
-# is full-body front (not the alias "front").
+# is full-body front (not the alias "front"). A trailing "s" is allowed so plurals
+# such as "headshots" or "wide shots" still match.
 _FUZZY_LABELS = tuple(
-    (re.compile(rf"\b{re.escape(label)}\b"), canon)
+    (re.compile(rf"\b{re.escape(label)}s?\b"), canon)
     for label, canon in sorted(
         [(c, c) for c in CANONICAL_ANGLES] + list(_ANGLE_ALIASES.items()),
         key=lambda pair: len(pair[0]),

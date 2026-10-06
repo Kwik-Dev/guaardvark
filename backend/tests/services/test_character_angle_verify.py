@@ -32,6 +32,16 @@ def test_normalize_angle_prefers_the_longest_label():
     assert normalize_angle("a front view") == "face-forward"
 
 
+def test_normalize_angle_accepts_simple_plurals():
+    assert normalize_angle("headshot") == "face-forward"
+    assert normalize_angle("headshots") == "face-forward"
+    assert normalize_angle("two headshots, studio light") == "face-forward"
+    assert normalize_angle("full-body shot") == "full-body front"
+    assert normalize_angle("full-body shots") == "full-body front"
+    assert normalize_angle("a set of wide shots") == "full-body front"
+    assert normalize_angle("close-ups of the face") == "face-forward"
+
+
 def test_angles_match_unknown_label_is_not_a_match():
     assert angles_match("profile right", "profile right") is True
     assert angles_match("profile right", "full-body front") is False
