@@ -340,24 +340,48 @@ class ContentAgent:
 
         Stops at batch_size to keep individual ticks bounded — a celery beat
         every few minutes will drain the queue eventually.
+
+        A row whose drafting raises is rejected as ``draft_crashed`` and
+        counted under errors, and the rows after it are still drafted. Left
+        as a candidate it would head the oldest-first query again and stop
+        every later tick at the same row.
         """
-        from backend.models import SocialOutreachLog
-        rows = (
-            SocialOutreachLog.query
-            .filter(SocialOutreachLog.status == "candidate")
-            .order_by(SocialOutreachLog.created_at.asc())
-            .limit(batch_size)
-            .all()
-        )
+        from backend.models import SocialOutreachLog, db
+        from backend.services.social_outreach import transitions
+        row_ids = [
+            row.id for row in (
+                SocialOutreachLog.query
+                .filter(SocialOutreachLog.status == "candidate")
+                .order_by(SocialOutreachLog.created_at.asc())
+                .limit(batch_size)
+                .all()
+            )
+        ]
         report = {
-            "considered": len(rows),
+            "considered": len(row_ids),
             "drafted": 0,
             "approved": 0,
             "rejected": 0,
             "errors": 0,
         }
-        for row in rows:
-            outcome = self.draft_candidate(row.id)
+        for row_id in row_ids:
+            try:
+                outcome = self.draft_candidate(row_id)
+            except Exception as e:
+                logger.exception("ContentAgent.draft_batch: drafting %s raised", row_id)
+                report["errors"] += 1
+                db.session.rollback()
+                # Only a row still waiting as a candidate is rejected; one the
+                # crash caught after promotion keeps its draft.
+                if not transitions.move(
+                    row_id, "rejected", ("candidate",),
+                    abort_reason=f"draft_crashed: {type(e).__name__}: {e}"[:512],
+                ):
+                    logger.warning(
+                        "ContentAgent.draft_batch: %s was no longer a candidate after the crash; left as is",
+                        row_id,
+                    )
+                continue
             status = outcome["status"]
             if status == "drafted":
                 report["drafted"] += 1

@@ -9,6 +9,7 @@ Tests cover:
   • candidate not found (id doesn't exist in DB)
   • posted_text gets UTM tags applied
   • batch processes oldest first
+  • batch rejects a row whose drafting raises and still drafts the rows after it
 
 The persona drafting call is mocked at draft_outreach_text and apply_utm_tags.
 The external grader is mocked at grade_draft_externally so tests don't depend
@@ -244,6 +245,96 @@ def test_draft_batch_processes_oldest_candidates_first(app):
         db.session.expire_all()
         statuses = sorted([r.status for r in SocialOutreachLog.query.all()])
         assert statuses == ["candidate", "drafted", "drafted"]
+
+
+def _two_candidates():
+    """Two comment candidates, oldest first. Returns their ids in that order."""
+    from datetime import datetime, timedelta, timezone
+    ids = []
+    for i in range(2):
+        row = SocialOutreachLog(
+            platform="reddit",
+            action="comment",
+            target_url=f"https://r.example/{i}",
+            target_thread_id=f"t{i}",
+            draft_text=json.dumps({"title": f"t{i}", "top_comments": []}),
+            status="candidate",
+            created_at=datetime.now(timezone.utc) - timedelta(hours=10 - i),
+        )
+        db.session.add(row)
+        db.session.commit()
+        ids.append(row.id)
+    return ids
+
+
+def _batch_with(grader_effect=None, trail_effect=None):
+    """Run draft_batch with drafting stubbed, outreach off and supervised on."""
+    with patch(
+        "backend.services.social_outreach.content_agent.persona.draft_outreach_text",
+        return_value={"draft": "ok", "grade": 0.9},
+    ), patch(
+        "backend.services.social_outreach.content_agent.persona.apply_utm_tags",
+        side_effect=lambda text, **k: text,
+    ), patch(
+        "backend.services.social_outreach.content_agent.external_grader.grade_draft_externally",
+        side_effect=grader_effect or (lambda *a, **k: EXT_SKIPPED),
+    ), patch(
+        "backend.services.social_outreach.content_agent.audit.log_trail_only",
+        side_effect=trail_effect,
+    ), patch(
+        "backend.services.social_outreach.kill_switch.is_enabled", return_value=False,
+    ), patch(
+        "backend.services.social_outreach.kill_switch.is_supervised", return_value=True,
+    ), patch(
+        "backend.services.social_outreach.kill_switch.cadence_allows_post",
+        return_value=(True, None),
+    ):
+        return ContentAgent().draft_batch(batch_size=5)
+
+
+def test_draft_batch_rejects_a_row_that_raises_and_drafts_the_next(app):
+    """The grader raising on the oldest row (int('yes') on a malformed answer)
+    escapes draft_candidate. The row is rejected as draft_crashed instead of
+    staying at the head of the queue, and the next row is still drafted."""
+    with app.app_context():
+        first, second = _two_candidates()
+        answers = iter([ValueError("invalid literal for int() with base 10: 'yes'"), EXT_SKIPPED])
+
+        def grader(*args, **kwargs):
+            answer = next(answers)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        report = _batch_with(grader_effect=grader)
+
+        assert report == {"considered": 2, "drafted": 1, "approved": 0, "rejected": 0, "errors": 1}
+        db.session.expire_all()
+        crashed = SocialOutreachLog.query.get(first)
+        assert crashed.status == "rejected"
+        assert crashed.abort_reason.startswith("draft_crashed: ValueError:")
+        assert "'yes'" in crashed.abort_reason
+        assert SocialOutreachLog.query.get(second).status == "drafted"
+
+
+def test_draft_batch_keeps_a_draft_when_the_crash_comes_after_promotion(app):
+    """A crash after the row left candidate (the audit trail write here) is
+    counted as an error but does not throw the finished draft away."""
+    with app.app_context():
+        first, second = _two_candidates()
+        trail_calls = []
+
+        def trail(**kwargs):
+            trail_calls.append(kwargs)
+            if len(trail_calls) == 1:
+                raise OSError("disk full")
+
+        report = _batch_with(trail_effect=trail)
+
+        assert report == {"considered": 2, "drafted": 1, "approved": 0, "rejected": 0, "errors": 1}
+        db.session.expire_all()
+        assert SocialOutreachLog.query.get(first).status == "drafted"
+        assert SocialOutreachLog.query.get(second).status == "drafted"
 
 
 def test_min_grade_threshold_is_07(app):
