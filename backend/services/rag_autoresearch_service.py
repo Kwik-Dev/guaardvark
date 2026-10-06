@@ -74,8 +74,17 @@ class RAGAutoresearchService:
         return os.path.join(root, "data", CONFIG_FILENAME)
 
     def _baseline_params(self) -> dict:
-        """The params retrieval uses when nothing is promoted."""
-        return dict(AUTORESEARCH_DEFAULT_PARAMS)
+        """The params retrieval uses when nothing is promoted, including the
+        dedup threshold measured for the active embedding model."""
+        params = dict(AUTORESEARCH_DEFAULT_PARAMS)
+        try:
+            from backend.config import get_active_embedding_model, get_dedup_threshold
+            params["dedup_threshold"] = get_dedup_threshold(get_active_embedding_model())
+        except Exception as e:
+            # Left out, experiments do not override it and retrieval keeps
+            # resolving its own per-model value.
+            logger.debug(f"Baseline dedup threshold not resolved: {e}")
+        return params
 
     def _full_params(self, overrides: dict) -> dict:
         """Baseline params with `overrides` applied: a promoted row, spelled out
@@ -86,17 +95,57 @@ class RAGAutoresearchService:
 
     def _infer_tuned(self, params: dict) -> list:
         """Tuned param names for a config file without a "tuned" record: the
-        ones whose value differs from the declared default."""
-        return sorted(
+        ones whose value differs from the declared default. dedup_threshold
+        has no declared default, so it counts only when the ledger's latest
+        kept dedup_threshold experiment set the stored value."""
+        tuned = {
             k for k, v in params.items()
             if k in AUTORESEARCH_DEFAULT_PARAMS and v != AUTORESEARCH_DEFAULT_PARAMS[k]
-        )
+        }
+        if "dedup_threshold" in params and self._kept_value_matches(
+                "dedup_threshold", params["dedup_threshold"]):
+            tuned.add("dedup_threshold")
+        return sorted(tuned)
+
+    def _kept_value_matches(self, parameter: str, value) -> bool:
+        """Whether the latest kept experiment on `parameter` set `value`."""
+        try:
+            from backend.models import ExperimentRun
+            row = (
+                ExperimentRun.query
+                .filter_by(parameter_changed=parameter, status="keep")
+                .order_by(ExperimentRun.created_at.desc())
+                .first()
+            )
+            return row is not None and float(row.new_value) == float(value)
+        except Exception as e:
+            logger.debug(f"Ledger check for {parameter} skipped: {e}")
+            return False
+
+    def _rebase_params(self, config: dict) -> bool:
+        """Take every untuned param from the current baseline, so experiments
+        start from what production does now (the dedup threshold follows the
+        active embedding model). A baseline score measured on other values is
+        dropped; the next research run measures it again. Returns whether the
+        config changed."""
+        stored = config.get("params")
+        if not isinstance(stored, dict):
+            stored = {}
+        params = self._baseline_params()
+        params.update({k: stored[k] for k in config.get("tuned") or [] if k in stored})
+        if params == stored:
+            return False
+        if any(params.get(k) != v for k, v in stored.items()):
+            config["baseline_score"] = 0.0
+        config["params"] = params
+        return True
 
     def _load_config(self) -> dict:
         """Load current experiment config from disk.
 
         "tuned" lists the params a kept experiment changed; only those are
-        promoted (see _promote_config).
+        promoted (see _promote_config), and every other param is re-resolved
+        from the baseline on load.
         """
         path = self._config_path()
         try:
@@ -113,8 +162,13 @@ class RAGAutoresearchService:
             }
             self._save_config(config)
             return config
+        changed = False
         if not isinstance(config.get("tuned"), list):
             config["tuned"] = self._infer_tuned(config.get("params") or {})
+            changed = True
+        if self._rebase_params(config):
+            changed = True
+        if changed:
             self._save_config(config)
         return config
 
@@ -185,7 +239,7 @@ class RAGAutoresearchService:
             config["phase_plateau_count"] = 0
             self._save_config(config)
         baseline = config.get("baseline_score", 0.0)
-        params = config.get("params", dict(AUTORESEARCH_DEFAULT_PARAMS))
+        params = config.get("params") or self._baseline_params()
 
         # 1. Get experiment history
         history = self._get_recent_history(limit=20)
