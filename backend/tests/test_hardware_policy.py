@@ -106,6 +106,27 @@ def test_model_tier_arm_wins_even_with_high_ram():
     assert t["chat"] == "llama3.2:1b"
 
 
+GB10 = {"vendor": "nvidia", "vram_mb": None, "compute_cap": "12.1", "unified_memory_gb": 119.7}
+
+
+def test_model_tier_standard_for_arm_with_nvidia_gpu():
+    # GB10 / DGX Spark: aarch64 with an NVIDIA GPU is not a Raspberry Pi.
+    assert hp.model_tier(ram_gb=119.7, gpu=GB10, arch="aarch64")["chat"] == "gemma4:e2b"
+
+
+def test_model_tier_small_arm_nvidia_board_stays_small():
+    # A Jetson-class board with 8 GB still gets the 1B model, by its memory.
+    jetson = {"vendor": "nvidia", "vram_mb": None, "unified_memory_gb": 7.4}
+    assert hp.model_tier(ram_gb=7.4, gpu=jetson, arch="aarch64")["chat"] == "llama3.2:1b"
+
+
+def test_ollama_tuning_uses_unified_memory_when_vram_unreported():
+    t = hp.ollama_tuning(GB10)
+    assert t["FLASH_ATTENTION"] == 1
+    assert t["NUM_PARALLEL"] == 2 and t["MAX_LOADED_MODELS"] == 2
+    assert hp.gpu_memory_mb(GB10) == int(119.7 * 1024)
+
+
 def test_model_tier_standard_for_normal_box():
     # Pinned to start.sh's actual standard-tier id (vision-capable Gemma4 default).
     t = hp.model_tier(ram_gb=125, gpu={"vendor": "nvidia", "vram_mb": 16311}, arch="x86_64")

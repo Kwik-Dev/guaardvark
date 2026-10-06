@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **ARM machines with an NVIDIA GPU are sized as GPU machines.** A GB10 machine (DGX Spark and
+  similar) reports no VRAM figure because its GPU shares the system memory; Guaardvark now finds
+  that GPU, uses the shared memory for Ollama's settings, and starts it on the standard chat
+  model instead of the 1B model meant for boards like the Raspberry Pi.
 - **ACE-Step 1.5 is an optional music model.** Audio Studio → Manage models lists it with an
   Install button that downloads its weights (9.4 GB, MIT license, pinned revision) into
   `data/models/ace-step-1.5/` and builds its own Python environment from the pinned 1.5 release;

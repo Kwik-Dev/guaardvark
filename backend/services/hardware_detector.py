@@ -202,14 +202,22 @@ class HardwareDetector:
             parts = [p.strip() for p in first.split(",")]
             if len(parts) < 4:
                 return None
-            return {
+            info = {
                 "vendor": "nvidia",
                 "model": parts[0],
-                "vram_mb": int(parts[1]),
+                "vram_mb": None,
                 "driver": parts[2],
                 "compute_cap": parts[3],
                 "cuda": self._detect_cuda_version(),
             }
+            try:
+                info["vram_mb"] = int(parts[1])
+            except ValueError:
+                # GB10-class machines (DGX Spark) share one memory pool between
+                # CPU and GPU, and nvidia-smi reports memory.total as [N/A].
+                # The GPU is real; its memory is the machine's RAM.
+                info["unified_memory_gb"] = self._probe_ram().get("total_gb", 0)
+            return info
         except (FileNotFoundError, subprocess.SubprocessError, ValueError):
             return None
 
