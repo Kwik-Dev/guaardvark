@@ -248,15 +248,16 @@ def unified_chat():
         except Exception as img_err:
             logger.warning(f"Failed to save chat image: {img_err}")
 
-    # Vision pipeline: attach latest frame if active and no explicit image
+    # Vision pipeline: while a camera streams, its latest frame rides along as
+    # camera context, not as the user's picture (which would skip RAG and make
+    # the frame an edit_image source). Only the server sets it.
+    options.pop("camera_frame", None)
     if not image_data:
         try:
-            from backend.utils.vision_context_utils import get_vision_context, get_latest_frame
-            vision_ctx = get_vision_context()
-            if vision_ctx:
-                latest_frame = get_latest_frame()
-                if latest_frame:
-                    image_data = latest_frame
+            from backend.utils.vision_context_utils import get_active_camera_frame
+            camera_frame = get_active_camera_frame()
+            if camera_frame:
+                options["camera_frame"] = camera_frame
         except Exception:
             pass
 

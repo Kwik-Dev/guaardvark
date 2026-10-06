@@ -2541,6 +2541,15 @@ class UnifiedChatEngine:
                 else:
                     # Last-ditch: attach raw image (multimodal) if the guide dog failed.
                     user_msg["images"] = [self._image_data]
+        elif options.get("camera_frame"):
+            # The live camera frame is context for a model that can see. It is
+            # not self._image_data, so RAG still runs and no edit intercept
+            # takes it; a text-only model has the scene text added above.
+            from backend.utils.chat_utils import is_vision_model
+            if is_vision_model(model_name):
+                from backend.utils.vision_context_utils import CAMERA_FRAME_NOTE
+                user_msg["content"] = f"{CAMERA_FRAME_NOTE}\n\n{user_msg['content']}"
+                user_msg["images"] = [options["camera_frame"]]
         ollama_messages.append(user_msg)
 
         # 5. Save user message to DB (with image metadata if present)
