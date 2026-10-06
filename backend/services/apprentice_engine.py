@@ -13,6 +13,7 @@ backend directly for typing, hotkeys, and scrolling.
 
 import json
 import logging
+import math
 import queue
 import re
 import threading
@@ -91,6 +92,65 @@ def _parse_match_verdict(text: str) -> Optional[bool]:
         return leading.group(1).lower() == "yes"
 
     return None
+
+
+_VISIBLE_FIELD_RE = re.compile(
+    r"""["']?\bvisible["']?\s*[:=]\s*["']?(true|false)\b""", re.IGNORECASE
+)
+_CONFIDENCE_FIELD_RE = re.compile(
+    r"""["']?\bconfidence["']?\s*[:=]\s*["']?(\d+(?:\.\d+)?|\.\d+)""", re.IGNORECASE
+)
+
+
+def _parse_visible_confidence(text: str) -> float:
+    """
+    Read the vision model's {"visible": ..., "confidence": ...} reply as a score.
+
+    Read like _parse_match_verdict: a JSON object anywhere in the reply (fences
+    and surrounding prose included), with booleans or the strings "true"/"false",
+    then `visible: ...` / `confidence: ...` fragments of malformed JSON. Prose
+    is not read: "not visible" contains the word too.
+
+    Only visible true returns the model's confidence, clamped to 0.0-1.0.
+    Visible false, a missing or unreadable visible field, and a missing or
+    unreadable confidence all give 0.0, so a supervised replay asks first.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return 0.0
+
+    visible: Optional[bool] = None
+    confidence: Any = None
+    parsed = None
+    start, end = text.find("{"), text.rfind("}")
+    if 0 <= start < end:
+        try:
+            parsed = json.loads(text[start:end + 1])
+        except ValueError:
+            parsed = None
+    if isinstance(parsed, dict):
+        value = parsed.get("visible")
+        if isinstance(value, bool):
+            visible = value
+        elif isinstance(value, str) and value.strip().lower() in ("true", "false"):
+            visible = value.strip().lower() == "true"
+        confidence = parsed.get("confidence")
+    else:
+        field = _VISIBLE_FIELD_RE.search(text)
+        if field:
+            visible = field.group(1).lower() == "true"
+        conf = _CONFIDENCE_FIELD_RE.search(text)
+        if conf:
+            confidence = conf.group(1)
+
+    if visible is not True or isinstance(confidence, bool):
+        return 0.0
+    try:
+        score = float(confidence)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(score):
+        return 0.0
+    return min(max(score, 0.0), 1.0)
 
 
 class ApprenticeEngine:
@@ -469,6 +529,9 @@ class ApprenticeEngine:
         Estimate confidence that we can successfully execute this step.
 
         Asks the vision model whether the target element is visible on screen.
+        Fails closed: anything short of a readable visible true scores 0.0
+        (see _parse_visible_confidence), as does a failed or raising vision
+        call, so a supervised replay asks before running the step.
 
         Returns:
             float between 0.0 and 1.0
@@ -486,20 +549,14 @@ class ApprenticeEngine:
             )
 
             if not result.success:
-                return 0.5
+                logger.warning(f"[APPRENTICE] Vision analysis failed: {result.error}")
+                return 0.0
 
-            try:
-                parsed = json.loads(result.description)
-                return float(parsed.get("confidence", 0.5))
-            except (json.JSONDecodeError, TypeError, ValueError):
-                desc = result.description.lower()
-                if "yes" in desc or "visible" in desc:
-                    return 0.8
-                return 0.4
+            return _parse_visible_confidence(result.description or "")
 
         except Exception as e:
-            logger.debug(f"[APPRENTICE] Confidence estimation error: {e}")
-            return 0.5
+            logger.warning(f"[APPRENTICE] Confidence estimation error: {e}")
+            return 0.0
 
     # ------------------------------------------------------------------
     # Human-in-the-loop

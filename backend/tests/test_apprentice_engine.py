@@ -323,3 +323,47 @@ class TestSupervisedReplay:
         assert result.success is True
         engine._wait_for_confirmation.assert_not_called()
         assert mock_servo.click_target.call_count == 2
+
+    def test_not_visible_with_high_confidence_asks(self, engine, mock_analyzer, mock_servo, click_steps):
+        _vision_reply(mock_analyzer, '{"visible": false, "confidence": 0.9}')
+        engine._wait_for_confirmation = MagicMock(return_value=None)
+
+        result = engine.execute(click_steps, autonomy_level="supervised")
+
+        assert result.success is False
+        engine._wait_for_confirmation.assert_called_once()
+        mock_servo.click_target.assert_not_called()
+
+
+class TestConfidenceEstimate:
+    STEP = {"step_index": 0, "action_type": "click", "target_description": "the Save button"}
+
+    @pytest.mark.parametrize("reply, expected", [
+        ('{"visible": false, "confidence": 0.9}', 0.0),
+        ("The Save button is not visible on this screen.", 0.0),
+        ("Yes, it is visible.", 0.0),
+        ('```json\n{"visible": true, "confidence": 0.85}\n```', 0.85),
+        ('Here you go: {"visible": "true", "confidence": "0.7"}', 0.7),
+        ('{"visible": "false", "confidence": 0.9}', 0.0),
+        ('{"visible": true, "confidence": 0.9,}', 0.9),
+        ('{"confidence": 0.9}', 0.0),
+        ('{"visible": true}', 0.0),
+        ('{"visible": true, "confidence": "high"}', 0.0),
+        ('{"visible": true, "confidence": 7}', 1.0),
+        ("asdf ;; <garbage>", 0.0),
+        ("", 0.0),
+    ])
+    def test_reply_is_read_fail_closed(self, engine, mock_analyzer, reply, expected):
+        _vision_reply(mock_analyzer, reply)
+
+        assert engine._estimate_confidence(self.STEP) == pytest.approx(expected)
+
+    def test_analyzer_failure_scores_zero(self, engine, mock_analyzer):
+        _vision_reply(mock_analyzer, "", success=False)
+
+        assert engine._estimate_confidence(self.STEP) == 0.0
+
+    def test_capture_error_scores_zero(self, engine, mock_screen):
+        mock_screen.capture.side_effect = RuntimeError("no display")
+
+        assert engine._estimate_confidence(self.STEP) == 0.0
