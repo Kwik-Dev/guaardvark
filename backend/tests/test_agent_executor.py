@@ -285,6 +285,88 @@ class TestApprovalRequiredTools:
         assert registry.executed == ["find_files"]
 
 
+class _ScriptedLLM:
+    """Plays back one reply per chat() call and keeps each prompt it was sent."""
+    model = ""
+
+    def __init__(self, *replies):
+        self._replies = list(replies)
+        self.prompts = []
+
+    def chat(self, messages, **kwargs):
+        from types import SimpleNamespace
+        self.prompts.append(messages[-1].content)
+        return SimpleNamespace(message=SimpleNamespace(content=self._replies.pop(0)))
+
+
+def _notes_registry():
+    """One tool whose output is a fact unrelated to the question asked."""
+    from backend.services.agent_tools import ToolRegistry, BaseTool, ToolParameter, ToolResult
+
+    class NotesRegistry(ToolRegistry):
+        def execute_tool(self, tool_name, /, agent_context=None, **kwargs):
+            return ToolResult(
+                success=True,
+                output="The team meeting is on Tuesday at noon in room four.",
+            )
+
+    class ReadNotesTool(BaseTool):
+        name = "read_notes"
+        description = "Read the user's notes."
+        parameters = {"topic": ToolParameter(name="topic", type="string", description="Topic")}
+
+    registry = NotesRegistry()
+    registry.register(ReadNotesTool())
+    return registry
+
+
+def _tool_call_then_answer(answer):
+    return (
+        json.dumps({
+            "thoughts": "check the notes",
+            "tool_calls": [{"tool_name": "read_notes", "parameters": {"topic": "storage"}}],
+            "final_answer": None,
+        }),
+        json.dumps({"thoughts": "done", "tool_calls": [], "final_answer": answer}),
+    )
+
+
+def _run_notes_agent(llm):
+    from backend.services.agent_executor import AgentExecutor
+
+    executor = AgentExecutor(_notes_registry(), llm, max_iterations=3)
+    executor.coordinator = None
+    return executor.execute("where are my notes stored?")
+
+
+class TestFinalAnswerFactsCheck:
+    """The model's final answer is returned as written; the facts check labels it."""
+
+    def test_unrelated_fact_keeps_the_answer_and_marks_it_unverified(self):
+        answer = "Your notes are stored in Dropbox."
+        llm = _ScriptedLLM(
+            *_tool_call_then_answer(answer),
+            "CORRECTED: The facts only mention a team meeting.",
+        )
+
+        result = _run_notes_agent(llm)
+
+        assert result.success is True
+        assert result.final_answer == answer
+        assert result.verified is False
+        assert not any("Based ONLY on these verified facts" in p for p in llm.prompts)
+
+    def test_answer_with_no_unsupported_claim_is_verified(self):
+        answer = "I checked your notes; they do not say where they are kept."
+        llm = _ScriptedLLM(*_tool_call_then_answer(answer))
+
+        result = _run_notes_agent(llm)
+
+        assert result.final_answer == answer
+        assert result.verified is True
+        assert len(llm.prompts) == 2
+
+
 @requires_llm
 class TestAgentExecutor:
     """Tests for AgentExecutor — backend/services/agent_executor.py:262"""

@@ -75,6 +75,10 @@ class AgentResult:
     iterations: int = 0
     success: bool = True
     error: Optional[str] = None
+    # Facts check on final_answer: True when every checkable claim is in the
+    # facts, False when it is not (the answer is still returned), None when
+    # no tool produced facts to check against.
+    verified: Optional[bool] = None
 
 
 class FactsRegistry:
@@ -549,26 +553,24 @@ class AgentExecutor:
                 if step_result['is_final']:
                     logger.info("Agent reached final answer")
                     final_answer = step_result['final_answer']
-                    
-                    # Synthesize and verify answer using facts
+
+                    # The model's own answer is returned; the facts check only
+                    # labels it. Facts come from every tool run, related or
+                    # not, so they never replace the answer.
+                    verified = None
                     if self.facts_registry.facts:
-                        logger.info(f"Synthesizing answer from {len(self.facts_registry.facts)} extracted facts")
-                        synthesized = self._synthesize_answer(self.original_query, self.facts_registry.facts)
-                        is_valid, verified_answer = self._verify_answer(synthesized, self.facts_registry.facts)
-                        
-                        if is_valid:
-                            final_answer = verified_answer
+                        verified, check_note = self._verify_answer(final_answer, self.facts_registry.facts)
+                        if verified:
                             logger.info("Answer verified against facts")
                         else:
-                            logger.warning(f"Answer verification failed: {verified_answer}")
-                            # Use synthesized answer anyway, but log the issue
-                            final_answer = synthesized
-                    
+                            logger.warning(f"Answer not verified against facts: {check_note[:200]}")
+
                     return AgentResult(
                         final_answer=final_answer,
                         steps=steps + [step_result['step']],
                         iterations=iteration,
-                        success=True
+                        success=True,
+                        verified=verified,
                     )
                 
                 # Add step and continue
@@ -578,11 +580,12 @@ class AgentExecutor:
             # Max iterations reached - synthesize from collected facts
             logger.warning(f"Agent reached max iterations ({self.max_iterations})")
             
+            verified = None
             if self.facts_registry.facts:
                 logger.info(f"Synthesizing final answer from {len(self.facts_registry.facts)} collected facts")
                 synthesized = self._synthesize_answer(self.original_query, self.facts_registry.facts)
-                is_valid, verified_answer = self._verify_answer(synthesized, self.facts_registry.facts)
-                final_answer = verified_answer if is_valid else synthesized
+                verified, verified_answer = self._verify_answer(synthesized, self.facts_registry.facts)
+                final_answer = verified_answer if verified else synthesized
             else:
                 final_summary = self._summarize_steps(steps)
                 final_answer = f"Reached maximum iterations. Here's what I found:\n\n{final_summary}"
@@ -591,7 +594,8 @@ class AgentExecutor:
                 final_answer=final_answer,
                 steps=steps,
                 iterations=iteration,
-                success=True
+                success=True,
+                verified=verified,
             )
             
         except Exception as e:
@@ -1272,7 +1276,9 @@ Answer:"""
             facts: List of extracted facts
             
         Returns:
-            Tuple of (is_valid, corrected_answer_or_reason)
+            Tuple of (is_valid, answer_or_correction_or_reason). is_valid is
+            True only when the answer as given is supported; a corrected
+            rewrite comes back with False.
         """
         if not facts:
             return (False, "No facts available to verify against")
@@ -1355,7 +1361,7 @@ If the answer needs correction, respond with: CORRECTED: [corrected answer using
             if verification_result.startswith("VALID:"):
                 return (True, verification_result[6:].strip())
             elif verification_result.startswith("CORRECTED:"):
-                return (True, verification_result[10:].strip())
+                return (False, verification_result[10:].strip())
             else:
                 # Fallback: return original but mark as potentially invalid
                 return (False, f"Verification inconclusive. Original answer: {answer}")
