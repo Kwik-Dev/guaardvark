@@ -847,6 +847,16 @@ class TestCheckEarlyDone(unittest.TestCase):
     def test_open_firefox_done_when_visible(self):
         self.assertEqual(self._check("open firefox", self.FIREFOX), "firefox is now open")
 
+    def test_bare_task_with_please_and_punctuation_still_checked(self):
+        self.assertEqual(self._check("Please open Firefox.", self.FIREFOX), "firefox is now open")
+        self.assertEqual(self._check("close firefox!", self.CHROMIUM), "firefox no longer visible")
+
+    def test_a_task_with_a_second_clause_never_ends_early(self):
+        for task in ("Open Firefox and go to reddit.com",
+                     "open the settings in Firefox",
+                     "Quit Chrome and open Firefox"):
+            self.assertEqual(self._check(task, self.FIREFOX), "", task)
+
     def test_unreachable_display_reads_as_unknown(self):
         from backend.services.agent_control_service import AgentControlService as A
         failed = MagicMock(returncode=1, stdout="", stderr="Error: Can't open display: (null)")

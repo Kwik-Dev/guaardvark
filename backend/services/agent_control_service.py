@@ -2551,16 +2551,33 @@ class AgentControlService:
             logger.debug(f"Desktop state query failed: {e}")
             return "Desktop state: unknown (query failed)"
 
+    # A task that is nothing but opening or closing one app, anchored like the
+    # recipe triggers. Anything after the app ("open firefox and go to
+    # reddit.com", "open the settings in firefox") is not met by a window
+    # appearing or going away.
+    _BARE_OPEN_TASK_RE = re.compile(
+        r"^\s*(?:please\s+)?(?:open|start|launch)\s+(?:the\s+)?"
+        r"(?:firefox|chrome|chromium|browser|terminal)\s*[.!]?\s*$")
+    _BARE_CLOSE_TASK_RE = re.compile(
+        r"^\s*(?:please\s+)?(?:(?:close|quit|exit)\s+(?:the\s+)?"
+        r"(?:firefox|chrome|chromium|browser|terminal)|close\s+all\s+(?:the\s+)?windows)"
+        r"\s*[.!]?\s*$")
+
     @staticmethod
     def _check_early_done(task: str, display: Optional[str] = None) -> str:
         """Check if the task goal is obviously met based on desktop state.
 
+        Only a bare "open <app>" or "close <app>" task (or "close all
+        windows") is checked; any other task returns "" without a query.
         Returns a reason string if done, empty string if not or if the
         desktop state could not be read.
         Fast check (<20ms) — no vision model, just xdotool queries.
         """
-        import re as _re
         task_lower = task.lower()
+        is_close = bool(AgentControlService._BARE_CLOSE_TASK_RE.match(task_lower))
+        is_open = bool(AgentControlService._BARE_OPEN_TASK_RE.match(task_lower))
+        if not (is_close or is_open):
+            return ""
         desktop = AgentControlService._get_desktop_state(display=display)
         # An unread desktop lists no windows, which would look like every app had closed.
         if desktop.startswith("Desktop state: unknown"):
@@ -2570,7 +2587,7 @@ class AgentControlService:
         ).lower()
 
         # "Close X" tasks: if no windows are open, we're done
-        if _re.search(r'\b(?:close|quit|exit|kill|shut\s*down)\b', task_lower):
+        if is_close:
             if "No application windows open" in desktop:
                 return "no windows open — target closed"
 
@@ -2585,7 +2602,7 @@ class AgentControlService:
                     return f"{app} no longer visible"
 
         # "Open X" tasks: if the target app is now visible
-        if _re.search(r'\b(?:open|start|launch)\b', task_lower):
+        if is_open:
             for app in ("firefox", "chrome", "chromium", "terminal"):
                 if app in task_lower and app in titles:
                     return f"{app} is now open"
