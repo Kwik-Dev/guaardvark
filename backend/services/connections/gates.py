@@ -2,7 +2,10 @@
 
 Publishing your own asset is a different act from unsolicited outreach, so it
 gets its own enable switch and defaults to on. The two paths still share one
-per-platform cadence budget, and the outreach kill switch stops both.
+per-platform cadence budget and one stop on all public posting
+(``kill_switch.posting_stop_reason``). That stop is its own setting, not the
+outreach on/off switch: outreach defaults off, and that must not hold back a
+publish.
 """
 
 from __future__ import annotations
@@ -73,8 +76,23 @@ def requires_approval(requested_by: str) -> bool:
     return (requested_by or "ui").strip().lower() in ALWAYS_SUPERVISED_SOURCES or publish_supervised()
 
 
+def posting_stop_reason() -> Optional[str]:
+    """Why public posting is stopped, or None. A stop that cannot be checked refuses."""
+    try:
+        from backend.services.social_outreach import kill_switch
+
+        return kill_switch.posting_stop_reason()
+    except Exception as e:  # noqa: BLE001 - an unknown stop state means fail closed
+        logger.warning("gates: could not check the posting stop: %s", e)
+        return "The public posting stop could not be checked; refusing to publish."
+
+
 def check_can_publish(platform: str) -> Tuple[bool, Optional[str]]:
     """Gate a publish at both queue and execution time."""
+    stopped = posting_stop_reason()
+    if stopped:
+        return False, stopped
+
     if not publish_enabled():
         return False, "Publishing is disabled."
 

@@ -53,6 +53,16 @@ export function killOutreach() {
   return request("/kill", { method: "POST" });
 }
 
+// The stop on ALL public posting (outreach and Connections), separate from
+// the outreach Enabled switch.
+export function stopAllPosting() {
+  return request("/stop-posting", { method: "POST" });
+}
+
+export function resumePosting() {
+  return request("/resume-posting", { method: "POST" });
+}
+
 export function setSupervised(on) {
   return request("/supervised", {
     method: "POST",
@@ -131,6 +141,8 @@ export default {
   fetchSnippets,
   enableOutreach,
   killOutreach,
+  stopAllPosting,
+  resumePosting,
   setSupervised,
   approveDraft,
   rejectDraft,
