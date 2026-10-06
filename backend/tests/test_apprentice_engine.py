@@ -113,6 +113,97 @@ class TestPreconditionCheck:
         result = engine._check_precondition("Login form visible")
         assert result["matches"] is False
 
+    @staticmethod
+    def _reply_with(mock_analyzer, text):
+        vision_mock = MagicMock()
+        vision_mock.success = True
+        vision_mock.description = "Dashboard showing"
+        mock_analyzer.analyze.return_value = vision_mock
+
+        text_mock = MagicMock()
+        text_mock.success = True
+        text_mock.description = text
+        mock_analyzer.text_query.return_value = text_mock
+
+    def test_fallback_matches_false(self, engine, mock_analyzer):
+        # Not valid JSON, and contains the word "matches".
+        self._reply_with(mock_analyzer, "matches: false, the dashboard is showing")
+
+        result = engine._check_precondition("Login form visible")
+        assert result["matches"] is False
+        assert result["checked"] is True
+
+    def test_fenced_json_false(self, engine, mock_analyzer):
+        self._reply_with(
+            mock_analyzer,
+            '```json\n{"matches": false, "description": "Dashboard, not login form"}\n```',
+        )
+
+        result = engine._check_precondition("Login form visible")
+        assert result["matches"] is False
+        assert result["checked"] is True
+
+    def test_string_false(self, engine, mock_analyzer):
+        self._reply_with(mock_analyzer, '{"matches": "false", "description": "Dashboard showing"}')
+
+        result = engine._check_precondition("Login form visible")
+        assert result["matches"] is False
+        assert result["checked"] is True
+
+    def test_missing_key(self, engine, mock_analyzer):
+        self._reply_with(mock_analyzer, '{"description": "The screen matches the login form"}')
+
+        result = engine._check_precondition("Login form visible")
+        assert result["matches"] is False
+        assert result["checked"] is False
+
+    def test_does_not_match_prose(self, engine, mock_analyzer):
+        self._reply_with(mock_analyzer, "The screen does not match: it shows a dashboard, not the login form.")
+
+        result = engine._check_precondition("Login form visible")
+        assert result["matches"] is False
+        assert result["checked"] is True
+
+    def test_plain_yes_is_match(self, engine, mock_analyzer):
+        self._reply_with(mock_analyzer, "Yes, the login form is visible.")
+
+        result = engine._check_precondition("Login form visible")
+        assert result["matches"] is True
+        assert result["checked"] is True
+
+    def test_vision_failure_fails_closed(self, engine, mock_analyzer):
+        vision_mock = MagicMock()
+        vision_mock.success = False
+        vision_mock.error = "vision model not loaded"
+        mock_analyzer.analyze.return_value = vision_mock
+
+        result = engine._check_precondition("Login form visible")
+        assert result["matches"] is False
+        assert result["checked"] is False
+        mock_analyzer.text_query.assert_not_called()
+
+    def test_text_failure_fails_closed(self, engine, mock_analyzer):
+        vision_mock = MagicMock()
+        vision_mock.success = True
+        vision_mock.description = "Login form with fields"
+        mock_analyzer.analyze.return_value = vision_mock
+
+        text_mock = MagicMock()
+        text_mock.success = False
+        text_mock.error = "text model not loaded"
+        mock_analyzer.text_query.return_value = text_mock
+
+        result = engine._check_precondition("Login form visible")
+        assert result["matches"] is False
+        assert result["checked"] is False
+
+    def test_exception_fails_closed(self, engine, mock_screen):
+        mock_screen.capture.side_effect = RuntimeError("no display")
+
+        result = engine._check_precondition("Login form visible")
+        assert result["matches"] is False
+        assert result["checked"] is False
+
 
 class TestStepExecution:
     def test_execute_click_step(self, engine, demo_steps, mock_servo):
