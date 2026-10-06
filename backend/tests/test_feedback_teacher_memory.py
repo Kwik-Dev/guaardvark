@@ -70,6 +70,28 @@ def test_blame_is_spread_over_the_prompt(app):
     assert db.session.get(AgentMemory, "m0").confidence == pytest.approx(0.875)
 
 
+def test_only_the_memories_that_fit_the_prompt_are_blamed(app):
+    from backend.api import memory_api
+    all_ids = [f"m{i:02d}" for i in range(30)]
+    for mid in all_ids:
+        # Each renders as a 402-character line (the note cap of 400 plus "- ").
+        _mem(mid, content=f"Project falcon detail {mid}: " + "x" * 420)
+    # 550 tokens is a 2200-character budget: five lines fit, a sixth does not.
+    text = memory_api._get_memories_for_context_inner(limit=30, max_tokens=550, query="falcon")
+    ids = memory_api.pop_last_selected_ids()
+    shown = [mid for mid in all_ids if f"falcon detail {mid}:" in text]
+    assert len(shown) == 5
+    assert sorted(ids) == shown
+
+    fb, a, u = _fb("down", ids)
+    ft.apply(fb, a, u)
+    audited = {row.memory_id for row in AgentMemoryAudit.query.filter_by(action="feedback_down")}
+    assert audited == set(shown)
+    for mid in all_ids:
+        expected = 0.85 if mid in shown else 1.0  # alpha 0.25 * min(1, 3/5)
+        assert db.session.get(AgentMemory, mid).confidence == pytest.approx(expected)
+
+
 def test_credit_moves_slowly_toward_one(app):
     m = _mem("m1", conf=0.5)
     fb, a, u = _fb("up", ["m1"])

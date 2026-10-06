@@ -814,10 +814,12 @@ def search_memories(
         return [item for _, item in picked]
 
 
-# The ids behind the last memory block built on this thread. Feedback on a
-# reply needs to know which memories shaped it; the block itself is prose and
-# the chat engine must not re-run the query. Pop, never peek: a reused worker
-# thread must not hand one request's selection to the next.
+# The ids behind the last memory block built on this thread: the memories
+# whose lines made it into the block, not every row the query selected, since
+# the character budget can cut the rest. Feedback on a reply credits or blames
+# exactly these; the block itself is prose and the chat engine must not re-run
+# the query. Pop, never peek: a reused worker thread must not hand one
+# request's selection to the next.
 _LAST_SELECTED = threading.local()
 
 
@@ -846,13 +848,14 @@ def _get_memories_for_context_inner(
         workspace_root=workspace_root,
         cli_working_memory=cli_working_memory,
     )
-    _LAST_SELECTED.ids = [m.id for m in (memories or [])]
+    _LAST_SELECTED.ids = []
 
     if not memories:
         return ""
 
     char_budget = max_tokens * 4  # rough chars-to-tokens ratio
     used = 0
+    shown = set()
 
     # Group by category. lesson_summary stays as its own bucket (source-based);
     # everything else groups by type so each lands under a framing header
@@ -889,6 +892,7 @@ def _get_memories_for_context_inner(
                 return out
             out.append(line)
             used += len(line)
+            shown.add(m.id)
         return out
 
     for type_name in ("fact", "note", "preference"):
@@ -956,6 +960,7 @@ def _get_memories_for_context_inner(
                 break
             lesson_lines.append(line)
             used += len(line)
+            shown.add(m.id)
         if lesson_lines:
             sections.append(
                 "\n".join(
@@ -982,6 +987,7 @@ def _get_memories_for_context_inner(
         if body:
             sections.append("\n".join(["Confirmed by your feedback (keep doing this):"] + body))
 
+    _LAST_SELECTED.ids = [m.id for m in memories if m.id in shown]
     if not sections:
         return ""
     return "\n\n".join(sections)
