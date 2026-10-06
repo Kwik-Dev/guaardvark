@@ -3350,6 +3350,11 @@ class SubjectSample(db.Model):
     index = db.Column(db.Integer, nullable=False)
     # Shot variation metadata (from ShotDesigner / angle taxonomy).
     angle = db.Column(db.String(128), nullable=True)
+    # Whether `angle` was read from the finished image by the vision check:
+    # 'verified', 'unverified' (check could not run; the planned label stands and
+    # the training gate leaves the sample out of its framing tally), or NULL for
+    # rows that were never checked.
+    angle_state = db.Column(db.String(16), nullable=True)
     framing = db.Column(db.String(64), nullable=True)
     expression = db.Column(db.String(128), nullable=True)
     lighting = db.Column(db.String(128), nullable=True)
@@ -3387,6 +3392,7 @@ class SubjectSample(db.Model):
             "subject_id": self.subject_id,
             "index": self.index,
             "angle": self.angle,
+            "angle_state": self.angle_state,
             "framing": self.framing,
             "expression": self.expression,
             "lighting": self.lighting,

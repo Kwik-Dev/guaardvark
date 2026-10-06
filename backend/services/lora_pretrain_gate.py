@@ -171,6 +171,12 @@ def caption_coverage_stats(
     }
 
 
+def _angle_unverified_paths(subject: Subject) -> set[str]:
+    from backend.services.character_angle_verify import ANGLE_UNVERIFIED
+    rows = SubjectSample.query.filter_by(subject_id=subject.id, angle_state=ANGLE_UNVERIFIED).all()
+    return {s.image_path for s in rows if s.image_path}
+
+
 def validate_cast_training(
     subject: Subject,
     train_images: list[str],
@@ -194,11 +200,18 @@ def validate_cast_training(
         failures.append(f"only {n} trainable image(s); need at least {min_images}")
 
     captions = build_training_captions(subject, existing)
+    # A sample whose angle check could not run keeps its planned label in the
+    # caption; that label was never seen in the image, so it is not coverage.
+    unverified_paths = _angle_unverified_paths(subject)
     framing_tally: dict[str, int] = {}
     bare_count = 0
-    for cap in captions:
-        fr = detect_framing(cap) or "unknown"
-        framing_tally[fr] = framing_tally.get(fr, 0) + 1
+    angle_unverified = 0
+    for path, cap in zip(existing, captions):
+        if path in unverified_paths:
+            angle_unverified += 1
+        else:
+            fr = detect_framing(cap) or "unknown"
+            framing_tally[fr] = framing_tally.get(fr, 0) + 1
         if require_trigger_in_captions and token.lower() not in cap.lower():
             failures.append(f"trigger '{token}' missing from caption for an image")
         if is_bare_caption(cap, token):
@@ -235,6 +248,7 @@ def validate_cast_training(
         "framing": framing_tally,
         "full_body_count": full_body,
         "full_body_recommended": need_full,
+        "angle_unverified": angle_unverified,
         "bare_captions": bare_count,
         "rich_captions": rich_count,
     }

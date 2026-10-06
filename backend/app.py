@@ -1329,6 +1329,8 @@ try:
                 # Generated samples graduate into Training Data after successful train.
                 ("subject_samples", "promoted_to_training", "ALTER TABLE subject_samples ADD COLUMN IF NOT EXISTS promoted_to_training BOOLEAN NOT NULL DEFAULT FALSE"),
                 ("subject_samples", "promoted_at", "ALTER TABLE subject_samples ADD COLUMN IF NOT EXISTS promoted_at TIMESTAMP"),
+                # Whether a sample's angle label was read from the image or is unverified.
+                ("subject_samples", "angle_state", "ALTER TABLE subject_samples ADD COLUMN IF NOT EXISTS angle_state VARCHAR(16)"),
                 ("production_shots", "scene_mood", "ALTER TABLE production_shots ADD COLUMN IF NOT EXISTS scene_mood VARCHAR(64)"),
                 ("production_shots", "character_name", "ALTER TABLE production_shots ADD COLUMN IF NOT EXISTS character_name VARCHAR(255)"),
                 # Local source folder for swarm/agent code runs (added Phase 2).

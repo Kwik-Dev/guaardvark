@@ -8,7 +8,9 @@ against the same closed label set, then:
   1. On mismatch → one auto-regen with a strengthened framing lead (same planned slot).
   2. Always relabel the sample to what vision sees on the final image (honest UI).
 
-Never raises for vision failures — returns match=True (skip) so generate continues.
+Never raises for vision failures. A check that could not run (missing image, vision
+error or timeout, unparseable reply, unknown label) returns match=None, "angle
+unverified": never counted as a match, so generate continues without claiming it.
 """
 from __future__ import annotations
 
@@ -18,6 +20,11 @@ from pathlib import Path
 from typing import Any, Optional
 
 log = logging.getLogger(__name__)
+
+# SubjectSample.angle_state values. 'verified': the label was read from the final
+# image. 'unverified': the check could not run and the planned label stands.
+ANGLE_VERIFIED = "verified"
+ANGLE_UNVERIFIED = "unverified"
 
 # Closed set — must stay aligned with character_generator_service._ANGLE_WEIGHTS labels.
 CANONICAL_ANGLES = (
@@ -105,14 +112,13 @@ def normalize_angle(label: str | None) -> Optional[str]:
     return None
 
 
-def angles_match(planned: str | None, observed: str | None) -> bool:
-    """True when labels agree (after normalize). Unknown observed → treat as match (don't regen)."""
+def angles_match(planned: str | None, observed: str | None) -> Optional[bool]:
+    """True when labels agree (after normalize), False when they differ, None when
+    either label is unknown: nothing was compared, so it is not a match."""
     p = normalize_angle(planned)
     o = normalize_angle(observed)
-    if o is None:
-        return True
-    if p is None:
-        return True
+    if o is None or p is None:
+        return None
     if p == o:
         return True
     # Soft: full-body front vs three-quarter both count as full-body coverage for regen skip?
@@ -220,10 +226,14 @@ def verify_sample_angle(
     *,
     analyzer=None,
 ) -> dict[str, Any]:
-    """Classify still and compare to plan. Does not mutate DB or regenerate."""
+    """Classify still and compare to plan. Does not mutate DB or regenerate.
+
+    ``match`` is True or False only when the classifier read the image and both
+    labels are known; otherwise it is None (angle unverified).
+    """
     clf = classify_image_angle(image_path, analyzer=analyzer)
     observed = clf.get("angle")
-    match = angles_match(planned_angle, observed) if clf.get("ok") else True
+    match = angles_match(planned_angle, observed) if clf.get("ok") else None
     return {
         "ok": clf.get("ok", False),
         "match": match,
