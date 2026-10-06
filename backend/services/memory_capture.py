@@ -3,10 +3,11 @@
 Explicit intents only — no LLM. A match writes an ``AgentMemory`` fact via
 ``add_memory``; questions, short utterances, and duplicates are skipped.
 
-A fact the person asks to be remembered ("remember that …", "remember: …") is
-stored without the chat's session id, so every later chat recalls it; in a
-project chat it keeps the project id and stays in that project. The other
-intents stay scoped to the chat they were said in.
+A fact the person asks to be kept ("remember that …", "remember: …", "from now
+on …", "for future reference …") is stored without the chat's session id, so
+every later chat recalls it; in a project chat it keeps the project id and
+stays in that project. "note that …" and "my X is Y" stay with the chat they
+were said in.
 """
 
 from __future__ import annotations
@@ -21,15 +22,15 @@ from backend.models import AgentMemory
 _MIN_WORDS = 4
 
 # Prefix intents are stripped; the remainder is the stored fact.
-# A remember intent is recalled in every later chat, not only this one.
+# These are recalled in every later chat, not only this one.
 _REMEMBER_PATTERNS = (
     re.compile(r"^\s*remember\s+that\s+", re.IGNORECASE),
     re.compile(r"^\s*remember:\s*", re.IGNORECASE),
+    re.compile(r"^\s*from\s+now\s+on[,:]?\s+", re.IGNORECASE),
+    re.compile(r"^\s*for\s+future\s+reference[,:]?\s+", re.IGNORECASE),
 )
 _PREFIX_PATTERNS = _REMEMBER_PATTERNS + (
     re.compile(r"^\s*note\s+that\s+", re.IGNORECASE),
-    re.compile(r"^\s*from\s+now\s+on[,:]?\s+", re.IGNORECASE),
-    re.compile(r"^\s*for\s+future\s+reference[,:]?\s+", re.IGNORECASE),
 )
 
 # Whole-message fact: "my/our <short noun phrase> is <value>".

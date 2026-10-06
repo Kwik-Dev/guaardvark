@@ -40,6 +40,10 @@ def app():
         ("Remember that the sky is blue", "the sky is blue"),
         ("remember: the sky is blue", "the sky is blue"),
         ("Remember: the sky is blue", "the sky is blue"),
+        ("from now on use dark mode", "use dark mode"),
+        ("From now on, always use dark mode", "always use dark mode"),
+        ("for future reference the API lives in settings", "the API lives in settings"),
+        ("For future reference, the API lives in settings", "the API lives in settings"),
     ],
 )
 def test_remember_forms_store_a_fact_for_every_chat(app, message, expected):
@@ -61,10 +65,6 @@ def test_remember_forms_store_a_fact_for_every_chat(app, message, expected):
     [
         ("note that we prefer pytest", "we prefer pytest"),
         ("Note that we prefer pytest", "we prefer pytest"),
-        ("from now on use dark mode", "use dark mode"),
-        ("From now on, always use dark mode", "always use dark mode"),
-        ("for future reference the API lives in settings", "the API lives in settings"),
-        ("For future reference, the API lives in settings", "the API lives in settings"),
         ("my name is Alice", "my name is Alice"),
         ("our timezone is Pacific", "our timezone is Pacific"),
     ],
