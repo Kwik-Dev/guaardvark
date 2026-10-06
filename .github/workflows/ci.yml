@@ -65,18 +65,74 @@ jobs:
         run: pip install -e ./cli pytest pytest-cov
 
       - name: Run CLI test suite (fast tiers)
-        # e2e is deselected here on purpose. The suite's one e2e test
-        # (test_mcp_cli_e2e) needs the `mcp` SDK and the backend package, neither
-        # of which this CLI-only job installs — it would skip at collection and
-        # `-m e2e` would select nothing, so a separate job here would be green
-        # having exercised nothing. The e2e tier runs where the backend stack is
-        # already installed; see docs/CLI_PLAN.md section 4.5.
+        # e2e is deselected here on purpose. The e2e tier needs the backend stack
+        # and a Postgres service, neither of which this CLI-only job has — it
+        # would skip at collection and `-m e2e` would select nothing, so a run
+        # here would be green having exercised nothing. The tier runs in the
+        # dedicated `cli-e2e` job below; see docs/CLI_PLAN.md section 4.5.
         #
         # The coverage floor is a regression guard, not a quality bar: 44% is the
         # measured baseline of `llx` under the fast tiers, and 40 leaves headroom
         # for a new module that lands with few tests. Raise it as tests land; see
         # docs/CLI_PLAN.md section 4.1.
         run: python -m pytest cli/tests -q -m "not e2e" --cov=llx --cov-report=term-missing --cov-fail-under=40
+
+  # The e2e tier is its own job because it needs what no other single job has:
+  # the CLI-only job installs no backend stack, and the backend jobs install no
+  # Postgres. The `inprocess_backend` fixture boots the real Flask app in-process
+  # against a scratch database (see docs/CLI_PLAN.md section 4.5), so this job
+  # installs the backend requirements and starts a Postgres service for it.
+  # `-m e2e` is the only place the tier is collected. A missing or unreachable
+  # scratch database makes the fixture skip with a reason rather than silently
+  # passing, so an unprovisioned job cannot look green while exercising nothing.
+  cli-e2e:
+    name: CLI E2E
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: guaardvark
+          POSTGRES_PASSWORD: guaardvark
+          POSTGRES_DB: guaardvark_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install backend and CLI
+        # requirements.txt, not requirements-base.txt: the e2e tier also collects
+        # test_mcp_cli_e2e, which imports the `mcp` SDK. That package is in the
+        # full requirements file and deliberately absent from the base one.
+        run: |
+          python -m venv backend/venv
+          source backend/venv/bin/activate
+          pip install -r backend/requirements.txt
+          pip install -e ./cli pytest
+
+      - name: Run CLI e2e tier (in-process backend)
+        env:
+          # The fixture writes schema and seed rows, so it refuses the configured
+          # development DSN by default and demands a scratch database here.
+          DATABASE_URL: postgresql://guaardvark:guaardvark@localhost:5432/guaardvark_e2e
+          GUAARDVARK_E2E_DATABASE_URL: postgresql://guaardvark:guaardvark@localhost:5432/guaardvark_e2e
+        run: |
+          source backend/venv/bin/activate
+          python -m pytest cli/tests -m e2e -q
 
   frontend:
     name: Frontend Lint & Build

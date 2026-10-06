@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import os
+import sys
 from pathlib import Path
 
 import httpx
@@ -135,6 +137,248 @@ class FakeBackend:
 
     def posted_paths(self) -> list[str]:
         return [c[1] for c in self.calls if c[0] == "POST"]
+
+
+# --- e2e: the real backend, in-process -------------------------------------
+#
+# `inprocess_backend` boots the actual Flask app and routes the CLI's HTTP client
+# into Flask's test client, so a smoke test exercises the real routes without a
+# socket, a subprocess, or a port to leak. The tier's CI home is a job that already
+# has the backend stack installed (see docs/CLI_PLAN.md sections 4.5 and 5).
+
+
+class InProcessBackend:
+    """The real Flask app, answering httpx requests through Flask's test client.
+
+    Deliberately not a fake: nothing here decides what a route returns, so a smoke
+    test that passes against it has proved the CLI and the backend agree end to end.
+
+    ``calls`` records ``(method, path)`` for every request Flask served. The transport
+    is address-agnostic, so a command that answers entirely in-process (or whose
+    request silently went nowhere) would still exit 0; asserting the expected route
+    was actually called is what makes a smoke test mean "the backend answered this".
+    """
+
+    # MockTransport never dials this, but relative request URLs need a base_url and a
+    # few commands print `server_url`, so it has to be a parseable URL rather than None.
+    server_url = "http://inprocess.local"
+
+    def __init__(self, app) -> None:
+        self.app = app
+        self.calls: list[tuple[str, str]] = []
+        self._client = app.test_client()
+
+    def called(self, method: str, path: str) -> bool:
+        return (method.upper(), path) in self.calls
+
+    def paths(self) -> list[str]:
+        return [path for _method, path in self.calls]
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        self.calls.append((request.method, path))
+        query = request.url.query
+        if query:
+            path += "?" + (query.decode() if isinstance(query, bytes) else str(query))
+        response = self._client.open(
+            path=path,
+            method=request.method,
+            data=request.content,
+            headers={
+                key: value
+                for key, value in request.headers.items()
+                if key.lower() not in ("host", "content-length")
+            },
+        )
+        return httpx.Response(
+            response.status_code,
+            content=response.get_data(),
+            headers=dict(response.headers),
+        )
+
+
+def _normalise_dsn(dsn: str) -> str:
+    """Drop any SQLAlchemy driver suffix so `postgresql+psycopg2://` matches `postgresql://`."""
+    scheme, sep, rest = dsn.partition("://")
+    if not sep:
+        return dsn
+    return f"{scheme.split('+', 1)[0]}://{rest}"
+
+
+def _same_database(effective: str, wanted: str) -> bool:
+    """Whether two DSNs touch the same database (host + path decide that, credentials do not)."""
+    from urllib.parse import urlsplit
+
+    e, w = urlsplit(_normalise_dsn(effective)), urlsplit(_normalise_dsn(wanted))
+    # The port matters: the same database name on a different port is a different server,
+    # and omitting it would let the scratch-DSN guard pass while bound to the dev database.
+    return (e.hostname, e.port or 5432, e.path) == (w.hostname, w.port or 5432, w.path)
+
+
+def _assert_reachable(dsn: str) -> None:
+    """Fail loudly when the scratch DSN is set but no server answers it."""
+    try:
+        import psycopg2
+    except ImportError:  # pragma: no cover - backend stack implies psycopg2
+        pytest.fail("GUAARDVARK_E2E_DATABASE_URL is set but psycopg2 is not installed")
+    try:
+        # psycopg2 rejects SQLAlchemy's driver suffix (`postgresql+psycopg2://`), so hand it
+        # the normalised DSN; otherwise the failure message blames the server, not the scheme.
+        psycopg2.connect(_normalise_dsn(dsn), connect_timeout=5).close()
+    except Exception as exc:
+        pytest.fail(f"GUAARDVARK_E2E_DATABASE_URL is set but unreachable: {exc}")
+
+
+def _e2e_database_url() -> str:
+    """The scratch database the e2e tier may boot against, or a skip.
+
+    `backend/config.py` rejects sqlite and resolves `DATABASE_URL` to Postgres at
+    import time, and the `guaardvark` role cannot create databases -- so a missing
+    override would silently boot against the live dev database. An explicit scratch
+    DSN is therefore required and is reachability-checked; only
+    `GUAARDVARK_E2E_ALLOW_CONFIGURED_DB=1` opts into whatever the environment already
+    resolves, which is meant for local validation against a database you are willing
+    to let the app run its idempotent `create_all()`/seed pass over.
+    """
+    explicit = os.environ.get("GUAARDVARK_E2E_DATABASE_URL", "").strip()
+    if explicit:
+        # `backend/config.py` keeps only the bare `postgresql`/`postgres` scheme and sends
+        # anything else to the configured database, so a driver-suffixed DSN must be
+        # normalised here rather than passed through -- left raw it would silently bind the
+        # wrong database (and then fail the `_same_database` guard blaming the server). A
+        # scheme that is not Postgres at all is rejected outright, naming what works.
+        database_url = _normalise_dsn(explicit)
+        scheme = database_url.partition("://")[0].lower()
+        if scheme not in ("postgresql", "postgres"):
+            pytest.fail(
+                "GUAARDVARK_E2E_DATABASE_URL must name a PostgreSQL server "
+                f"(postgresql:// or postgres://); got scheme {scheme!r}"
+            )
+        _assert_reachable(database_url)
+        return database_url
+    if os.environ.get("GUAARDVARK_E2E_ALLOW_CONFIGURED_DB") == "1":
+        return ""  # leave DATABASE_URL as backend/config.py already resolves it
+    pytest.skip(
+        "e2e needs GUAARDVARK_E2E_DATABASE_URL -- a scratch Postgres database. "
+        "backend/config.py rejects sqlite and the `guaardvark` role cannot create "
+        "databases, so a missing override would silently test the live dev database. "
+        "Set GUAARDVARK_E2E_ALLOW_CONFIGURED_DB=1 to opt into the configured database."
+    )
+
+
+@pytest.fixture(scope="session")
+def inprocess_backend(tmp_path_factory):
+    """A running Guaardvark backend, in this process, with the CLI pointed at it.
+
+    Session-scoped because booting the app costs seconds and nothing in the tier
+    mutates it. The environment has to be set *before* the first `backend.*` import
+    (`config.py` reads it at import time, and `backend/app.py` runs `create_app()` at
+    module level), hence the manual `pytest.MonkeyPatch` rather than the
+    function-scoped `monkeypatch` fixture. The CLI suite never imports backend, so
+    setting it here is safe.
+
+    Hermetic by construction: `GUAARDVARK_ROOT` is a throwaway tmp directory (so the
+    app's own data dirs and its idempotent `create_all()`/seed pass never touch the
+    repo or the dev database), `GUAARDVARK_STORAGE_DIR` is pinned to that same tmp root
+    because call-time storage readers (`system_mapper`, `code_storage_bridge`) consult
+    it *before* falling back to the root that is restored below, and the plugin state
+    store is re-pointed at a tmp file (see below) so no plugin listed `running` in the
+    developer's `data/plugin_state.json` is restored and that file is not rewritten.
+    `GUAARDVARK_MODE=test` additionally redirects the app's writable data directories.
+    The module-level `_PluginRunnerClient`
+    sidecar process still starts at import -- it is a lightweight runner *client*, not a
+    GPU plugin -- and the tier is designed to run in its own pytest session (`-m e2e`) so
+    the tmp root cannot leak into other tiers.
+    """
+    pytest.importorskip("flask", reason="backend stack not installed (CLI-only job)")
+    database_url = _e2e_database_url()
+
+    repo_root = Path(__file__).resolve().parents[2]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+
+    patch = pytest.MonkeyPatch()
+    patch.setenv("GUAARDVARK_MODE", "test")
+    # start.sh normally verifies migrations and that llama is reachable; neither is
+    # available here, and both are checks, not behaviour the tier depends on.
+    patch.setenv("PYTEST_SKIP_MIGRATION_CHECK", "1")
+    patch.setenv("PYTEST_SKIP_LLAMA_CHECK", "1")
+
+    original_root = os.environ.get("GUAARDVARK_ROOT")
+    tmp_root = tmp_path_factory.mktemp("guaardvark_e2e_root")
+    patch.setenv("GUAARDVARK_ROOT", str(tmp_root))
+    # Call-time storage readers (`system_mapper._store_dir`, `code_storage_bridge`) take
+    # `GUAARDVARK_STORAGE_DIR` first and only then fall back to `<GUAARDVARK_ROOT>/data`.
+    # The root env var is restored below so later tiers see the project, which would send
+    # them back to the repo; pin the storage dir to the tmp root instead. Left set for the
+    # session (not restored) because it is read at call time, not import time.
+    os.environ["GUAARDVARK_STORAGE_DIR"] = str(tmp_root / "data")
+    if database_url:
+        patch.setenv("DATABASE_URL", database_url)
+
+    # `plugin_state.json` is anchored to `<repo>/data` (PluginRegistry default
+    # plugins_dir is `backend/plugins/../../plugins`, and PluginManager derives the
+    # store path from `plugins_dir.parent`), NOT to GUAARDVARK_ROOT. A tmp root alone
+    # therefore still lets `PluginManager._init_plugin_status` read the developer's
+    # `running` list -- restoring real services on boot -- and rewrite the file. Point
+    # the store at the session tmp dir *before* `get_plugin_manager()` first runs: no
+    # plugin is restored and nothing under the repo is written.
+    import backend.plugins.plugin_manager as plugin_manager
+
+    from backend.plugins.plugin_state_store import PluginStateStore
+
+    state_path = tmp_path_factory.mktemp("guaardvark_e2e_plugin_state") / "plugin_state.json"
+
+    class _IsolatedPluginStateStore(PluginStateStore):
+        def __init__(self, path=None):  # ignore the repo-anchored default path
+            super().__init__(state_path)
+
+    patch.setattr(plugin_manager, "PluginStateStore", _IsolatedPluginStateStore)
+    # Defensive: if something already built the global manager, re-point its store too.
+    _existing_manager = getattr(plugin_manager, "_manager", None)
+    if _existing_manager is not None:
+        _existing_manager.state_store = _IsolatedPluginStateStore()
+
+    import backend.app as backend_app
+
+    # `backend/config.py` captured the tmp root at import (and wrote it back into the
+    # environment), so the app is bound to it. Restore the *env var* now: later tests
+    # in the same session that resolve the project from `GUAARDVARK_ROOT` at call time
+    # (`cli/llx/commands/recipes.py`) must see the original value, not the tmp one.
+    # The app keeps using `config.GUAARDVARK_ROOT` (already captured), so this is safe.
+    if original_root is None:
+        os.environ.pop("GUAARDVARK_ROOT", None)
+    else:
+        os.environ["GUAARDVARK_ROOT"] = original_root
+
+    # `DATABASE_URL` is read once at import; if `backend.config` had already been
+    # imported, setting the env var is a silent no-op and the app is bound to whatever
+    # it resolved earlier -- possibly the live dev database. Prove it took.
+    if database_url:
+        effective = backend_app.app.config.get("SQLALCHEMY_DATABASE_URI", "")
+        if not _same_database(effective, database_url):
+            pytest.fail(
+                "scratch DSN not honoured -- backend.config was imported before the "
+                f"fixture set DATABASE_URL (app is bound to {effective!r}, "
+                f"wanted {database_url!r})"
+            )
+
+    backend = InProcessBackend(backend_app.app)
+
+    from llx.client import LlxClient
+
+    real_init = LlxClient.__init__
+
+    def patched_init(self, *args, **kwargs):
+        real_init(self, *args, **kwargs)
+        self.http = httpx.Client(
+            base_url=self.server_url,
+            transport=httpx.MockTransport(backend.handler),
+        )
+
+    patch.setattr(LlxClient, "__init__", patched_init)
+    yield backend
+    patch.undo()
 
 
 @pytest.fixture

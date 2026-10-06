@@ -468,25 +468,45 @@ call or a wrong route path fails beside the shape (query strings and bodies are 
 phase tests). The files are marked `contract` by the filename rule, so the existing `cli` CI
 job runs them with no workflow change.
 
-Still open: the `InProcessBackend` e2e tier (§4.5). The `pytest-cov` floor (§4.1) is also
-not wired yet — the CI job installs only `pytest`, so a floor needs `pytest-cov` added there
-and a measured starting number.
+Still open: nothing in this section. The `pytest-cov` floor is wired in
+`.github/workflows/ci.yml` (`--cov=llx`, `--cov-fail-under=40`) and the e2e tier shipped
+(§4.5).
 
 ### 4.5 E2E harness
 
-`InProcessBackend` boots the Flask app with a tmp `GUAARDVARK_ROOT`, sqlite (or the test
-Postgres), and plugins mocked at the boundary — the pattern already proven by
-`test_mcp_cli_e2e.py`. Then: one smoke per group (`cast list`, `upscale models`,
-`video-editor projects list`, `llm provider`, `guard status`, …) asserting exit code and
-JSON shape, never real GPU work.
+**Shipped.** `InProcessBackend` (in `cli/tests/conftest.py`) boots the real Flask app in-process
+and routes the CLI's HTTP client to `app.test_client()` through an httpx `MockTransport` — no
+socket, no CLI subprocess. `cli/tests/test_groups_e2e.py` adds one read-only smoke per group
+(26 covered: guard, improve, system-map, content, connections, approvals, cast, llm,
+settings, training, wordpress, agents, jobs, projects, files, family, websearch, infographic,
+video-editor projects, plugins, the film-crew/music-video lists, `api routes`), each asserting
+exit code 0, the `--json` envelope, and that the expected route was actually called. No GPU
+work, and no command starts a plugin service.
 
-**Where e2e runs in CI.** Phase 0 registers the tier and deselects it from the CLI job
-(`-m "not e2e"`) but does **not** add a dedicated e2e job, because the suite's only e2e
-test needs the `mcp` SDK *and* the backend package, neither of which the CLI-only job
-installs — such a job would collect zero tests and fail (pytest exits 5), or pass having
-exercised nothing. The tier's CI home belongs with the real harness above, in a job
-that already has the backend stack (the `backend` job, or `cli-e2e` with
-`backend/requirements-base.txt` installed).
+Safety properties, all enforced in the fixture:
+
+- **Scratch database only.** `backend/config.py` has no test database and rejects sqlite, and
+the `guaardvark` role cannot create one, so the fixture requires
+  `GUAARDVARK_E2E_DATABASE_URL` and skips with a reason otherwise. It proves the effective
+  `SQLALCHEMY_DATABASE_URI` matches that DSN after boot (a `backend.config` import earlier in
+  the process would otherwise silently bind the dev database).
+- **Hermetic filesystem/state.** The fixture sets `GUAARDVARK_ROOT` to a session tmp dir and
+  re-points `PluginManager`'s `PluginStateStore` at a tmp file, because `plugin_state.json` is
+  anchored under the repo `data/`, not `GUAARDVARK_ROOT` — without that, boot would restore
+  the developer's `running` plugins and start real services. The `GUAARDVARK_ROOT` env var is
+  restored right after import so call-time readers such as `recipes._backend_validator()` still
+  see the repo. Verified: `data/plugin_state.json` is byte-identical across a run and no plugin
+  process is started.
+- **Two plugin-backed groups skip with a reason** (`video-editor health` proxies
+  `127.0.0.1:8207`; `upscale models` needs the upscaling service); the tier never starts a
+  plugin to satisfy them.
+
+**Where e2e runs in CI.** The dedicated `cli-e2e` job installs `backend/requirements.txt` (the
+full file, for the `mcp` SDK that `test_mcp_cli_e2e` needs), starts a `postgres:16` service
+with `POSTGRES_DB=guaardvark_e2e`, sets `GUAARDVARK_E2E_DATABASE_URL`, and runs
+`pytest cli/tests -m e2e`. The CLI-only `cli` job keeps deselecting the tier (`-m "not e2e"`).
+The app boots without torch (verified: only the `gpu_api` blueprint fails to import, and no
+smoke hits it).
 
 ### 4.6 New contract tests for the gates
 
