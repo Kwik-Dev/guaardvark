@@ -194,6 +194,111 @@ class TestPastedDescriptionsDoNotGenerate:
         assert "generate_image" not in selected
 
 
+# (message, no picture in the session, picture attached or just made, older picture)
+_IMAGE_INTENT_ROWS = [
+    ("Draw me a cat wearing a top hat", "new", "new", "new"),
+    ("Can you draw a dragon over a castle at night?", "new", "new", "new"),
+    ("generate an image of a lighthouse at dusk", "new", "new", "new"),
+    ("animate this logo spinning slowly", "new", "new", "new"),
+    ("make a picture of my dog as an astronaut", "new", "new", "new"),
+    ("How do I animate a CSS button on hover?", "-", "-", "-"),
+    ("Can you draw a conclusion from these numbers?", "-", "-", "-"),
+    ("Can you fix the grammar in this sentence?", "-", "-", "-"),
+    ("How do I make an image responsive in CSS?", "-", "-", "-"),
+    ("Make sure the image path in config.yaml is correct", "-", "-", "-"),
+    ("Please add error handling to this function", "-", "-", "-"),
+    ("We should draw the line at 50 requests per minute", "-", "-", "-"),
+    ("make it bigger", "-", "edit", "-"),
+    ("add a red scarf to the horse", "-", "edit", "-"),
+    ("change the date format to ISO 8601", "-", "-", "-"),
+    ("now change the sky in the last image to sunset", "-", "edit", "edit"),
+]
+
+
+class TestImageIntent:
+    """New picture, edit of the session's picture, or neither.
+
+    The engine tries the edit first and new-image generation after it, and both
+    run with no model in the loop, so a false hit starts a GPU job.
+    """
+
+    @staticmethod
+    def _route(message, has_recent_image, has_stale_image):
+        from backend.services.unified_chat_engine import (
+            user_wants_image_edit,
+            user_wants_image_generation,
+        )
+        if user_wants_image_edit(message, has_recent_image, has_stale_image):
+            return "edit"
+        return "new" if user_wants_image_generation(message) else "-"
+
+    @pytest.mark.parametrize("message,no_image,recent,stale", _IMAGE_INTENT_ROWS)
+    def test_route(self, message, no_image, recent, stale):
+        assert self._route(message, False, False) == no_image
+        assert self._route(message, True, False) == recent
+        assert self._route(message, False, True) == stale
+
+    def test_mid_sentence_draw_is_left_to_the_chat_model(self):
+        from backend.services.unified_chat_engine import (
+            _pin_image_generation_tools,
+            user_wants_image_generation,
+        )
+        message = "I'd like you to draw a cat"
+        assert user_wants_image_generation(message) is False
+        selected = _pin_image_generation_tools(message, [], ["web_search", "generate_image"])
+        assert "generate_image" in selected
+
+
+class TestImageFocus:
+    """A follow-up edit applies right after an image turn, or when it names the image."""
+
+    def test_plain_chat_turn_ends_the_follow_up_edit(self, monkeypatch, tmp_path):
+        import backend.services.media_director as media_director
+        import backend.services.unified_chat_engine as uce
+        from backend.tests.test_unified_chat_host_hooks import (
+            _engine as chat_engine,
+            _run as chat_turn,
+        )
+
+        sid = "sess-host"  # the session chat_turn runs in
+        picture = tmp_path / "last.png"
+        picture.write_bytes(b"png")
+        edits = []
+
+        class Registry:
+            def get_tool(self, name):
+                return object() if name == "edit_image" else None
+
+            def execute_tool(self, tool_name, **params):
+                edits.append(params["instruction"])
+                raise RuntimeError("no render in a unit test")
+
+        monkeypatch.setattr(media_director, "refine_edit_instruction", lambda text, **kw: text)
+        editor = uce.UnifiedChatEngine.__new__(uce.UnifiedChatEngine)
+        editor.registry = Registry()
+        editor._image_data = None
+        editor._save_message = lambda *a, **k: None
+
+        def follow_up(message):
+            editor._try_image_edit_direct(message, sid, lambda *a: None, "req", {})
+
+        try:
+            uce._remember_session_image(sid, str(picture))
+            follow_up("make it bigger")
+            assert edits == ["make it bigger"]
+
+            chat_turn(chat_engine(monkeypatch), "hello there, how are you today", {})
+            assert sid not in uce._SESSION_IMAGE_FOCUS
+
+            follow_up("make it bigger")
+            assert edits == ["make it bigger"]
+            follow_up("make the last image bigger")
+            assert edits == ["make it bigger", "make the last image bigger"]
+        finally:
+            uce._SESSION_LAST_EDIT.pop(sid, None)
+            uce._SESSION_IMAGE_FOCUS.discard(sid)
+
+
 class TestCommandOnlyMode:
     """chat_media_requires_command: only an explicit command may create media."""
 
