@@ -204,7 +204,7 @@ A newer category: the coding agent runs the studio. Facts checked 2026-09-11 fro
 
 ### AgentBrain — Three-Tier Neural Routing
 
-Every message is routed through a three-tier decision engine that picks the fastest path to the right answer. Reflexes fire in under a millisecond. Instinct handles single-shot requests in one LLM call. Deliberation spins up a full ReACT reasoning loop when the problem demands it.
+Every message is routed through a three-tier decision engine that picks the fastest path to the right answer. Reflexes answer in under 100 ms with no model call. Instinct handles single-shot requests in one LLM call. Deliberation spins up a full ReACT reasoning loop when the problem demands it.
 
 | Tier | Name | Latency | LLM Calls | When It Fires |
 |------|------|---------|-----------|---------------|
