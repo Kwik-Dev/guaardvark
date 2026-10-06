@@ -695,3 +695,38 @@ def test_run_editor_without_a_video_model_has_no_scene_renderer(app, production)
         )
         run_editor(production.id, i2v=MagicMock(), audio_foundry=MagicMock(), ffmpeg=MagicMock())
         assert MockEditor.call_args.kwargs["scene_renderer"] is None
+
+
+def test_film_autocurate_is_off_by_default(monkeypatch):
+    from backend.tasks.production_swarm_tasks import _film_autocurate_enabled
+    monkeypatch.delenv("GUAARDVARK_FILM_AUTOCURATE", raising=False)
+    assert _film_autocurate_enabled() is False
+    monkeypatch.setenv("GUAARDVARK_FILM_AUTOCURATE", "1")
+    assert _film_autocurate_enabled() is True
+
+
+def test_run_curator_all_pass_keeps_the_storyboard_gate(app, production):
+    from backend.tasks.production_swarm_tasks import run_curator
+    production.current_stage = "awaiting_approval"
+    shots = [
+        ProductionShot(production_id=production.id, scene_number=1, shot_number=n,
+                       description=f"Shot {n}", storyboard_image_path=f"/tmp/shot_{n}.png")
+        for n in (1, 2)
+    ]
+    db.session.add_all(shots)
+    db.session.commit()
+
+    passing = {"approved": True, "approve": True, "confidence": 95, "reason": "clean frame"}
+    with patch("backend.services.film_curator_service.judge_shot", return_value=dict(passing)), \
+         patch("backend.celery_app.celery.send_task") as mock_send_task:
+        summary = run_curator(production.id)
+
+    assert summary["flagged"] == 0
+    assert summary["advanced_to_rendering"] is False
+    for shot in shots:
+        db.session.refresh(shot)
+        assert shot.approved is True
+    db.session.refresh(production)
+    assert production.current_stage == "awaiting_approval"
+    sent = [c.args[0] for c in mock_send_task.call_args_list]
+    assert "production.run_editor" not in sent

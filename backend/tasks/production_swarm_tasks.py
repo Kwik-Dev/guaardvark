@@ -98,6 +98,16 @@ def _default_ollama_llm(*, system: str, user: str, model: str = "gemma4:e4b") ->
     return response["message"]["content"]
 
 
+# The storyboard curator is advice only: when on, it pre-ticks the shot cards it
+# judges usable, and a person still starts the render. Off unless set to 1.
+FILM_AUTOCURATE_DEFAULT = "0"
+
+
+def _film_autocurate_enabled() -> bool:
+    value = os.environ.get("GUAARDVARK_FILM_AUTOCURATE", FILM_AUTOCURATE_DEFAULT)
+    return value not in ("0", "false", "False", "")
+
+
 def create_production_swarm_tasks(celery_app: Celery):
     
     @celery_app.task(name="production.run_screenwriter")
@@ -119,10 +129,10 @@ def create_production_swarm_tasks(celery_app: Celery):
     def run_storyboard_artist_task(prod_id: int):
         with current_app.app_context():
             run_storyboard_artist(prod_id)
-            # Layer 3: hand the keyframe approval gate to the vision brain instead
-            # of the human, unless opted out. Safe to fire unconditionally —
-            # run_curator no-ops unless the production reached awaiting_approval.
-            if os.environ.get("GUAARDVARK_FILM_AUTOCURATE", "1") not in ("0", "false", "False", ""):
+            # The curator only pre-ticks cards; the approval gate stays with the
+            # person. run_curator no-ops unless the production reached
+            # awaiting_approval.
+            if _film_autocurate_enabled():
                 run_curator(prod_id)
 
     @celery_app.task(name="production.run_curator")
@@ -500,21 +510,17 @@ def run_storyboard_artist(prod_id: int, image_generator=None):
             db.session.commit()
 
 def run_curator(prod_id: int) -> dict:
-    """Layer 3 auto-curation: Gemma-4 vision judges each storyboard frame and sets
-    ProductionShot.approved, so the human only reviews the shots it flags. If every
-    shot passes, the gate advances awaiting_approval -> rendering and the editor is
-    dispatched — fully hands-off. Idempotent (no-ops unless at awaiting_approval)."""
+    """Storyboard curation, advice only: the vision model judges each frame and
+    pre-ticks ProductionShot.approved on the ones it judges usable. The stage stays
+    at awaiting_approval even when every shot passes; the render starts only when a
+    person approves the storyboard. Idempotent (no-ops unless at awaiting_approval)."""
     import logging
     from backend.services.film_curator_service import auto_curate
     log = logging.getLogger(__name__)
-    summary = auto_curate(prod_id)
-    if summary.get("advanced_to_rendering"):
-        from backend.celery_app import celery
-        celery.send_task("production.run_editor", args=[prod_id])
-        log.info("Curator approved all shots for production %s -> rendering dispatched", prod_id)
-    elif not summary.get("skipped"):
-        log.info("Curator flagged shots %s for production %s -> awaiting human review",
-                 summary.get("flagged_shots"), prod_id)
+    summary = auto_curate(prod_id, do_advance=False)
+    if not summary.get("skipped"):
+        log.info("Curator pre-ticked %s of %s shots for production %s (flagged %s) -> awaiting human approval",
+                 summary.get("approved"), summary.get("total"), prod_id, summary.get("flagged_shots"))
     return summary
 
 

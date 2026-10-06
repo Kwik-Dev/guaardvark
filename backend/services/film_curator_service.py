@@ -1,11 +1,11 @@
-"""Layer 3 of the film-orchestrator plan — the auto-curator.
+"""Layer 3 of the film-orchestrator plan — the storyboard curator.
 
 The production pipeline parks at the `awaiting_approval` stage with one storyboard
-frame per shot and `ProductionShot.approved=False`, waiting for a human to bless
-each one. That's the "flip switches all day" problem. This module lets the
-multimodal brain do the blessing: Gemma-4 *looks* at each storyboard frame, judges
-whether it's on-model and coherent for that shot's character, and sets `approved`
-automatically — escalating to the human ONLY the shots it's unsure about.
+frame per shot and `ProductionShot.approved=False`, waiting for a person to approve
+the storyboard. This module gives that person a head start: Gemma-4 *looks* at each
+frame, judges whether it's on-model and coherent for that shot's character, and
+pre-ticks `approved` on the frames it judges usable. It is advice only — the stage
+stays at `awaiting_approval` and the render starts when the person approves.
 
 Design notes:
   - Follows the codebase's see→think split (utils/vision_analyzer): the VISION model
@@ -130,12 +130,13 @@ def judge_shot(shot, *, analyzer=None, decider=None, threshold: int = DEFAULT_TH
 
 
 def auto_curate(prod_id: int, *, analyzer=None, decider=None,
-                threshold: int = DEFAULT_THRESHOLD, do_advance: bool = True) -> dict:
-    """Judge every shot of a production parked at `awaiting_approval`, set
-    `approved`, and (if all pass and do_advance) advance the stage to `rendering`.
+                threshold: int = DEFAULT_THRESHOLD, do_advance: bool = False) -> dict:
+    """Judge every shot of a production parked at `awaiting_approval` and set
+    `approved` on the ones that pass. Only when do_advance is set and every shot
+    passes does the stage move on to `rendering`; the Film Crew task leaves it
+    off so the person's approval stays the only way to start the render.
 
-    Returns a summary dict. Does NOT dispatch the editor task — the caller
-    (run_curator) does, keeping celery out of this testable unit. Idempotent:
+    Returns a summary dict and never dispatches the editor task. Idempotent:
     no-ops unless the production is at `awaiting_approval`.
     """
     from backend.models import Production, ProductionShot, db
@@ -166,7 +167,6 @@ def auto_curate(prod_id: int, *, analyzer=None, decider=None,
 
     advanced = False
     if do_advance and not flagged:
-        # Every shot passed — no human needed. Advance the gate to rendering.
         svc = ProductionService(db.session)
         advanced = svc.advance_if_predecessor(prod_id, expected_predecessor="awaiting_approval")
 
