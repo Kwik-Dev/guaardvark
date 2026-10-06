@@ -32,7 +32,7 @@ from typing import Any, Dict, Optional
 
 from flask import Blueprint, jsonify, request
 
-from backend.services.social_outreach import audit, kill_switch, persona
+from backend.services.social_outreach import audit, external_grader, gates, kill_switch, persona
 from backend.utils.hosts import host_matches
 
 logger = logging.getLogger(__name__)
@@ -285,7 +285,11 @@ def draft_comment():
         "share_target": "r/SideProject",  # required for share mode
         "share_link": "https://guaardvark.com",  # required for share mode
     }
-    Returns: {draft, grade, reason, audit_id, would_post}
+    Returns: {draft, grade, reason, audit_id, would_post, gates}
+
+    gates.independent_check is passed, failed or unavailable: whether the
+    second-opinion grader ran on this draft and what it concluded. With
+    supervised mode off, only a passed check lets the draft post on its own.
     """
     body = request.get_json(silent=True) or {}
     platform = body.get("platform", "unknown")
@@ -299,6 +303,7 @@ def draft_comment():
             "target": body.get("share_target") or "(unspecified)",
             "link_url": body.get("share_link") or persona.SITE_URL,
         }
+        grading_context = f"NEW POST to {context['target']}, sharing {context['link_url']}"
     else:
         thread_context = body.get("thread_context", "")
         if not thread_context:
@@ -307,6 +312,7 @@ def draft_comment():
             "thread_context": thread_context,
             "url": target_url,
         }
+        grading_context = thread_context
 
     result = persona.draft_outreach_text(
         platform=platform,
@@ -326,7 +332,19 @@ def draft_comment():
     grade_ok = grade >= 0.7
     has_draft = bool(draft_text.strip())
 
-    would_post = enabled and not supervised and cadence_ok and grade_ok and has_draft
+    # Second opinion from a different model, blind to the self-grade. An empty
+    # draft cannot post, so it is not sent to the grader.
+    if has_draft:
+        ext = external_grader.grade_draft_externally(draft_text, grading_context)
+    else:
+        ext = {"grade": 0.0, "checked": False, "skipped": True, "model": None, "reason": "empty_draft"}
+    independent_pass, independent_reason = gates.independent_ok(ext, supervised=supervised)
+    independent_check = gates.independent_check_label(ext)
+    hold_reason = None if independent_pass else independent_reason
+
+    would_post = (
+        enabled and not supervised and cadence_ok and grade_ok and has_draft and independent_pass
+    )
 
     # Unsupervised auto-post goes through process-approved (single posting path).
     # Legacy Reddit/self-share loops are draft-only and never servo-post.
@@ -343,7 +361,15 @@ def draft_comment():
         grade_score=grade,
         abort_reason=None,
         task_id=task_id,
-        extra={"reason": reason, "would_post": would_post, "cadence_block": cadence_reason if not cadence_ok else None},
+        extra={
+            "reason": reason,
+            "would_post": would_post,
+            "cadence_block": cadence_reason if not cadence_ok else None,
+            "independent_check": independent_check,
+            "external_grade": ext.get("grade"),
+            "external_reason": ext.get("reason", ""),
+            "hold_reason": hold_reason,
+        },
     )
 
     return jsonify({
@@ -359,6 +385,8 @@ def draft_comment():
             "cadence_reason": cadence_reason,
             "grade_ok": grade_ok,
             "has_draft": has_draft,
+            "independent_check": independent_check,
+            "independent_reason": independent_reason,
         },
     })
 

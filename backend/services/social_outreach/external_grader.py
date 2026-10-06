@@ -7,7 +7,8 @@ believes is good. An independent grader, run on a different model family
 with a fixed rubric, catches drafts that the writer overrated.
 
 This is intentionally NOT a generation model — it's a binary fitness check.
-Grade is 0-1, threshold is at the call site (see content_agent.MIN_EXTERNAL_GRADE).
+Grade is 0-1; the threshold and what an unchecked draft may do live in
+gates.py (MIN_EXTERNAL_GRADE, independent_ok).
 """
 
 from __future__ import annotations
@@ -88,17 +89,19 @@ def grade_draft_externally(draft_text: str, thread_context: str) -> dict:
             "appropriate_tone": int 0/1,
             "concise": int 0/1,
             "reason": str,
-            "skipped": bool,    # true if we couldn't grade (model unavailable, parse error)
+            "checked": bool,    # true only when a grade actually came back
+            "skipped": bool,    # not checked (model unavailable, call or parse error)
             "model": str | None,
         }
 
-    A "skipped" result means the call didn't fail per se — there's just no
-    independent signal to gate on. The caller should treat skipped as
-    "trust the self-grade", not "reject".
+    An unchecked result is not a rejection, but it is no independent signal
+    either: gates.independent_ok holds an unchecked draft for a person's
+    approval instead of letting it post on its self-grade.
     """
     model = _resolve_grader_model()
     if model is None:
-        return {"grade": 0.0, "skipped": True, "model": None, "reason": "no_grader_model_loaded"}
+        return {"grade": 0.0, "checked": False, "skipped": True, "model": None,
+                "reason": "no_grader_model_loaded"}
 
     user_msg = (
         f"DRAFT:\n{draft_text}\n\n"
@@ -131,7 +134,8 @@ def grade_draft_externally(draft_text: str, thread_context: str) -> dict:
         data = json.loads(content[start:end])
     except Exception as e:
         logger.warning("external grader call failed: %s", e)
-        return {"grade": 0.0, "skipped": True, "model": model, "reason": f"grader_call_failed: {e}"}
+        return {"grade": 0.0, "checked": False, "skipped": True, "model": model,
+                "reason": f"grader_call_failed: {e}"}
 
     grade = float(data.get("grade") or 0.0)
     return {
@@ -141,6 +145,7 @@ def grade_draft_externally(draft_text: str, thread_context: str) -> dict:
         "appropriate_tone": int(data.get("appropriate_tone") or 0),
         "concise": int(data.get("concise") or 0),
         "reason": (data.get("reason") or "")[:300],
+        "checked": True,
         "skipped": False,
         "model": model,
     }

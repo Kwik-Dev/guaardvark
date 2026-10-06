@@ -2,6 +2,8 @@
 
 Tests cover:
   • candidate → drafted (good draft, grade ≥ MIN_GRADE, external grader passes/skipped)
+  • unsupervised: approved only when the independent check ran and passed;
+    an unchecked draft is held as drafted with a hold_reason
   • candidate → rejected (low self-grade, low external grade, empty draft, json parse error, draft call raises)
   • candidate → skipped (already non-candidate status, e.g. drafted/posted/rejected)
   • candidate not found (id doesn't exist in DB)
@@ -18,12 +20,12 @@ from unittest.mock import patch
 import pytest
 
 
-# Default external grader mock — returns skipped=True so the second-opinion
-# gate falls through to "trust self-grade", same as production behavior when
-# the grader model isn't loaded. Individual tests override to test the gate.
-EXT_SKIPPED = {"grade": 0.0, "skipped": True, "model": None, "reason": "test_default"}
-EXT_PASS = {"grade": 0.9, "skipped": False, "model": "test", "reason": "looks good", "engages": 1, "on_topic": 1, "appropriate_tone": 1, "concise": 1}
-EXT_FAIL = {"grade": 0.25, "skipped": False, "model": "test", "reason": "generic boilerplate", "engages": 0, "on_topic": 1, "appropriate_tone": 0, "concise": 1}
+# Default external grader mock — unchecked, same as production when the grader
+# model isn't installed. The draft is not rejected; whether it may post on its
+# own is the would_post gate's call. Individual tests override to test the gate.
+EXT_SKIPPED = {"grade": 0.0, "checked": False, "skipped": True, "model": None, "reason": "test_default"}
+EXT_PASS = {"grade": 0.9, "checked": True, "skipped": False, "model": "test", "reason": "looks good", "engages": 1, "on_topic": 1, "appropriate_tone": 1, "concise": 1}
+EXT_FAIL = {"grade": 0.25, "checked": True, "skipped": False, "model": "test", "reason": "generic boilerplate", "engages": 0, "on_topic": 1, "appropriate_tone": 0, "concise": 1}
 
 
 @pytest.fixture(autouse=True)
@@ -273,7 +275,8 @@ def test_external_grader_low_score_rejects_even_if_self_grade_high(app):
 
 def test_external_grader_skipped_falls_through_to_self_grade(app):
     """When the external grader returns skipped=True (model unavailable, call
-    failed, etc.) we should NOT block on it — the self-grade alone gates."""
+    failed, etc.) the draft is not rejected; it is drafted on its self-grade.
+    Whether it may then post without a person is tested further down."""
     with app.app_context():
         row = _make_candidate()
         with patch(
@@ -307,7 +310,7 @@ def test_unsupported_action_is_rejected(app):
 
 def test_draft_candidate_unsupervised_promotes_to_approved(app):
     """Parity with /draft-comment would_post: enabled + not supervised +
-    grade OK + cadence OK → approved (not drafted)."""
+    grade OK + cadence OK + independent check passed → approved (not drafted)."""
     with app.app_context():
         row = _make_candidate(platform="youtube")
         with patch(
@@ -316,6 +319,9 @@ def test_draft_candidate_unsupervised_promotes_to_approved(app):
                 "draft": "Solid Ollama walkthrough — https://github.com/guaardvark/guaardvark",
                 "grade": 0.9,
             },
+        ), patch(
+            "backend.services.social_outreach.content_agent.external_grader.grade_draft_externally",
+            return_value=EXT_PASS,
         ), patch(
             "backend.services.social_outreach.content_agent.persona.apply_utm_tags",
             side_effect=lambda text, **k: text,
@@ -363,3 +369,122 @@ def test_draft_candidate_supervised_stays_drafted(app):
         db.session.expire_all()
         updated = SocialOutreachLog.query.get(row.id)
         assert updated.status == "drafted"
+
+
+# ---- unsupervised posting needs an independent check that actually ran ---------------
+
+def _draft_with_gates(row_id, ext, *, supervised=False, draft="Nice local AI tip.", grade=0.88):
+    """Draft one candidate with outreach on and cadence open. Returns the outcome,
+    the audit-trail extra, and the grader mock."""
+    with patch(
+        "backend.services.social_outreach.content_agent.persona.draft_outreach_text",
+        return_value={"draft": draft, "grade": grade},
+    ), patch(
+        "backend.services.social_outreach.content_agent.persona.apply_utm_tags",
+        side_effect=lambda text, **k: text,
+    ), patch(
+        "backend.services.social_outreach.content_agent.external_grader.grade_draft_externally",
+        return_value=ext,
+    ) as grader, patch(
+        "backend.services.social_outreach.kill_switch.is_enabled",
+        return_value=True,
+    ), patch(
+        "backend.services.social_outreach.kill_switch.is_supervised",
+        return_value=supervised,
+    ), patch(
+        "backend.services.social_outreach.kill_switch.cadence_allows_post",
+        return_value=(True, None),
+    ), patch(
+        "backend.services.social_outreach.content_agent.audit.log_trail_only",
+    ) as trail:
+        outcome = ContentAgent().draft_candidate(row_id)
+    extra = trail.call_args.kwargs["extra"] if trail.called else None
+    return outcome, extra, grader
+
+
+def test_unsupervised_unchecked_draft_is_held_for_approval(app):
+    """The grader did not run (model not installed): the draft must not post on
+    its self-grade. It waits as drafted, and the trail says why."""
+    with app.app_context():
+        row = _make_candidate(platform="youtube")
+        outcome, extra, _ = _draft_with_gates(row.id, EXT_SKIPPED)
+
+        assert outcome["status"] == "drafted"
+        assert outcome["would_post"] is False
+        assert outcome["hold_reason"] == "no_independent_check"
+        assert extra["hold_reason"] == "no_independent_check"
+        assert extra["external_checked"] is False
+        db.session.expire_all()
+        assert SocialOutreachLog.query.get(row.id).status == "drafted"
+
+
+def test_unsupervised_unchecked_draft_posts_when_the_check_is_not_required(app):
+    """outreach_require_independent_check switched off restores the old
+    behaviour: an unchecked draft posts on its self-grade."""
+    from backend.models import Setting
+    with app.app_context():
+        db.session.add(Setting(key="outreach_require_independent_check", value="false"))
+        db.session.commit()
+        row = _make_candidate(platform="youtube")
+        outcome, extra, _ = _draft_with_gates(row.id, EXT_SKIPPED)
+
+        assert outcome["status"] == "approved"
+        assert outcome["would_post"] is True
+        assert outcome["hold_reason"] is None
+        assert extra["hold_reason"] is None
+
+
+def test_unsupervised_checked_and_passed_draft_is_approved(app):
+    with app.app_context():
+        row = _make_candidate(platform="youtube")
+        outcome, extra, _ = _draft_with_gates(row.id, EXT_PASS)
+
+        assert outcome["status"] == "approved"
+        assert outcome["hold_reason"] is None
+        assert extra["external_checked"] is True
+
+
+def test_supervised_unchecked_draft_waits_without_a_hold_reason(app):
+    """Supervised mode is unchanged: every draft waits for a person anyway, so
+    a missing check is not what holds it."""
+    with app.app_context():
+        row = _make_candidate(platform="youtube")
+        outcome, extra, _ = _draft_with_gates(row.id, EXT_SKIPPED, supervised=True)
+
+        assert outcome["status"] == "drafted"
+        assert outcome["would_post"] is False
+        assert outcome["hold_reason"] is None
+        assert extra["hold_reason"] is None
+
+
+def test_grader_result_without_checked_counts_as_unchecked(app):
+    """Only an explicit checked=True is a check that ran; anything else holds."""
+    with app.app_context():
+        row = _make_candidate(platform="youtube")
+        outcome, _, _ = _draft_with_gates(row.id, {"grade": 0.9, "skipped": False})
+
+        assert outcome["status"] == "drafted"
+        assert outcome["hold_reason"] == "no_independent_check"
+
+
+def test_unsupervised_reply_is_held_because_replies_are_not_graded(app):
+    """Replies skip the comment rubric, so they have no independent check and
+    wait for approval when unsupervised."""
+    with app.app_context():
+        row = _make_candidate(
+            payload={
+                "stage": "recon",
+                "title": "My local AI setup",
+                "parent_text": "Here is how I run it.",
+                "incoming_text": "Does this work on a 12GB card?",
+                "incoming_author": "someone",
+            },
+            platform="youtube",
+            action="reply",
+        )
+        outcome, extra, grader = _draft_with_gates(row.id, EXT_PASS, draft="Yes, 12GB is enough.")
+
+        grader.assert_not_called()
+        assert outcome["status"] == "drafted"
+        assert outcome["hold_reason"] == "no_independent_check"
+        assert extra["external_reason"] == "skip_for_reply_action"

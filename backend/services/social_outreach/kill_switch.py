@@ -5,6 +5,8 @@ Three layers of brakes:
   1. is_enabled() — global on/off via Setting('social_outreach_enabled', 'true'/'false'). Defaults false.
   2. is_supervised() — when true, drafts wait for a person (Approvals → Outreach) instead of posting.
      Defaults true; only an explicit "false" lets graded drafts post on their own.
+     requires_independent_check() — when unsupervised, a draft also needs a second check that
+     actually ran (gates.independent_ok). Defaults true.
   3. cadence checks — Redis-backed, per-platform. Hard caps: 1 post / 30 min / platform, 8 posts / 24h / platform.
 
 Plus task-level abort on 2 servo failures (enforced by the loop, not here).
@@ -127,6 +129,19 @@ def is_supervised() -> bool:
     except Exception as e:
         logger.warning("supervised setting unreadable, treating as supervised: %s", e)
         return True
+
+
+def requires_independent_check() -> bool:
+    """Whether an unsupervised draft needs a second check that actually ran
+    (gates.independent_ok) before it may post. True unless the setting
+    ``outreach_require_independent_check`` is switched off explicitly, and true
+    when the setting cannot be read."""
+    try:
+        value = _lookup_setting("outreach_require_independent_check")
+    except Exception as e:
+        logger.warning("independent-check setting unreadable, treating as required: %s", e)
+        return True
+    return True if value is None else _is_on(value)
 
 
 def status_snapshot() -> dict:
