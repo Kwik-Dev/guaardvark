@@ -165,7 +165,8 @@ class OutreachListQueueTool(BaseTool):
             description=(
                 "candidate (found, not drafted yet), drafted (waiting for review), approved "
                 "(queued to post), processing (a poster has picked it up), submitting (being "
-                "published now), posted, rejected, aborted (posting failed)"
+                "published now), posted, rejected, aborted (posting failed), unsupported "
+                "(nothing here posts that action on that platform)"
             ),
             default="drafted", enum=list(transitions.KNOWN_STATUSES),
         ),
