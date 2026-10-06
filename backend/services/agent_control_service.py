@@ -1343,6 +1343,9 @@ class AgentControlService:
                     # advisory path) a concrete, history-backed string instead of forcing the
                     # model to perfectly re-phrase the visible state. Mirrors how expected_effect
                     # is pulled from action (1067) and recipe success_proof is top-level declared.
+                    # A grounded proof is ours, not the model's: it must be seen on
+                    # screen, and never takes the advisory branch below.
+                    proof_grounded = False
                     if enforce_proof and (not proof or proof_lc in trivial_proofs) and has_recent_verified:
                         for st in reversed(self._action_history):
                             if getattr(getattr(st, "action", None), "action_type", "") == "done":
@@ -1351,6 +1354,7 @@ class AgentControlService:
                             if tgt:
                                 proof = f"{tgt} now visible/achieved (per prior verified servo change)"
                                 proof_lc = proof.lower()
+                                proof_grounded = True
                                 # attach back so emit/history and finish() see the grounded value
                                 decision.action.success_proof = proof
                                 logger.debug(f"[AGENT][DONE] Grounded success_proof from prior verified step: {proof!r}")
@@ -1392,11 +1396,12 @@ class AgentControlService:
                     # intent as reality.
                     #
                     # ADVISORY EXCEPTION (verified fix for servo-success + user-visible
-                    # goal not leading to termination): if a prior non-done step had
-                    # servo DPC (or equivalent) `verified` or post_action_effect indicating
-                    # real visible change (e.g. the exact GOTHAM RISING thumbnail click
-                    # that achieved the goal per user + step-1 [OK]), then the semantic
-                    # verify on the *model's* proof is treated as advisory only.
+                    # goal not leading to termination): if the latest click (see
+                    # _task_has_verified_click) had servo DPC (or equivalent) `verified`
+                    # or post_action_effect indicating real visible change (e.g. the exact
+                    # GOTHAM RISING thumbnail click that achieved the goal per user +
+                    # step-1 [OK]), then the semantic verify on the *model's* proof is
+                    # treated as advisory only. A proof grounded from history never is.
                     # This re-uses the documented contract for slow expected_effect
                     # verifies (1085: "keeping click as OK; next SEE will observe actual
                     # state") and recipe final proof (2846-2853: "DO NOT flip the whole
@@ -1417,7 +1422,7 @@ class AgentControlService:
                             proof, screen, timeout_s=10.0, allow_dom_fastpath=False,
                         )
                         if not bool(done_verify.get("success", False)):
-                            if has_recent_verified:
+                            if has_recent_verified and not proof_grounded:
                                 # Advisory path: prior servo evidence (DPC change) + user-visible
                                 # goal already confirm the achievement. Log + emit advisory note
                                 # (visible in AgentThinkingTrail), append non-failed advisory step
@@ -3491,7 +3496,7 @@ class AgentControlService:
 
     @classmethod
     def _task_has_verified_click(cls, history) -> bool:
-        """Did a click in this task change the screen where it landed.
+        """Did the latest click in this task change the screen where it landed.
 
         Gates the advisory "done" that overrides a proof the verifier could
         not see. Only clicks count: a hotkey is marked verified whatever the
@@ -3501,14 +3506,20 @@ class AgentControlService:
         to its points changed. A smiley drawn exactly as asked was otherwise
         refused "done" four times, because the eye would not call two dots
         and a line "a complete smiley face" (2026-10-02).
+        Only the most recent click since the last navigate is read, failed or
+        not: a verified click on a composer says nothing about the Post click
+        after it.
         ``history`` is the current task's, reset when each task starts.
         """
-        for st in history:
-            if st.failed or st.action.action_type not in cls._CLICK_FAMILY + ("click_at", "draw"):
+        for st in reversed(history):
+            kind = st.action.action_type
+            if kind == "navigate":
+                return False
+            if kind not in cls._CLICK_FAMILY + ("click_at", "draw"):
                 continue
             r = st.result or {}
-            if bool(r.get("verified")) or str(r.get("post_action_effect") or "") == "verified":
-                return True
+            return not st.failed and (
+                bool(r.get("verified")) or str(r.get("post_action_effect") or "") == "verified")
         return False
 
     _NUMBER_WORDS = {

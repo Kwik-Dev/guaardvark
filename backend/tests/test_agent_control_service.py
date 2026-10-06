@@ -133,8 +133,8 @@ class TestParseDecision(unittest.TestCase):
         llm_output = '{"action": "done", "success_proof": "", "reasoning": "I clicked the video and the player is now there"}'
         decision = service._parse_decision(llm_output)
         self.assertTrue(decision.task_complete)
-        # In execute_task the has_recent_verified block would have grounded the proof from the prior target
-        # and taken the advisory (non-failure) path instead of "done rejected — proof not visible".
+        # In execute_task the has_recent_verified block grounds the proof from the prior target; a
+        # grounded proof must then be seen on screen and never takes the advisory path.
         # We assert the objects here; runtime advisory/grounding covered by higher-level tests + manual.
 
     def test_parse_invalid_json_returns_stuck(self):
@@ -714,6 +714,40 @@ class TestPointActions(unittest.TestCase):
     def test_the_rule_names_the_screen_size(self):
         self.svc._screen_size = (1000, 1000)
         self.assertIn("the screen is 1000x1000", self.svc._point_rule())
+
+
+class TestLatestClickVerified(unittest.TestCase):
+    """The advisory "done" reads only the latest click since the last
+    navigate; an earlier verified click does not vouch for it."""
+
+    def _has(self, history):
+        from backend.services.agent_control_service import AgentControlService
+        return AgentControlService._task_has_verified_click(history)
+
+    def test_verified_composer_then_unverified_post_is_not_verified(self):
+        history = [_stepped("composer", verified=True, effect="verified"),
+                   _stepped("Post button", effect="no_visible_change")]
+        self.assertFalse(self._has(history))
+
+    def test_verified_post_last_is_verified(self):
+        history = [_stepped("composer", verified=True, effect="verified"),
+                   _stepped("Post button", verified=True, effect="verified")]
+        self.assertTrue(self._has(history))
+
+    def test_a_failed_last_click_is_not_verified(self):
+        history = [_stepped("composer", verified=True, effect="verified"),
+                   _stepped("Post button", ok=False)]
+        self.assertFalse(self._has(history))
+
+    def test_steps_that_are_not_clicks_do_not_hide_the_last_click(self):
+        history = [_stepped("Post button", verified=True, effect="verified"),
+                   _stepped("", action_type="hotkey"), _stepped("", action_type="wait")]
+        self.assertTrue(self._has(history))
+
+    def test_a_navigate_after_the_click_clears_it(self):
+        history = [_stepped("Post button", verified=True, effect="verified"),
+                   _stepped("", action_type="navigate")]
+        self.assertFalse(self._has(history))
 
 
 class TestFailedToolsSayWhy(unittest.TestCase):
