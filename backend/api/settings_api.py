@@ -457,6 +457,8 @@ def set_llm_debug():
             f"Failed to update llm_debug setting: {e}", exc_info=True
         )
         return error_response("Failed to update setting", status_code=500)
+    import backend.utils.settings_utils as settings_utils
+    settings_utils._llm_debug_seen = enabled
     return success_response({"llm_debug": enabled})
 
 
