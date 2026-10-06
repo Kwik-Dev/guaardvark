@@ -394,3 +394,95 @@ def test_comment_left_in_the_composer_is_not_recorded_posted(monkeypatch):
             "https://www.youtube.com/watch?v=test123", COMMENT)
     assert ok is False
     assert reason.startswith("submit_unverified")
+
+
+# ---------------------------------------------------------------------------
+# Fill and submit: a disabled Comment button is a failed submit
+# ---------------------------------------------------------------------------
+
+class _BidiSocket:
+    """BiDi socket for the fill step: opens a session on one tab, then answers
+    each script.evaluate with the next queued page result."""
+
+    def __init__(self, *page_results):
+        import json
+        self.replies = [{"type": "success"},
+                        {"type": "success", "result": {"contexts": [{"context": "tab-1"}]}}]
+        self.replies += [
+            {"type": "success", "result": {"result": {"type": "string", "value": json.dumps(r)}}}
+            for r in page_results
+        ]
+        self.sent = []
+
+    def send(self, message):
+        import json
+        self.sent.append(json.loads(message))
+
+    def recv(self):
+        import json
+        return json.dumps(self.replies.pop(0))
+
+    def close(self):
+        pass
+
+    def expressions(self):
+        return [m["params"]["expression"] for m in self.sent if m.get("method") == "script.evaluate"]
+
+
+def _fill(*page_results):
+    from backend.services.social_outreach.youtube_outreach import _bidi_fill_and_submit_comment
+
+    sock = _BidiSocket(*page_results)
+    with patch("websocket.create_connection", return_value=sock), \
+         patch("backend.services.social_outreach.youtube_outreach.time.sleep"):
+        result = _bidi_fill_and_submit_comment(COMMENT)
+    return result, sock
+
+
+def test_fill_with_the_comment_button_disabled_is_a_failed_submit():
+    (ok, reason), sock = _fill(
+        {"ok": True, "stage": "clicked_placeholder"},
+        {"ok": False, "stage": "comment_button_disabled", "filled_len": len(COMMENT)},
+    )
+    assert ok is False
+    assert reason.startswith("fill_failed:") and "comment_button_disabled" in reason
+    # The page script itself refuses to fall back to Ctrl+Enter for a disabled button.
+    fill_script = sock.expressions()[1]
+    assert fill_script.index("comment_button_disabled") < fill_script.index("ctrlKey")
+
+
+def test_fill_with_the_comment_button_clicked_is_submitted():
+    (ok, reason), _ = _fill(
+        {"ok": True, "stage": "clicked_placeholder"},
+        {"ok": True, "stage": "clicked_submit", "filled_len": len(COMMENT)},
+    )
+    assert ok is True
+    assert "clicked_submit" in reason
+
+
+def test_disabled_button_stops_the_post_before_the_page_check(monkeypatch):
+    """Through the poster: the row fails at fill_submit, and the page is never
+    read as if the comment had been sent."""
+    from backend.services.social_outreach import youtube_outreach as yt
+
+    service = MagicMock()
+    service.is_active = False
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    monkeypatch.setattr(yt, "_bidi_navigate", lambda *a, **k: True)
+    monkeypatch.setattr(yt, "_bidi_scroll_to_yt_composer", lambda: (True, "ok", (1, 1)))
+    sock = _BidiSocket(
+        {"ok": True, "stage": "clicked_placeholder"},
+        {"ok": False, "stage": "comment_button_disabled", "filled_len": len(COMMENT)},
+    )
+    with patch("backend.services.agent_control_service.get_agent_control_service",
+               return_value=service), \
+         patch("backend.utils.agent_display_utils.start_agent_display_if_needed",
+               return_value=True), \
+         patch("backend.services.local_screen_backend.LocalScreenBackend"), \
+         patch("websocket.create_connection", return_value=sock), \
+         patch(EVALUATE) as page_check:
+        ok, reason = yt.post_youtube_comment_via_servo(
+            "https://www.youtube.com/watch?v=test123", COMMENT)
+    assert ok is False
+    assert reason.startswith("fill_submit_failed") and "comment_button_disabled" in reason
+    page_check.assert_not_called()

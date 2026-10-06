@@ -370,19 +370,26 @@ def _bidi_fill_and_submit_comment(comment_text: str) -> tuple[bool, str]:
               b => /^\\s*Comment\\s*$/i.test((b.innerText || '').trim())
             );
           }}
-          if (btn && !btn.disabled) {{
+          // A disabled Comment button means YouTube did not register the
+          // text; a keyboard submit would not post it either.
+          if (btn && btn.disabled) {{
+            return JSON.stringify({{
+              ok:false, stage:'comment_button_disabled', filled_len: filled.length
+            }});
+          }}
+          if (btn) {{
             btn.click();
             return JSON.stringify({{
               ok:true, stage:'clicked_submit', filled_len: filled.length
             }});
           }}
+          // No Comment button found at all: try the Ctrl+Enter shortcut.
           ce.dispatchEvent(new KeyboardEvent('keydown', {{
             key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
             ctrlKey: true, bubbles: true, cancelable: true,
           }}));
           return JSON.stringify({{
             ok: true, stage: 'ctrl_enter', filled_len: filled.length,
-            btn_disabled: !!(btn && btn.disabled),
           }});
         }})()"""
         fill_d = _eval(4, js_fill)
