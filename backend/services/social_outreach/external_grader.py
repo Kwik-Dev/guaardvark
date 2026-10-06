@@ -50,6 +50,27 @@ Return ONLY this JSON shape:
 {"grade": 0.75, "engages": 1, "on_topic": 1, "appropriate_tone": 1, "concise": 0, "reason": "Solid engagement and on-topic, but too long for Reddit's casual feel."}"""
 
 
+RUBRIC_ITEMS = ("engages", "on_topic", "appropriate_tone", "concise")
+
+_YES = frozenset({"1", "true", "yes"})
+_NO = frozenset({"0", "false", "no"})
+
+
+def _rubric_bit(value) -> Optional[int]:
+    """1 for true/yes/1, 0 for false/no/0, None for any other answer."""
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return int(value)
+    if isinstance(value, str):
+        word = value.strip().lower()
+        if word in _YES:
+            return 1
+        if word in _NO:
+            return 0
+    return None
+
+
 def _list_loaded_models() -> list[str]:
     try:
         r = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
@@ -98,6 +119,10 @@ def grade_draft_externally(draft_text: str, thread_context: str) -> dict:
             "model": str | None,
         }
 
+    A rubric item the grader answered with anything but true/yes/1 or
+    false/no/0 (or a grade that is not a number) leaves the draft unchecked,
+    reason "grader_reply_unparsed".
+
     An unchecked result is not a rejection, but it is no independent signal
     either: gates.independent_ok holds an unchecked draft for a person's
     approval instead of letting it post on its self-grade.
@@ -141,14 +166,20 @@ def grade_draft_externally(draft_text: str, thread_context: str) -> dict:
         return {"grade": 0.0, "checked": False, "skipped": True, "model": model,
                 "reason": f"grader_call_failed: {e}"}
 
-    grade = float(data.get("grade") or 0.0)
+    items = {name: _rubric_bit(data.get(name)) for name in RUBRIC_ITEMS}
+    try:
+        grade = float(data.get("grade") or 0.0)
+    except (TypeError, ValueError):
+        grade = None
+    if grade is None or None in items.values():
+        logger.warning("external grader reply unparsed: %.300r", data)
+        return {"grade": 0.0, "checked": False, "skipped": True, "model": model,
+                "reason": "grader_reply_unparsed"}
+
     return {
         "grade": max(0.0, min(1.0, grade)),
-        "engages": int(data.get("engages") or 0),
-        "on_topic": int(data.get("on_topic") or 0),
-        "appropriate_tone": int(data.get("appropriate_tone") or 0),
-        "concise": int(data.get("concise") or 0),
-        "reason": (data.get("reason") or "")[:300],
+        **items,
+        "reason": str(data.get("reason") or "")[:300],
         "checked": True,
         "skipped": False,
         "model": model,
