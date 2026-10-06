@@ -182,7 +182,9 @@ def test_cast_use_existing_lora_404_for_unknown_lora(client, app):
 
 
 def test_cast_train_from_uploads_dispatches(client, app, monkeypatch):
-    """When dispatch succeeds, returns the task id."""
+    """When dispatch succeeds, returns the unified progress job id, the one the
+    Casting panel matches against live progress (lora_train_dispatch, the same
+    path as Cast Studio). The Celery task gets the subject and that job id."""
     sent = {}
 
     class _FakeTask:
@@ -193,8 +195,17 @@ def test_cast_train_from_uploads_dispatches(client, app, monkeypatch):
         sent["args"] = args
         return _FakeTask()
 
+    class _FakeProgress:
+        def create_process(self, *args, **kwargs):
+            return "training_job_x"
+
+        def error_process(self, *args, **kwargs):
+            pass
+
     from backend import celery_app as celery_app_module
     monkeypatch.setattr(celery_app_module.celery, "send_task", _fake_send_task)
+    monkeypatch.setattr("backend.utils.unified_progress_system.get_unified_progress",
+                        lambda: _FakeProgress())
 
     with app.app_context():
         from backend.models import Subject, Production
@@ -212,9 +223,11 @@ def test_cast_train_from_uploads_dispatches(client, app, monkeypatch):
     assert resp.status_code == 200
     data = resp.get_json()
     assert data["training_status"] == "training"
-    assert data["training_job_id"] == "fake-task-id-abc"
+    assert data["training_job_id"] == "training_job_x"
     assert sent["name"] == "lora_trainer.train_lora"
-    assert sent["args"] == [subj_id]
+    assert sent["args"] == [subj_id, "training_job_x"]
+    with app.app_context():
+        assert db.session.get(Subject, subj_id).current_training_job_id == "training_job_x"
 
 
 def test_cast_train_from_uploads_tolerates_unwired_dispatcher(client, app, monkeypatch):
