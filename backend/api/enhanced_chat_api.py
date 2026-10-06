@@ -506,11 +506,17 @@ class EnhancedChatManager:
         # ENHANCED: More specific file analysis detection to prevent auto-output
         # Only trigger file_analysis if user explicitly asks for analysis
         if any(w in msg_lower for w in ['analyze', 'review', 'examine', 'inspect', 'check']):
-            # Check if there's a file reference in the message
-            has_file_reference = any(w in msg_lower for w in ['file', 'document', 'code', 'upload']) or \
-                                any(ext in msg_lower for ext in ['.jsx', '.js', '.py', '.html', '.css', '.json', '.csv', '.txt', '.md'])
+            # A file named outside any typed link: "data.json" or "code" in
+            # https://example.com/code/data.json is part of the address.
+            outside_links = self._URL_RE.sub(" ", msg_lower)
+            has_file_reference = any(w in outside_links for w in ['file', 'document', 'code', 'upload']) or \
+                                any(ext in outside_links for ext in ['.jsx', '.js', '.py', '.html', '.css', '.json', '.csv', '.txt', '.md'])
             if has_file_reference:
                 return "file_analysis"
+            # "analyze https://example.com" reads the page it names.
+            if self._URL_RE.search(message):
+                return "website_analysis"
+            return "general_chat"
         elif any(w in msg_lower for w in ['what is', 'what does', 'explain', 'describe', 'tell me about']) and \
              any(w in msg_lower for w in ['file', 'document', 'code', 'upload']):
             # For general questions about files, use general_chat instead of auto-analysis

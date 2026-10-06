@@ -564,10 +564,13 @@ def route_and_execute():
                 )
                 db.session.add(user_msg)
 
-                # Save assistant response with screenshot markdown
+                # Save assistant response with screenshot markdown. An agent
+                # loop's facts check rides along so the note survives reload.
+                verified = result.get("verified") if result.get("type") == "agent_result" else None
                 assistant_msg = LLMMessage(
                     session_id=session_id, role="assistant",
-                    content=display_content, timestamp=datetime.now()
+                    content=display_content, timestamp=datetime.now(),
+                    extra_data={"verified": verified} if verified is not None else None,
                 )
                 db.session.add(assistant_msg)
 

@@ -19,6 +19,55 @@ export const RouteType = {
 };
 
 /**
+ * Convert a backend route to the detection shape ChatPage reads.
+ *
+ * A file route without a typed name gets one with the extension the request
+ * asked for (tool_params.extension, from agent_router.requested_file): "create
+ * a python file" proposes a .py. A generate_file request that names no
+ * language proposes a .txt; codegen keeps .js.
+ * @param {Object} routeDecision - Route decision from backend
+ * @returns {Object} Detection result compatible with ChatPage
+ */
+export function routeToDetection(routeDecision) {
+  if (!routeDecision || routeDecision.route_type === RouteType.CHAT_ONLY) {
+    return { isCSVRequest: false, isCodeRequest: false };
+  }
+
+  const toolName = routeDecision.tool_name || "";
+  const isCSV = ["generate_csv", "generate_bulk_csv", "generate_wordpress_content", "generate_enhanced_wordpress_content"].includes(toolName);
+  const isCode = ["codegen", "generate_file"].includes(toolName) && !isCSV;
+  const isBulk = toolName === "generate_bulk_csv";
+
+  // Extract quantity from params if available
+  const quantity = routeDecision.tool_params?.quantity || null;
+
+  // Generate filename if not provided
+  let filename = routeDecision.tool_params?.filename;
+  if (!filename) {
+    if (isCSV) {
+      filename = `generated_data_${Date.now()}.csv`;
+    } else if (toolName === "generate_file") {
+      const extension = routeDecision.tool_params?.extension || "txt";
+      filename = `generated_file_${Date.now()}.${extension}`;
+    } else if (isCode) {
+      filename = `generated_code_${Date.now()}.js`;
+    }
+  }
+
+  return {
+    isCSVRequest: isCSV,
+    isCodeRequest: isCode,
+    isBulkRequest: isBulk,
+    filename,
+    quantity,
+    description: `Route: ${routeDecision.reasoning}`,
+    toolName: routeDecision.tool_name,
+    toolParams: routeDecision.tool_params,
+    confidence: routeDecision.confidence,
+  };
+}
+
+/**
  * Hook for agent-based message routing
  *
  * Usage:
@@ -181,41 +230,7 @@ export function useAgentRouter() {
    * @param {Object} routeDecision - Route decision from backend
    * @returns {Object} Detection result compatible with ChatPage
    */
-  const toDetectionFormat = useCallback((routeDecision) => {
-    if (!routeDecision || routeDecision.route_type === RouteType.CHAT_ONLY) {
-      return { isCSVRequest: false, isCodeRequest: false };
-    }
-
-    const toolName = routeDecision.tool_name || "";
-    const isCSV = ["generate_csv", "generate_bulk_csv", "generate_wordpress_content", "generate_enhanced_wordpress_content"].includes(toolName);
-    const isCode = ["codegen", "generate_file"].includes(toolName) && !isCSV;
-    const isBulk = toolName === "generate_bulk_csv";
-
-    // Extract quantity from params if available
-    const quantity = routeDecision.tool_params?.quantity || null;
-
-    // Generate filename if not provided
-    let filename = routeDecision.tool_params?.filename;
-    if (!filename) {
-      if (isCSV) {
-        filename = `generated_data_${Date.now()}.csv`;
-      } else if (isCode) {
-        filename = `generated_code_${Date.now()}.js`;
-      }
-    }
-
-    return {
-      isCSVRequest: isCSV,
-      isCodeRequest: isCode,
-      isBulkRequest: isBulk,
-      filename,
-      quantity,
-      description: `Route: ${routeDecision.reasoning}`,
-      toolName: routeDecision.tool_name,
-      toolParams: routeDecision.tool_params,
-      confidence: routeDecision.confidence,
-    };
-  }, []);
+  const toDetectionFormat = useCallback(routeToDetection, []);
 
   return {
     route,

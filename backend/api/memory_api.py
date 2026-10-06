@@ -534,6 +534,15 @@ def _app_context():
     return _flask_app.app_context()
 
 
+def _mark_recalled(memories) -> None:
+    """Count each row as recalled once (access_count, last_accessed_at)."""
+    now = utcnow()
+    for memory in memories:
+        memory.access_count = int(memory.access_count or 0) + 1
+        memory.last_accessed_at = now
+    db.session.commit()
+
+
 def _query_memories(
     sources=None,
     types=None,
@@ -549,6 +558,7 @@ def _query_memories(
     raise_errors: bool = False,
     include_always_on: bool = True,
     count_access: bool = True,
+    min_importance: float | None = None,
 ):
     """Single source of truth for memory SELECT.
 
@@ -568,6 +578,8 @@ def _query_memories(
     count_access records the returned rows as recalled (access_count and
     last_accessed_at, which feed the "recalled before" rank reason). A
     read-only search passes False.
+
+    min_importance drops rows below that importance, always-on rows included.
     """
     try:
         q = db.session.query(AgentMemory)
@@ -581,6 +593,8 @@ def _query_memories(
             q = q.filter(AgentMemory.status == normalize_memory_status(status))
         else:
             q = q.filter((AgentMemory.status == None) | (AgentMemory.status != "wrong"))
+        if min_importance is not None:
+            q = q.filter(AgentMemory.importance >= min_importance)
         if session_id:
             q = q.filter(
                 or_(AgentMemory.session_id == session_id, AgentMemory.session_id == None)
@@ -667,6 +681,8 @@ def _query_memories(
             )
             if sources:
                 always_q = always_q.filter(AgentMemory.source.in_(normalized_sources))
+            if min_importance is not None:
+                always_q = always_q.filter(AgentMemory.importance >= min_importance)
             if project_id is not None:
                 always_q = always_q.filter(
                     or_(AgentMemory.project_id == project_id, AgentMemory.project_id == None)
@@ -701,11 +717,7 @@ def _query_memories(
                 break
 
         if selected and count_access:
-            now = utcnow()
-            for memory in selected:
-                memory.access_count = int(memory.access_count or 0) + 1
-                memory.last_accessed_at = now
-            db.session.commit()
+            _mark_recalled(selected)
         return selected
     except Exception as e:
         try:
@@ -749,6 +761,57 @@ def get_memories_for_context(
             workspace_root=workspace_root,
             cli_working_memory=cli_working_memory,
         )
+
+
+def search_memories(
+    query: str,
+    limit: int = 8,
+    min_importance: float | None = None,
+    match_text: str | None = None,
+    min_match: float = 0.0,
+    session_id: str = None,
+    project_id=None,
+    workspace_root: str = None,
+) -> list[dict]:
+    """Recalled memories as dicts, for callers that build their own hint lines
+    (the agent executor, the screen agent's launcher recovery).
+
+    Rows are selected and ranked by `_query_memories`. With match_text, each
+    row also gets a `match_score` from `memory_match_score` against that text;
+    rows at or below min_match are dropped and the rest are ordered by it.
+    Only the rows returned count as recalled. Returns [] when nothing matches
+    or the query fails.
+    """
+    with _app_context():
+        rows = _query_memories(
+            limit=limit,
+            query=query,
+            session_id=session_id,
+            project_id=project_id,
+            workspace_root=workspace_root,
+            include_always_on=False,
+            count_access=False,
+            min_importance=min_importance,
+        )
+        picked = []
+        for row in rows:
+            item = row.to_dict()
+            if match_text is not None:
+                item["match_score"] = memory_match_score(
+                    row.content or "", normalize_tags(row.tags), match_text
+                )
+                if item["match_score"] <= min_match:
+                    continue
+            picked.append((row, item))
+        if match_text is not None:
+            picked.sort(key=lambda pair: pair[1]["match_score"], reverse=True)
+        if picked:
+            try:
+                _mark_recalled([row for row, _ in picked])
+            except Exception as e:
+                db.session.rollback()
+                logger.debug(f"Could not count recalled memories: {e}")
+        return [item for _, item in picked]
 
 
 # The ids behind the last memory block built on this thread. Feedback on a

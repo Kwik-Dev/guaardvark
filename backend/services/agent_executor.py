@@ -427,29 +427,22 @@ class AgentExecutor:
             from backend.services.tool_execution_guard import ToolExecutionGuard
             self._guard = ToolExecutionGuard(max_failures_per_tool=2, scope="for the rest of this task")
 
-            # Inject memory via the architecture (memory_contract + get_memories_for_context + FactsRegistry learnings).
-            # Lean on durable AgentMemory (fact/lesson/belief) scored by contract, not legacy in-mem manager.
-            # Reuse brain_state / memory_api patterns for consistency with AgentBrain/STA.
+            # Durable AgentMemory rows that match the task, kept when
+            # memory_match_score against the query is above 0.3, best first.
             memory_context = ""
             try:
-                from backend.api.memory_api import get_memories_for_context
-                from backend.services.memory_contract import memory_match_score
-                mems = get_memories_for_context(
-                    session_id=process_id or "default",
+                from backend.api.memory_api import search_memories
+                mems = search_memories(
                     query=user_query,
                     limit=8,
-                    min_importance=0.4
-                ) or []
-                # Score + filter using contract (prefer high trust + match to query)
-                scored = []
-                for m in mems:
-                    score = memory_match_score(user_query, m.get('content', ''), m.get('type'))
-                    if score > 0.3:
-                        scored.append((score, m))
-                scored.sort(reverse=True)
-                learnings = [m.get('content', '')[:200] for _, m in scored[:5]]
+                    min_importance=0.4,
+                    match_text=user_query,
+                    min_match=0.3,
+                    session_id=process_id or "default",
+                )
+                learnings = [(m.get('content') or '')[:200] for m in mems[:5]]
                 if learnings:
-                    memory_context = "\n\nRelevant memory (via contract + match_score; lean on lessons/facts):\n" + "\n".join(f"- {l}" for l in learnings)
+                    memory_context = "\n\nSaved memories that match this task:\n" + "\n".join(f"- {l}" for l in learnings)
             except Exception as e:
                 logger.debug(f"Contract memory context not available (falling back empty): {e}")
 

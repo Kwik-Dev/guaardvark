@@ -82,6 +82,25 @@ def test_chat_reads_only_a_link_the_person_typed(web_access, recorded_search):
     assert recorded_search == ["https://example.com"]
 
 
+def test_analyze_with_a_typed_link_reaches_website_analysis(web_access, recorded_search):
+    """"analyze <link>" is the documented example; it used to fall out of the
+    analyze branch with no intent at all. File words inside the link are part
+    of the address, not a file to analyze."""
+    from backend.api.enhanced_chat_api import EnhancedChatManager
+
+    web_access["on"] = True
+    manager = EnhancedChatManager.__new__(EnhancedChatManager)
+
+    for message in ("analyze https://example.com", "review www.example.com/pricing",
+                    "check https://example.com/code/data.json"):
+        assert manager._fallback_intent_detection(message) == "website_analysis", message
+    assert manager._fallback_intent_detection("analyze the code in settings.py") == "file_analysis"
+    assert manager._fallback_intent_detection("analyze my week for me") == "general_chat"
+
+    manager._handle_website_analysis_request("s1", "analyze https://example.com")
+    assert recorded_search == ["https://example.com"]
+
+
 def test_chat_website_analysis_skips_a_long_message(web_access, recorded_search):
     from backend.api.enhanced_chat_api import EnhancedChatManager
 

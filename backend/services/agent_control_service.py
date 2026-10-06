@@ -1687,11 +1687,14 @@ class AgentControlService:
                                 failed = not launch_verify.get("success", False)
                             # Lean on memory/lessons for recovery (per approved plan + STA awareness): query prior similar fails/lessons.
                             try:
-                                from backend.api.memory_api import get_memories_for_context
-                                from backend.services.memory_contract import memory_match_score
-                                prior = get_memories_for_context(limit=3, query=f"launcher icon click failed for {target}", min_importance=0.3) or []
+                                from backend.api.memory_api import search_memories
+                                prior = search_memories(
+                                    query=f"launcher icon click failed for {target}",
+                                    limit=3, min_importance=0.3,
+                                    match_text=target, min_match=0.2,
+                                )
                                 if prior:
-                                    lesson_hints = [m.get('content','')[:120] for m in prior if memory_match_score(target, m.get('content','')) > 0.2]
+                                    lesson_hints = [(m.get('content') or '')[:120] for m in prior]
                                     if lesson_hints:
                                         result["memory_lesson_hints"] = lesson_hints
                                         logger.debug(f"[AGENT][STA] launcher memory hints for {target}: {lesson_hints}")

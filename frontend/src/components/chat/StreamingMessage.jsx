@@ -348,6 +348,7 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
           thinking: finalThinking,
           truncated: isTruncated,
           synthesized: isSynthesized,
+          verified: typeof data.verified === "boolean" ? data.verified : null,
         });
       }
     });

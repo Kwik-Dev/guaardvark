@@ -11,7 +11,7 @@ import shlex
 import shutil
 from pathlib import Path
 
-from llx.command_catalog import BARE_ONLY_COMMANDS, COMMAND_TREE
+from llx.command_catalog import BARE_ONLY_COMMANDS, BARE_OR_NUMBER_COMMANDS, COMMAND_TREE
 
 _AUDIO_EXT = (".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac")
 _SCRIPT_EXT = (".txt", ".md", ".fountain", ".fdx")
@@ -239,6 +239,10 @@ def resolve_repl_line(line: str, cwd: Path | None = None) -> tuple[str, list[str
 
     cmd = parts[0].lower()
     if cmd in BARE_ONLY_COMMANDS and len(parts) > 1:
+        return None
+    if cmd in BARE_OR_NUMBER_COMMANDS and (
+        len(parts) > 2 or (len(parts) == 2 and not parts[1].isdigit())
+    ):
         return None
     if cmd in COMMAND_TREE:
         return cmd, parts[1:]

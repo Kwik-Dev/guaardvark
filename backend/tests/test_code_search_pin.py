@@ -60,3 +60,18 @@ def test_asks_about_code_matches_source_questions_only():
     assert uce._asks_about_code("how does the backend pick a video model")
     assert not uce._asks_about_code("make me a CSV of the eight workspaces")
     assert "search_codebase" in uce._CODE_SEARCH_NUDGE
+
+
+def test_a_keyword_inside_another_word_pins_nothing():
+    out = uce._pin_code_search_tools("my wifi router keeps dropping", ["web_search"], ALL)
+    assert out == ["web_search"]
+    assert not uce._asks_about_code("is a subclass of mammals a reptile")
+    assert not uce._asks_about_code("what does undefined behaviour mean in law")
+
+
+def test_whole_code_keywords_still_pin():
+    out = uce._pin_code_search_tools("where is the route for /api/x", ["web_search"], ALL)
+    assert out[:2] == ["search_codebase", "read_code"]
+    assert uce._asks_about_code("what does backend/app.py do on startup")
+    assert uce._asks_about_code("list the routes the server registers")
+    assert uce._asks_about_code("show me class Worker and its def run")

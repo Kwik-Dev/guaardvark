@@ -1358,6 +1358,9 @@ class AgentBrain:
             response_text = result.final_answer if result.success else (
                 result.error or "I wasn't able to complete that task."
             )
+            # The executor's facts check: False when the answer names things
+            # the tool results do not contain. The chat shows a note for it.
+            verified = result.verified if result.success else None
 
             # Drain agent thinking steps (from any agent_task_execute that ran
             # inside the executor). Live streaming of steps relies on the
@@ -1373,7 +1376,10 @@ class AgentBrain:
             except Exception:
                 pass
 
-            self._emit_response(emit_fn, session_id, response_text, request_id or "")
+            self._emit_response(
+                emit_fn, session_id, response_text, request_id or "",
+                complete_extra={"verified": verified} if verified is not None else None,
+            )
 
             # Persist the assistant turn (Tier 3 direct path bypasses legacy
             # UnifiedChatEngine which normally does the save + drain). Mirrors
@@ -1383,6 +1389,8 @@ class AgentBrain:
                 extra = {}
                 if agent_thinking_steps:
                     extra["agentThinkingSteps"] = agent_thinking_steps
+                if verified is not None:
+                    extra["verified"] = verified
                 extra["provenance"] = _brain_provenance(
                     request_id, 3, getattr(self.state.llm, "model", None), agent_thinking_steps)
                 _persist_turn(app, session_id, "assistant", clean or response_text, extra,
@@ -1394,6 +1402,7 @@ class AgentBrain:
                 "iterations": result.iterations,
                 "tier": 3,
                 "agentThinkingSteps": agent_thinking_steps,
+                "verified": verified,
             }
 
         except Exception as e:
@@ -1491,9 +1500,11 @@ class AgentBrain:
     # -- Response formatting ------------------------------------------------
 
     def _emit_response(
-        self, emit_fn: Callable, session_id: str, response: str, request_id: str
+        self, emit_fn: Callable, session_id: str, response: str, request_id: str,
+        complete_extra: Optional[Dict[str, Any]] = None,
     ):
-        """Emit a complete response via Socket.IO."""
+        """Emit a complete response via Socket.IO. complete_extra adds
+        fields to the chat:complete payload (e.g. the Tier 3 facts check)."""
         emit_fn("chat:response", {
             "response": response,
             "session_id": session_id,
@@ -1504,6 +1515,7 @@ class AgentBrain:
             "request_id": request_id,
             "response": response,
             "steps": [],
+            **(complete_extra or {}),
         })
 
     def _build_result(

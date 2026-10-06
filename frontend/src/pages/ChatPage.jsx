@@ -768,6 +768,7 @@ const ChatPage = () => {
                   generatedImages: msg.generatedImages ?? msg.extra_data?.generatedImages,
                   thinking: msg.thinking ?? msg.extra_data?.thinking,
                   truncated: msg.truncated ?? msg.extra_data?.truncated,
+                  verified: msg.verified ?? msg.extra_data?.verified,
                   isUnifiedChat: msg.isUnifiedChat || Boolean(hydratedSteps && hydratedSteps.length),
                   // extra_data does not currently store a top-level synthesized
                   // flag; the last step in extra_data.steps carries it.
@@ -1519,6 +1520,7 @@ const ChatPage = () => {
                     id: agentMsgId,
                     role: "assistant",
                     content,
+                    verified: agentResult?.verified ?? null,
                     timestamp: new Date().toISOString(),
                   };
                 }
@@ -2383,6 +2385,7 @@ const ChatPage = () => {
                   thinking: result.thinking || "",
                   truncated: result.truncated === true,
                   synthesized: result.synthesized === true,
+                  verified: result.verified ?? null,
                   iterations: result.iterations || 0,
                   budget: result.budget || budgetTelemetry,  // Phase 2.1 surface budget telemetry
                 };
