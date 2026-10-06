@@ -11,9 +11,9 @@ Usage::
     python scripts/run_lesson_reconciler.py --threshold 5
     python scripts/run_lesson_reconciler.py --dry-run
 
-Intentionally not on the Celery beat schedule — the user runs this when they
-want to review the staged proposals, not on a background timer that surprises
-them with edits.
+The same scan also runs on the Celery beat every six hours
+(``memory.reconcile_belief_updates``); run it here to stage proposals now.
+Either way it only stages them for review and edits no file.
 """
 
 import argparse
