@@ -1202,14 +1202,28 @@ const CastMemberPage = () => {
             </Alert>
           )}
           {subject.smoke_identity?.ok && (
-            <Alert severity={Number(subject.smoke_identity.score) >= 0.75 ? 'success' : 'warning'} sx={{ mb: 2 }}>
-              Post-train smoke identity score:{' '}
-              {subject.smoke_identity.score != null
-                ? Number(subject.smoke_identity.score).toFixed(2)
-                : 'n/a'}{' '}
-              ({subject.smoke_identity.method || 'hist'}
-              {subject.smoke_identity.family ? ` · ${subject.smoke_identity.family}` : ''})
-            </Alert>
+            subject.smoke_identity.status === 'measured' ? (
+              <Alert
+                severity={
+                  Number(subject.smoke_identity.score) >= Number(subject.smoke_identity.threshold ?? 0.75)
+                    ? 'success'
+                    : 'warning'
+                }
+                sx={{ mb: 2 }}
+              >
+                Post-train smoke identity score:{' '}
+                {Number(subject.smoke_identity.score).toFixed(2)}{' '}
+                ({subject.smoke_identity.method}
+                {subject.smoke_identity.family ? ` · ${subject.smoke_identity.family}` : ''})
+              </Alert>
+            ) : (
+              /* No badge and no number: the score is withheld until the method is
+                 proven on labelled pairs, and a colour would be a verdict. */
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 2 }}>
+                Identity: not measured
+                {subject.smoke_identity.reason ? ` — ${subject.smoke_identity.reason}` : ''}
+              </Typography>
+            )
           )}
 
           {/* Progress + honest status — so a planned-but-not-generated sheet doesn't

@@ -14,9 +14,18 @@ Store results in job metadata or sidecar JSON next to the asset.
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+from backend.services.identity_method_data import (
+    IDENTITY_METHOD_ORDER,
+    IDENTITY_METHODS,
+    NOT_PROVEN_REASON,
+    proven_for_model,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,13 +79,34 @@ def score_identity_preservation(
     ref_paths: list[str],
     candidate_path: str,
     *,
-    method: str = "hist",  # "hist" | "size" | "clip" | "face"
+    method: str = "hist",  # "hist" | "size" | "vlm" | "embed"
+    analyzer=None,
 ) -> Dict[str, Any]:
-    """Best-effort identity score between training refs and a generated candidate.
+    """Identity score between training refs and a generated candidate.
 
-    Default ``hist``: mean cosine similarity of RGB histograms (cheap, no extra deps
-    beyond PIL/numpy already used elsewhere). Higher is better in [0,1].
+    ``hist`` (default): mean cosine similarity of RGB histograms. Cheap, and a
+    colour-palette proxy rather than an identity measure — enough to tell a clip
+    apart from its own keyframe, which is all batch_video_generator asks of it.
+
+    ``size``: ratio of file sizes. Kept for callers that still want it. It carries
+    no identity signal, and nothing on the Cast smoke path may use it.
+
+    ``vlm`` and ``embed`` are the qualified methods and answer in a different
+    shape: ``status`` ("measured" | "not_measured") with a plain-words ``reason``,
+    and a ``score`` that stays None until the method is proven for the model it
+    actually used (see identity_method_data). ``score_smoke_identity`` picks
+    between them; call that rather than naming one here.
     """
+    if method in ("vlm", "embed"):
+        if not Path(candidate_path).is_file():
+            return _identity_not_measured(method, "the candidate image is missing")
+        refs = [p for p in (ref_paths or []) if p and Path(p).is_file()]
+        if not refs:
+            return _identity_not_measured(method, "no reference photos on disk")
+        if method == "vlm":
+            return _identity_via_vlm(refs, candidate_path, analyzer=analyzer)
+        return _identity_via_embed(refs, candidate_path)
+
     result = {"method": method, "score": 0.5, "details": {}}
     try:
         cand = Path(candidate_path)
@@ -133,6 +163,296 @@ def score_identity_preservation(
         logger.debug("identity score computation skipped: %s", e)
         result["details"]["error"] = str(e)[:200]
     return result
+
+
+# ── Identity on the Cast post-train smoke still ──────────────────────────────
+# Two methods that look at the subject, and a gate that withholds the number
+# until the method has been checked on labelled pairs. Every threshold, floor
+# and measured row lives in identity_method_data; nothing here decides what
+# counts as good enough.
+
+_SAME_SUBJECT_PROMPT = (
+    "This picture is two photographs side by side: A on the left, B on the right.\n"
+    "Do these two images show the same person or character? Answer yes or no."
+)
+
+_YES_NO_RE = re.compile(r"^(yes|no)\b", re.IGNORECASE)
+_ANSWER_TRIM = " \t\r\n\"'*`."
+
+
+def parse_same_subject(reply: str | None) -> Optional[bool]:
+    """A closed yes/no answer as a bool, or None when the reply is not one.
+
+    Strict on purpose: a model that answers with prose, a hedge or nothing has
+    not answered, and an unknown must not reach the caller as a match. Accepts a
+    leading yes/no ("Yes, same person" counts) or a JSON boolean, including a
+    one-field object as returned under ``format: json``.
+    """
+    text = (reply or "").strip().strip(_ANSWER_TRIM).strip()
+    if not text:
+        return None
+    hit = _YES_NO_RE.match(text)
+    if hit:
+        return hit.group(1).lower() == "yes"
+    try:
+        doc = json.loads(text)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if isinstance(doc, bool):
+        return doc
+    if isinstance(doc, dict):
+        flags = [v for v in doc.values() if isinstance(v, bool)]
+        if len(flags) == 1:
+            return flags[0]
+    return None
+
+
+def _identity_not_measured(
+    method: Optional[str],
+    reason: str,
+    *,
+    model: Optional[str] = None,
+    details: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """No number, and the plain reason there is none. The only honest failure."""
+    return {
+        "score": None,
+        "method": method,
+        "status": "not_measured",
+        "reason": reason,
+        "model": model,
+        "details": details or {},
+    }
+
+
+def _identity_measured_or_withheld(
+    method: str, model: Optional[str], score: float, details: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Return the score only when this model has earned it on labelled pairs.
+
+    The raw value stays in ``details`` either way — the measurement harness reads
+    it, and a withheld score is still worth having in a log.
+    """
+    spec = IDENTITY_METHODS.get(method) or {}
+    details = {**details, "raw_score": round(float(score), 4)}
+    if not proven_for_model(method, model):
+        return _identity_not_measured(method, NOT_PROVEN_REASON, model=model, details=details)
+    threshold = spec.get("threshold")
+    return {
+        "score": round(float(score), 4),
+        "method": method,
+        "status": "measured",
+        "reason": None,
+        "model": model,
+        "threshold": threshold,
+        "match": None if threshold is None else float(score) >= float(threshold),
+        "details": details,
+    }
+
+
+def _side_by_side(left_path: str, right_path: str, *, height: int = 512):
+    """One picture of two photographs, A left and B right, built in memory.
+
+    VisionAnalyzer.analyze sends a single image, and asking in two calls would
+    ask the model to remember the first photograph. Nothing is written to disk:
+    this runs beside a person's reference photos and leaves no files there.
+    """
+    from PIL import Image
+    panes = []
+    for path in (left_path, right_path):
+        img = Image.open(path).convert("RGB")
+        width = max(1, round(img.width * (height / max(1, img.height))))
+        panes.append(img.resize((width, height), Image.LANCZOS))
+    gap = 8
+    canvas = Image.new(
+        "RGB", (panes[0].width + gap + panes[1].width, height), (255, 255, 255)
+    )
+    canvas.paste(panes[0], (0, 0))
+    canvas.paste(panes[1], (panes[0].width + gap, 0))
+    return canvas
+
+
+def _identity_via_vlm(
+    ref_paths: list[str], candidate_path: str, *, analyzer=None
+) -> Dict[str, Any]:
+    """Fraction of references the installed vision model calls the same subject.
+
+    Fails closed: a vision error or a reply that is not yes/no ends the run as
+    not_measured. A model that would not answer has not said the render matches.
+    """
+    spec = IDENTITY_METHODS.get("vlm") or {}
+    refs = list(ref_paths)[: int(spec.get("refs_compared") or 3)]
+    try:
+        from backend.utils.vision_analyzer import VisionAnalyzer
+        az = analyzer if analyzer is not None else VisionAnalyzer()
+    except Exception as e:  # noqa: BLE001 - no vision model is a reason, not a crash
+        return _identity_not_measured("vlm", f"no vision model is available ({e})")
+
+    model = getattr(az, "default_model", "") or None
+    votes: list[bool] = []
+    for ref_path in refs:
+        try:
+            pair = _side_by_side(ref_path, candidate_path)
+        except Exception as e:  # noqa: BLE001
+            return _identity_not_measured(
+                "vlm", f"a reference photo could not be read ({e})", model=model
+            )
+        try:
+            res = az.analyze(
+                pair, _SAME_SUBJECT_PROMPT, think=False, temperature=0.0, num_predict=16
+            )
+        except Exception as e:  # noqa: BLE001
+            return _identity_not_measured(
+                "vlm", f"the vision model could not be reached ({e})", model=model
+            )
+        model = getattr(res, "model_used", "") or model
+        if not getattr(res, "success", False):
+            return _identity_not_measured(
+                "vlm",
+                f"the vision model could not answer ({getattr(res, 'error', None) or 'vision failed'})",
+                model=model,
+            )
+        raw = getattr(res, "description", "") or ""
+        verdict = parse_same_subject(raw)
+        if verdict is None:
+            return _identity_not_measured(
+                "vlm", "the vision model did not answer yes or no",
+                model=model, details={"raw": raw[:200]},
+            )
+        votes.append(verdict)
+
+    if not votes:
+        return _identity_not_measured("vlm", "no reference photo could be compared", model=model)
+    return _identity_measured_or_withheld(
+        "vlm", model, sum(votes) / len(votes),
+        {"refs_compared": len(votes), "yes": sum(1 for v in votes if v)},
+    )
+
+
+_ENCODER_CACHE: Dict[str, Any] = {}
+
+
+def _image_encoder_classes():
+    """The transformers classes the encoder loads through.
+
+    A seam, so a test can hand in stand-ins and assert the load asked for local
+    files only — an identity check must never be the thing that starts a download.
+    """
+    from transformers import AutoImageProcessor, AutoModel
+    return AutoImageProcessor, AutoModel
+
+
+def _load_image_encoder(repo_id: str):
+    """(processor, model) for ``repo_id`` from this machine only. Cached on success."""
+    cached = _ENCODER_CACHE.get(repo_id)
+    if cached is not None:
+        return cached
+    from backend.services.local_weights import from_pretrained_local
+    processor_cls, model_cls = _image_encoder_classes()
+    hint = "Install the image encoder first; the identity check never downloads it."
+    processor = from_pretrained_local(
+        processor_cls, repo_id, purpose="Cast identity check", install_hint=hint
+    )
+    model = from_pretrained_local(
+        model_cls, repo_id, purpose="Cast identity check", install_hint=hint
+    )
+    model.eval()
+    _ENCODER_CACHE[repo_id] = (processor, model)
+    return _ENCODER_CACHE[repo_id]
+
+
+def _image_embedding(processor, model, path: str):
+    """L2-normalised pooled embedding of one image, so a dot product is a cosine."""
+    import torch
+    from PIL import Image
+    image = Image.open(path).convert("RGB")
+    with torch.no_grad():
+        out = model(**processor(images=image, return_tensors="pt"))
+    vec = getattr(out, "pooler_output", None)
+    if vec is None:
+        vec = out.last_hidden_state.mean(dim=1)
+    flat = vec.reshape(-1).float()
+    return flat / flat.norm().clamp_min(1e-6)
+
+
+def _identity_via_embed(ref_paths: list[str], candidate_path: str) -> Dict[str, Any]:
+    """Mean cosine between the candidate and each reference, from a local encoder.
+
+    The encoder is self-supervised and not a face recogniser: insightface's
+    pretrained models are licensed for non-commercial research only, so they are
+    not an option here however well they would work.
+    """
+    spec = IDENTITY_METHODS.get("embed") or {}
+    repo_id = spec.get("encoder") or ""
+    from backend.services.local_weights import WeightsNotInstalled
+    try:
+        processor, model = _load_image_encoder(repo_id)
+    except WeightsNotInstalled:
+        return _identity_not_measured("embed", "image encoder not installed", model=repo_id)
+    except Exception as e:  # noqa: BLE001
+        return _identity_not_measured(
+            "embed", f"the image encoder could not be loaded ({e})", model=repo_id
+        )
+
+    try:
+        candidate = _image_embedding(processor, model, candidate_path)
+        sims = [
+            float((candidate * _image_embedding(processor, model, rp)).sum())
+            for rp in ref_paths
+        ]
+    except Exception as e:  # noqa: BLE001
+        return _identity_not_measured(
+            "embed", f"the image encoder could not read the images ({e})", model=repo_id
+        )
+    if not sims:
+        return _identity_not_measured(
+            "embed", "no reference photo could be compared", model=repo_id
+        )
+
+    mean = sum(sims) / len(sims)
+    return _identity_measured_or_withheld(
+        "embed", repo_id, max(0.0, min(1.0, mean)),
+        {
+            "refs_compared": len(sims),
+            "mean_cosine": round(mean, 4),
+            "min_cosine": round(min(sims), 4),
+            "max_cosine": round(max(sims), 4),
+        },
+    )
+
+
+def score_smoke_identity(
+    ref_image_paths: list[str], smoke_path: str, *, analyzer=None
+) -> Dict[str, Any]:
+    """Identity of a post-train smoke still, or the plain reason there is no number.
+
+    Tries IDENTITY_METHOD_ORDER and returns the first method that both ran and is
+    proven for the model it used. A method with no measured rows is skipped
+    without loading anything, so the shipped state costs no GPU and no Ollama
+    load. Never raises and never guesses: no qualified method means score None.
+    """
+    refs = [p for p in (ref_image_paths or []) if p and Path(p).is_file()]
+    if not refs:
+        return _identity_not_measured(None, "no reference photos on disk")
+    if not Path(smoke_path).is_file():
+        return _identity_not_measured(None, "the smoke image is missing")
+
+    reasons: list[str] = []
+    for method in IDENTITY_METHOD_ORDER:
+        if not (IDENTITY_METHODS.get(method) or {}).get("measured"):
+            reasons.append(NOT_PROVEN_REASON)
+            continue
+        run = score_identity_preservation(refs, smoke_path, method=method, analyzer=analyzer)
+        if run.get("status") == "measured":
+            return run
+        reasons.append(f"{method}: {run.get('reason')}")
+
+    if not reasons:
+        return _identity_not_measured(None, "no identity method is available")
+    if set(reasons) == {NOT_PROVEN_REASON}:
+        return _identity_not_measured(None, NOT_PROVEN_REASON)
+    return _identity_not_measured(None, "; ".join(reasons))
+
 
 
 def compute_frame_consistency(video_path: str | Path, sample_frames: int = 5) -> Dict[str, Any]:
@@ -564,7 +884,9 @@ def annotate_asset(asset_path: str | Path, metrics: Dict[str, Any]) -> None:
 
 
 # Convenience for smoke test callers
-def score_smoke_vs_refs(ref_image_paths: list[str], smoke_path: str) -> Dict[str, Any]:
+def score_smoke_vs_refs(
+    ref_image_paths: list[str], smoke_path: str, *, analyzer=None
+) -> Dict[str, Any]:
     stats = compute_basic_video_stats(smoke_path)  # works for png too (size only)
-    ident = score_identity_preservation(ref_image_paths, smoke_path, method="size")
+    ident = score_smoke_identity(ref_image_paths, smoke_path, analyzer=analyzer)
     return {"stats": stats, "identity": ident}
