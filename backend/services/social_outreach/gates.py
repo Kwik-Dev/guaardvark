@@ -1,0 +1,56 @@
+"""
+Posting gates shared by every path that can mark an outreach draft approved.
+
+The drafter grades its own text, and that score leans toward whatever it just
+wrote. A draft may post without a person's click only when the independent
+check (external_grader) actually ran and passed. When that check could not
+run, an unsupervised draft waits in the queue for approval instead of posting
+on its self-grade. Supervised drafts wait for a person either way.
+
+Used by content_agent (Recon candidates) and POST /draft-comment (Reddit loop,
+self-share, Discord cog, Outreach page).
+"""
+
+from __future__ import annotations
+
+from backend.services.social_outreach import kill_switch
+
+MIN_EXTERNAL_GRADE = 0.5
+"""Second-opinion threshold (different model, rubric-based). Lower than the
+self-grade threshold because the rubric is binary on each axis (each item is
+0 or 1), so 0.5 means "passes 2 of 4". A checked draft below this is not
+allowed to post even if its self-grade was high."""
+
+
+def independent_check_label(ext: dict) -> str:
+    """passed, failed or unavailable: what the independent check concluded.
+
+    ``ext`` is a grade_draft_externally result. Only ``checked`` counts as a
+    check having run; a result without it is unavailable.
+    """
+    ext = ext or {}
+    if not ext.get("checked"):
+        return "unavailable"
+    return "passed" if float(ext.get("grade") or 0.0) >= MIN_EXTERNAL_GRADE else "failed"
+
+
+def independent_ok(ext: dict, *, supervised: bool) -> tuple[bool, str]:
+    """Whether the independent check lets this draft go forward, and why.
+
+    Returns one of:
+      (True,  "passed")               checked, grade at or above MIN_EXTERNAL_GRADE
+      (False, "failed")               checked, grade below it
+      (True,  "human_review")         unchecked, supervised: a person approves it
+      (False, "no_independent_check") unchecked, unsupervised: hold for approval
+      (True,  "check_not_required")   unchecked, unsupervised, and the
+                                      outreach_require_independent_check
+                                      setting is switched off
+    """
+    label = independent_check_label(ext)
+    if label != "unavailable":
+        return label == "passed", label
+    if supervised:
+        return True, "human_review"
+    if not kill_switch.requires_independent_check():
+        return True, "check_not_required"
+    return False, "no_independent_check"

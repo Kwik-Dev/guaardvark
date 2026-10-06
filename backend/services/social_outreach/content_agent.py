@@ -13,9 +13,10 @@ feature_hint). No live Reddit fetch — that was Recon's job.
 
 Doesn't post. Doesn't call the servo. The servo path is Phase 3 (Outreach),
 which already exists in tick_process_approved_drafts. When unsupervised
-(kill on, not supervised, grade ≥ MIN_GRADE, cadence OK), Content promotes
-straight to ``approved`` — same would_post gate as /draft-comment — so
-YouTube chain-draft matches Reddit unsupervised behavior.
+(kill on, not supervised, grade ≥ MIN_GRADE, cadence OK, independent check
+ran and passed), Content promotes straight to ``approved`` — same would_post
+gate as /draft-comment — so YouTube chain-draft matches Reddit unsupervised
+behavior.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ import json
 import logging
 from typing import Optional
 
-from backend.services.social_outreach import audit, external_grader, persona
+from backend.services.social_outreach import audit, external_grader, gates, persona
 
 logger = logging.getLogger(__name__)
 
@@ -39,14 +40,6 @@ REPLY_TO_OWN_VIDEO_SYSTEM_BLOCK is different (we're not asking "would a
 stranger flag this as promo?", we're asking "is this a real engagement?"),
 so 0.6+ posts there. Set just below MIN_GRADE rather than equal to it to
 make the difference explicit if someone wants to retune later."""
-
-MIN_EXTERNAL_GRADE = 0.5
-"""Second-opinion threshold (different model, rubric-based). Lower than the
-self-grade threshold because the rubric is binary on each axis (each item is
-0 or 1) — 0.5 means "passes 2 of 4". Below this we reject even if the
-self-grade was high. If the external grader is unavailable (model not loaded,
-call failed) we skip this gate; treat-as-pass keeps the pipeline moving rather
-than blocking on infra problems."""
 
 DEFAULT_BATCH_SIZE = 5
 """How many candidates one tick processes. Keep small — each draft is an LLM
@@ -200,18 +193,20 @@ class ContentAgent:
         # Reply path skips the external grader entirely — its rubric was
         # tuned for outreach comments ("would a stranger flag this as
         # promotional?"), which scores replies-to-fans as low even when
-        # the reply is good. We keep the self-grade threshold (MIN_REPLY_GRADE)
-        # and let the supervised-approval UI catch any obvious misses.
+        # the reply is good. We keep the self-grade threshold (MIN_REPLY_GRADE).
+        # With no independent check, an unsupervised reply waits for approval
+        # (gates.independent_ok) rather than posting on its self-grade.
         if row.action == "reply":
-            ext = {"skipped": True, "reason": "skip_for_reply_action"}
+            ext = {"checked": False, "skipped": True, "reason": "skip_for_reply_action"}
         else:
             # Second-opinion grade — different model family, rubric-based,
             # blind to the self-grade. Drafter is biased toward its own
             # output; this catches generic, off-tone, or oversold comments
-            # that the writer rated highly. If the grader is unavailable we
-            # skip rather than block on infra.
+            # that the writer rated highly. If the grader is unavailable the
+            # draft is not rejected; the would_post gate below decides
+            # whether it may still post.
             ext = external_grader.grade_draft_externally(draft_text, thread_context)
-        if not ext.get("skipped") and ext.get("grade", 0.0) < MIN_EXTERNAL_GRADE:
+        if gates.independent_check_label(ext) == "failed":
             reason = f"external_grade_too_low:{ext['grade']:.2f} ({ext.get('reason', '')[:120]})"
             audit.mark_rejected(audit_id, reason)
             return {
@@ -261,20 +256,24 @@ class ContentAgent:
         # caller-pending mutations under celery.
         #
         # Unsupervised parity with /draft-comment: when enabled, not
-        # supervised, grade ≥ MIN_GRADE, and cadence allows → approved
-        # so tick_process_approved_drafts can post without a human click.
+        # supervised, grade ≥ MIN_GRADE, cadence allows, and the independent
+        # check ran and passed → approved so tick_process_approved_drafts can
+        # post without a human click. An unchecked draft is held as drafted.
         from backend.services.social_outreach import kill_switch
         enabled = kill_switch.is_enabled()
         supervised = kill_switch.is_supervised()
         cadence_ok, cadence_reason = kill_switch.cadence_allows_post(row.platform)
+        independent_pass, independent_reason = gates.independent_ok(ext, supervised=supervised)
         would_post = (
             enabled
             and not supervised
             and cadence_ok
             and grade >= MIN_GRADE
             and bool((draft_text or "").strip())
+            and independent_pass
         )
         promote_status = "approved" if would_post else "drafted"
+        hold_reason = None if independent_pass else independent_reason
 
         promoted = audit.mark_drafted_from_candidate(
             audit_id,
@@ -305,11 +304,13 @@ class ContentAgent:
                 "subreddit": payload.get("subreddit"),
                 "self_grade": grade,
                 "external_grade": ext.get("grade"),
+                "external_checked": bool(ext.get("checked")),
                 "external_skipped": ext.get("skipped", False),
                 "external_reason": ext.get("reason", ""),
                 "promoted_status": promote_status,
                 "would_post": would_post,
                 "cadence_block": cadence_reason if not cadence_ok else None,
+                "hold_reason": hold_reason,
             },
         )
 
@@ -319,6 +320,7 @@ class ContentAgent:
             "reason": None,
             "external": ext,
             "would_post": would_post,
+            "hold_reason": hold_reason,
         }
 
     def draft_batch(self, batch_size: int = DEFAULT_BATCH_SIZE) -> dict:
