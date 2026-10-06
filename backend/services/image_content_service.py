@@ -37,7 +37,6 @@ except ImportError:
 
 try:
     from backend.config import OLLAMA_BASE_URL, LLM_REQUEST_TIMEOUT
-    from backend.utils.chat_utils import VISION_MODEL_PATTERNS
     import requests
     config_available = True
 except ImportError as e:
@@ -45,7 +44,6 @@ except ImportError as e:
     config_available = False
     OLLAMA_BASE_URL = "http://127.0.0.1:11434"
     LLM_REQUEST_TIMEOUT = 120
-    VISION_MODEL_PATTERNS = ["vision", "llava", "gpt-4", "gpt4", "gpt-4o"]
 
 # Whether the `ollama` package is importable, which is a separate question from
 # `import_source` above: that one records how *LlamaIndex* was found, and a
@@ -136,21 +134,25 @@ class ImageContentExtractor:
                 logger.debug(f"Vision model {model_name} check failed: {e}")
                 continue
                 
-        # Try to find any model with vision patterns
+        # Any installed model Ollama reports as vision-capable (/api/show
+        # capabilities, the probe chat uses), preferring one already in memory.
+        # Name patterns cannot do this: qwen3-vl tags match none of them.
         try:
-            resp = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=10)
-            if resp.ok:
-                models_data = resp.json().get('models', [])
-                for model_data in models_data:
-                    if isinstance(model_data, dict):
-                        model_name = model_data.get("name", "").lower()
-                        for pattern in VISION_MODEL_PATTERNS:
-                            if pattern in model_name:
-                                logger.info(f"Found vision model by pattern: {model_name}")
-                                return model_data.get("name")
+            from backend.utils.chat_utils import get_available_vision_models
+            vision_models = get_available_vision_models()
         except Exception as e:
-            logger.warning(f"Failed to search for vision models by pattern: {e}")
-            
+            logger.warning(f"Vision capability probe failed: {e}")
+            vision_models = []
+        if vision_models:
+            try:
+                from backend.services.model_capability_resolver import _resident
+                resident = set(_resident())
+            except Exception:
+                resident = set()
+            pick = next((m for m in vision_models if m in resident), vision_models[0])
+            logger.info(f"Found vision model by capability: {pick}")
+            return pick
+
         logger.warning("No vision models found in Ollama")
         return None
     
