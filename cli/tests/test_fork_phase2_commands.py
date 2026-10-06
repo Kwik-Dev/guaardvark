@@ -108,6 +108,38 @@ def test_cast_import_lora_uploads_under_the_field_the_route_reads(fake_backend, 
     assert b"zimage" in request_body
 
 
+def test_cast_generate_sends_the_key_the_route_reads(fake_backend, cli_runner, isolated_home):
+    """The generate route reads body["n"], not body["count"]. Sending "count" was
+    accepted with a 200 and then ignored, so every run used the default of 32."""
+    fake_backend.route("POST", "/api/cast-library/subjects/4/generate", json={"success": True, "data": {}})
+
+    _run(cli_runner, ["cast", "generate", "4", "--count", "16", "--json"])
+
+    posted = fake_backend.calls_for("POST", "/api/cast-library/subjects/4/generate")[0]
+    assert json.loads(posted[2]) == {"n": 16}
+
+
+def test_cast_generate_without_count_lets_the_backend_default_apply(fake_backend, cli_runner, isolated_home):
+    fake_backend.route("POST", "/api/cast-library/subjects/4/generate", json={"success": True, "data": {}})
+
+    _run(cli_runner, ["cast", "generate", "4", "--json"])
+
+    posted = fake_backend.calls_for("POST", "/api/cast-library/subjects/4/generate")[0]
+    assert json.loads(posted[2]) == {}
+
+
+def test_cast_generate_refuses_a_count_the_route_would_reject(fake_backend, cli_runner, isolated_home):
+    """The route only accepts 16 or 32. Refused locally, so the GPU is never queued
+    and nothing is sent."""
+    fake_backend.default()
+
+    result = cli_runner.invoke(app, ["cast", "generate", "4", "--count", "20", "--json"])
+
+    assert result.exit_code == 2, result.output
+    assert json.loads(result.output)["error"]["code"] == "BAD_ARGUMENT"
+    assert not fake_backend.calls
+
+
 # --- upscale ---------------------------------------------------------------
 
 
