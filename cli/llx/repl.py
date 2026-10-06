@@ -546,7 +546,7 @@ def launch_repl():
 
         from llx.intent_router import resolve_repl_line
 
-        cli_route = resolve_repl_line(line)
+        cli_route = resolve_repl_line(line, cwd=state.get("cwd"))
         if cli_route:
             cmd, cmd_args = cli_route
             slash_line = f"/{cmd}"

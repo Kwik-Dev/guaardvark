@@ -18,6 +18,15 @@ COMMAND_ALIASES: dict[str, str] = {
 }
 
 
+# Commands that end the session or wipe its state. Typed without a slash they
+# run only when the whole line is the bare word: "new ideas for a party" and
+# "exit strategy for my startup" are chat. With a slash they take arguments
+# as usual ("/undo path/to/file.py").
+BARE_ONLY_COMMANDS: frozenset[str] = frozenset(
+    {"new", "clear", "abort", "undo", "apply", "quit", "exit"}
+)
+
+
 COMMAND_TREE: dict[str, list[str]] = OrderedDict(
     [
         ("status", []),
