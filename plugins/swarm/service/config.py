@@ -60,10 +60,10 @@ class SwarmConfig:
     # autonomous conflict resolution must be opted into, and self-repo writes are
     # routed through the guarded_code_service chokepoint (see merger_agent.py).
     enable_merger_agent: bool = False
-    # A last pass after a task's retries run out, on the backend that ran the
-    # task (never a cloud CLI in Flight Mode). Default OFF: it edits and
-    # commits in the task's worktree without a person.
-    enable_diagnostic_agent: bool = False
+    # A last pass after a task's retries run out. It runs on the backend that
+    # ran the task, so a local task is diagnosed locally, and a backend that
+    # needs internet is never used in Flight Mode.
+    enable_diagnostic_agent: bool = True
     run_tests_before_merge: bool = True
     test_command: str = "python3 -m pytest"
     flight_mode: bool = False
@@ -150,7 +150,7 @@ def load_config(
         worktree_base=defaults.get("worktree_base", ".swarm-worktrees"),
         auto_merge=defaults.get("auto_merge", False),
         enable_merger_agent=defaults.get("enable_merger_agent", False),
-        enable_diagnostic_agent=defaults.get("enable_diagnostic_agent", False),
+        enable_diagnostic_agent=defaults.get("enable_diagnostic_agent", True),
         run_tests_before_merge=defaults.get("run_tests_before_merge", True),
         test_command=defaults.get("test_command", "python3 -m pytest"),
         flight_mode=(env_flight == "1") if env_flight else defaults.get("flight_mode", False),

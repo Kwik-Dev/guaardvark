@@ -1,13 +1,16 @@
-"""The diagnostic pass is off by default and, when on, runs on the backend
-that ran the failed task — never the cloud CLI in Flight Mode."""
+"""The diagnostic pass is on by default and runs on the backend that ran
+the failed task — never the cloud CLI in Flight Mode."""
 
 import pytest
 
 
-def _config(enabled=True, flight_mode=False):
+def _config(enabled=None, flight_mode=False):
+    """Two backends; enabled=None keeps the stock enable_diagnostic_agent default."""
     from service.config import BackendConfig, SwarmConfig
 
-    cfg = SwarmConfig(enable_diagnostic_agent=enabled, flight_mode=flight_mode)
+    cfg = SwarmConfig(flight_mode=flight_mode)
+    if enabled is not None:
+        cfg.enable_diagnostic_agent = enabled
     cfg.backends = {
         "claude": BackendConfig(name="claude", command="claude",
                                 args=["--print", "--bare", "--dangerously-skip-permissions"],
@@ -76,14 +79,14 @@ def _crashed_task_orchestrator(tmp_path, cfg, backend_name, flight_mode):
     return orch, task, events
 
 
-def test_diagnostic_agent_is_off_by_default(tmp_path):
+def test_diagnostic_agent_is_on_by_default(tmp_path):
     from service.config import DEFAULT_CONFIG_PATH, SwarmConfig, load_config
 
-    assert SwarmConfig().enable_diagnostic_agent is False
+    assert SwarmConfig().enable_diagnostic_agent is True
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text("defaults:\n  max_concurrent_agents: 3\n")
-    assert load_config(cfg_path).enable_diagnostic_agent is False
-    assert load_config(DEFAULT_CONFIG_PATH).enable_diagnostic_agent is False
+    assert load_config(cfg_path).enable_diagnostic_agent is True
+    assert load_config(DEFAULT_CONFIG_PATH).enable_diagnostic_agent is True
 
 
 def test_flight_mode_cline_failure_is_diagnosed_with_cline(tmp_path, recorder):

@@ -731,7 +731,7 @@ class SwarmOrchestrator:
     def _diagnostic_agent_for(self, task: SwarmTask):
         """A DiagnosticAgent on the backend that ran this task, or None.
 
-        Off unless enable_diagnostic_agent is set. It never switches backend,
+        None when enable_diagnostic_agent is off. It never switches backend,
         so a task that ran locally is diagnosed locally, and a backend that
         needs internet is never used while the swarm is in Flight Mode.
         """
