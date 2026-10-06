@@ -1249,9 +1249,14 @@ class AgentBrain:
                     )
                     # backend.log keeps WARNING and up; the per-session trail in
                     # llm_debug.log (Settings > LLM debug) is where this is read.
-                    log_decision("agent_brain", "NARRATED_TOOL_NOT_RUN", {
-                        "session_id": session_id, "tool": narrated[0],
-                    })
+                    # That setting is read from the database, so the call needs
+                    # an app context; engine.chat has already left its own.
+                    decision = {"session_id": session_id, "tool": narrated[0]}
+                    if app is not None:
+                        with app.app_context():
+                            log_decision("agent_brain", "NARRATED_TOOL_NOT_RUN", decision)
+                    else:
+                        log_decision("agent_brain", "NARRATED_TOOL_NOT_RUN", decision)
 
             result["tier"] = 2
             return result

@@ -205,7 +205,7 @@ SEARCH_REPLY = "I should use the web_search tool to find this information"
 SEARCH_MESSAGE = "what is quantum computing"
 
 
-def _run_instinct(brain, engine_result, message, skip_tools=False):
+def _run_instinct(brain, engine_result, message, skip_tools=False, app=None):
     """Run Tier 2 against a stub engine that returns ``engine_result``."""
     brain.state.health.llm_available = True
     emit_fn = MagicMock()
@@ -216,6 +216,7 @@ def _run_instinct(brain, engine_result, message, skip_tools=False):
             message=message,
             options={},
             emit_fn=emit_fn,
+            app=app,
             skip_tools=skip_tools,
         )
     return result, emit_fn
@@ -259,6 +260,21 @@ class TestTier2NarrationNoExecute:
             {"session_id": "s1", "tool": "web_search"},
         )
         brain_with_tools.state.tool_registry.execute_tool.assert_not_called()
+
+    def test_narration_decision_is_written_inside_the_app_context(self, brain_with_tools):
+        # log_decision reads the LLM-debug setting from the database; outside an
+        # app context it falls back to the environment and writes nothing.
+        from flask import Flask, has_app_context
+        seen = []
+        with patch("backend.services.agent_brain.log_decision",
+                   side_effect=lambda *a: seen.append(has_app_context())):
+            _run_instinct(
+                brain_with_tools,
+                {"response": SEARCH_REPLY, "steps": []},
+                SEARCH_MESSAGE,
+                app=Flask("narration-test"),
+            )
+        assert seen == [True]
 
     def test_generate_image_narration_does_not_execute(self, brain_with_tools):
         reply = "Let me use the generate_image tool to draw that"
