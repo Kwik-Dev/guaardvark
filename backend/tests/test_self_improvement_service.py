@@ -170,7 +170,7 @@ class TestScheduledAndReactiveRunHonesty:
         assert result["success"] is False
         assert result["fixes_staged"] == 0 and result["changes"] == []
         assert result["message"] == "No fix staged for 1 failure(s)"
-        assert pytest_run.call_count == 1
+        assert pytest_run.call_count == 2  # the check, then a re-run of its failing tests
         run = SelfImprovementRun.query.order_by(SelfImprovementRun.id.desc()).first()
         assert run.status == "failed"
         assert json.loads(run.changes_made) == []
@@ -194,7 +194,7 @@ class TestScheduledAndReactiveRunHonesty:
         assert result["success"] is True
         assert result["message"] == "1 fix(es) staged for review"
         assert result["fixes_staged"] == 1 and result["fixes_verified"] == 1
-        assert pytest_run.call_count == 1
+        assert pytest_run.call_count == 2  # the check, then a re-run of its failing tests
         fix = PendingFix.query.one()
         verify.assert_called_once_with(["backend/tests/test_a.py"], [fix])
         assert fix.status == "proposed"

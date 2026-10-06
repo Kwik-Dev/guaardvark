@@ -32,6 +32,17 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+# Test runs this service starts never reach a database. An address nothing
+# listens on, not an unset DATABASE_URL: config replaces a missing one with the
+# default local address, which is a stock install's own database.
+_UNREACHABLE_DATABASE_URL = "postgresql://self-improvement-tests@127.0.0.1:1/none"
+
+
+def _test_env(**extra) -> Dict[str, str]:
+    env = dict(os.environ)
+    env.update(DATABASE_URL=_UNREACHABLE_DATABASE_URL, GUAARDVARK_MODE="test", **extra)
+    return env
+
 
 def _is_codebase_locked() -> bool:
     """User-facing kill switch — same semantics as before (default UNLOCKED).
@@ -291,6 +302,32 @@ class SelfImprovementService:
                 })
         return failures
 
+    def _confirm_failures(self, failures: List[Dict[str, str]], root: str):
+        """(failures that fail again, failures that passed when re-run).
+
+        Re-runs only the failing tests. If the re-run cannot be read (it
+        errors, or fails without naming a test), the first run's failures
+        stand."""
+        if not failures:
+            return failures, []
+        node_ids = [f"{f['file']}::{f['test_name']}" for f in failures]
+        try:
+            rerun = subprocess.run(
+                ["python3", "-m", "pytest", *node_ids, "-v", "--tb=short", "--no-header"],
+                capture_output=True, text=True, timeout=300, cwd=root, env=_test_env(),
+            )
+        except Exception as e:
+            logger.warning(f"Re-running the failing tests failed ({e}); acting on the first run")
+            return failures, []
+        again = {(f["file"], f["test_name"]) for f in self._parse_test_failures(rerun.stdout + rerun.stderr)}
+        if rerun.returncode != 0 and not again:
+            return failures, []
+        confirmed = [f for f in failures if (f["file"], f["test_name"]) in again]
+        flaky = [f for f in failures if (f["file"], f["test_name"]) not in again]
+        if flaky:
+            logger.info(f"Self-check: {len(flaky)} failure(s) passed on a re-run and are left alone as flaky")
+        return confirmed, flaky
+
     def snapshot_pytest(self, timeout: int = 120) -> Dict[str, Any]:
         """Analysis-only pytest snapshot. Never dispatches fixes or writes files.
 
@@ -312,7 +349,7 @@ class SelfImprovementService:
                  "backend/tests/test_code_tools.py",
                  "-q", "--tb=no", "--no-header"],
                 capture_output=True, text=True, timeout=timeout, cwd=root,
-                env={**os.environ, "GUAARDVARK_MODE": "test"},
+                env=_test_env(),
             )
         except subprocess.TimeoutExpired:
             return {"ok": False, "skipped": False, "reason": "pytest_timeout",
@@ -369,15 +406,20 @@ class SelfImprovementService:
                 ["python3", "-m", "pytest", "backend/tests/test_self_improvement.py",
                  "backend/tests/test_code_tools.py", "-v", "--tb=short", "--no-header"],
                 capture_output=True, text=True, timeout=300, cwd=root,
-                env={**os.environ, "GUAARDVARK_MODE": "test"},
+                env=_test_env(),
             )
 
             test_output = result.stdout + result.stderr
             failures = self._parse_test_failures(test_output)
+            # Some of these tests drive the model and fail now and then. A test
+            # that passes when run again is flaky, not broken, and a "fix" for it
+            # would change working code: only failures that repeat are acted on.
+            failures, flaky = self._confirm_failures(failures, root)
 
             run_record.test_results_before = json.dumps({
                 "total_failures": len(failures),
                 "failures": failures,
+                "flaky": flaky,
                 "return_code": result.returncode,
             })
 
@@ -393,6 +435,14 @@ class SelfImprovementService:
                 db.session.commit()
                 self._emit_progress("complete", "All tests passing", 1.0, status="success")
                 return {"success": True, "message": "All tests passing", "failures": 0}
+
+            if not failures and flaky:
+                run_record.status = "success"
+                run_record.duration_seconds = time.time() - start_time
+                db.session.commit()
+                message = f"{len(flaky)} failure(s) passed on a re-run; left alone as flaky"
+                self._emit_progress("complete", message, 1.0, status="success")
+                return {"success": True, "message": message, "failures": 0, "flaky": len(flaky)}
 
             # Return code nonzero but parser found nothing — record as unparsed failure
             if not failures and result.returncode != 0:
@@ -535,7 +585,7 @@ class SelfImprovementService:
         the fixes' exact replacements are made there and nowhere else, and the
         copy is removed afterwards. Only the named test files run, with
         GUAARDVARK_MODE=test, GUAARDVARK_ROOT pointing at the copy and
-        DATABASE_URL removed, so the tests cannot reach the app's database.
+        DATABASE_URL pointed at an address nothing listens on, so the tests cannot reach a database.
 
         Returns all_passed, total_failures, failures and return_code from that
         run, the test files run, and ``error`` saying why nothing ran (no test
@@ -570,8 +620,7 @@ class SelfImprovementService:
                     result["error"] = problem
                     return result
 
-            env = {k: v for k, v in os.environ.items() if k != "DATABASE_URL"}
-            env.update(GUAARDVARK_MODE="test", GUAARDVARK_ROOT=str(tree))
+            env = _test_env(GUAARDVARK_ROOT=str(tree))
             run = subprocess.run(
                 ["python3", "-m", "pytest", *result["tests"], "-v", "--tb=short", "--no-header"],
                 capture_output=True, text=True, timeout=self.VERIFY_TIMEOUT_SECONDS,

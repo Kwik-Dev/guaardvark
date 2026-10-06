@@ -557,7 +557,9 @@ class EditCodeTool(BaseTool):
             # Self-improvement writes a file only once a person has set
             # self_improvement_apply_enabled=true. Until then, and whenever that
             # setting cannot be read, the change is staged for review instead.
-            if _self_improvement_apply_blocked():
+            # A scheduled run always stages: nobody asked for it, so a person
+            # reviews what it found.
+            if _self_improvement_apply_blocked() or ctx.get("_trigger") == "scheduled":
                 try:
                     pending_id = stage_pending_fix(
                         filepath,

@@ -16,6 +16,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from flask import Flask
 
+from backend.services.self_improvement_service import _UNREACHABLE_DATABASE_URL
+
 SVC = "backend.services.self_improvement_service"
 REAL_RUN = subprocess.run
 
@@ -221,7 +223,7 @@ def test_a_scheduled_run_stages_one_fix_with_a_verification_result(app, checkout
     run = verify_runs[0]
     assert run["cmd"][:4] == ["python3", "-m", "pytest", "backend/tests/test_a.py"]
     assert run["cwd"].resolve() != checkout.resolve()
-    assert "DATABASE_URL" not in run["env"]
+    assert run["env"]["DATABASE_URL"] == _UNREACHABLE_DATABASE_URL
     assert run["env"]["GUAARDVARK_MODE"] == "test"
     assert run["env"]["GUAARDVARK_ROOT"] == str(run["cwd"])
     # The copy had the uncommitted change, with the fix made on top of it.
@@ -333,3 +335,30 @@ def test_a_directed_run_that_raises_closes_its_run_as_failed(app, gates_open):
     assert run.status == "failed"
     assert run.error_message == "RuntimeError: agent crashed"
     assert svc._running is False and svc._current_run_id is None
+
+
+def test_a_failure_that_passes_on_a_re_run_is_left_alone(app, checkout):
+    """Model-driven tests fail now and then; only a failure that repeats reaches the agent."""
+    svc = _service()
+    attempts = []
+    checkout_runs = []
+
+    def run(cmd, *args, **kwargs):
+        if "pytest" not in cmd:
+            return REAL_RUN(cmd, *args, **kwargs)
+        checkout_runs.append(cmd)
+        if len(checkout_runs) == 1:
+            return MagicMock(returncode=1, stdout=ONE_FAILURE, stderr="")
+        return MagicMock(returncode=0, stdout="1 passed\n", stderr="")
+
+    with patch(f"{SVC}.subprocess.run", side_effect=run), \
+         patch.object(svc, "_attempt_fix", side_effect=lambda f, message=None: attempts.append(f) or None):
+        svc.run_self_check()
+
+    assert attempts == []
+    assert checkout_runs[1][3:4] == ["backend/tests/test_a.py::test_one"]
+    from backend.models import SelfImprovementRun
+    run_row = SelfImprovementRun.query.order_by(SelfImprovementRun.id.desc()).first()
+    before = json.loads(run_row.test_results_before)
+    assert before["total_failures"] == 0
+    assert [f["test_name"] for f in before["flaky"]] == ["test_one"]

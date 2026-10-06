@@ -268,6 +268,17 @@ def test_self_improvement_edit_lands_once_apply_is_enabled(tmp_path, monkeypatch
     assert Path(result.metadata["backup_path"]).exists()
 
 
+def test_a_scheduled_run_stages_even_with_apply_enabled(tmp_path, monkeypatch, settings_db):
+    # Dean 2026-10-06 (T518): the scheduled self-check stages fixes for review.
+    _set_setting(settings_db, "self_improvement_apply_enabled", "true")
+    result, staged, _, target = _gated_edit(tmp_path, monkeypatch, context={"_trigger": "scheduled"},
+                                            scheduled_sends=True)
+
+    assert result.success is True
+    assert len(staged) == 1
+    assert target.read_text() == "x = 1\n"
+
+
 def test_apply_gate_fails_closed_when_the_setting_cannot_be_read(settings_db):
     from backend.tools.agent_tools.code_manipulation_tools import _self_improvement_apply_blocked
     _set_setting(settings_db, "self_improvement_apply_enabled", "true")
