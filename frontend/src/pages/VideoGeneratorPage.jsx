@@ -73,6 +73,7 @@ import {
   fitAreaToRatio,
 } from "../constants/videoGeneratorPresets";
 import QualityFlagsPill from "../components/videogen/QualityFlagsPill";
+import VlmReviewPill from "../components/videogen/VlmReviewPill";
 import RenderFailureNote from "../components/videogen/RenderFailureNote";
 import { refusalText } from "../utils/renderFailure";
 import VideoGenEffectiveSettings from "../components/videogen/VideoGenEffectiveSettings";
@@ -2632,15 +2633,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                             {res.frame_paths?.length > 0 && (
                               <Chip label={`${res.frame_paths.length}f`} size="small" variant="outlined" />
                             )}
-                            {res.metadata?.quality?.vlm_review?.available &&
-                              typeof res.metadata.quality.vlm_review.review?.quality_score === "number" && (
-                              <Chip
-                                label={`QA ${res.metadata.quality.vlm_review.review.quality_score}/10`}
-                                size="small"
-                                color={res.metadata.quality.vlm_review.review.quality_score >= 5 ? "success" : "warning"}
-                                variant="outlined"
-                              />
-                            )}
+                            <VlmReviewPill review={res.metadata?.quality?.vlm_review} />
                             {typeof res.metadata?.quality?.identity?.score === "number" && (
                               <Chip
                                 label={`ID ${Math.round(res.metadata.quality.identity.score * 100)}%`}

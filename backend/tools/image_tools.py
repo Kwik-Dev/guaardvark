@@ -637,7 +637,11 @@ def _quality_summary(quality) -> Optional[dict]:
     if not isinstance(quality, dict):
         return None
     flags = [f for f in quality.get("flags") or [] if isinstance(f, dict) and f.get("message")]
-    return {"checked": bool((quality.get("frames") or {}).get("readable")) or bool(flags), "flags": flags}
+    summary = {"checked": bool((quality.get("frames") or {}).get("readable")) or bool(flags), "flags": flags}
+    review = quality.get("vlm_review")
+    if isinstance(review, dict) and review.get("status") == "not_reviewed":
+        summary["not_reviewed"] = review.get("message") or review.get("reason") or "no score"
+    return summary
 
 
 # get_generation_status can wait for a job, for clients that cannot pause between
@@ -1223,6 +1227,8 @@ class GenerationStatusTool(BaseTool):
                 lines.append("Quality: flagged — " + "; ".join(q["message"] for q in quality["flags"]))
             elif quality and quality.get("checked"):
                 lines.append("Quality: no problems found in the sampled frames")
+            if quality and quality.get("not_reviewed"):
+                lines.append(f"Vision review: not reviewed — {quality['not_reviewed']}")
         failures = info.get("failures")
         if failures is not None:
             # Video: every failure with its kind, the batch's own first.

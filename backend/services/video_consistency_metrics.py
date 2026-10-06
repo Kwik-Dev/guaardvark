@@ -788,6 +788,68 @@ def _extract_frames_b64(video_path: str | Path, n: int = 6, width: int = 448) ->
         return out
 
 
+# A review that produced no score has not passed: the record reads "not
+# reviewed" with the reason, and every reader shows that state rather than
+# nothing, which would look the same as a clean pass.
+REVIEW_REASON_TEXT: Dict[str, str] = {
+    "model_not_installed": "the review model {model} is not installed",
+    "ollama_unreachable": "Ollama could not be asked which models are installed",
+    "no_frames": "no frames could be read from the clip",
+    "vlm_unavailable": "the review model could not be run",
+    "unparseable_review": "the review model's reply was not a review",
+    "no_score": "the review model gave no score",
+    "review_error": "the review could not run",
+}
+
+
+def not_reviewed(reason: str, *, model: Optional[str] = None, detail: str = "") -> Dict[str, Any]:
+    """The record of a clip the vision review did not score, in plain words."""
+    message = REVIEW_REASON_TEXT.get(reason, reason).format(model=model or "?")
+    if detail:
+        message = f"{message} ({detail[:160]})"
+    return {"status": "not_reviewed", "available": False, "model": model,
+            "reason": reason, "message": message}
+
+
+def _installed_ollama_tags() -> Optional[set]:
+    """Tags Ollama reports as pulled, or None when Ollama cannot be asked."""
+    try:
+        import ollama
+        resp = ollama.list()
+    except Exception as e:  # noqa: BLE001 — unreachable is a reason, not a crash
+        logger.debug("video review: ollama.list() failed: %s", e)
+        return None
+    models = resp.get("models", []) if hasattr(resp, "get") else getattr(resp, "models", [])
+    tags: set = set()
+    for m in models or []:
+        tag = getattr(m, "model", None)
+        if tag is None and hasattr(m, "get"):
+            tag = m.get("model") or m.get("name")
+        if tag is None:
+            tag = getattr(m, "name", None)
+        if tag:
+            tags.add(str(tag))
+    return tags
+
+
+def resolve_review_model(model: str) -> tuple:
+    """(installed tag, None) for the review model, or (None, reason code).
+
+    Matches the tag exactly, or a bare name against its ``:latest`` tag. Never
+    substitutes a different vision model: the score would be another reviewer's
+    under this one's name.
+    """
+    tags = _installed_ollama_tags()
+    if tags is None:
+        return None, "ollama_unreachable"
+    want = (model or "").strip()
+    if want in tags:
+        return want, None
+    if ":" not in want and f"{want}:latest" in tags:
+        return f"{want}:latest", None
+    return None, "model_not_installed"
+
+
 def review_video_quality(
     video_path: str | Path,
     *,
@@ -800,24 +862,32 @@ def review_video_quality(
     MiniCPM-V 4.5) to judge scene, temporal coherence, artifacts, and a 0-10 score.
 
     Catches the failure single-frame metrics can't: subject morphing / flicker /
-    teleporting across frames. Best-effort and fails OPEN — returns
-    {"available": False, "reason": ...} when ffmpeg / ollama / the model is missing,
-    so callers can treat it as an optional signal.
+    teleporting across frames. Never raises. ``status`` is "reviewed" only when
+    the model returned a score; otherwise "not_reviewed" with a ``reason`` code
+    and a plain ``message`` (see REVIEW_REASON_TEXT). The model is checked
+    against what Ollama has installed before any frame is read, so a missing
+    model is known up front. ``available`` stays for older readers: the model
+    answered with a parseable review.
 
     annotate=True writes the result into the asset's .metrics.json sidecar.
     """
-    import json as _json
-    import re as _re
-
-    model = model or __import__("os").environ.get(
+    requested = model or __import__("os").environ.get(
         "GUAARDVARK_VIDEO_REVIEW_MODEL", DEFAULT_VIDEO_REVIEW_MODEL
     )
-    result: Dict[str, Any] = {"available": False, "model": model}
+    result = _review_clip(video_path, requested, sample_frames)
+    if annotate:
+        annotate_asset(video_path, {"vlm_review": result})
+    return result
+
+
+def _review_clip(video_path: str | Path, requested: str, sample_frames: int) -> Dict[str, Any]:
+    model, missing = resolve_review_model(requested)
+    if model is None:
+        return not_reviewed(missing, model=requested)
 
     frames = _extract_frames_b64(video_path, n=sample_frames)
     if not frames:
-        result["reason"] = "no_frames"
-        return result
+        return not_reviewed("no_frames", model=model)
 
     dur = compute_basic_video_stats(video_path).get("duration_s", "?")
     prompt = _REVIEW_PROMPT.format(n=len(frames), dur=dur)
@@ -833,23 +903,22 @@ def review_video_quality(
             **think_payload(model),
         )
         raw = (resp["message"]["content"] or "").strip()
-    except Exception as e:  # noqa: BLE001 — optional signal, never crash the caller
+    except Exception as e:  # noqa: BLE001 — a failed call is a reason, never a crash
         logger.warning("video review: VLM call failed: %s", e)
-        result["reason"] = f"vlm_unavailable: {e}"
-        return result
+        return not_reviewed("vlm_unavailable", model=model, detail=str(e))
 
-    review: Dict[str, Any] = {}
+    review: Any = {}
     try:
-        review = _json.loads(raw)
-    except _json.JSONDecodeError:
-        m = _re.search(r"\{.*\}", raw, _re.DOTALL)
+        review = json.loads(raw)
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
         if m:
             try:
-                review = _json.loads(m.group(0))
-            except _json.JSONDecodeError:
+                review = json.loads(m.group(0))
+            except json.JSONDecodeError:
                 pass
-    if not review:
-        result["reason"] = "unparseable_review"
+    if not review or not isinstance(review, dict):
+        result = not_reviewed("unparseable_review", model=model)
         result["raw"] = raw[:300]
         return result
 
@@ -859,9 +928,11 @@ def review_video_quality(
     except (TypeError, ValueError):
         review["quality_score"] = None
 
+    if review["quality_score"] is None:
+        result = not_reviewed("no_score", model=model)
+    else:
+        result = {"status": "reviewed", "model": model, "reason": None, "message": None}
     result.update({"available": True, "frames_reviewed": len(frames), "review": review})
-    if annotate:
-        annotate_asset(video_path, {"vlm_review": result})
     return result
 
 

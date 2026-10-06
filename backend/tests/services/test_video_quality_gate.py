@@ -220,3 +220,69 @@ def test_status_text_names_the_flags(monkeypatch):
     assert "Quality: flagged — black frames: 3 of 9 sampled frames" in out.output
     assert "Quality: no problems found in the sampled frames" in out.output
     assert out.metadata["files"][0]["quality"]["flags"][0]["code"] == "black_frames"
+
+
+# ── The vision review's "not reviewed" state ─────────────────────────────────
+
+def _attach(made, **kwargs):
+    from backend.services import batch_video_generator as bvg
+
+    gen = bvg.BatchVideoGenerator.__new__(bvg.BatchVideoGenerator)
+    result = bvg.BatchVideoResult(item_id="item1", success=True, video_path="clip.mp4")
+    gen._attach_quality_metrics(result, video_path=str(made["clean"]), cinematic=True, **kwargs)
+    return result.metadata["quality"]
+
+
+def test_a_cinematic_clip_without_the_review_model_reads_not_reviewed(made, monkeypatch):
+    monkeypatch.setenv("GUAARDVARK_VIDEO_REVIEW_MODEL", "not-pulled-vlm:7b")
+    monkeypatch.setattr(vcm, "_installed_ollama_tags", lambda: {"gemma4:e2b"})
+    monkeypatch.setattr(vcm, "_extract_frames_b64", lambda *a, **k: pytest.fail("frames sampled"))
+
+    quality = _attach(made)
+
+    review = quality["vlm_review"]
+    assert review["status"] == "not_reviewed"
+    assert review["reason"] == "model_not_installed"
+    assert "not-pulled-vlm:7b" in review["message"]
+    assert "low_vlm_score" not in quality["flag_reasons"]
+
+
+def test_a_review_that_raises_is_recorded_not_dropped(made, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("ffmpeg vanished")
+
+    monkeypatch.setattr(vcm, "review_video_quality", boom)
+    quality = _attach(made)
+    assert quality["vlm_review"]["status"] == "not_reviewed"
+    assert quality["vlm_review"]["reason"] == "review_error"
+    assert "ffmpeg vanished" in quality["vlm_review"]["message"]
+
+
+def test_a_reviewed_clip_keeps_its_score_and_low_score_flag(made, monkeypatch):
+    monkeypatch.setattr(vcm, "review_video_quality", lambda *a, **k: {
+        "status": "reviewed", "available": True, "model": "m", "reason": None, "message": None,
+        "review": {"quality_score": 3},
+    })
+    quality = _attach(made)
+    assert quality["vlm_review"]["review"]["quality_score"] == 3
+    assert "low_vlm_score:3" in quality["flag_reasons"]
+
+
+def test_status_text_says_when_a_clip_was_not_reviewed(monkeypatch):
+    from backend.tools import image_tools
+
+    quality = {"flagged": False, "frames": {"readable": True}, "flags": [],
+               "vlm_review": vcm.not_reviewed("model_not_installed", model="minicpm-v4.5:latest")}
+    body = {"status": "completed", "stage": "done", "completed_videos": 1, "total_videos": 1, "results": [
+        {"success": True, "video_path": "a/videos/a.mp4", "metadata": {"quality": quality}},
+    ]}
+    def fake_http(method, path, *args, **kwargs):
+        if path.startswith("/api/batch-video/status/"):
+            return body
+        raise RuntimeError("404 not found")
+
+    monkeypatch.setattr(image_tools, "_http_json", fake_http)
+    tool = image_tools.GenerationStatusTool()
+    tool._context = {"transport": "mcp"}
+    out = tool.execute(batch_id="VideoBatch_x")
+    assert "Vision review: not reviewed — the review model minicpm-v4.5:latest is not installed" in out.output

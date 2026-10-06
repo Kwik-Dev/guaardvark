@@ -442,6 +442,7 @@ class BatchVideoGenerator:
                 inspect_video_frames,
                 score_identity_preservation,
                 review_video_quality,
+                not_reviewed,
                 annotate_asset,
             )
         except Exception as e:
@@ -501,22 +502,25 @@ class BatchVideoGenerator:
             except Exception as e:
                 logger.debug("identity scoring skipped: %s", e)
 
-        # Optional VLM review for high-consistency / cinematic runs (fail-open).
+        # VLM review for high-consistency / cinematic runs. A review that did not
+        # produce a score is recorded as "not reviewed" with its reason, never
+        # left out: a missing review must not read as a clean pass.
         if high_consistency or cinematic:
             try:
                 review = review_video_quality(video_path, annotate=False)
-                quality["vlm_review"] = review
-                if review.get("available"):
-                    qscore = (review.get("review") or {}).get("quality_score")
-                    if isinstance(qscore, (int, float)) and qscore < 5:
-                        quality["flagged"] = True
-                        quality["flag_reasons"].append(f"low_vlm_score:{qscore}")
-                        quality["flags"].append({
-                            "code": "low_vlm_score",
-                            "message": f"the vision review scored it {qscore}/10",
-                        })
-            except Exception as e:
-                logger.debug("VLM video review skipped: %s", e)
+            except Exception as e:  # noqa: BLE001 — the review must never fail a render
+                logger.warning("VLM video review failed for %s: %s", video_path, e)
+                review = not_reviewed("review_error", detail=str(e))
+            quality["vlm_review"] = review
+            if review.get("status") == "reviewed":
+                qscore = (review.get("review") or {}).get("quality_score")
+                if isinstance(qscore, (int, float)) and qscore < 5:
+                    quality["flagged"] = True
+                    quality["flag_reasons"].append(f"low_vlm_score:{qscore}")
+                    quality["flags"].append({
+                        "code": "low_vlm_score",
+                        "message": f"the vision review scored it {qscore}/10",
+                    })
 
         batch_result.metadata = dict(batch_result.metadata or {})
         batch_result.metadata["quality"] = quality
