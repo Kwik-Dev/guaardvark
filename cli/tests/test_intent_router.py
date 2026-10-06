@@ -109,6 +109,8 @@ class TestCommandWordsInEnglish:
             "abort the mission plan, what are my options",
             "undo the damage of a bad review",
             "apply for a passport",
+            "stop being so verbose",
+            "start a story about dragons",
         ],
     )
     def test_session_command_word_with_more_text_is_chat(self, line, tmp_path):
@@ -118,6 +120,9 @@ class TestCommandWordsInEnglish:
     def test_bare_session_command_still_runs(self, word):
         assert resolve_repl_line(word) == (word, [])
         assert resolve_repl_line(word.capitalize()) == (word, [])
+
+    def test_start_plugin_rule_still_wins(self):
+        assert resolve_repl_line("start comfyui") == ("plugins", ["start", "comfyui"])
 
     def test_slash_session_commands_untouched(self):
         assert resolve_repl_line("/new") is None
