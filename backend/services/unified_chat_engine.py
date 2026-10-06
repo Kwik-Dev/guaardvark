@@ -770,6 +770,11 @@ def _image_generation_gate(message: str, draw_anywhere: bool) -> bool:
         return True
     if _media_requires_explicit_command():
         return False
+    if (not draw_anywhere and _VIDEO_INTENT_RE.search(msg_lower)
+            and not _STILL_OR_ANIMATION_NOUN_RE.search(msg_lower)):
+        # Making a video is user_wants_video_generation's call; a message it turned
+        # down ("why does it take so long to generate a video?") is not a picture request.
+        return False
     return _is_new_image_request(msg_lower, draw_anywhere)
 
 
@@ -820,6 +825,37 @@ _VIDEO_INTENT_RE = re.compile(
     r"\b(generate|create|make|render|produce)\b[^.?!]{0,40}\bvideo\b", re.IGNORECASE
 )
 
+# A request for a new clip opens the message or one of its sentences, optionally
+# after "please" / "can you", with "video" at most five words after the verb as
+# its object: "make a video of a fox", "can you generate a short cinematic video
+# of rain". "Why does it take so long to generate a video?", "make sure the video
+# plays", "make a list of video ideas" and "make a video call" only mention one.
+_VIDEO_REQUEST_RE = re.compile(
+    r"(?:^|[.!?;:,]\s+)\s*(?:(?:ok(?:ay)?|now|so|also|then|and|hey)\s+)?"
+    r"(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)?"
+    r"(?:(?:i(?:'d|\s+would)\s+like|i\s+(?:want|need))\s+you\s+to\s+|let'?s\s+)?"
+    r"(?:generate|create|make|render|produce)\s+(?:me\s+|us\s+)?"
+    r"(?:(?!(?:sure|certain|the|this|that|these|those|my|your|our|his|her|its|their"
+    r"|of|for|to|about|with|from|in|on|at|into|and|or|than|then)\b)[\w'-]+\s+){0,5}?"
+    r"video\b(?!\s+(?:games?|calls?|chats?|conferenc\w*|cards?|edit\w*|players?|codecs?"
+    r"|drivers?|scripts?|files?|formats?)\b)",
+    re.IGNORECASE,
+)
+# Video software named in the message: making a video there is the user's own job.
+_VIDEO_SOFTWARE_PATTERN = (
+    r"\b(?:premiere\s+pro|after\s+effects|davinci|final\s+cut|imovie|capcut|camtasia|filmora"
+    r"|kdenlive|shotcut|openshot|obs\s+studio|clipchamp|ffmpeg|handbrake|movie\s+maker"
+    r"|vegas\s+pro)\b"
+    r"|\b(?:in|with|using)\s+(?:adobe\s+)?(?:premiere|resolve|obs|canva|blender|powerpoint)\b"
+)
+# How-to and front-end questions (as for images) plus questions about video software.
+_VIDEO_REQUEST_NEGATIVE_PATTERNS = _IMAGE_REQUEST_NEGATIVE_PATTERNS + (_VIDEO_SOFTWARE_PATTERN,)
+# A picture or animation named alongside "video" keeps a message open to the image path.
+_STILL_OR_ANIMATION_NOUN_RE = re.compile(
+    r"\b(?:image|picture|photo|illustration|drawing|painting|gif|animation|animated|animate)s?\b",
+    re.IGNORECASE,
+)
+
 # Strip "generate a video of…" / "/video " chrome so the video model gets pure scene text.
 _VIDEO_CHROME_RE = re.compile(
     r"^\s*(?:/video\b[:\s]*|(?:please\s+)?(?:can\s+you\s+|could\s+you\s+)?"
@@ -848,11 +884,11 @@ def user_wants_video_generation(message: str) -> bool:
         return True
     if _media_requires_explicit_command():
         return False
-    if not (_VIDEO_INTENT_RE.search(msg_lower) or msg_lower.startswith("video of ")):
+    if not (_VIDEO_REQUEST_RE.search(msg_lower) or msg_lower.startswith("video of ")):
         return False
     if any(w in msg_lower for w in ("gif", "animate", "animation", "animated")):
         return False
-    for pat in _IMAGE_GEN_NEGATIVE_PATTERNS:
+    for pat in _VIDEO_REQUEST_NEGATIVE_PATTERNS:
         if re.search(pat, msg_lower):
             return False
     return True

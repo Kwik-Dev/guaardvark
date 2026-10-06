@@ -354,6 +354,49 @@ class TestImageRetry:
             uce._SESSION_PENDING_IMAGE_EDIT.pop(sid, None)
 
 
+class TestVideoRequests:
+    """A new clip starts only from a request for one, never from a question that mentions video."""
+
+    @pytest.fixture
+    def uce(self, monkeypatch):
+        import backend.services.unified_chat_engine as uce
+        monkeypatch.setattr(uce, "_media_requires_explicit_command", lambda: False)
+        return uce
+
+    @pytest.mark.parametrize("message", [
+        "make a video of a fox running",
+        "make a video of a cat surfing",
+        "Can you make a short video of waves crashing?",
+        "Generate a 10 second cinematic video of a dragon flying over mountains",
+        "I love foxes. Make a video of one in the snow",
+        "video of a cat surfing",
+    ])
+    def test_requests_start_a_video(self, uce, message):
+        assert uce.user_wants_video_generation(message) is True
+        assert uce.user_wants_image_generation(message) is False
+
+    @pytest.mark.parametrize("message", [
+        "How do I make a video in Premiere?",
+        "Make a video in DaVinci Resolve of my trip",
+        "What's the best software to make a video on Linux?",
+        "Why does it take so long to generate a video?",
+        "Is it possible to make a video longer than 10 seconds?",
+        "I'm going to make dinner and then watch a video",
+        "make a list of video ideas",
+        "Can you make a video call to my mom?",
+        "Can you produce a video script for my channel?",
+    ])
+    def test_questions_and_mentions_start_nothing(self, uce, message):
+        assert uce.user_wants_video_generation(message) is False
+        # Turned down for video, the message does not become a picture request either.
+        assert uce.user_wants_image_generation(message) is False
+
+    def test_a_picture_that_mentions_video_is_still_a_picture(self, uce):
+        message = "make a picture of my video game character"
+        assert uce.user_wants_video_generation(message) is False
+        assert uce.user_wants_image_generation(message) is True
+
+
 class TestCommandOnlyMode:
     """chat_media_requires_command: only an explicit command may create media."""
 
