@@ -1480,49 +1480,56 @@ const ChatPage = () => {
         setMessages((prev) => [...prev, thinkingMessage]);
         setAgentLoopExecuting(true);
 
+        let fallBackToChat = false;
         try {
           const result = await routeAndExecute(inputText, {
             project_id: projectId,
             session_id: sessionId,
           });
 
+          if (result?.fallback_to_chat) {
+            // The server found nothing to run and saved nothing; this turn
+            // goes through the normal unified send below instead.
+            fallBackToChat = true;
+            setMessages((prev) => prev.filter((msg) => msg.id !== agentMsgId));
+          } else {
+            const agentResult = result?.result?.type === "agent_result"
+              ? result.result
+              : result?.result || result;
 
-          const agentResult = result?.result?.type === "agent_result"
-            ? result.result
-            : result?.result || result;
-
-          // display_content is what the server persisted for this turn; a
-          // tool_result or file_generation shape carries no final_answer.
-          let content =
-            result?.display_content ||
-            agentResult?.final_answer ||
-            agentResult?.error ||
-            result?.error;
-          if (!content) {
-            if (agentResult?.success === false) {
-              content = "Agent execution failed (no response from the model).";
-            } else {
-              content = "Agent execution completed with no response.";
-            }
-          }
-          const screenshotUrls = agentResult?.screenshot_urls || [];
-          for (const url of screenshotUrls) {
-            content += `\n\n![Screenshot](${url})`;
-          }
-
-          setMessages((prev) =>
-            prev.map((msg) => {
-              if (msg.id === agentMsgId) {
-                return {
-                  id: agentMsgId,
-                  role: "assistant",
-                  content,
-                  timestamp: new Date().toISOString(),
-                };
+            // display_content is what the server persisted for this turn; a
+            // tool_result or file_generation shape carries no final_answer.
+            let content =
+              result?.display_content ||
+              agentResult?.final_answer ||
+              agentResult?.error ||
+              result?.error;
+            if (!content) {
+              if (agentResult?.success === false) {
+                content = "Agent execution failed (no response from the model).";
+              } else {
+                content = "Agent execution completed with no response.";
               }
-              return msg;
-            })
-          );
+            }
+            const screenshotUrls = agentResult?.screenshot_urls || [];
+            for (const url of screenshotUrls) {
+              content += `\n\n![Screenshot](${url})`;
+            }
+
+            setMessages((prev) =>
+              prev.map((msg) => {
+                if (msg.id === agentMsgId) {
+                  return {
+                    id: agentMsgId,
+                    role: "assistant",
+                    content,
+                    timestamp: new Date().toISOString(),
+                  };
+                }
+                return msg;
+              })
+            );
+          }
         } catch (agentError) {
           console.error("AGENT_LOOP: Execution failed:", agentError);
           setMessages((prev) =>
@@ -1543,7 +1550,12 @@ const ChatPage = () => {
           setAgentLoopMessageId(null);
         }
 
-        return; // Don't continue with normal chat for agent loop requests
+        // This return is what keeps an agent-loop turn out of the normal
+        // send; shouldContinueWithNormalChat is reset to true further down.
+        if (!fallBackToChat) {
+          return;
+        }
+        shouldContinueWithNormalChat = true;
       }
 
       if (fileDetection && (fileDetection.isCSVRequest || fileDetection.isCodeRequest)) {
