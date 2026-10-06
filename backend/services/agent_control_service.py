@@ -4055,6 +4055,10 @@ Reply ONLY with JSON:
         "your", "will", "show", "shows", "text", "box", "form", "link", "menu",
         "tab", "panel", "dialog", "modal", "header", "footer", "list", "item",
         "items", "loading", "load", "loaded",
+        # State-change verbs. Without them "Firefox browser window opens and
+        # becomes visible." left "becomes" over, missed the window check and
+        # went to the vision model, which said no for 12s with Firefox up.
+        "become", "becomes", "appeared", "displayed", "shown",
         # Generic UI ACTION/label words — present on countless pages, so a match on
         # these alone must not confirm that a specific effect actually happened.
         "submit", "comment", "reply", "post", "send", "search", "save", "cancel",
@@ -4358,7 +4362,7 @@ Reply ONLY with JSON:
         # synthetic navigation phrase when "go to <known page>" matches.
         task_effective = task_for_match or task_stripped
 
-        # Also handle "go to X page" → localhost:5175/X
+        # Also handle "go to X page" → this install's web UI at localhost:<VITE_PORT>/X
         page_match = re.search(
             r'(?:go\s+to|open|navigate\s+to)\s+(?:the\s+)?(\w+)\s+page', task_lower
         )
@@ -4372,7 +4376,8 @@ Reply ONLY with JSON:
             }
             page = page_match.group(1)
             if page in page_routes:
-                task_effective = f"navigate to localhost:5175{page_routes[page]}"
+                from backend.utils.cors_policy import vite_port
+                task_effective = f"navigate to localhost:{vite_port()}{page_routes[page]}"
 
         recipes = self._load_recipes()
         for recipe_name, recipe in recipes.items():
@@ -4565,16 +4570,18 @@ Reply ONLY with JSON:
 
         def get_servo():
             if servo_box["servo"] is None:
-                from backend.services.servo_controller import ServoController
                 from backend.services.training_data_collector import TrainingDataCollector
-                from backend.services.servo_knowledge_store import get_vision_config
-                from backend.utils.vision_analyzer import VisionAnalyzer
-                analyzer = VisionAnalyzer()
-                servo_box["servo"] = ServoController(
-                    screen, analyzer,
-                    collector=TrainingDataCollector(),
-                    vision_config=get_vision_config(analyzer.default_model),
-                )
+                # Point with the task's eye, as the loop does. The analyzer's
+                # default is whichever sighted model is resident, which can be a
+                # different model with its own calibration: gemma4:e4b's fit
+                # sent a correct top-of-screen answer for "Firefox icon",
+                # (299, 61), to (288, 0) while the task's eye was gemma4:12b.
+                be = getattr(self, "_brain_eye", None)
+                eye = be.eye if be is not None and be.eye else ""
+                if not eye:
+                    from backend.utils.vision_analyzer import VisionAnalyzer
+                    eye = VisionAnalyzer().default_model
+                _, servo_box["servo"] = build_servo(screen, eye, collector=TrainingDataCollector())
             return servo_box["servo"]
 
         for step in recipe.get("steps", []):
