@@ -54,6 +54,7 @@ import {
   deleteDeviceProfile,
   getBaseModels,
   exportToOllama,
+  exportTrainingJobAnyway,
 } from "../api";
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 import RefreshIcon from "@mui/icons-material/Refresh";
@@ -512,6 +513,23 @@ const TrainingPage = () => {
     setExportModalOpen(true);
   };
 
+  // A run held as worse than its base model is exported only on the person's
+  // explicit choice; the backend records it, then the usual export dialog opens.
+  const handleExportAnyway = async (job) => {
+    const ok = window.confirm(
+      `This run was held because it measured worse than its base model:\n\n${job.error_message || ""}\n\n` +
+        "Export it anyway? Your choice is recorded on the job.",
+    );
+    if (!ok) return;
+    try {
+      const released = await exportTrainingJobAnyway(job.id, { by: "person", via: "training_page" });
+      fetchJobs();
+      handleExportToOllama(released, false);
+    } catch (err) {
+      showMessage(`Failed to release the run for export: ${err.message}`, "error");
+    }
+  };
+
   const handleExportConfirm = async (quantization, modelName) => {
     if (!selectedJobForExport) return;
 
@@ -607,6 +625,8 @@ const TrainingPage = () => {
       case "completed": return "success";
       case "running": return "info";
       case "failed": return "error";
+      // Held by the export gate (training_tasks.WORSE_THAN_BASE).
+      case "failed: worse than base": return "error";
       case "cancelled": return "default";
       default: return "warning";
     }
@@ -890,6 +910,18 @@ const TrainingPage = () => {
                                 </IconButton>
                               </Tooltip>
                             )}
+                            {job.status === "failed: worse than base" && job.lora_path && (
+                              <Tooltip title="Export anyway (the run measured worse than its base model)">
+                                <IconButton
+                                  size="small"
+                                  color="warning"
+                                  onClick={() => handleExportAnyway(job)}
+                                  disabled={exportingJobs.has(job.id)}
+                                >
+                                  <CloudUploadIcon fontSize="small" />
+                                </IconButton>
+                              </Tooltip>
+                            )}
                             {job.status === "running" && (
                               <Tooltip title="Cancel">
                                 <IconButton size="small" onClick={() => handleCancelJob(job.id)}>
@@ -922,6 +954,12 @@ const TrainingPage = () => {
                         {job.error_message && (
                           <Typography variant="caption" color="error" sx={{ mt: 1, display: "block" }}>
                             Error: {job.error_message}
+                          </Typography>
+                        )}
+                        {job.config?.export_override && (
+                          <Typography variant="caption" color="warning.main" sx={{ mt: 1, display: "block" }}>
+                            Export gate overridden by {job.config.export_override.by} ({job.config.export_override.via})
+                            {" "}at {job.config.export_override.at}. {job.config.export_override.gate_note}
                           </Typography>
                         )}
                         {/* Show export results when available */}
