@@ -1183,6 +1183,13 @@ def _initialize_app_components(app):
             get_image_keep_loaded_minutes()
     except Exception as e:
         app.logger.warning(f"Could not load the keep-image-model setting: {e}")
+    # LLM debug logging is written from the agent brain's threads as well.
+    try:
+        with app.app_context():
+            from backend.utils.settings_utils import get_llm_debug
+            get_llm_debug()
+    except Exception as e:
+        app.logger.warning(f"Could not load the LLM debug setting: {e}")
     try:
         with app.app_context():
             from backend.services.inbound_guard_service import get_mode
