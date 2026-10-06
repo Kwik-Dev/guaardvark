@@ -4119,10 +4119,16 @@ class UnifiedChatEngine:
 
         return None  # Not a media command
 
-    def _chat_image_source(self, session_id: str) -> Optional[str]:
-        """Attached photo this turn, else the last image this session produced."""
+    def _chat_image_source(self, session_id: str, message: str = "") -> Optional[str]:
+        """Attached photo this turn, else the last image this session produced.
+
+        The last image counts while it is in focus (made since the last plain chat
+        turn) or when the message names it ("the last image"), as for follow-up edits.
+        """
         if getattr(self, "_image_data", None):
             return self._materialize_attached_image()
+        if session_id not in _SESSION_IMAGE_FOCUS and not _NAMES_THE_IMAGE_RE.search(message or ""):
+            return None
         img_path = _SESSION_LAST_EDIT.get(session_id)
         if img_path and os.path.exists(img_path):
             return img_path
@@ -4132,7 +4138,7 @@ class UnifiedChatEngine:
                                 emit_fn: Callable, request_id: str,
                                 options: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         """Identity / background-remove / outpaint intercepts. Run before generic edit."""
-        img_path = self._chat_image_source(session_id)
+        img_path = self._chat_image_source(session_id, message)
         if not img_path:
             return None
 

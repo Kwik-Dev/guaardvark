@@ -141,7 +141,7 @@ def test_named_image_direct_identity_not_edit():
         return {"success": True, "tool": tool}
 
     engine._run_direct_tool_execution = _run
-    engine._chat_image_source = lambda sid: "/tmp/face.png"
+    engine._chat_image_source = lambda sid, message="": "/tmp/face.png"
 
     result = engine._try_named_image_direct(
         "this person as a 1940s detective", "s", lambda *a: None, "r", {},
@@ -155,6 +155,49 @@ def test_named_image_direct_identity_not_edit():
         "put a cowboy hat on this person", "s", lambda *a: None, "r", {},
     )
     assert skipped is None
+
+
+def test_named_image_tools_use_the_last_image_only_while_in_focus(monkeypatch, tmp_path):
+    """After a plain chat turn the last image applies only when the message names it."""
+    import backend.services.unified_chat_engine as uce
+    from backend.tests.test_unified_chat_host_hooks import (
+        _engine as chat_engine,
+        _run as chat_turn,
+    )
+
+    sid = "sess-host"  # the session chat_turn runs in
+    picture = tmp_path / "last.png"
+    picture.write_bytes(b"png")
+
+    class FakeRegistry:
+        def get_tool(self, name):
+            return object() if name == "remove_background" else None
+
+    engine = uce.UnifiedChatEngine.__new__(uce.UnifiedChatEngine)
+    engine.registry = FakeRegistry()
+    engine._image_data = None
+    calls = []
+    engine._run_direct_tool_execution = (
+        lambda tool, params, *a, **k: calls.append((tool, params)) or {"success": True}
+    )
+
+    def ask(message):
+        return engine._try_named_image_direct(message, sid, lambda *a: None, "r", {})
+
+    try:
+        uce._remember_session_image(sid, str(picture))
+        assert ask("remove the background") is not None
+        assert calls == [("remove_background", {"image": str(picture)})]
+
+        chat_turn(chat_engine(monkeypatch), "hello there, how are you today", {})
+        assert ask("remove the background") is None
+        assert len(calls) == 1
+
+        assert ask("remove the background from the last image") is not None
+        assert calls[-1] == ("remove_background", {"image": str(picture)})
+    finally:
+        uce._SESSION_LAST_EDIT.pop(sid, None)
+        uce._SESSION_IMAGE_FOCUS.discard(sid)
 
 
 # ── a busy GPU: chat waits, other callers are told at once ─────────────────

@@ -236,7 +236,7 @@ def _run_direct(e, face, answer):
         if name == "chat:tool_approval_request" and answer is not None:
             uce.set_approval_response(payload["session_id"], answer)
 
-    e._chat_image_source = lambda sid: face
+    e._chat_image_source = lambda sid, message="": face
     result = e._try_named_image_direct("this person as a 1940s detective", "sess-c", emit, "req-1", {})
     return result, events
 
