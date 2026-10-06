@@ -735,8 +735,8 @@ class RedditOutreachLoop:
     """One pass = visit one subreddit, find up to MAX_THREADS_PER_PASS candidates, draft + maybe post."""
 
     def run_one_pass(self, subreddit: str, task_id: Optional[int] = None) -> dict:
-        # recon imports this module, so its constant is read here, not at import.
-        from backend.services.social_outreach.recon import MIN_RELEVANCE_GRADE
+        # recon imports this module, so its judge rule is read here, not at import.
+        from backend.services.social_outreach.recon import judged_unfit
 
         report = {
             "subreddit": subreddit,
@@ -805,9 +805,9 @@ class RedditOutreachLoop:
 
             # Thread-fit judge, asked the same way recon asks it: a keyword
             # match cannot tell a setup question from a rant against local AI.
-            # A thread it grades below the bar gets no draft. When the judge
-            # cannot run, the thread is drafted marked relevance unchecked, and
-            # an unsupervised draft is then held for approval.
+            # A thread it grades below the bar, or says "skip" to, gets no
+            # draft. When the judge cannot run, the thread is drafted marked
+            # relevance unchecked, and an unsupervised draft is then held.
             relevance = external_grader.score_thread_relevance(
                 title=thread.title,
                 selftext=thread.selftext,
@@ -817,11 +817,11 @@ class RedditOutreachLoop:
             )
             relevance_unchecked = bool(relevance.get("skipped"))
             logger.info(
-                "reddit loop: r/%s thread=%s relevance grade=%.2f unchecked=%s reason=%s",
-                subreddit, thread.id, relevance.get("grade", 0.0), relevance_unchecked,
-                (relevance.get("reason") or "")[:80],
+                "reddit loop: r/%s thread=%s relevance grade=%.2f verdict=%s unchecked=%s reason=%s",
+                subreddit, thread.id, relevance.get("grade", 0.0), relevance.get("verdict") or "-",
+                relevance_unchecked, (relevance.get("reason") or "")[:80],
             )
-            if not relevance_unchecked and relevance.get("grade", 0.0) < MIN_RELEVANCE_GRADE:
+            if judged_unfit(relevance):
                 report["skipped_by_llm"] += 1
                 continue
 

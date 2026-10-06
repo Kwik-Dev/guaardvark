@@ -270,7 +270,8 @@ DECISIONS: dict = {
         "anchor": "backend/services/social_outreach/external_grader.py score_thread_relevance; recon.py; "
                   "reddit_outreach.py beat loop",
         "precheck": "a candidate thread passed the topic keyword match",
-        "fallback": "the existing relevance grade against MIN_RELEVANCE_GRADE",
+        "fallback": "the existing relevance judge (recon.judged_unfit: a grade below MIN_RELEVANCE_GRADE "
+                    "or a 'skip' verdict)",
         "safe_side": "skip",
         "side_effect": "public_post",
         "mode_default": "off", "floor": GATE_FLOOR,

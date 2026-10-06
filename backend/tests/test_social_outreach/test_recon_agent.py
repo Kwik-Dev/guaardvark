@@ -768,6 +768,69 @@ def test_loop_drafts_a_thread_the_judge_passes(app):
     assert report["drafted"] == 1
 
 
+# ---- a "skip" verdict skips the thread whatever grade came with it ------------------------
+
+SKIP_AT_HIGH_GRADE = {"grade": 0.7, "skipped": False, "verdict": "skip", "reason": "OP already solved it"}
+
+
+@pytest.mark.parametrize("relevance, unfit", [
+    (SKIP_AT_HIGH_GRADE, True),
+    ({"grade": 0.9, "skipped": False, "verdict": " Skip ", "reason": "r"}, True),
+    ({"grade": 0.4, "skipped": False, "verdict": "good_fit", "reason": "r"}, True),
+    ({"grade": 0.7, "skipped": False, "verdict": "good_fit", "reason": "r"}, False),
+    ({"grade": 0.7, "skipped": False, "reason": "no verdict given"}, False),
+    ({"grade": 0.0, "skipped": True, "verdict": "skip", "reason": "no_grader_model_loaded"}, False),
+])
+def test_judged_unfit(relevance, unfit):
+    from backend.services.social_outreach.recon import judged_unfit
+
+    assert judged_unfit(relevance) is unfit
+
+
+def test_loop_drafts_nothing_on_a_skip_verdict_with_a_passing_grade(app):
+    report, draft = _run_loop(app, SKIP_AT_HIGH_GRADE)
+
+    draft.assert_not_called()
+    assert report["skipped_by_llm"] == 1
+
+
+def test_scout_reddit_skips_on_a_skip_verdict_with_a_passing_grade(app):
+    thread = _thread("solved1", "Ollama on a 12GB card (solved)", score=300)
+    with app.app_context(), \
+            patch("backend.services.social_outreach.recon.kill_switch.is_enabled", return_value=True), \
+            patch("backend.services.social_outreach.recon.fetch_subreddit_rules", return_value=[]), \
+            patch("backend.services.social_outreach.recon.fetch_hot_threads", return_value=[thread]), \
+            patch("backend.services.social_outreach.recon.fetch_thread_comments", return_value=[]), \
+            patch("backend.services.social_outreach.recon.thread_is_relevant", return_value="local_llm"), \
+            patch("backend.services.social_outreach.recon.external_grader.score_thread_relevance",
+                  return_value=SKIP_AT_HIGH_GRADE):
+        report = RecondAgent().scout_reddit("LocalLLaMA")
+
+        assert report["candidates"] == 0
+        assert report["skipped_by_llm"] == 1
+        assert SocialOutreachLog.query.count() == 0
+
+
+def test_scout_youtube_skips_on_a_skip_verdict_with_a_passing_grade(app):
+    response = _ddg_response(
+        _ddg_result(
+            title="Ollama local LLM setup, solved",
+            url="https://www.youtube.com/watch?v=SKIPVERDICT",
+            snippet="local LLM walkthrough",
+        ),
+    )
+    with app.app_context(), \
+            patch("backend.services.social_outreach.recon.kill_switch.is_enabled", return_value=True), \
+            patch("backend.api.web_search_api.enhanced_web_search", return_value=response), \
+            patch("backend.services.social_outreach.recon.external_grader.score_thread_relevance",
+                  return_value=SKIP_AT_HIGH_GRADE):
+        report = RecondAgent().scout_youtube("Ollama local LLM")
+
+        assert report["candidates"] == 0
+        assert report["skipped_by_llm"] == 1
+        assert SocialOutreachLog.query.count() == 0
+
+
 # ---- rules that could not be read are not "no rules" -------------------------------------
 
 @pytest.mark.parametrize("reply, rules", [

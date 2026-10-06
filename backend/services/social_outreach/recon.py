@@ -48,12 +48,22 @@ tractable."""
 MIN_RELEVANCE_GRADE = 0.5
 """Threshold for the LLM relevance judge. The keyword filter is regex-only and
 can't tell "I love local AI" from "I hate local AI" — the LLM sees context
-and rules out hostile/off-topic threads. Below this we skip without queuing.
-The scheduled Reddit loop (reddit_outreach.RedditOutreachLoop) skips on the
+and rules out hostile/off-topic threads. Below this, or on a "skip" verdict
+at any grade, we skip without queuing (judged_unfit). The scheduled Reddit loop (reddit_outreach.RedditOutreachLoop) skips on the
 same bar. When the relevance model is unavailable, recon still queues the
 candidate on its keyword match, marked relevance_skipped, and the loop still
 drafts, marked relevance unchecked; either way an unsupervised draft is then
 held for approval (gates.independent_ok)."""
+
+
+def judged_unfit(relevance: dict) -> bool:
+    """True when the thread-fit judge ran and said no: a grade below
+    MIN_RELEVANCE_GRADE, or a "skip" verdict whatever grade came with it.
+    A skipped judge is no verdict either way."""
+    if relevance.get("skipped"):
+        return False
+    verdict = str(relevance.get("verdict") or "").strip().lower()
+    return verdict == "skip" or relevance.get("grade", 0.0) < MIN_RELEVANCE_GRADE
 
 
 def topic_matches_text(text: str, topic_filters: Optional[list[str]]) -> bool:
@@ -206,7 +216,7 @@ class RecondAgent:
                 feature_hint=feature_hint,
                 subreddit=subreddit,
             )
-            if not relevance.get("skipped") and relevance.get("grade", 0.0) < MIN_RELEVANCE_GRADE:
+            if judged_unfit(relevance):
                 report["skipped_by_llm"] += 1
                 logger.info(
                     "recon: r/%s thread=%s skipped by LLM (grade=%.2f, reason=%s)",
@@ -396,7 +406,7 @@ class RecondAgent:
                 feature_hint=feature_hint,
                 subreddit="",
             )
-            if not relevance.get("skipped") and relevance.get("grade", 0.0) < MIN_RELEVANCE_GRADE:
+            if judged_unfit(relevance):
                 report["skipped_by_llm"] += 1
                 logger.info(
                     "recon: youtube vid=%s skipped by LLM (grade=%.2f, reason=%s)",
