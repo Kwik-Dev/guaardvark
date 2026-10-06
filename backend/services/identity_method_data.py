@@ -58,15 +58,17 @@ IDENTITY_METHODS: Dict[str, Dict[str, Any]] = {
         ),
     },
     "vlm": {
-        "threshold": 0.67,
+        "threshold": 0.66,
         "floor": DEFAULT_IDENTITY_FLOOR,
         "refs_compared": 3,
         "measured": [],
         "why": (
             "Fraction of up to 3 reference photos the installed vision model calls "
-            "the same person or character. 0.67 is 2 of 3 — a majority of the "
+            "the same person or character, so the only scores it can produce are "
+            "0, 1/3, 2/3 and 1. 0.66 selects 2 of 3 — a majority of the "
             "references, so one disagreeing reference does not sink a good render "
-            "and one agreeing reference does not carry a bad one. Unmeasured."
+            "and one agreeing reference does not carry a bad one. It must sit just "
+            "below 2/3 and not at 0.67, which 0.6667 fails. Unmeasured."
         ),
     },
 }
