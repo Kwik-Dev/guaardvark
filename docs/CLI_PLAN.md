@@ -13,7 +13,7 @@ These change the shape of the work; everything else can proceed without them.
 | # | Decision | Options | Recommendation |
 |---|---|---|---|
 | **D1** | Do render/GPU-spend actions enter the CLI? | (a) stay plan-only · (b) allow render commands that use the existing job/gate system | **(b)** — `images generate` and `videos generate` already spend GPU; `video-editor render` and `cast train` are the same class. Keep them going through the same GPU gate so the CLI cannot bypass it. |
-| **D2** | Do **approval** actions enter the CLI? | (a) keep approvals Studio-only · (b) add explicit `approve`/`reject` subcommands | **Split**: read-only `approvals list/show` in the CLI; `approve`/`reject` **only** where a contract test already permits it (`outreach approve`). Do **not** add approvals for held code / inbound guard / film-crew storyboards, and keep `test_music_video_cli.py`'s "never POST approve" contract. |
+| **D2** | Do **approval** actions enter the CLI? | (a) keep approvals Studio-only · (b) add explicit `approve`/`reject` subcommands | **Split**: read-only `approvals list/show` in the CLI; `approve`/`reject` **only** where a contract test already permits it (`outreach approve`). Do **not** add approvals for held code / inbound guard / publishing; film-crew storyboards were the one re-opened case, settled by **D6** below, and `test_music_video_cli.py`'s "create never POSTs approve" contract stays. |
 | **D3** | Where does fork code live? | (a) new modules + one registry line · (b) a separate pip package | **(a)** — see §2. |
 | **D4** | Is the CLI surface a fork-only concern? | (a) fork-only · (b) upstreamable | **Mixed** (§3 marks each): `upscaling`, `system-map`, `web-search`, `content-management`, `wordpress`, `connections`, `self-improvement`, `inbound-guard`, `infographic` are *upstream* features that upstream's own CLI also lacks — upstreamable in principle, but per fork policy **no PR is opened**. |
 | **D5** | A **generic REST escape hatch** — does one command reach every backend route? | (a) keep wrapping one command at a time · (b) a single `api request <METHOD> <PATH>` with a guard · (c) a separate second CLI that speaks raw REST | **(b), safety tier B** (decided 2026-10-05, after a proposal for (c)). Adding commands one at a time is why coverage is always N of 97 — a route nobody wrapped is unreachable from the terminal, which is exactly what blocks *render Film Crew / music-video by CLI* and the ~25 unwrapped files routes. (c) was rejected: the value is one ~200-line command reusing `llx.client`, not a second 9.7k-line CLI to re-port against ~5 upstream `cli/` commits a week. **Tier B**: reads free; every write needs `--yes`; a decision-class route needs `--yes` even as a read; `--dry-run` previews a gated request **without** needing `--yes` (seeing what would be sent is how a person decides); every attempt (allowed, refused, failed, previewed) is appended to `<GUAARDVARK_DIR>/api-audit.jsonl`. This **amends D2**: D2 still governs the *named* commands (no `film-crew approve-storyboard`, no `guard approve`, no held-code release), while `api request` is the documented, gated, audited escape hatch that can reach them when a person types the path deliberately. See §3.16. |
@@ -89,10 +89,10 @@ CLI surface at all**. Highest value per line of code.
 
 ### 3.2 Cast Library — `cast` (Tier 2, biggest gap)
 
-`cast list` · `cast show <id>` · `cast refs <id>` · `cast samples <id>` · `cast plan <id>` ·
-`cast generate <id> --count/--shots` · `cast cancel <id>` · `cast approve <id>` ·
-`cast train <id>` · `cast loras <id>` · `cast make-default <id> <base>` ·
-`cast import-lora <id> --file` · `cast delete <id>`
+`cast list` · `cast show <id>` · `cast samples <id>` · `cast plan <id>` ·
+`cast generate <id> --count 16|32` · `cast cancel <id>` · `cast approve <id>` ·
+`cast train <id>` · `cast train-cancel <id>` · `cast make-default <id> <base>` ·
+`cast import-lora <id> <path> --base <base>` · `cast delete <id>`
 
 Routes: `GET|POST /api/cast-library/subjects`, `GET|PATCH|DELETE /subjects/<id>`,
 `GET /subjects/<id>/samples`, `POST /subjects/<id>/{plan,generate,generate/cancel}`,
@@ -380,8 +380,12 @@ a client could not supply one — and a document id is what every other CLI comm
 
 ## 4. Test framework renewal
 
-The current suite is good but flat: 221 tests, one style per file, one e2e, no shared
-fixtures beyond ad-hoc mocks, and coverage that tracks only implemented commands.
+The suite the renewal started from was flat: 221 tests, one style per file, one e2e, no
+shared fixtures beyond ad-hoc mocks, and a coverage signal that tracked only implemented
+commands. The sections below are the changes that fixed it, not a wish list — they are
+already applied, so read them as a record. The live counts are in the `cli` CI job rather
+than here — that job is also where the coverage floor is enforced (§4.1) — and the golden
+snapshots under `cli/tests/golden/` are their own record (§4.4).
 
 ### 4.1 Problems to fix
 
@@ -393,7 +397,7 @@ fixtures beyond ad-hoc mocks, and coverage that tracks only implemented commands
 | No assertion that the *command surface* matches the *API surface* | a **spec-parity test** (§4.3) |
 | Only one e2e, and only for `mcp client` | a smoke e2e per command group |
 | Silent-failure regressions (the class fixed in the two output-registration commits) have no test | error-path tests: backend down, 4xx/5xx, timeout, non-TTY REPL, `--json` on error |
-| No coverage signal for `cli/llx` | `pytest-cov` for the CLI package, floor raised over time |
+| No coverage signal for `cli/llx` | **Done** — the `cli` CI job runs `pytest --cov=llx --cov-fail-under=40`; baseline measured at 44.07% on 2026-10-06, floor raised over time |
 
 ### 4.2 New layout
 
@@ -488,10 +492,11 @@ that already has the backend stack (the `backend` job, or `cli-e2e` with
 
 | Test | Asserts |
 |---|---|
-| `test_fork_cli_contract.py::test_no_approval_commands` | no CLI command POSTs to any `approve`/`reject` route except the allowlisted `outreach approve` (extends today's `test_music_video_cli.py`) |
-| `…::test_render_commands_go_through_the_gpu_gate` | every render-spending command passes `gpu_session`/job params (D1) |
-| `…::test_paid_backends_require_confirmation` | `cast train --backend runpod` refuses without `--yes` |
-| `test_error_paths.py::*` | backend unreachable / 4xx / 5xx / timeout → non-zero exit, structured error under `--json`, never a bare traceback or a success body with a missing id |
+| `test_fork_readonly_contract.py` (shipped) | the D2 static scan: no fork module outside `render_gates.py` names `/approve`, `/reject`, `/decide`, `/apply`, `/release-held` or `/dispatch`. The only exceptions are the historical `outreach approve` (outside this package) and cast's sample-approval base path in `cast.py` — both listed in `_ALLOWED` |
+| `test_fork_render_gates.py` (shipped) | the three D6 gates — `film-crew confirm-casting`, `film-crew approve-storyboard`, `music-video approve` — each refuse without `--yes` and, with it, POST exactly the `_ALLOWED` route `render_gates.py` declares |
+| `test_fork_gpu_gate.py` (shipped) | the D1 gate: no fork command addresses a plugin port directly, every fork API path goes through the guarded client, and the generation groups are mounted. Per-command `gpu_session`/job-param assertions are (planned) |
+| `test_fork_phase2_commands.py::test_cast_train_refuses_without_yes_and_touches_nothing` (shipped) | `cast train --backend runpod` refuses without `--yes` and sends no request; with `--yes` the `runpod` backend reaches `training_settings` |
+| `test_system_json_contracts.py::test_health_json_connection_error_envelope`, `test_status_degraded_json_contracts.py::test_status_still_exits_one_when_the_celery_leg_cannot_connect`, `test_fork_phase1_commands.py::test_a_backend_error_exits_nonzero_without_a_traceback` (shipped) | backend unreachable → exit 1 with `error.code == CONNECTION_ERROR` under `--json`; a 5xx → non-zero exit and no traceback. 4xx and timeout envelopes, and errors that must never read as a success body with a missing id, are (planned) |
 
 ## 5. Phases, deliverables, acceptance
 
