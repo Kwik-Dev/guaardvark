@@ -55,13 +55,16 @@ except ImportError as e:
 
 # Smart Query Routing System
 try:
-    from backend.utils.intent_classifier import classify_user_intent, IntentType, get_intent_context_limit
+    from backend.utils.intent_classifier import (
+        classify_user_intent, IntentType, get_intent_context_limit, offer_web_search,
+    )
     from backend.handlers.database_handler import create_database_handler
     logger.info("Smart routing system imported successfully")
 except ImportError as e:
     classify_user_intent = None
     IntentType = None
     get_intent_context_limit = None
+    offer_web_search = None
     create_database_handler = None
     logger.warning(f"Smart routing system not available: {e}")
 
@@ -1642,6 +1645,22 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
 
         return result
 
+    # _perform_web_search_safe outcomes that sent nothing to the search engine.
+    _WEB_SEARCH_NOT_SENT = ("disabled", "skipped_length")
+
+    def _web_search_offer(self, message: str, intent_type, web_search_result: Optional[Dict[str, Any]]) -> Optional[Dict[str, str]]:
+        """The reply's offer to search the web for ``message`` (offer_web_search),
+        or None. A turn that sent a search offers nothing."""
+        if offer_web_search is None:
+            return None
+        if web_search_result and web_search_result.get("strategy_used") not in self._WEB_SEARCH_NOT_SENT:
+            return None
+        try:
+            return offer_web_search(message, intent_type=intent_type)
+        except Exception as e:
+            logger.debug(f"Web search offer skipped: {e}")
+            return None
+
     def _perform_web_search_safe(self, query: str) -> Dict[str, Any]:
         """BULLETPROOF: Safely perform web search with comprehensive error handling"""
         try:
@@ -2807,6 +2826,7 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
             )
 
             # SMART ROUTING SYSTEM - Route query before heavy processing
+            intent_type = None
             if classify_user_intent and not simple_mode:
                 try:
                     intent_type, confidence, intent_metadata = classify_user_intent(message)
@@ -2938,6 +2958,8 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
                     "Web search not triggered "
                     f"(simple_mode={simple_mode}, should_use={self._should_use_web_search(message) if not simple_mode else False})"
                 )
+
+            web_search_offer = None if simple_mode else self._web_search_offer(message, intent_type, web_search_result)
 
             # Retrieve relevant RAG context if enabled and not in simple mode
             rag_context = []
@@ -3472,7 +3494,10 @@ You are analyzing code files. When responding to questions about code:
 
             # Save assistant response
             logger.info(f"Enhanced chat: Saving assistant response...")
-            self._save_message(session_id, 'assistant', full_response, project_id=project_id)
+            self._save_message(
+                session_id, 'assistant', full_response, project_id=project_id,
+                extra_data={'web_search_offer': web_search_offer} if web_search_offer else None,
+            )
             logger.info(f"Enhanced chat: Assistant response saved")
 
             # Commit database changes
@@ -3562,6 +3587,7 @@ You are analyzing code files. When responding to questions about code:
                 'web_search_used': web_search_used,
                 'web_search_successful': web_search_result.get("success", False) if web_search_result else False,
                 'web_search_strategy': web_search_result.get("strategy_used", "none") if web_search_result else "none",
+                'web_search_offer': web_search_offer,
                 'token_usage': {
                     'estimated_input_tokens': self._estimate_tokens(enhanced_message_with_context),
                     'estimated_output_tokens': self._estimate_tokens(full_response)
@@ -4834,7 +4860,8 @@ def get_chat_history(session_id: str):
                 for key in ('imageUrl', 'imageFileName', 'messageType',
                             'relatedImageUrl', 'imageAnalysis', 'analysisDetails',
                             'generatedImages', 'agentThinkingSteps',
-                            'orchestratorPlan', 'orchestratorPlanId'):
+                            'orchestratorPlan', 'orchestratorPlanId',
+                            'web_search_offer'):
                     if key in msg.extra_data:
                         msg_data[key] = msg.extra_data[key]
                 # Restore tool call steps for unified chat rendering

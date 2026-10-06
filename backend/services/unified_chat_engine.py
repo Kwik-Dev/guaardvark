@@ -415,6 +415,9 @@ DESKTOP_TOOLS = ["app_launch", "app_list", "app_focus", "gui_click", "gui_type",
                  "gui_hotkey", "gui_screenshot", "notification_send",
                  "clipboard_get", "clipboard_set", "gui_locate_image"]
 WEB_TOOLS = ["analyze_website", "fetch_url"]
+# A successful call to one of these means the reply already read the web, so it
+# carries no offer to search.
+_WEB_LOOKUP_TOOLS = frozenset({"web_search", *WEB_TOOLS})
 MEDIA_TOOLS = ["media_play", "media_control", "media_volume", "media_status"]
 IMAGE_TOOLS = ["generate_image", "generate_animation", "generate_video"]
 # Tools that consume an attached (or last-edited) photo. Pinned whenever a
@@ -3504,6 +3507,8 @@ class UnifiedChatEngine:
             except Exception:
                 logger.exception("[UNIFIED_ENGINE] finalize_fn failed; keeping the model's draft")
 
+        web_search_offer = self._web_search_offer(message, steps, session_id)
+
         # 7. Emit complete
         emit_fn("chat:complete", {
             "response": accumulated_response,
@@ -3516,6 +3521,7 @@ class UnifiedChatEngine:
             "thinking": final_thinking,
             "truncated": final_truncated,
             "synthesized": synthesized,
+            "web_search_offer": web_search_offer,
         })
 
         # 8. Save assistant message (only if we have actual content)
@@ -3540,6 +3546,8 @@ class UnifiedChatEngine:
                 extra_data["generatedImages"] = generated_images
             if final_thinking:
                 extra_data["thinking"] = final_thinking
+            if web_search_offer:
+                extra_data["web_search_offer"] = web_search_offer
             # Pull agent-loop thinking steps emitted during this turn so they
             # survive hard refresh. Empty list if no agent task ran. Drains the
             # service's accumulator so the next turn starts fresh.
@@ -3570,7 +3578,26 @@ class UnifiedChatEngine:
             "session_id": session_id,
             "token_usage": token_usage,
             "synthesized": synthesized,
+            "web_search_offer": web_search_offer,
         }
+
+    def _web_search_offer(self, message: str, steps: List[Dict[str, Any]],
+                          session_id: str) -> Optional[Dict[str, str]]:
+        """The reply's offer to search the web for ``message`` (offer_web_search),
+        or None. Nothing is offered once a web tool has answered this turn, for
+        facts a host supplied for the turn, or for a stopped turn."""
+        if is_aborted(session_id) or getattr(self, "_local_facts_this_turn", False):
+            return None
+        for step in steps:
+            for call in step.get("tool_calls") or []:
+                if call.get("tool_name") in _WEB_LOOKUP_TOOLS and call.get("success"):
+                    return None
+        try:
+            from backend.utils.intent_classifier import offer_web_search
+            return offer_web_search(message)
+        except Exception as e:
+            logger.debug(f"Web search offer skipped: {e}")
+            return None
 
     # ── Media command direct intercept ─────────────────────────────────────
     # Patterns and their media tool + param extraction. Bypasses the LLM loop.

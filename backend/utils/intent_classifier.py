@@ -36,7 +36,7 @@ class IntentType(Enum):
     COMMAND = "COMMAND"              # /codegen, /analyze commands
     DATABASE_QUERY = "DATABASE_QUERY"  # Count/list requests
     RAG_SEARCH = "RAG_SEARCH"        # Document content search
-    WEB_SEARCH = "WEB_SEARCH"        # Current info requests; sizes the context, never sends a search by itself
+    WEB_SEARCH = "WEB_SEARCH"        # Current info requests; sizes the context and offers a search, never sends one by itself
     GENERAL_CHAT = "GENERAL_CHAT"    # Default conversational
 
 class IntentClassifier:
@@ -296,6 +296,42 @@ except ImportError:
 def should_enable_web_search(intent_type: IntentType, message: str) -> bool:
     """Check if web search should be enabled"""
     return intent_classifier.should_use_web_search(intent_type, message)
+
+
+# The two offers a reply can carry; see offer_web_search.
+WEB_SEARCH_OFFER_SEARCH = "search"
+WEB_SEARCH_OFFER_ENABLE = "enable_web_access"
+# The query is the person's message as typed. Longer than this it is a paste or
+# a brief rather than a question, as enhanced chat's _WEB_SEARCH_MAX_CHARS has it.
+WEB_SEARCH_OFFER_MAX_CHARS = 300
+
+
+def offer_web_search(message: str, intent_type: Optional[IntentType] = None) -> Optional[Dict[str, str]]:
+    """The offer a chat reply carries when ``message`` looks like it needs
+    current information, or None.
+
+    ``{"action": "search", "query": message}`` with web access on: the chat
+    shows "Search the web for this", and a click runs one search of the query.
+    ``{"action": "enable_web_access", "query": message}`` with it off: the
+    chat says how to turn web access on. The offer itself sends nothing, and
+    callers ask only for a turn that sent no search. ``intent_type`` is the
+    caller's own classification of ``message``, when it has one.
+    """
+    text = (message or "").strip()
+    if not text or len(text) > WEB_SEARCH_OFFER_MAX_CHARS:
+        return None
+    if intent_type is None:
+        intent_type, _, _ = intent_classifier.classify_intent(text)
+    if not should_enable_web_search(intent_type, text):
+        return None
+    try:
+        from backend.utils.settings_utils import get_web_access
+        web_access = bool(get_web_access())
+    except Exception as e:
+        logger.debug(f"Web access setting unreadable, offering to turn it on: {e}")
+        web_access = False
+    action = WEB_SEARCH_OFFER_SEARCH if web_access else WEB_SEARCH_OFFER_ENABLE
+    return {"action": action, "query": text}
 
 
 def is_realtime_query(message: str) -> Tuple[bool, float]:
