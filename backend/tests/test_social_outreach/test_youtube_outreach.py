@@ -298,3 +298,99 @@ def test_tick_process_approved_drafts_youtube_posted_text_fallback(app):
         assert mock_post.call_count == 1
         call_args = mock_post.call_args[0]
         assert call_args[1] == "Great local AI content!"  # comment_text from draft_text
+
+
+# ---------------------------------------------------------------------------
+# Post-submit check: the text must be in a posted comment, not just on the page
+# ---------------------------------------------------------------------------
+
+COMMENT = "Great breakdown of local inference, we run the same setup at home"
+EVALUATE = "backend.services.social_outreach.reddit_outreach.bidi_evaluate_json"
+
+
+def _page(**fields):
+    """What the verify script reports; defaults describe a clean posted comment."""
+    page = {
+        "in_comments": True, "comments_seen": 21, "composers": 1, "composer_chars": 0,
+        "box_text": "Add a comment... Cancel Comment", "url": "https://www.youtube.com/watch?v=test123",
+    }
+    page.update(fields)
+    return page
+
+
+def _verify(page):
+    from backend.services.social_outreach.youtube_outreach import _verify_youtube_text_in_dom
+
+    seen = []
+
+    def evaluate(expression):
+        seen.append(expression)
+        return page
+
+    with patch(EVALUATE, side_effect=evaluate):
+        result = _verify_youtube_text_in_dom(COMMENT)
+    return result, seen
+
+
+def test_verify_text_only_in_the_composer_is_not_posted():
+    (ok, reason), _ = _verify((_page(in_comments=False, composer_chars=59), ""))
+    assert ok is False
+    assert "not_in_comment_bodies" in reason and "composer_not_empty" in reason
+
+
+def test_verify_text_in_a_comment_body_is_posted():
+    (ok, reason), seen = _verify((_page(), ""))
+    assert ok is True, reason
+    # The needle is the start of the comment; the page body as a whole is not read.
+    assert COMMENT[:60] in seen[0]
+    assert "#content-text" in seen[0]
+    assert "document.body" not in seen[0]
+
+
+def test_verify_try_again_in_another_comment_still_posted():
+    # Other people's comments never reach box_text; only the comment box and
+    # toasts are searched for error words.
+    (ok, reason), _ = _verify((_page(comments_seen=40), ""))
+    assert ok is True, reason
+
+
+def test_verify_error_in_the_comment_box_is_not_posted():
+    (ok, reason), _ = _verify((_page(box_text="Add a comment... Something went wrong"), ""))
+    assert ok is False
+    assert "error_in_comment_box" in reason
+    assert "not_in_comment_bodies" not in reason
+
+
+def test_verify_text_in_body_but_composer_still_full_is_not_posted():
+    (ok, reason), _ = _verify((_page(composer_chars=12), ""))
+    assert ok is False
+    assert reason.startswith("composer_not_empty")
+
+
+def test_verify_unreadable_page_is_not_posted():
+    (ok, reason), _ = _verify((None, "connect failed: refused"))
+    assert ok is False
+    assert "page_not_readable" in reason
+
+
+def test_comment_left_in_the_composer_is_not_recorded_posted(monkeypatch):
+    """End to end through the poster: a fill that 'worked' but left the text
+    in the box comes back submit_unverified, so the row is never marked posted."""
+    from backend.services.social_outreach import youtube_outreach as yt
+
+    service = MagicMock()
+    service.is_active = False
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    monkeypatch.setattr(yt, "_bidi_navigate", lambda *a, **k: True)
+    monkeypatch.setattr(yt, "_bidi_scroll_to_yt_composer", lambda: (True, "ok", (1, 1)))
+    monkeypatch.setattr(yt, "_bidi_fill_and_submit_comment", lambda text: (True, "submitted"))
+    with patch("backend.services.agent_control_service.get_agent_control_service",
+               return_value=service), \
+         patch("backend.utils.agent_display_utils.start_agent_display_if_needed",
+               return_value=True), \
+         patch("backend.services.local_screen_backend.LocalScreenBackend"), \
+         patch(EVALUATE, return_value=(_page(in_comments=False, composer_chars=59), "")):
+        ok, reason = yt.post_youtube_comment_via_servo(
+            "https://www.youtube.com/watch?v=test123", COMMENT)
+    assert ok is False
+    assert reason.startswith("submit_unverified")
