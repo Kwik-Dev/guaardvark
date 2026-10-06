@@ -829,7 +829,9 @@ class RedditOutreachLoop:
         recent_done = audit.recent_thread_ids("reddit", hours=168)
 
         for thread in threads:
-            if report["posted"] + report["aborted"] >= MAX_THREADS_PER_PASS:
+            # This loop only drafts (the approved-drafts tick posts), so the
+            # cap counts drafts.
+            if report["drafted"] + report["aborted"] >= MAX_THREADS_PER_PASS:
                 break
             if thread.id in recent_done:
                 report["skipped"] += 1
