@@ -27,6 +27,8 @@ def test_loop_drafts_without_calling_servo():
          patch("backend.services.social_outreach.reddit_outreach.audit.recent_thread_ids", return_value=set()), \
          patch("backend.services.social_outreach.reddit_outreach.fetch_thread_comments", return_value=["ollama comment"]), \
          patch("backend.services.social_outreach.reddit_outreach.thread_is_relevant", return_value="hint"), \
+         patch("backend.services.social_outreach.reddit_outreach.external_grader.score_thread_relevance",
+               return_value={"grade": 0.9, "skipped": False, "reason": "fits"}), \
          patch("backend.services.social_outreach.reddit_outreach.draft_via_backend") as mock_draft, \
          patch("backend.services.social_outreach.reddit_outreach.post_comment_via_servo") as mock_post:
 

@@ -139,6 +139,19 @@ def test_an_empty_draft_is_not_sent_to_the_grader(route):
     assert body["gates"]["independent_check"] == "unavailable"
 
 
+def test_a_passed_draft_on_a_thread_the_judge_did_not_see_is_held(route):
+    route.state["ext"] = PASSED
+
+    body = route(relevance_unchecked=True)
+
+    assert body["would_post"] is False
+    assert body["gates"]["independent_check"] == "passed"
+    assert body["gates"]["independent_reason"] == "relevance_unchecked"
+    assert _status(body["audit_id"]) == "drafted"
+    assert route.audit_extra()["relevance_unchecked"] is True
+    assert route.audit_extra()["hold_reason"] == "relevance_unchecked"
+
+
 def _share(route):
     return route(mode="share", share_target="r/SideProject", share_link="https://example.com/x",
                  thread_context=None)

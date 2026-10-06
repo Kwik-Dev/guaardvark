@@ -62,6 +62,8 @@ def test_run_one_pass_is_draft_only_never_servo_posts(app):
          patch("backend.services.social_outreach.reddit_outreach.fetch_hot_threads") as mock_hot, \
          patch("backend.services.social_outreach.reddit_outreach.fetch_thread_comments", return_value=[]), \
          patch("backend.services.social_outreach.reddit_outreach.thread_is_relevant", return_value="test_hint"), \
+         patch("backend.services.social_outreach.reddit_outreach.external_grader.score_thread_relevance",
+               return_value={"grade": 0.9, "skipped": False, "reason": "fits"}), \
          patch("backend.services.social_outreach.reddit_outreach.draft_via_backend") as mock_draft, \
          patch("backend.services.social_outreach.reddit_outreach.post_comment_via_servo") as mock_post, \
          patch("backend.services.social_outreach.reddit_outreach.kill_switch.is_enabled", return_value=True):

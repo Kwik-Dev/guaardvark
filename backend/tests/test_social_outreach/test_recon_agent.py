@@ -714,3 +714,55 @@ def test_content_agent_drafts_youtube_candidate_without_crashing(app):
         if payload:
             ctx = _build_thread_context(payload)
             assert "walkthrough of installing Ollama" in ctx
+
+
+# ---- the scheduled Reddit loop asks the same thread-fit judge ----------------------------
+
+def _run_loop(app, judge):
+    """One RedditOutreachLoop pass over one keyword-matched thread, with the
+    thread-fit judge answering ``judge``. Returns the report and the draft mock."""
+    from backend.services.social_outreach.reddit_outreach import RedditOutreachLoop
+
+    thread = _thread("loop1", "Why I hate local LLMs", score=400)
+    with app.app_context(), \
+            patch("backend.services.social_outreach.reddit_outreach.kill_switch.is_enabled", return_value=True), \
+            patch("backend.services.social_outreach.reddit_outreach.fetch_subreddit_rules", return_value=[]), \
+            patch("backend.services.social_outreach.reddit_outreach.fetch_hot_threads", return_value=[thread]), \
+            patch("backend.services.social_outreach.reddit_outreach.fetch_thread_comments",
+                  return_value=["awful experience"]), \
+            patch("backend.services.social_outreach.reddit_outreach.thread_is_relevant", return_value="local_llm"), \
+            patch("backend.services.social_outreach.reddit_outreach.external_grader.score_thread_relevance",
+                  return_value=judge) as asked, \
+            patch("backend.services.social_outreach.reddit_outreach.draft_via_backend",
+                  return_value={"audit_id": 1, "would_post": False, "draft": "d"}) as draft:
+        report = RedditOutreachLoop().run_one_pass("LocalLLaMA")
+    asked.assert_called_once_with(
+        title=thread.title, selftext=thread.selftext, top_comments=["awful experience"],
+        feature_hint="local_llm", subreddit="LocalLLaMA",
+    )
+    return report, draft
+
+
+def test_loop_drafts_nothing_for_a_thread_the_judge_grades_low(app):
+    report, draft = _run_loop(app, {"grade": 0.2, "skipped": False, "verdict": "skip", "reason": "OP is venting"})
+
+    draft.assert_not_called()
+    assert report["skipped_by_llm"] == 1
+    assert report["drafted"] == 0
+
+
+def test_loop_marks_the_draft_unchecked_when_the_judge_could_not_run(app):
+    report, draft = _run_loop(app, {"grade": 0.0, "skipped": True, "model": None, "reason": "no_grader_model_loaded"})
+
+    draft.assert_called_once()
+    assert draft.call_args.kwargs["relevance_unchecked"] is True
+    assert report["drafted"] == 1
+    assert report["skipped_by_llm"] == 0
+
+
+def test_loop_drafts_a_thread_the_judge_passes(app):
+    report, draft = _run_loop(app, {"grade": 0.85, "skipped": False, "verdict": "good_fit", "reason": "asks for advice"})
+
+    draft.assert_called_once()
+    assert draft.call_args.kwargs["relevance_unchecked"] is False
+    assert report["drafted"] == 1

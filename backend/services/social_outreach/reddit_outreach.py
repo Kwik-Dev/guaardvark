@@ -28,7 +28,7 @@ from urllib.parse import quote
 
 import requests
 
-from backend.services.social_outreach import audit, kill_switch, persona
+from backend.services.social_outreach import audit, external_grader, kill_switch, persona
 from backend.services.social_outreach.transitions import WITHDRAWN_BEFORE_SUBMIT
 
 logger = logging.getLogger(__name__)
@@ -464,8 +464,19 @@ def backend_url() -> str:
 _backend_url = backend_url
 
 
-def draft_via_backend(thread: RedditThread, comments: list[str], feature_hint: Optional[str], task_id: Optional[int]) -> Optional[dict]:
-    """Calls the social-outreach draft endpoint synchronously."""
+def draft_via_backend(
+    thread: RedditThread,
+    comments: list[str],
+    feature_hint: Optional[str],
+    task_id: Optional[int],
+    *,
+    relevance_unchecked: bool = False,
+) -> Optional[dict]:
+    """Calls the social-outreach draft endpoint synchronously.
+
+    ``relevance_unchecked`` says the thread-fit judge could not run on this
+    thread; the endpoint then holds an unsupervised draft for approval.
+    """
     thread_context = (
         f"TITLE: {thread.title}\n\n"
         f"OP BODY:\n{thread.selftext or '(link-only post)'}\n\n"
@@ -482,6 +493,7 @@ def draft_via_backend(thread: RedditThread, comments: list[str], feature_hint: O
                 "feature_hint": feature_hint,
                 "task_id": task_id,
                 "mode": "comment",
+                "relevance_unchecked": relevance_unchecked,
             },
             timeout=120,
         )
@@ -717,12 +729,16 @@ class RedditOutreachLoop:
     """One pass = visit one subreddit, find up to MAX_THREADS_PER_PASS candidates, draft + maybe post."""
 
     def run_one_pass(self, subreddit: str, task_id: Optional[int] = None) -> dict:
+        # recon imports this module, so its constant is read here, not at import.
+        from backend.services.social_outreach.recon import MIN_RELEVANCE_GRADE
+
         report = {
             "subreddit": subreddit,
             "drafted": 0,
             "posted": 0,
             "aborted": 0,
             "skipped": 0,
+            "skipped_by_llm": 0,
             "reason": None,
         }
 
@@ -771,7 +787,32 @@ class RedditOutreachLoop:
                 report["skipped"] += 1
                 continue
 
-            draft_result = draft_via_backend(thread, comments, feature_hint, task_id)
+            # Thread-fit judge, asked the same way recon asks it: a keyword
+            # match cannot tell a setup question from a rant against local AI.
+            # A thread it grades below the bar gets no draft. When the judge
+            # cannot run, the thread is drafted marked relevance unchecked, and
+            # an unsupervised draft is then held for approval.
+            relevance = external_grader.score_thread_relevance(
+                title=thread.title,
+                selftext=thread.selftext,
+                top_comments=comments,
+                feature_hint=feature_hint,
+                subreddit=subreddit,
+            )
+            relevance_unchecked = bool(relevance.get("skipped"))
+            logger.info(
+                "reddit loop: r/%s thread=%s relevance grade=%.2f unchecked=%s reason=%s",
+                subreddit, thread.id, relevance.get("grade", 0.0), relevance_unchecked,
+                (relevance.get("reason") or "")[:80],
+            )
+            if not relevance_unchecked and relevance.get("grade", 0.0) < MIN_RELEVANCE_GRADE:
+                report["skipped_by_llm"] += 1
+                continue
+
+            draft_result = draft_via_backend(
+                thread, comments, feature_hint, task_id,
+                relevance_unchecked=relevance_unchecked,
+            )
             if not draft_result:
                 report["skipped"] += 1
                 continue

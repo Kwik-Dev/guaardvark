@@ -71,6 +71,26 @@ def test_label(ext, label):
     assert gates.independent_check_label(ext) == label
 
 
+# ---- the thread-fit judge did not run --------------------------------------------------
+
+def test_a_passed_draft_on_an_unjudged_thread_is_held(app):
+    assert gates.independent_ok(PASSED, supervised=False, relevance_unchecked=True) == (False, "relevance_unchecked")
+
+
+def test_an_unjudged_thread_goes_to_a_person_when_supervised(app):
+    assert gates.independent_ok(PASSED, supervised=True, relevance_unchecked=True) == (True, "human_review")
+
+
+def test_an_unjudged_thread_does_not_rescue_a_failed_draft(app):
+    assert gates.independent_ok(FAILED, supervised=False, relevance_unchecked=True) == (False, "failed")
+
+
+def test_an_unjudged_thread_posts_when_the_check_is_switched_off(app):
+    _set("outreach_require_independent_check", "false")
+
+    assert gates.independent_ok(PASSED, supervised=False, relevance_unchecked=True) == (True, "check_not_required")
+
+
 # ---- self-shares ---------------------------------------------------------------------
 
 @pytest.mark.parametrize("ext", [PASSED, FAILED, UNCHECKED])

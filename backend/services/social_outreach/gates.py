@@ -37,11 +37,19 @@ def independent_check_label(ext: dict) -> str:
     return "passed" if float(ext.get("grade") or 0.0) >= MIN_EXTERNAL_GRADE else "failed"
 
 
-def independent_ok(ext: dict, *, supervised: bool, action: str = "comment") -> tuple[bool, str]:
+def independent_ok(
+    ext: dict,
+    *,
+    supervised: bool,
+    action: str = "comment",
+    relevance_unchecked: bool = False,
+) -> tuple[bool, str]:
     """Whether the independent check lets this draft go forward, and why.
 
     ``action`` is the audit row's action; a "share" is decided before ``ext``
-    is read, because no check applies to it.
+    is read, because no check applies to it. ``relevance_unchecked`` says the
+    thread-fit judge (external_grader.score_thread_relevance) could not run on
+    the thread; a draft for it counts as unchecked even when its grade passed.
 
     Returns one of:
       (True,  "passed")               checked, grade at or above MIN_EXTERNAL_GRADE
@@ -49,7 +57,9 @@ def independent_ok(ext: dict, *, supervised: bool, action: str = "comment") -> t
       (True,  "human_review")         unchecked, supervised: a person approves it;
                                       also every supervised share
       (False, "no_independent_check") unchecked, unsupervised: hold for approval
-      (True,  "check_not_required")   unchecked, unsupervised, and the
+      (False, "relevance_unchecked")  checked and passed, but the thread-fit
+                                      judge did not run; unsupervised: hold
+      (True,  "check_not_required")   either of the two above, and the
                                       outreach_require_independent_check
                                       setting is switched off
       (False, "share_needs_person")   a share, unsupervised: hold for approval
@@ -58,10 +68,12 @@ def independent_ok(ext: dict, *, supervised: bool, action: str = "comment") -> t
     if action == "share":
         return (True, "human_review") if supervised else (False, "share_needs_person")
     label = independent_check_label(ext)
-    if label != "unavailable":
-        return label == "passed", label
+    if label == "failed":
+        return False, "failed"
+    if label == "passed" and not relevance_unchecked:
+        return True, "passed"
     if supervised:
         return True, "human_review"
     if not kill_switch.requires_independent_check():
         return True, "check_not_required"
-    return False, "no_independent_check"
+    return False, "no_independent_check" if label == "unavailable" else "relevance_unchecked"

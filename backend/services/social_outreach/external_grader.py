@@ -177,8 +177,10 @@ def score_thread_relevance(
     that pure regex matching can't see.
 
     Same skip-on-infra-failure semantics as grade_draft_externally — if the
-    model isn't loaded or the call fails, we return skipped=True and the
-    caller treats that as "trust the keyword match" rather than a hard reject.
+    model isn't loaded or the call fails, we return skipped=True. That is not
+    a reject: recon queues the candidate on its keyword match, and the
+    scheduled Reddit loop drafts it marked relevance unchecked, which holds an
+    unsupervised draft for approval (gates.independent_ok).
     """
     model = _resolve_grader_model()
     if model is None:

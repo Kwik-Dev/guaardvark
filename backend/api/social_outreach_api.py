@@ -284,6 +284,7 @@ def draft_comment():
         "mode": "comment"|"share",     # default "comment"
         "share_target": "r/SideProject",  # required for share mode
         "share_link": "https://guaardvark.com",  # required for share mode
+        "relevance_unchecked": true,   # optional: the thread-fit judge could not run
     }
     Returns: {draft, grade, reason, audit_id, would_post, gates}
 
@@ -291,7 +292,8 @@ def draft_comment():
     second-opinion grader ran on this draft and what it concluded. With
     supervised mode off, only a passed check lets the draft post on its own.
     A share is never graded (there is no thread for the rubric) and is always
-    held for a person.
+    held for a person. A comment sent with relevance_unchecked is held the way
+    an unchecked draft is (gates.independent_ok).
     """
     body = request.get_json(silent=True) or {}
     platform = body.get("platform", "unknown")
@@ -300,6 +302,7 @@ def draft_comment():
     task_id = body.get("task_id")
     target_url = body.get("target_url")
     target_thread_id = body.get("target_thread_id")
+    relevance_unchecked = bool(body.get("relevance_unchecked"))
 
     if mode == "share":
         context = {
@@ -342,7 +345,9 @@ def draft_comment():
         ext = external_grader.grade_draft_externally(draft_text, context["thread_context"])
     else:
         ext = {"grade": 0.0, "checked": False, "skipped": True, "model": None, "reason": "empty_draft"}
-    independent_pass, independent_reason = gates.independent_ok(ext, supervised=supervised, action=action)
+    independent_pass, independent_reason = gates.independent_ok(
+        ext, supervised=supervised, action=action, relevance_unchecked=relevance_unchecked,
+    )
     independent_check = gates.independent_check_label(ext)
     hold_reason = None if independent_pass else independent_reason
 
@@ -372,6 +377,7 @@ def draft_comment():
             "independent_check": independent_check,
             "external_grade": ext.get("grade"),
             "external_reason": ext.get("reason", ""),
+            "relevance_unchecked": relevance_unchecked,
             "hold_reason": hold_reason,
         },
     )

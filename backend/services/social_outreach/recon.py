@@ -49,8 +49,10 @@ MIN_RELEVANCE_GRADE = 0.5
 """Threshold for the LLM relevance judge. The keyword filter is regex-only and
 can't tell "I love local AI" from "I hate local AI" — the LLM sees context
 and rules out hostile/off-topic threads. Below this we skip without queuing.
-Same skipped-as-pass behavior as the Content grader: if the relevance model
-is unavailable we fall through to keyword-only behavior."""
+The scheduled Reddit loop (reddit_outreach.RedditOutreachLoop) skips on the
+same bar. When the relevance model is unavailable, recon still queues the
+candidate on its keyword match; the loop still drafts, marked relevance
+unchecked, which holds an unsupervised draft for approval."""
 
 
 def topic_matches_text(text: str, topic_filters: Optional[list[str]]) -> bool:
