@@ -264,6 +264,23 @@ def test_topic_matches_text_helpers():
     assert prefer_subreddit_for_topics(["LocalLLaMA"], ["gardening"]) is None
 
 
+@pytest.mark.parametrize("text, topics, expected", [
+    ("how to start", ["art"], False),
+    ("AI art tools", ["art"], True),
+    ("running it locally", ["local"], False),
+    ("local models only", ["local"], True),
+    ("best GPUs for this", ["gpu"], True),
+    ("stable  diffusion on a laptop", ["stable diffusion"], True),
+    ("the artist's notebook", ["art workflows"], False),
+    ("my comfyui workflows broke", ["ComfyUI workflows"], True),
+])
+def test_topic_matches_text_matches_whole_words(text, topics, expected):
+    """A topic or token inside a longer word ("art" in "start") is no match."""
+    from backend.services.social_outreach.recon import topic_matches_text
+
+    assert topic_matches_text(text, topics) is expected
+
+
 def test_scout_reddit_topic_filters_skip_off_topic(app):
     """NL topic_filters keep on-topic threads and skip others after relevance."""
     on_topic = RedditThread(

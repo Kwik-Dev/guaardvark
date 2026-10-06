@@ -66,12 +66,24 @@ def judged_unfit(relevance: dict) -> bool:
     return verdict == "skip" or relevance.get("grade", 0.0) < MIN_RELEVANCE_GRADE
 
 
+def _whole_word_in(term: str, blob: str) -> bool:
+    """True when ``term`` occurs in ``blob`` as a whole word or phrase: not
+    inside a longer word ("art" is not in "start"), a plural "s" allowed."""
+    words = [re.escape(w) for w in term.split()]
+    if not words:
+        return False
+    pattern = r"(?<![a-z0-9])" + r"\s+".join(words) + r"s?(?![a-z0-9])"
+    return re.search(pattern, blob) is not None
+
+
 def topic_matches_text(text: str, topic_filters: Optional[list[str]]) -> bool:
-    """True when no filters are set, or any topic/token appears in ``text``.
+    """True when no filters are set, or any topic, or any 3+ letter token of
+    one, appears in ``text`` as a whole word.
 
     Used so NL phrases like "market on reddit about ComfyUI" actually constrain
     which hot threads become candidates (after the structural RELEVANCE_KEYWORDS
-    match). Empty/None filters → pass-through (legacy behavior).
+    match). A cheap pre-filter; the thread-fit judge decides. Empty/None
+    filters → pass-through (legacy behavior).
     """
     if not topic_filters:
         return True
@@ -82,10 +94,10 @@ def topic_matches_text(text: str, topic_filters: Optional[list[str]]) -> bool:
         t = (topic or "").strip().lower()
         if not t:
             continue
-        if t in blob:
+        if _whole_word_in(t, blob):
             return True
         for tok in re.split(r"[\s\-/_,]+", t):
-            if len(tok) >= 3 and tok in blob:
+            if len(tok) >= 3 and _whole_word_in(tok, blob):
                 return True
     return False
 
