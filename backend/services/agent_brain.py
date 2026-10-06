@@ -6,7 +6,9 @@ Tier 1 (Reflexes):     <100ms, 0 LLM calls — pattern-matched direct actions
 Tier 2 (Instinct):     1-3s,   1 LLM call  — single pre-warmed shot
 Tier 3 (Deliberation): 5-30s,  3-10 calls  — full ReACT loop
 
-Every message enters at Tier 1 and escalates only if needed.
+Every message enters at Tier 1; a reflex that fails falls through to Tier 2.
+Tier 3 is chosen up front for multi-step requests (_needs_deliberation); a
+Tier 2 reply is not escalated after it has been sent.
 """
 
 import json
