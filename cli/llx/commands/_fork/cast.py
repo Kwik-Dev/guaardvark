@@ -136,13 +136,22 @@ def cast_plan(
 @app.command("generate")
 def cast_generate(
     subject_id: int = typer.Argument(..., help="Subject id"),
-    count: int = typer.Option(None, "--count", "-n", help="How many samples"),
+    count: int | None = typer.Option(None, "--count", "-n", help="How many samples: 16 or 32"),
     server: str = typer.Option(None, "--server", "-s"),
     json_out: bool = typer.Option(False, "--json", "-j"),
 ):
-    """Generate samples. Queues GPU work through the backend's own gate."""
+    """Generate samples. Queues GPU work through the backend's own gate.
+
+    `--count` is 16 or 32 (a reference sheet needs 16 so every angle, including
+    profile right, appears); omitted, the backend plans its own default.
+    """
     json_out = json_mode(json_out)
-    body = {"count": count} if count else {}
+    # The route reads `n`, not `count`, and rejects anything but 16/32. Checked here
+    # too so a typo is a usage error (exit 2) instead of a 400 that reads like a fault.
+    if count is not None and count not in (16, 32):
+        output.print_error(f"--count must be 16 or 32, got {count}.", code="BAD_ARGUMENT")
+        raise typer.Exit(2)
+    body = {"n": count} if count is not None else {}
     try:
         data = get_client(resolve_server(server)).post(f"{BASE}/subjects/{subject_id}/generate", json=body)
     except LlxError as exc:
