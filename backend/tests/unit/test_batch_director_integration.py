@@ -13,6 +13,7 @@ the batch path stopped using when the Director layer was unified on
 from types import SimpleNamespace
 
 from backend.services import media_director as md
+from backend.services import video_model_registry as vmr
 from backend.services.batch_video_generator import (
     BatchVideoGenerator,
     BatchVideoRequest,
@@ -24,7 +25,8 @@ def test_to_i2v_model_mapping():
     assert BatchVideoGenerator._to_i2v_model("wan22-14b") == "wan22-14b-i2v"
     assert BatchVideoGenerator._to_i2v_model("cogvideox-5b") == "cogvideox-5b-i2v"
     assert BatchVideoGenerator._to_i2v_model("wan22-14b-i2v") == "wan22-14b-i2v"  # already I2V
-    assert BatchVideoGenerator._to_i2v_model(None) == "wan22-14b-i2v"            # safe default
+    # No model: the registry's default first-frame model (the 16 GB-native Wan 5B TI2V).
+    assert BatchVideoGenerator._to_i2v_model(None) == vmr.DEFAULT_I2V_MODEL
 
 
 def _req(items, **kw):
