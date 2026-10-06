@@ -1003,9 +1003,12 @@ class SelfImprovementService:
 
         # Call LLM to extract the insight
         try:
-            from backend.utils.llm_service import run_llm_chat_prompt
+            from backend.utils.llm_service import is_llm_failure_reply, run_llm_chat_prompt
             prompt = self._DISTILL_PROMPT.format(task=task, steps=formatted_steps)
             insight = run_llm_chat_prompt(prompt)
+            if is_llm_failure_reply(insight):
+                logger.warning(f"Distillation skipped: the model call failed ({insight.strip()})")
+                return
             if not insight or len(insight.strip()) < 10:
                 logger.warning("Distillation returned empty/short result, skipping")
                 return

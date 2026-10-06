@@ -38,6 +38,19 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# What run_llm_chat_prompt returns in place of a reply when the call fails.
+# They are not model output: a caller that stores or acts on the reply checks
+# is_llm_failure_reply() before using it.
+LLM_UNAVAILABLE_REPLY = "[LLM unavailable]"
+LLM_ERROR_REPLY = "[LLM error occurred.]"
+LLM_NO_RESPONSE_REPLY = "[The model returned no response.]"
+LLM_FAILURE_REPLIES = frozenset({LLM_UNAVAILABLE_REPLY, LLM_ERROR_REPLY, LLM_NO_RESPONSE_REPLY})
+
+
+def is_llm_failure_reply(text) -> bool:
+    """True when ``text`` is one of run_llm_chat_prompt's failure replies."""
+    return isinstance(text, str) and text.strip() in LLM_FAILURE_REPLIES
+
 
 def _safe_content(message) -> Optional[str]:
     """Extract content from a LlamaIndex ChatMessage, handling multi-block (thinking) models."""
@@ -255,12 +268,12 @@ def run_llm_chat_prompt(
         logger.critical(
             "LlamaIndex ChatMessage/MessageRole classes not available. Returning placeholder text."
         )
-        return "[The model returned no response.]"
+        return LLM_NO_RESPONSE_REPLY
 
     llm = llm_instance or get_llm_instance()
     if not llm:
         logger.error("LLM instance not available for run_llm_chat_prompt.")
-        return "[LLM unavailable]"
+        return LLM_UNAVAILABLE_REPLY
 
     if LLM and not isinstance(llm, LLM):
         logger.warning("Configured LLM does not inherit from expected base class LLM.")
@@ -297,14 +310,14 @@ def run_llm_chat_prompt(
             e,
             exc_info=True,
         )
-        return "[LLM error occurred.]"
+        return LLM_ERROR_REPLY
 
     if content is None:
         logger.warning(
             "LLM direct chat response message content is None (debug_id=%s).",
             debug_id,
         )
-        return "[The model returned no response.]"
+        return LLM_NO_RESPONSE_REPLY
 
     content = content.strip()
     if not content:
@@ -312,7 +325,7 @@ def run_llm_chat_prompt(
             "LLM direct chat response was an empty string (debug_id=%s).",
             debug_id,
         )
-        return "[The model returned no response.]"
+        return LLM_NO_RESPONSE_REPLY
 
     logger.info(
         "LLM direct chat response received (debug_id=%s, length=%d).",

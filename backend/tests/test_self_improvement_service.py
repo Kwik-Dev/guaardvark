@@ -270,6 +270,54 @@ class TestScheduledAndReactiveRunHonesty:
         assert self._learnings() == 0
 
 
+class TestDistillationSkipsFailedModelCalls:
+    """A failed model call's placeholder reply is never written as a learned strategy."""
+
+    SECTION = (
+        "# Self knowledge\n\n"
+        "<!-- AUTO-DISTILLED START -->\n"
+        "### Learned Strategies (auto-distilled from successful sessions)\n\n"
+        "- **[2026-01-01, m]** Wait for the dialog before typing.\n\n"
+        "<!-- AUTO-DISTILLED END -->\n"
+    )
+    STEPS = [{"action_type": "click", "target": "Save", "failed": True},
+             {"action_type": "click", "target": "Save button"}]
+
+    @pytest.fixture
+    def knowledge(self, tmp_path):
+        path = tmp_path / "data" / "agent" / "self_knowledge.md"
+        path.parent.mkdir(parents=True)
+        path.write_text(self.SECTION, encoding="utf-8")
+        with patch("backend.config.GUAARDVARK_ROOT", str(tmp_path)), \
+             patch("backend.services.inbound_guard_service.is_on", return_value=False):
+            yield path
+
+    @staticmethod
+    def _service():
+        from backend.services.self_improvement_service import SelfImprovementService
+        return object.__new__(SelfImprovementService)
+
+    @pytest.mark.parametrize("reply_name", [
+        "LLM_UNAVAILABLE_REPLY", "LLM_ERROR_REPLY", "LLM_NO_RESPONSE_REPLY"])
+    def test_failure_reply_leaves_self_knowledge_unchanged(self, knowledge, reply_name):
+        from backend.utils import llm_service
+        reply = getattr(llm_service, reply_name)
+        with patch("backend.utils.llm_service.run_llm_chat_prompt", return_value=reply):
+            self._service().distill_task_learning("save the file", self.STEPS, "m")
+        assert knowledge.read_text(encoding="utf-8") == self.SECTION
+
+    def test_unavailable_sentinel_text_is_the_one_the_service_returns(self, knowledge):
+        with patch("backend.utils.llm_service.run_llm_chat_prompt", return_value="[LLM unavailable]"):
+            self._service().distill_task_learning("save the file", self.STEPS, "m")
+        assert "[LLM" not in knowledge.read_text(encoding="utf-8")
+
+    def test_a_real_insight_is_still_written(self, knowledge):
+        insight = "Click the labelled Save button rather than the toolbar icon."
+        with patch("backend.utils.llm_service.run_llm_chat_prompt", return_value=insight):
+            self._service().distill_task_learning("save the file", self.STEPS, "m")
+        assert insight in knowledge.read_text(encoding="utf-8")
+
+
 class TestPendingFixDisplayPath:
     def test_to_dict_path_is_repo_relative(self, tmp_path):
         from backend.models import PendingFix
