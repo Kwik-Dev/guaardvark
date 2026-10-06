@@ -61,10 +61,12 @@ def compute_basic_video_stats(video_path: str | Path) -> Dict[str, Any]:
     return stats
 
 
-def _histogram_vec(path: str, bins: int = 16):
+def _histogram_vec(image, bins: int = 16):
+    """Unit-length RGB histogram (``bins`` per channel) of an image path or PIL image."""
     from PIL import Image
     import numpy as np
-    img = Image.open(path).convert("RGB").resize((64, 64))
+    img = image if isinstance(image, Image.Image) else Image.open(image)
+    img = img.convert("RGB").resize((64, 64))
     arr = np.asarray(img, dtype=np.float32)
     hist = []
     for c in range(3):
@@ -73,6 +75,66 @@ def _histogram_vec(path: str, bins: int = 16):
     v = np.concatenate(hist)
     n = float(np.linalg.norm(v)) or 1.0
     return v / n
+
+
+COLOUR_MATCH_LABEL = "colour match"
+
+
+def _clip_frame_count(video_path: str | Path) -> int:
+    """Frames the container declares, or a decode count when it declares none."""
+    import av
+    with av.open(str(video_path)) as container:
+        stream = container.streams.video[0]
+        declared = int(stream.frames or 0)
+        if declared:
+            return declared
+        return sum(1 for _ in container.decode(stream))
+
+
+def _clip_frame(video_path: str | Path, index: int):
+    """Frame ``index`` of a clip as a PIL image, or None past the end."""
+    import av
+    with av.open(str(video_path)) as container:
+        stream = container.streams.video[0]
+        for i, frame in enumerate(container.decode(stream)):
+            if i == index:
+                return frame.to_image()
+    return None
+
+
+def colour_match(
+    reference_path: str | Path, video_path: str | Path, *, frame_count: Optional[int] = None
+) -> Dict[str, Any]:
+    """How closely the middle frame of a clip keeps a still's colours.
+
+    Cosine of the two images' RGB histograms (``_histogram_vec``). It compares
+    palettes and says nothing about who or what is in the frame, so the record
+    carries ``label`` "colour match". The frame is the middle of the clip: an
+    image-to-video clip starts from its keyframe, so an early frame matches by
+    construction and drift only shows later. ``frame_count`` is the decoded
+    length when the caller has it. Never raises; ``score`` is None with a
+    ``reason`` when the match could not run.
+    """
+    out: Dict[str, Any] = {
+        "label": COLOUR_MATCH_LABEL, "method": "rgb_histogram", "score": None,
+        "frame_index": None, "frames": None, "reason": None,
+    }
+    try:
+        import numpy as np
+        total = int(frame_count or 0) or _clip_frame_count(video_path)
+        if total <= 0:
+            out["reason"] = "the clip has no frames"
+            return out
+        index = total // 2
+        frame = _clip_frame(video_path, index)
+        if frame is None:
+            out["reason"] = f"frame {index} of {total} could not be decoded"
+            return out
+        cosine = float(np.dot(_histogram_vec(frame), _histogram_vec(str(reference_path))))
+        out.update(score=round(max(0.0, min(1.0, cosine)), 4), frame_index=index, frames=total)
+    except Exception as e:  # noqa: BLE001 — a measurement that cannot run is a reason
+        out["reason"] = f"the colour match could not run ({str(e)[:160]})"
+    return out
 
 
 def score_identity_preservation(
@@ -84,9 +146,9 @@ def score_identity_preservation(
 ) -> Dict[str, Any]:
     """Identity score between training refs and a generated candidate.
 
-    ``hist`` (default): mean cosine similarity of RGB histograms. Cheap, and a
-    colour-palette proxy rather than an identity measure — enough to tell a clip
-    apart from its own keyframe, which is all batch_video_generator asks of it.
+    ``hist`` (default): mean cosine similarity of RGB histograms. It measures
+    palette, not identity, and its result carries ``label`` "colour match" to
+    say so. Clips are compared with ``colour_match``, which also picks the frame.
 
     ``size``: ratio of file sizes. Kept for callers that still want it. It carries
     no identity signal, and nothing on the Cast smoke path may use it.
@@ -127,9 +189,9 @@ def score_identity_preservation(
                         pass
                 if sims:
                     score = float(sum(sims) / len(sims))
-                    # Cosine of normalized hist is typically ~0.7–0.99 for same subject.
                     result["score"] = max(0.0, min(1.0, score))
                     result["method"] = "hist"
+                    result["label"] = COLOUR_MATCH_LABEL
                     result["details"] = {
                         "n_refs": len(sims),
                         "mean_cosine": round(score, 4),
@@ -138,7 +200,7 @@ def score_identity_preservation(
                     }
                     return result
             except Exception as e:
-                logger.debug("hist identity score failed, falling back to size: %s", e)
+                logger.debug("colour histogram failed, falling back to size: %s", e)
                 method = "size"
 
         if method == "size":
@@ -528,6 +590,12 @@ QUALITY_THRESHOLDS: Dict[str, Dict[str, Any]] = {
         "Models move a length onto their frame grid (4n+1, 8n+1, 17k+5), up or down, so an "
         "expected count is allowed one grid step either way, multiplied by the RIFE factor.")},
     "samples": {"value": 8, "why": "Every Nth frame such that about 8 are checked, plus the first and last."},
+    "colour_match_floor": {"value": 0.5, "why": (
+        "Histogram cosine between a cinematic clip's keyframe and its middle frame (colour_match). "
+        "Frames of one scene usually sit between 0.7 and 0.99, so under 0.5 the palette has moved "
+        "well away from the keyframe. It says nothing about who is in the shot. Uncalibrated; measured on "
+        "a frame from the first second it would almost never fire, since an image-to-video clip "
+        "starts from its keyframe.")},
 }
 
 _FLAG_TEXT = {
@@ -542,6 +610,7 @@ _FLAG_TEXT = {
     "frozen": "frozen video (frames do not change)",
     "wrong_size": "wrong frame size",
     "wrong_frame_count": "wrong number of frames",
+    "low_colour_match": "colours drift from the keyframe",
 }
 
 

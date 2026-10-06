@@ -440,7 +440,8 @@ class BatchVideoGenerator:
             from backend.services.video_consistency_metrics import (
                 compute_basic_video_stats,
                 inspect_video_frames,
-                score_identity_preservation,
+                colour_match,
+                QUALITY_THRESHOLDS,
                 review_video_quality,
                 not_reviewed,
                 annotate_asset,
@@ -468,39 +469,21 @@ class BatchVideoGenerator:
             logger.warning("frame quality check skipped for %s: %s", video_path, e)
 
         if cinematic and keyframe_path and Path(keyframe_path).exists():
-            try:
-                # Sample a mid-frame via identity score against the keyframe still.
-                # score_identity_preservation expects image refs; extract one frame.
-                import subprocess
-                import tempfile
-                with tempfile.TemporaryDirectory() as td:
-                    frame_path = str(Path(td) / "mid.jpg")
-                    subprocess.run(
-                        [
-                            "ffmpeg", "-y", "-loglevel", "error",
-                            "-ss", "0.5", "-i", str(video_path),
-                            "-frames:v", "1", frame_path,
-                        ],
-                        capture_output=True,
-                        timeout=30,
-                    )
-                    if Path(frame_path).exists():
-                        identity = score_identity_preservation(
-                            [keyframe_path], frame_path, method="hist"
-                        )
-                        quality["identity"] = identity
-                        score = float(identity.get("score") or 0)
-                        if score < 0.5:
-                            quality["flagged"] = True
-                            quality["flag_reasons"].append(
-                                f"low_identity_score:{score:.2f}"
-                            )
-                            quality["flags"].append({
-                                "code": "low_identity_score",
-                                "message": f"the clip drifts from its keyframe: identity score {score:.2f}",
-                            })
-            except Exception as e:
-                logger.debug("identity scoring skipped: %s", e)
+            # The keyframe's palette against the middle frame: a colour match,
+            # not a check of who is in the shot.
+            match = colour_match(
+                keyframe_path, video_path, frame_count=(quality.get("frames") or {}).get("frames"),
+            )
+            quality["colour_match"] = match
+            score = match.get("score")
+            if isinstance(score, (int, float)) and score < QUALITY_THRESHOLDS["colour_match_floor"]["value"]:
+                quality["flagged"] = True
+                quality["flag_reasons"].append(f"low_colour_match:{score:.2f}")
+                quality["flags"].append({
+                    "code": "low_colour_match",
+                    "message": (f"colours drift from the keyframe: colour match {score:.2f} "
+                                f"at frame {match['frame_index']} of {match['frames']}"),
+                })
 
         # VLM review for high-consistency / cinematic runs. A review that did not
         # produce a score is recorded as "not reviewed" with its reason, never

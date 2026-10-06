@@ -74,6 +74,7 @@ import {
 } from "../constants/videoGeneratorPresets";
 import QualityFlagsPill from "../components/videogen/QualityFlagsPill";
 import VlmReviewPill from "../components/videogen/VlmReviewPill";
+import ColourMatchPill from "../components/videogen/ColourMatchPill";
 import RenderFailureNote from "../components/videogen/RenderFailureNote";
 import { refusalText } from "../utils/renderFailure";
 import VideoGenEffectiveSettings from "../components/videogen/VideoGenEffectiveSettings";
@@ -2634,13 +2635,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                               <Chip label={`${res.frame_paths.length}f`} size="small" variant="outlined" />
                             )}
                             <VlmReviewPill review={res.metadata?.quality?.vlm_review} />
-                            {typeof res.metadata?.quality?.identity?.score === "number" && (
-                              <Chip
-                                label={`ID ${Math.round(res.metadata.quality.identity.score * 100)}%`}
-                                size="small"
-                                variant="outlined"
-                              />
-                            )}
+                            <ColourMatchPill quality={res.metadata?.quality} />
                             <QualityFlagsPill quality={res.metadata?.quality} />
                           </Stack>
                           {!res.success && <RenderFailureNote failure={res.failure} error={res.error} />}

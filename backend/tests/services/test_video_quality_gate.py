@@ -286,3 +286,41 @@ def test_status_text_says_when_a_clip_was_not_reviewed(monkeypatch):
     tool._context = {"transport": "mcp"}
     out = tool.execute(batch_id="VideoBatch_x")
     assert "Vision review: not reviewed — the review model minicpm-v4.5:latest is not installed" in out.output
+
+
+# ── The keyframe colour match ────────────────────────────────────────────────
+
+def _keyframe(tmp_path, rgb):
+    from PIL import Image
+    path = tmp_path / "keyframe.png"
+    Image.fromarray(rgb).save(path)
+    return str(path)
+
+
+def test_colour_match_reads_the_middle_frame_and_says_what_it_is(made, tmp_path):
+    match = vcm.colour_match(_keyframe(tmp_path, clips._scene(0)), made["clean"])
+    assert match["label"] == "colour match"
+    assert match["frame_index"] == clips.FRAMES // 2 and match["frames"] == clips.FRAMES
+    assert 0.5 < match["score"] <= 1.0
+
+
+def test_a_cinematic_clip_records_a_colour_match_not_an_identity_score(made, tmp_path, monkeypatch):
+    monkeypatch.setattr(vcm, "review_video_quality", lambda *a, **k: vcm.not_reviewed("no_frames"))
+    quality = _attach(made, keyframe_path=_keyframe(tmp_path, clips._scene(0)))
+    assert "identity" not in quality
+    assert quality["colour_match"]["label"] == "colour match"
+    assert quality["colour_match"]["frame_index"] == clips.FRAMES // 2
+    assert not any(code.startswith("low_colour_match") for code in quality["flag_reasons"])
+
+
+def test_a_clip_whose_palette_left_the_keyframe_is_flagged_as_colour_drift(made, tmp_path, monkeypatch):
+    import numpy as np
+
+    monkeypatch.setattr(vcm, "review_video_quality", lambda *a, **k: vcm.not_reviewed("no_frames"))
+    magenta = np.zeros((clips.HEIGHT, clips.WIDTH, 3), dtype=np.uint8)
+    magenta[..., 0] = magenta[..., 2] = 255
+    quality = _attach(made, keyframe_path=_keyframe(tmp_path, magenta))
+    flag = next(f for f in quality["flags"] if f["code"] == "low_colour_match")
+    assert flag["message"].startswith("colours drift from the keyframe: colour match")
+    assert f"at frame {clips.FRAMES // 2} of {clips.FRAMES}" in flag["message"]
+    assert "identity" not in flag["message"]
