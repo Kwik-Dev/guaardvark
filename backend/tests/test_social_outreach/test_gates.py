@@ -71,6 +71,23 @@ def test_label(ext, label):
     assert gates.independent_check_label(ext) == label
 
 
+# ---- self-shares ---------------------------------------------------------------------
+
+@pytest.mark.parametrize("ext", [PASSED, FAILED, UNCHECKED])
+def test_an_unsupervised_share_always_waits_for_a_person(app, ext):
+    assert gates.independent_ok(ext, supervised=False, action="share") == (False, "share_needs_person")
+
+
+def test_a_share_waits_even_when_the_check_is_switched_off(app):
+    _set("outreach_require_independent_check", "false")
+
+    assert gates.independent_ok(UNCHECKED, supervised=False, action="share") == (False, "share_needs_person")
+
+
+def test_a_supervised_share_goes_to_a_person(app):
+    assert gates.independent_ok(UNCHECKED, supervised=True, action="share") == (True, "human_review")
+
+
 # ---- the setting ---------------------------------------------------------------------
 
 def test_required_by_default(app):

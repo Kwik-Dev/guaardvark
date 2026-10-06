@@ -488,3 +488,24 @@ def test_unsupervised_reply_is_held_because_replies_are_not_graded(app):
         assert outcome["status"] == "drafted"
         assert outcome["hold_reason"] == "no_independent_check"
         assert extra["external_reason"] == "skip_for_reply_action"
+
+
+@pytest.mark.parametrize("supervised, hold", [(False, "share_needs_person"), (True, None)])
+def test_a_share_candidate_is_not_graded_and_waits_for_a_person(app, supervised, hold):
+    """A self-share has no thread for the rubric, so the grader is not asked and
+    the share waits as drafted, supervised or not."""
+    with app.app_context():
+        row = _make_candidate(
+            payload={"stage": "recon", "target": "r/SideProject", "link_url": "https://example.com/x"},
+            target_url="https://www.reddit.com/r/SideProject",
+            action="share",
+        )
+        outcome, extra, grader = _draft_with_gates(row.id, EXT_PASS, supervised=supervised)
+
+        grader.assert_not_called()
+        assert outcome["status"] == "drafted"
+        assert outcome["would_post"] is False
+        assert outcome["hold_reason"] == hold
+        assert extra["external_reason"] == "share_not_graded"
+        db.session.expire_all()
+        assert SocialOutreachLog.query.get(row.id).status == "drafted"

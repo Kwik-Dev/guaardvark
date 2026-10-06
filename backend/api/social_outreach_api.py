@@ -290,10 +290,13 @@ def draft_comment():
     gates.independent_check is passed, failed or unavailable: whether the
     second-opinion grader ran on this draft and what it concluded. With
     supervised mode off, only a passed check lets the draft post on its own.
+    A share is never graded (there is no thread for the rubric) and is always
+    held for a person.
     """
     body = request.get_json(silent=True) or {}
     platform = body.get("platform", "unknown")
     mode = body.get("mode", "comment")
+    action = "comment" if mode == "comment" else "share"
     task_id = body.get("task_id")
     target_url = body.get("target_url")
     target_thread_id = body.get("target_thread_id")
@@ -303,7 +306,6 @@ def draft_comment():
             "target": body.get("share_target") or "(unspecified)",
             "link_url": body.get("share_link") or persona.SITE_URL,
         }
-        grading_context = f"NEW POST to {context['target']}, sharing {context['link_url']}"
     else:
         thread_context = body.get("thread_context", "")
         if not thread_context:
@@ -312,7 +314,6 @@ def draft_comment():
             "thread_context": thread_context,
             "url": target_url,
         }
-        grading_context = thread_context
 
     result = persona.draft_outreach_text(
         platform=platform,
@@ -333,12 +334,15 @@ def draft_comment():
     has_draft = bool(draft_text.strip())
 
     # Second opinion from a different model, blind to the self-grade. An empty
-    # draft cannot post, so it is not sent to the grader.
-    if has_draft:
-        ext = external_grader.grade_draft_externally(draft_text, grading_context)
+    # draft cannot post, so it is not sent to the grader. The rubric judges a
+    # reply to a thread; a share has none, so it is not graded and gates holds it.
+    if action == "share":
+        ext = {"grade": 0.0, "checked": False, "skipped": True, "model": None, "reason": "share_not_graded"}
+    elif has_draft:
+        ext = external_grader.grade_draft_externally(draft_text, context["thread_context"])
     else:
         ext = {"grade": 0.0, "checked": False, "skipped": True, "model": None, "reason": "empty_draft"}
-    independent_pass, independent_reason = gates.independent_ok(ext, supervised=supervised)
+    independent_pass, independent_reason = gates.independent_ok(ext, supervised=supervised, action=action)
     independent_check = gates.independent_check_label(ext)
     hold_reason = None if independent_pass else independent_reason
 
@@ -352,7 +356,7 @@ def draft_comment():
 
     audit_id = audit.log_outreach_event(
         platform=platform,
-        action="comment" if mode == "comment" else "share",
+        action=action,
         target_url=target_url,
         target_thread_id=target_thread_id,
         draft_text=draft_text,

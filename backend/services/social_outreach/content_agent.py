@@ -196,8 +196,11 @@ class ContentAgent:
         # the reply is good. We keep the self-grade threshold (MIN_REPLY_GRADE).
         # With no independent check, an unsupervised reply waits for approval
         # (gates.independent_ok) rather than posting on its self-grade.
+        # A share has no thread for the rubric at all; gates holds every share.
         if row.action == "reply":
             ext = {"checked": False, "skipped": True, "reason": "skip_for_reply_action"}
+        elif row.action == "share":
+            ext = {"checked": False, "skipped": True, "reason": "share_not_graded"}
         else:
             # Second-opinion grade — different model family, rubric-based,
             # blind to the self-grade. Drafter is biased toward its own
@@ -263,7 +266,9 @@ class ContentAgent:
         enabled = kill_switch.is_enabled()
         supervised = kill_switch.is_supervised()
         cadence_ok, cadence_reason = kill_switch.cadence_allows_post(row.platform)
-        independent_pass, independent_reason = gates.independent_ok(ext, supervised=supervised)
+        independent_pass, independent_reason = gates.independent_ok(
+            ext, supervised=supervised, action=row.action,
+        )
         would_post = (
             enabled
             and not supervised

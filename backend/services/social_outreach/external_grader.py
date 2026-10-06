@@ -81,6 +81,10 @@ def _resolve_grader_model() -> Optional[str]:
 def grade_draft_externally(draft_text: str, thread_context: str) -> dict:
     """Score a draft against the rubric using a different-family LLM.
 
+    For replies to a thread only. A self-share has no thread to engage with,
+    so callers do not grade it; gates.independent_ok holds every share for a
+    person instead.
+
     Returns:
         {
             "grade": float in [0, 1],

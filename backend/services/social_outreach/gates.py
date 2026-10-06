@@ -7,6 +7,9 @@ check (external_grader) actually ran and passed. When that check could not
 run, an unsupervised draft waits in the queue for approval instead of posting
 on its self-grade. Supervised drafts wait for a person either way.
 
+A self-share has no thread for the rubric to judge, so it is never graded and
+always waits for a person, supervised or not.
+
 Used by content_agent (Recon candidates) and POST /draft-comment (Reddit loop,
 self-share, Discord cog, Outreach page).
 """
@@ -34,18 +37,26 @@ def independent_check_label(ext: dict) -> str:
     return "passed" if float(ext.get("grade") or 0.0) >= MIN_EXTERNAL_GRADE else "failed"
 
 
-def independent_ok(ext: dict, *, supervised: bool) -> tuple[bool, str]:
+def independent_ok(ext: dict, *, supervised: bool, action: str = "comment") -> tuple[bool, str]:
     """Whether the independent check lets this draft go forward, and why.
+
+    ``action`` is the audit row's action; a "share" is decided before ``ext``
+    is read, because no check applies to it.
 
     Returns one of:
       (True,  "passed")               checked, grade at or above MIN_EXTERNAL_GRADE
       (False, "failed")               checked, grade below it
-      (True,  "human_review")         unchecked, supervised: a person approves it
+      (True,  "human_review")         unchecked, supervised: a person approves it;
+                                      also every supervised share
       (False, "no_independent_check") unchecked, unsupervised: hold for approval
       (True,  "check_not_required")   unchecked, unsupervised, and the
                                       outreach_require_independent_check
                                       setting is switched off
+      (False, "share_needs_person")   a share, unsupervised: hold for approval
+                                      whatever that setting says
     """
+    if action == "share":
+        return (True, "human_review") if supervised else (False, "share_needs_person")
     label = independent_check_label(ext)
     if label != "unavailable":
         return label == "passed", label
