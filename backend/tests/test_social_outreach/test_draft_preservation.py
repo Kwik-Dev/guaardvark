@@ -102,6 +102,41 @@ def test_run_one_pass_is_draft_only_never_servo_posts(app):
         assert SocialOutreachLog.query.get(rid).draft_text == "Test draft text"
 
 
+def test_run_one_pass_drafts_at_most_the_pass_cap(app):
+    """Five relevant hot threads get MAX_THREADS_PER_PASS (2) draft calls, not five."""
+    from unittest.mock import MagicMock, patch
+    from backend.services.social_outreach.reddit_outreach import (
+        MAX_THREADS_PER_PASS,
+        RedditOutreachLoop,
+    )
+
+    threads = []
+    for i in range(5):
+        thread = MagicMock()
+        thread.id = f"t{i}"
+        thread.permalink = f"https://reddit.com/r/test/comments/t{i}"
+        threads.append(thread)
+
+    with app.app_context(), \
+         patch("backend.services.social_outreach.reddit_outreach.fetch_subreddit_rules", return_value=[]), \
+         patch("backend.services.social_outreach.reddit_outreach.fetch_hot_threads", return_value=threads), \
+         patch("backend.services.social_outreach.reddit_outreach.fetch_thread_comments", return_value=[]), \
+         patch("backend.services.social_outreach.reddit_outreach.thread_is_relevant", return_value="test_hint"), \
+         patch("backend.services.social_outreach.reddit_outreach.external_grader.score_thread_relevance",
+               return_value={"grade": 0.9, "skipped": False, "reason": "fits"}), \
+         patch("backend.services.social_outreach.reddit_outreach.draft_via_backend",
+               return_value={"audit_id": 1, "would_post": False, "draft": "d"}) as mock_draft, \
+         patch("backend.services.social_outreach.reddit_outreach.post_comment_via_servo") as mock_post, \
+         patch("backend.services.social_outreach.reddit_outreach.kill_switch.is_enabled", return_value=True):
+        report = RedditOutreachLoop().run_one_pass("test_subreddit")
+
+    assert MAX_THREADS_PER_PASS == 2
+    assert mock_draft.call_count == 2
+    assert report["drafted"] == 2
+    assert [c.args[0].id for c in mock_draft.call_args_list] == ["t0", "t1"]
+    assert mock_post.call_count == 0
+
+
 def test_self_share_loop_is_draft_only_never_servo_posts(app):
     """Self-share loop drafts only — never calls servo submit."""
     from unittest.mock import patch

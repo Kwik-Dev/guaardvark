@@ -81,6 +81,9 @@ const PLATFORM_OPTIONS = [
   { value: "internal", label: "Internal note", auto: false },
 ];
 
+// Terminal statuses the History panel lists ("all" shows these together).
+const HISTORY_STATUSES = ["posted", "aborted", "rejected", "unsupported"];
+
 const CHAT_EXAMPLES = [
   "comment on youtube videos about Ollama",
   "market Guaardvark on reddit about ComfyUI",
@@ -183,12 +186,12 @@ const OutreachPage = () => {
     }
   }, []);
 
-  // History: terminal-state audit rows (posted/aborted/rejected). Read-only —
+  // History: terminal-state audit rows (HISTORY_STATUSES). Read-only —
   // gives the user a click-through receipt for every comment that actually
   // landed (or didn't) so they can verify or audit afterward. The queue panel
   // above only shows status='drafted'; this fills the gap on the other end.
   const [history, setHistory] = useState([]);
-  const [historyFilter, setHistoryFilter] = useState("posted");  // 'posted' | 'aborted' | 'rejected' | 'all'
+  const [historyFilter, setHistoryFilter] = useState("posted");  // one of HISTORY_STATUSES, or 'all'
   const [loadingHistory, setLoadingHistory] = useState(false);
 
   const fetchHistory = useCallback(async () => {
@@ -1093,7 +1096,7 @@ const OutreachPage = () => {
           <Typography variant="subtitle2" sx={{ flex: 1 }}>
             History
           </Typography>
-          {["posted", "aborted", "rejected", "all"].map((f) => (
+          {[...HISTORY_STATUSES, "all"].map((f) => (
             <Chip
               key={f}
               size="small"
@@ -1114,12 +1117,12 @@ const OutreachPage = () => {
           <CircularProgress size={20} />
         ) : (() => {
           const filtered = historyFilter === "all"
-            ? history.filter((r) => ["posted", "aborted", "rejected"].includes(r.status))
+            ? history.filter((r) => HISTORY_STATUSES.includes(r.status))
             : history.filter((r) => r.status === historyFilter);
           if (filtered.length === 0) {
             return (
               <Typography variant="body2" color="text.secondary">
-                Nothing in this view yet. Drafts that get approved and successfully post will appear under 'posted'; servo failures land under 'aborted'; ones you reject in the queue land under 'rejected'.
+                Nothing in this view yet. Drafts that get approved and successfully post will appear under 'posted'; servo failures land under 'aborted'; ones you reject in the queue land under 'rejected'; approved drafts that nothing here can post on their platform (a reply outside YouTube, for one) land under 'unsupported'.
               </Typography>
             );
           }
@@ -1131,6 +1134,7 @@ const OutreachPage = () => {
                   const text = (row.posted_text || row.draft_text || "").trim();
                   const statusColor = row.status === "posted" ? "success"
                                     : row.status === "aborted" ? "error"
+                                    : row.status === "unsupported" ? "warning"
                                     : "default";
                   return (
                     <Box
@@ -1142,6 +1146,7 @@ const OutreachPage = () => {
                         borderLeft: 3,
                         borderColor: row.status === "posted" ? "success.main"
                                    : row.status === "aborted" ? "error.main"
+                                   : row.status === "unsupported" ? "warning.main"
                                    : "divider",
                       }}
                     >

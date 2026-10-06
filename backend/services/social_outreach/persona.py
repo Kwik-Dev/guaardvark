@@ -210,11 +210,22 @@ Return JSON: {"draft": "<reply text>", "grade": 0.0-1.0, "reason": "<one line>"}
 )
 
 
+def _pitch_sheet() -> str:
+    """PITCH.md when present; otherwise a sheet from the one-line pitch and
+    FEATURE_BLURBS, so a fresh install's drafter still reads the facts the
+    framing calls the source of truth."""
+    pitch = _load_pitch_md().strip()
+    if pitch:
+        return pitch
+    features = "\n".join(f"- {blurb}" for blurb in FEATURE_BLURBS.values())
+    return f"{GUAARDVARK_PITCH}\n\nWhat it does:\n{features}"
+
+
 def _compose_outward_facing_system() -> str:
     """Build the system message: framing + PITCH.md. Re-read on every call
     via the mtime-cached loader, so edits to PITCH.md propagate without
     restarting the worker."""
-    pitch = _load_pitch_md().strip()
+    pitch = _pitch_sheet()
     if not pitch:
         return _OUTWARD_FACING_FRAMING
     return f"{_OUTWARD_FACING_FRAMING}\n\n--- PITCH SHEET ---\n{pitch}\n"
@@ -222,7 +233,7 @@ def _compose_outward_facing_system() -> str:
 
 def _compose_reply_system() -> str:
     """Same idea as _compose_outward_facing_system but for replies-on-own-video."""
-    pitch = _load_pitch_md().strip()
+    pitch = _pitch_sheet()
     if not pitch:
         return _REPLY_FRAMING
     return f"{_REPLY_FRAMING}\n\n--- PITCH SHEET (factual reference only) ---\n{pitch}\n"
@@ -230,7 +241,7 @@ def _compose_reply_system() -> str:
 
 def _compose_share_system() -> str:
     """Same idea as _compose_outward_facing_system but for self-share posts."""
-    pitch = _load_pitch_md().strip()
+    pitch = _pitch_sheet()
     if not pitch:
         return _SHARE_FRAMING_SYSTEM
     return f"{_SHARE_FRAMING_SYSTEM}\n\n--- PITCH SHEET ---\n{pitch}\n"
@@ -374,30 +385,20 @@ def _build_user_prompt(
     platform: str,
     thread_context: str,
     target_url: Optional[str],
-    feature_hint: Optional[str],
     tone: Optional[str] = None,
     include_link: bool = False,
     link_url: Optional[str] = None,
 ) -> str:
     """Compose the user-side prompt for the LLM.
 
-    Facts about Guaardvark live in the system message (PITCH.md). This
-    side carries thread-specific context + an optional soft hint about
-    which talking point the recon agent thought was relevant. The hint
-    is annotation, not instruction — the model is free to ignore it if
-    a different point fits the thread better.
+    Facts about Guaardvark live in the system message (the pitch sheet,
+    PITCH.md); the drafter picks the talking point that fits the thread
+    from it. This side carries only the thread and the output contract.
 
     `include_link=True` asks for a natural cite of `link_url` (default
     GitHub for YouTube comments, site otherwise). Low-grade spam still
     fails the gate.
     """
-    feature = feature_hint or find_relevant_feature(thread_context)
-    hint_block = ""
-    if feature:
-        hint_block = (
-            f"\nRECON HINT (use only if it actually fits the thread; "
-            f"ignore otherwise): {feature}\n"
-        )
     tone_guide = TONE_GUIDES.get((tone or "default").lower(), "").strip()
     tone_block = f"\nTONE OVERRIDE: {tone_guide}\n" if tone_guide else ""
 
@@ -427,7 +428,7 @@ THREAD CONTEXT:
 \"\"\"
 {thread_context.strip()[:4000]}
 \"\"\"
-{hint_block}{tone_block}
+{tone_block}
 {closing_line}
 
 Respond with JSON: {{"draft": "...", "grade": 0.0-1.0, "reason": "..."}}.
@@ -517,8 +518,8 @@ def draft_outreach_text(
 ) -> dict:
     """Unified entry point for all outreach LLM calls.
 
-    Guarantees OUTWARD_FACING_SYSTEM_BLOCK + audience-aware FEATURE_BLURBS
-    are always injected. Returns parsed JSON dict with keys:
+    The system message is always the mode's framing plus the pitch sheet
+    (PITCH.md) when one is present. Returns parsed JSON dict with keys:
     - comment/draft: the text
     - grade: 0.0-1.0
     - rationale/reason: explanation
@@ -530,7 +531,9 @@ def draft_outreach_text(
             - share mode: {"target", "link_url"}
         tone: optional tone preset from TONE_GUIDES
         mode: "comment" or "share"
-        feature_hint: optional feature key override
+        feature_hint: accepted from callers that label a thread with a
+            feature key; it is not put in the prompt — the drafter chooses
+            its angle from the pitch sheet.
         llm: optional LLM callable (for testing)
         campaign: UTM campaign tag (default "v253")
         include_link: comment-mode only. When True the user prompt asks the
@@ -599,7 +602,6 @@ def draft_outreach_text(
             platform=platform,
             thread_context=thread_context,
             target_url=context.get("url"),
-            feature_hint=feature_hint,
             tone=tone,
             include_link=include_link,
             link_url=cta,

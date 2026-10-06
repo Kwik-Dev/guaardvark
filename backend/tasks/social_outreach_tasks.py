@@ -245,13 +245,26 @@ def tick_self_share(self) -> dict:
     return _with_app_context(SelfShareLoop().run_one_pass, sub, link_url)
 
 
+# What the approved-drafts tick can post, by action. Comments go to the
+# calibrated BiDi posters (Reddit, YouTube) or the general agent loop
+# (X/Twitter, Facebook); only YouTube has a reply poster; a share is a Reddit
+# link post. Platforms are compared lowercased.
+_POSTABLE_PLATFORMS = {
+    "comment": ("reddit", "youtube", "x", "twitter", "facebook"),
+    "reply": ("youtube",),
+    "share": ("reddit",),
+}
+
+
 @shared_task(name="social_outreach.tick_process_approved_drafts", bind=True)
 def tick_process_approved_drafts(self) -> dict:
     """Beat tick — process UI-approved drafts for Reddit and YouTube.
 
     Cadence is enforced here (same Redis caps as unsupervised would_post).
     At most one successful post per platform per tick; remaining approved
-    rows stay approved for a later tick.
+    rows stay approved for a later tick. A row whose action has no poster on
+    its platform (``_POSTABLE_PLATFORMS``) is moved to ``unsupported`` without
+    being claimed.
     """
     skipped = _skip_if_kill_switch_off()
     if skipped:
@@ -273,6 +286,7 @@ def tick_process_approved_drafts(self) -> dict:
         from backend.services.social_outreach.self_share import _submit_post_via_servo
         import json
         import requests
+        from sqlalchemy import func
         from backend.services.social_outreach.reddit_outreach import backend_url
         from backend.services.social_outreach.reddit_outreach import REDDIT_BASE
 
@@ -282,8 +296,7 @@ def tick_process_approved_drafts(self) -> dict:
         rows = (
             SocialOutreachLog.query
             .filter(SocialOutreachLog.status == "approved")
-            .filter(SocialOutreachLog.platform.in_(
-                ("reddit", "youtube", "x", "twitter", "facebook")))
+            .filter(func.lower(SocialOutreachLog.platform).in_(_POSTABLE_PLATFORMS["comment"]))
             .order_by(SocialOutreachLog.created_at.asc())
             .limit(20)
             .all()
@@ -296,6 +309,7 @@ def tick_process_approved_drafts(self) -> dict:
         skipped_cadence = 0
         skipped_not_approved = 0
         withdrawn = 0
+        unsupported = 0
         posted_platforms: set[str] = set()
 
         def _give_up(row_id: int, reason: str) -> None:
@@ -308,6 +322,16 @@ def tick_process_approved_drafts(self) -> dict:
 
         for row in rows:
             platform = (row.platform or "").strip().lower()
+            action = (row.action or "").strip().lower()
+            if platform not in _POSTABLE_PLATFORMS.get(action, ()):
+                if transitions.mark_unsupported(
+                    row.id, f"unsupported: no poster for action '{action}' on platform '{platform}'",
+                ):
+                    unsupported += 1
+                    logger.info(
+                        "process-approved: row %s unsupported (%s on %s)", row.id, action, platform,
+                    )
+                continue
             if platform in posted_platforms:
                 # One successful post per platform per tick — leave the rest
                 # approved for the next minute's beat.
@@ -336,7 +360,7 @@ def tick_process_approved_drafts(self) -> dict:
             # rejected after the claim.
             before_submit = transitions.submit_gate(row.id)
 
-            if row.action == "comment":
+            if action == "comment":
                 # Pipeline (Phase 2) writes UTM-tagged copy into posted_text; legacy
                 # /draft-comment rows leave posted_text NULL and the engage_with
                 # path tags inline at servo time. Prefer posted_text so we don't
@@ -347,11 +371,11 @@ def tick_process_approved_drafts(self) -> dict:
                 # posters; everything else (X/Twitter, Facebook, …) posts through
                 # the general NL agent loop — no per-platform code, driven by the
                 # grounded eye. "Adding a platform" is now "be logged into it".
-                if row.platform == "reddit":
+                if platform == "reddit":
                     success, reason = reddit_post_comment(
                         row.target_url, comment_text, before_submit=before_submit,
                     )
-                elif row.platform == "youtube":
+                elif platform == "youtube":
                     success, reason = post_youtube_comment_via_servo(
                         row.target_url, comment_text, row.task_id, before_submit=before_submit,
                     )
@@ -365,13 +389,13 @@ def tick_process_approved_drafts(self) -> dict:
                 if success:
                     record_post_via_backend(
                         row.id, row.target_url, row.target_thread_id,
-                        comment_text, row.task_id, platform=row.platform,
+                        comment_text, row.task_id, platform=platform,
                     )
                     processed += 1
                     posted_platforms.add(platform)
                 else:
                     _give_up(row.id, reason)
-            elif row.action == "reply" and row.platform == "youtube":
+            elif action == "reply":
                 # ContentAgent writes a JSON envelope to draft_text for
                 # replies because mark_drafted_from_candidate overwrites
                 # draft_text and there's no extras column to carry the
@@ -406,7 +430,7 @@ def tick_process_approved_drafts(self) -> dict:
                 if success:
                     record_post_via_backend(
                         row.id, row.target_url, row.target_thread_id,
-                        reply_text, row.task_id, platform=row.platform,
+                        reply_text, row.task_id, platform=platform,
                     )
                     processed += 1
                     posted_platforms.add(platform)
@@ -416,7 +440,7 @@ def tick_process_approved_drafts(self) -> dict:
                     # retry — far better UX than the original "human deals
                     # with it" comment that left rows in limbo.
                     _give_up(row.id, reason)
-            elif row.action == "share":
+            elif action == "share":
                 from backend.services.social_outreach.persona import SITE_URL
                 payload = {}
                 try:
@@ -471,6 +495,7 @@ def tick_process_approved_drafts(self) -> dict:
             "skipped_cadence": skipped_cadence,
             "skipped_not_approved": skipped_not_approved,
             "withdrawn": withdrawn,
+            "unsupported": unsupported,
             "posted_platforms": sorted(posted_platforms),
         }
     return _with_app_context(_run)
