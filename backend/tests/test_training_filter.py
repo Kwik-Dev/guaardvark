@@ -137,3 +137,60 @@ def test_filter_route_refuses_a_min_score_that_is_not_a_number(app):
 
     assert response.status_code == 400
     assert db.session.query(TrainingJob).count() == 0
+
+
+def test_in_the_pipeline_the_filter_leaves_the_job_status_alone(app, progress, tmp_path):
+    job_id = _job(config={"steps": 5})
+    src = _write_jsonl(tmp_path / "in.jsonl", [_pair(), _pair(score=0.1)])
+
+    result = tt.filter_dataset_task(job_id, src, 0.5, in_pipeline=True)
+
+    row = _row(job_id)
+    assert row.status == "running"
+    assert row.completed_at is None
+    assert row.pipeline_stage == "filtering"
+    assert json.loads(row.config_json) == {"steps": 5}
+    assert result["filtered_count"] == 1
+    assert {status for _, _, status in progress} == {"processing"}
+    low, high = tt.PIPELINE_FILTER_PROGRESS
+    assert all(low <= pct <= high for pct, _, _ in progress)
+
+
+@pytest.fixture
+def pipeline_seams(monkeypatch, tmp_path):
+    """Stand-ins for the steps after filtering, recording the job row as the
+    training step sees it, and for the Ollama unload the pipeline does first."""
+    seen = {}
+
+    def finetune(job_id, config, resume=False):
+        row = _row(job_id)
+        seen["at_training"] = (row.status, row.pipeline_stage, json.loads(row.config_json))
+        return {"model_dir": str(tmp_path / "model"), "lora_path": str(tmp_path / "model" / "lora")}
+
+    monkeypatch.setattr(tt, "finetune_model_task", finetune)
+    monkeypatch.setattr(tt, "export_gguf_task", lambda job_id, model_dir, quant: {"gguf_path": "model.gguf"})
+    monkeypatch.setattr(tt, "import_ollama_task", lambda job_id, model_dir, name: {"ollama_model_name": name})
+    monkeypatch.setattr("backend.services.gpu_resource_coordinator.get_available_vram", lambda: {})
+    monkeypatch.setattr("backend.services.gpu_resource_coordinator.unload_ollama_models",
+                        lambda *a, **k: {"success": True, "models_unloaded": []})
+    return seen
+
+
+def test_the_pipeline_job_stays_running_through_filtering_into_training(app, progress, pipeline_seams, tmp_path):
+    src = _write_jsonl(tmp_path / "in.jsonl", [_pair(), _pair(score=0.1)])
+    job = TrainingJob(job_id="pipe-job", name="pipe", base_model="org/base", status="pending",
+                      config_json=json.dumps({"dataset_path": src, "min_score": 0.5}))
+    db.session.add(job)
+    db.session.commit()
+
+    tt.full_training_pipeline_task("pipe-job", {})
+
+    status, stage, config = pipeline_seams["at_training"]
+    assert status == "running"
+    assert stage == "training"
+    assert config["data_path"] == config["filter_report"]["output_path"]
+    assert config["data_path"] != src
+    assert config["filter_report"]["filtered_count"] == 1
+    assert _row("pipe-job").status == "completed"
+    assert not any(status == "complete" for _, message, status in progress
+                   if "pairs passed filtering" in message)

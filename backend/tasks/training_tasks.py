@@ -207,23 +207,42 @@ def parse_transcripts_task(self, job_id: str, input_path: str, recursive: bool =
         raise
 
 
+# Share of the full pipeline's progress bar the filter step fills.
+PIPELINE_FILTER_PROGRESS = (20, 30)
+
+
 @shared_task(bind=True, name='training.filter_dataset')
-def filter_dataset_task(self, job_id: str, input_path: str, min_score: float = 0.5):
+def filter_dataset_task(self, job_id: str, input_path: str, min_score: float = 0.5,
+                        in_pipeline: bool = False):
     """Drop pairs that are empty, too short, too long, or scored below
     min_score. Pairs without a score are kept; when no pair has one, the job
-    says min_score was not applied rather than implying it filtered."""
+    says min_score was not applied rather than implying it filtered.
+
+    in_pipeline: called by full_training_pipeline_task, which owns the job's
+    status, timestamps and config. The filter then reports its stage and
+    progress only, and the pipeline records the returned report."""
     logger.info(f"Starting filter_dataset_task for job {job_id}")
+
+    def emit(pct, message, status="processing"):
+        if in_pipeline:
+            low, high = PIPELINE_FILTER_PROGRESS
+            _emit_progress(job_id, low + (high - low) * pct // 100, message, "processing")
+        else:
+            _emit_progress(job_id, pct, message, status)
 
     try:
         min_score = float(min_score)
-        _update_job_status(job_id, status="running", pipeline_stage="filtering", started_at=utcnow(), celery_task_id=self.request.id)
-        _emit_progress(job_id, 0, "Starting dataset filtering...", "start")
+        if in_pipeline:
+            _update_job_status(job_id, pipeline_stage="filtering")
+        else:
+            _update_job_status(job_id, status="running", pipeline_stage="filtering", started_at=utcnow(), celery_task_id=self.request.id)
+        emit(0, "Starting dataset filtering...", "start")
         
         input_path_obj = Path(input_path)
         if not input_path_obj.exists():
             raise FileNotFoundError(f"Input path not found: {input_path}")
         
-        _emit_progress(job_id, 10, f"Loading dataset from {input_path}...", "processing")
+        emit(10, f"Loading dataset from {input_path}...")
         
         pairs = []
         with open(input_path_obj, 'r', encoding='utf-8') as f:
@@ -235,7 +254,7 @@ def filter_dataset_task(self, job_id: str, input_path: str, min_score: float = 0
         scored_count = sum(1 for score in scores if score is not None)
         min_score_applied = scored_count > 0
         score_rule = f"min_score={min_score}" if min_score_applied else MIN_SCORE_NOT_APPLIED
-        _emit_progress(job_id, 30, f"Filtering {len(pairs)} pairs ({score_rule})...", "processing")
+        emit(30, f"Filtering {len(pairs)} pairs ({score_rule})...")
         
         filtered_pairs = []
         below_min_score = 0
@@ -257,8 +276,8 @@ def filter_dataset_task(self, job_id: str, input_path: str, min_score: float = 0
             filtered_pairs.append(pair)
 
             if (i + 1) % 100 == 0:
-                _emit_progress(job_id, 30 + int(50 * (i + 1) / len(pairs)),
-                             f"Filtered {len(filtered_pairs)}/{i+1} pairs...", "processing")
+                emit(30 + int(50 * (i + 1) / len(pairs)),
+                     f"Filtered {len(filtered_pairs)}/{i+1} pairs...")
 
         if min_score_applied:
             score_summary = f"{below_min_score} below min_score {min_score}"
@@ -270,7 +289,7 @@ def filter_dataset_task(self, job_id: str, input_path: str, min_score: float = 0
         output_filename = f"filtered_dataset_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
         output_path = PROCESSED_DIR / output_filename
 
-        _emit_progress(job_id, 90, f"Saving {len(filtered_pairs)} filtered pairs...", "processing")
+        emit(90, f"Saving {len(filtered_pairs)} filtered pairs...")
 
         with open(output_path, 'w', encoding='utf-8') as f:
             for pair in filtered_pairs:
@@ -289,24 +308,28 @@ def filter_dataset_task(self, job_id: str, input_path: str, min_score: float = 0
         if not min_score_applied:
             report["min_score_note"] = MIN_SCORE_NOT_APPLIED
 
-        _update_job_status(job_id,
-                          status="completed",
-                          pipeline_stage="filtering",
-                          completed_at=utcnow(),
-                          progress=100,
-                          config_json=json.dumps(report))
+        if in_pipeline:
+            _update_job_status(job_id, pipeline_stage="filtering", progress=PIPELINE_FILTER_PROGRESS[1])
+        else:
+            _update_job_status(job_id,
+                              status="completed",
+                              pipeline_stage="filtering",
+                              completed_at=utcnow(),
+                              progress=100,
+                              config_json=json.dumps(report))
 
-        _emit_progress(job_id, 100,
-                     f"Completed: {len(filtered_pairs)}/{len(pairs)} pairs passed filtering ({score_summary})",
-                     "complete")
+        emit(100,
+             f"Completed: {len(filtered_pairs)}/{len(pairs)} pairs passed filtering ({score_summary})",
+             "complete")
 
         logger.info(f"Filter task completed for job {job_id}: {len(filtered_pairs)}/{len(pairs)} pairs ({score_summary})")
         return report
         
     except Exception as e:
         logger.error(f"Error in filter_dataset_task: {e}", exc_info=True)
-        _update_job_status(job_id, status="failed", error_message=str(e))
-        _emit_progress(job_id, 0, f"Error: {str(e)}", "error")
+        if not in_pipeline:
+            _update_job_status(job_id, status="failed", error_message=str(e))
+            _emit_progress(job_id, 0, f"Error: {str(e)}", "error")
         raise
 
 
@@ -675,25 +698,28 @@ def full_training_pipeline_task(self, job_id: str, config: dict):
         filter_output_path = parse_output_path or job_config.get("dataset_path")
         if job_config.get("min_score") is not None and filter_output_path:
             _update_job_status(job_id, pipeline_stage="filtering")
-            _emit_progress(job_id, 20, "Step 2/5: Filtering dataset...", "processing")
+            _emit_progress(job_id, PIPELINE_FILTER_PROGRESS[0], "Step 2/5: Filtering dataset...", "processing")
             
             filter_result = filter_dataset_task(job_id,
                                                filter_output_path,
-                                               job_config.get("min_score", 0.5))
+                                               job_config.get("min_score", 0.5),
+                                               in_pipeline=True)
             filter_output_path = filter_result.get("output_path")
             job_config["data_path"] = filter_output_path
+            job_config["filter_report"] = filter_result
         elif filter_output_path:
             job_config["data_path"] = filter_output_path
         
         _update_job_status(job_id, pipeline_stage="training")
-        _emit_progress(job_id, 30, "Step 3/5: Training model...", "processing")
+        _emit_progress(job_id, PIPELINE_FILTER_PROGRESS[1], "Step 3/5: Training model...", "processing")
         
         if not job_config.get("data_path"):
             raise ValueError("No dataset path available for training")
         
-        with current_app.app_context():
-            job.config_json = json.dumps(job_config)
-            db.session.commit()
+        # The job row read above belongs to a session that closed with its
+        # app context, so setting attributes on it saves nothing; write
+        # through a fresh one so finetune_model_task reads this config.
+        _update_job_status(job_id, config_json=json.dumps(job_config))
         
         train_result = finetune_model_task(job_id, job_config)
         model_dir = train_result.get("model_dir")
