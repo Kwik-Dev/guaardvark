@@ -466,6 +466,13 @@ class TestVideoFromPictureInFocus:
     def test_plain_edit_still_edits(self, uce):
         assert uce.user_wants_image_edit("make it brighter", has_recent_image=True) is True
 
+    @pytest.mark.parametrize("message", [
+        "how do I remove the background in GIMP?",
+        "how can I make it brighter in Photoshop?",
+    ])
+    def test_how_to_question_is_not_an_edit(self, uce, message):
+        assert uce.user_wants_image_edit(message, has_recent_image=True) is False
+
     def _engine(self, uce, calls):
         engine = uce.UnifiedChatEngine.__new__(uce.UnifiedChatEngine)
         engine.registry = type("R", (), {"get_tool": lambda self, n: object()})()

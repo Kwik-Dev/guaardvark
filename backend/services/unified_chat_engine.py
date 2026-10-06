@@ -819,6 +819,9 @@ def user_wants_image_edit(message: str, has_recent_image: bool,
     # step animates the picture in focus instead.
     if _SLASH_VIDEO_RE.match(msg_lower) or user_wants_video_generation(message):
         return False
+    # "how do I remove the background in GIMP?" asks for steps, not an edit.
+    if _HOW_TO_QUESTION_RE.search(message):
+        return False
     names_image = bool(_NAMES_THE_IMAGE_RE.search(msg_lower))
     # "Draw me a cat wearing a top hat" has an edit verb but asks for a new picture.
     new_request = (bool(_SLASH_IMAGE_RE.match(msg_lower) or _SLASH_VIDEO_RE.match(msg_lower))
