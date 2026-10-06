@@ -45,6 +45,50 @@ class IntentPattern:
     param_extractors: Optional[Dict[str, str]] = None  # param_name -> regex
 
 
+# A file name typed in the request: "notes.md", "src/app.py". The extension
+# starts with a letter, so "1.5" is not one, and a word inside a longer dotted
+# name ("www.example.com") is not taken.
+_FILENAME_RE = re.compile(r"(?<![\w./-])((?:[\w-]+/)*[\w-]+\.[A-Za-z][A-Za-z0-9]{0,7})(?!\.?[\w/])")
+
+# Languages a file request may name, and the extension each one means. A
+# language counts only as the kind of file ("a python file", "a bash script")
+# or what it is written in ("in python"); "a file about python" names none.
+_LANGUAGE_EXTENSIONS = {
+    "python": "py", "javascript": "js", "typescript": "ts", "react": "jsx",
+    "jsx": "jsx", "tsx": "tsx", "html": "html", "css": "css", "json": "json",
+    "yaml": "yaml", "markdown": "md", "bash": "sh", "shell": "sh", "sql": "sql",
+    "java": "java", "golang": "go", "rust": "rs", "ruby": "rb", "php": "php",
+    "c++": "cpp", "xml": "xml", "toml": "toml", "text": "txt", "plain text": "txt",
+}
+_LANGUAGE_WORDS = "|".join(
+    re.escape(word) for word in sorted(_LANGUAGE_EXTENSIONS, key=len, reverse=True)
+)
+_LANGUAGE_RE = re.compile(
+    rf"(?<![\w+])({_LANGUAGE_WORDS})(?:\s+(?:code\s+)?(?:file|script|module|program|component|page|stylesheet|document|config))\b"
+    rf"|\b(?:in|written\s+in|using)\s+({_LANGUAGE_WORDS})(?![\w+])",
+    re.IGNORECASE,
+)
+
+
+def requested_file(message: str) -> Dict[str, str]:
+    """The file a "create a file" request names: {"filename", "extension"}.
+
+    A typed file name gives both; otherwise a named language gives the
+    extension alone. Empty when the request names neither, and the caller
+    picks its own default.
+    """
+    text = message or ""
+    name = _FILENAME_RE.search(text)
+    if name:
+        filename = name.group(1)
+        return {"filename": filename, "extension": filename.rsplit(".", 1)[1].lower()}
+    language = _LANGUAGE_RE.search(text)
+    if language:
+        word = " ".join((language.group(1) or language.group(2)).lower().split())
+        return {"extension": _LANGUAGE_EXTENSIONS[word]}
+    return {}
+
+
 class AgentRouter:
     """
     Routes user messages to appropriate handling mechanisms.
@@ -370,6 +414,11 @@ class AgentRouter:
         for pattern in self._intent_patterns:
             match_result = self._match_pattern(message_lower, pattern)
             if match_result:
+                if match_result.route_type == RouteType.FILE_GENERATION:
+                    # The name or language the person typed, case kept, so the
+                    # proposed file is notes.md or a .py rather than a guess.
+                    params = {**(match_result.tool_params or {}), **requested_file(message)}
+                    match_result.tool_params = params or None
                 return match_result
 
         # Check for file-related context that suggests generation
@@ -409,10 +458,13 @@ class AgentRouter:
 
         if command in command_tool_map:
             tool_name, route_type = command_tool_map[command]
+            tool_params = {"args": args} if args else None
+            if route_type == RouteType.FILE_GENERATION and args:
+                tool_params.update(requested_file(args))
             return RouteDecision(
                 route_type=route_type,
                 tool_name=tool_name,
-                tool_params={"args": args} if args else None,
+                tool_params=tool_params,
                 confidence=1.0,
                 reasoning=f"Explicit command: {command}"
             )
@@ -614,14 +666,13 @@ class AgentRouter:
     def _handle_file_generation(self, decision: RouteDecision, message: str,
                                 context: Dict[str, Any]) -> Dict[str, Any]:
         """Handle file generation requests"""
-        # Extract filename if present
-        filename_match = re.search(r'(\w+\.\w+)', message)
-        filename = filename_match.group(1) if filename_match else None
+        requested = requested_file(message)
 
         return {
             "type": "file_generation",
             "tool_name": decision.tool_name or "generate_file",
-            "suggested_filename": filename,
+            "suggested_filename": requested.get("filename"),
+            "extension": requested.get("extension"),
             "message": message,
             "show_file_dialog": True
         }
