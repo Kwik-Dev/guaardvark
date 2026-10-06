@@ -267,7 +267,17 @@ class ApprenticeEngine:
                             step_results=step_results,
                             failure_reason="Execution killed by user",
                         )
-                    if confirmation and confirmation.get("variable_input"):
+                    # The step was put to a person because it looked unsafe to run
+                    # alone; with no answer it does not run, as in guided mode.
+                    if confirmation is None:
+                        return AttemptResult(
+                            success=False,
+                            steps_completed=steps_completed,
+                            total_steps=len(steps),
+                            step_results=step_results,
+                            failure_reason=f"Timeout waiting for confirmation at step {step_index}",
+                        )
+                    if confirmation.get("variable_input"):
                         variable_input = confirmation["variable_input"]
 
             # level == "autonomous": just execute, no preview or fallback

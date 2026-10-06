@@ -267,3 +267,59 @@ class TestAttemptResult:
         )
         assert result.success is True
         assert result.steps_completed == 5
+
+
+def _vision_reply(mock_analyzer, text, success=True):
+    reply = MagicMock()
+    reply.success = success
+    reply.description = text
+    reply.error = None if success else "vision model not loaded"
+    mock_analyzer.analyze.return_value = reply
+
+
+class TestSupervisedReplay:
+    @pytest.fixture
+    def click_steps(self):
+        # No precondition, so the only vision call is the confidence estimate.
+        return [
+            {"step_index": 0, "action_type": "click", "target_description": "the Save button",
+             "element_context": "", "precondition": ""},
+            {"step_index": 1, "action_type": "click", "target_description": "the Close button",
+             "element_context": "", "precondition": ""},
+        ]
+
+    def test_low_confidence_without_confirmation_aborts(self, engine, mock_analyzer, mock_servo,
+                                                         click_steps, monkeypatch):
+        monkeypatch.setattr("backend.services.apprentice_engine.QUESTION_TIMEOUT", 0.05)
+        _vision_reply(mock_analyzer, '{"visible": false, "confidence": 0.1}')
+        emitted = []
+
+        result = engine.execute(click_steps, autonomy_level="supervised",
+                                emit_fn=lambda name, data: emitted.append(name))
+
+        assert result.success is False
+        assert result.failure_reason == "Timeout waiting for confirmation at step 0"
+        assert result.steps_completed == 0
+        assert result.step_results == []
+        assert emitted == ["step_preview"]
+        mock_servo.click_target.assert_not_called()
+
+    def test_low_confidence_with_confirmation_runs(self, engine, mock_analyzer, mock_servo, click_steps):
+        _vision_reply(mock_analyzer, '{"visible": false, "confidence": 0.1}')
+        engine._wait_for_confirmation = MagicMock(return_value={"confirmed": True})
+
+        result = engine.execute(click_steps, autonomy_level="supervised")
+
+        assert result.success is True
+        assert engine._wait_for_confirmation.call_count == 2
+        assert mock_servo.click_target.call_count == 2
+
+    def test_high_confidence_runs_without_asking(self, engine, mock_analyzer, mock_servo, click_steps):
+        _vision_reply(mock_analyzer, '{"visible": true, "confidence": 0.9}')
+        engine._wait_for_confirmation = MagicMock(return_value=None)
+
+        result = engine.execute(click_steps, autonomy_level="supervised")
+
+        assert result.success is True
+        engine._wait_for_confirmation.assert_not_called()
+        assert mock_servo.click_target.call_count == 2
