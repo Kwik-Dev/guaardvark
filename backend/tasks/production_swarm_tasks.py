@@ -203,8 +203,11 @@ def run_screenwriter(prod_id: int, llm=None):
         for subj in resolved_subjects:
             existing = Subject.query.filter_by(name=subj["name"], kind=subj["kind"]).first()
             if existing:
-                existing.description = subj["description"]
-                existing.cast_required = subj["cast_required"]
+                # A Cast Library subject belongs to every production that names
+                # it. Link it as it is; this script's text and cast pin stay on
+                # the link. An empty description is the one gap worth filling.
+                if not (existing.description or "").strip():
+                    existing.description = subj["description"]
                 subject_to_link = existing
             else:
                 new_subj = Subject(
@@ -215,9 +218,12 @@ def run_screenwriter(prod_id: int, llm=None):
                 db.session.flush()  # get ID
                 subject_to_link = new_subj
 
-            # Link to production
-            ps = ProductionSubject(production_id=prod_id, subject_id=subject_to_link.id)
-            db.session.add(ps)
+            db.session.add(ProductionSubject(
+                production_id=prod_id,
+                subject_id=subject_to_link.id,
+                script_description=subj["description"],
+                cast_required=subj["cast_required"],
+            ))
         
         for scene in out.scenes:
             for shot in scene.shots:

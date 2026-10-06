@@ -3433,6 +3433,14 @@ class ProductionSubject(db.Model):
         db.ForeignKey("subjects.id", name="fk_production_subject_subject_id", ondelete="CASCADE"),
         nullable=False, index=True,
     )
+    # What this production's screenwriter said about the subject, and whether
+    # its script makes the subject an identity-locked cast member. Kept here
+    # rather than on the Subject, which the Cast Library shares across
+    # productions: one film's script must not rewrite another film's character.
+    # NULL cast_required (a row not written by the screenwriter) defers to the
+    # Subject's own setting.
+    script_description = db.Column(db.Text, nullable=True)
+    cast_required = db.Column(db.Boolean, nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=db.func.now())
     __table_args__ = (db.UniqueConstraint("production_id", "subject_id", name="uq_production_subject"),)
 

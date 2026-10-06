@@ -184,6 +184,60 @@ def test_run_screenwriter_retry_does_not_duplicate(app, production):
     assert ProductionShot.query.filter_by(production_id=production.id).count() == 1
 
 
+def _screenwriter_naming(name, description):
+    def fake_llm(*args, **kwargs):
+        return json.dumps({
+            "subjects": [{"name": name, "kind": "character", "description": description}],
+            "scenes": [],
+        })
+    return fake_llm
+
+
+def test_run_screenwriter_links_an_existing_subject_without_rewriting_it(app, production):
+    """A new film that names 'Anna' links the library's Anna as she is; the
+    script's text and cast pin stay with this production."""
+    from backend.models import ProductionSubject
+    anna = Subject(name="Anna", kind="character",
+                   description="Hand-written: auburn bob, green coat", cast_required=False)
+    db.session.add(anna)
+    db.session.commit()
+    anna_id = anna.id
+
+    production.script_text = "INT. CAFE - DAY\n[[Anna]] orders coffee."
+    db.session.commit()
+    run_screenwriter(production.id, llm=_screenwriter_naming("Anna", "LLM: a barista in her twenties"))
+
+    anna = db.session.get(Subject, anna_id)
+    assert anna.description == "Hand-written: auburn bob, green coat"
+    assert anna.cast_required is False
+    assert Subject.query.filter_by(name="Anna").count() == 1
+
+    link = ProductionSubject.query.filter_by(production_id=production.id, subject_id=anna_id).one()
+    assert link.script_description == "LLM: a barista in her twenties"
+    assert link.cast_required is True  # [[Anna]] pins her for this production
+
+
+def test_run_screenwriter_fills_an_existing_subject_s_empty_description(app, production):
+    anna = Subject(name="Anna", kind="character", description="  ")
+    db.session.add(anna)
+    db.session.commit()
+    anna_id = anna.id
+
+    run_screenwriter(production.id, llm=_screenwriter_naming("Anna", "A barista in her twenties"))
+
+    assert db.session.get(Subject, anna_id).description == "A barista in her twenties"
+
+
+def test_run_screenwriter_new_subject_takes_the_script_s_text(app, production):
+    from backend.models import ProductionSubject
+    run_screenwriter(production.id, llm=_screenwriter_naming("Bea", "A courier on a red bike"))
+
+    bea = Subject.query.filter_by(name="Bea").one()
+    assert bea.description == "A courier on a red bike"
+    link = ProductionSubject.query.filter_by(production_id=production.id, subject_id=bea.id).one()
+    assert link.script_description == "A courier on a red bike"
+
+
 def test_run_screenwriter_parse_error_marks_failed_stage(app, production):
     def fake_llm(*args, **kwargs):
         return "garbage"
