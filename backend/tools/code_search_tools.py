@@ -58,7 +58,12 @@ def _resolve_root(explicit: Optional[str], agent_context: Optional[Dict[str, Any
     checkout, whatever the arguments carry, and a root outside it raises
     ValueError instead of being searched."""
     ctx = {} if confine else (agent_context or {})
-    base = Path(str(ctx.get("project_root") or _default_root())).expanduser().resolve()
+    ctx_root = ctx.get("project_root")
+    # A request root that is not a folder (an API route the chat page took
+    # for a path) falls back to the checkout instead of failing the search.
+    if ctx_root and not Path(str(ctx_root)).expanduser().is_dir():
+        ctx_root = None
+    base = Path(str(ctx_root or _default_root())).expanduser().resolve()
     if not explicit:
         return str(base)
     given = Path(str(explicit)).expanduser()
