@@ -42,8 +42,12 @@ log = logging.getLogger(__name__)
 # Image-specific dedicated model (same small fast one; user can override).
 DEFAULT_DIRECTOR_MODEL = DIRECTOR_MODEL
 
-# Batching for large N (same rationale).
-DIRECTOR_BATCH_SIZE = 12  # Slightly smaller for image plans (richer per-shot often)
+# Most prompts one prose rewrite call carries; enhance_prompts splits larger
+# prose batches into chunks of this size. Measured 2026-10-06 against a stub
+# model with estimated token counts: a single prose call of 15 (pessimistic),
+# 17 (central) or 20 (optimistic) prompts overflows the 4096-token window set in
+# _options and the model returns nothing. Not yet measured on a live model.
+DIRECTOR_BATCH_SIZE = 12
 
 # Image "storyboard" contract: one concept -> N connected visual prompts.
 _SYSTEM_STORYBOARD_IMAGE = """You are a visual director for still image generation.
@@ -251,12 +255,52 @@ def enhance_prompts(
 
     ``prompt_style="natural"`` selects the prose contract for LLM-encoder models
     (Z-Image); anything else keeps the comma-phrase contract for CLIP-era models.
+    A prose batch larger than ``DIRECTOR_BATCH_SIZE`` is rewritten in chunks of
+    that size; a chunk the director cannot rewrite keeps its originals, and a
+    timeout keeps the originals for that chunk and every one after it.
     """
     if not prompts:
         return []
     if verbatim_prompts_enabled():
         log.info("media_director: verbatim prompts ON — sending user prompts to the model as-is (no director rewrite)")
         return list(prompts)
+    n = len(prompts)
+    prose = (prompt_style or "").lower() == "natural"
+    chunk_size = DIRECTOR_BATCH_SIZE if prose else n
+    if chunk_size < n:
+        log.info(
+            "media_director.enhance_prompts: prose batch of %d sent in chunks of %d",
+            n, chunk_size,
+        )
+    out: List[str] = []
+    for start in range(0, n, chunk_size):
+        chunk = list(prompts[start:start + chunk_size])
+        rewritten, timed_out = _enhance_chunk(
+            chunk, prose=prose, style=style, extra_guidance=extra_guidance,
+            model=model, cast_descriptors=cast_descriptors, sampling=sampling,
+        )
+        if timed_out:
+            out.extend(prompts[start:])
+            break
+        out.extend(rewritten)
+    return out
+
+
+def _enhance_chunk(
+    prompts: List[str],
+    *,
+    prose: bool,
+    style: str,
+    extra_guidance: Optional[str],
+    model: Optional[str],
+    cast_descriptors: Optional[List[str]],
+    sampling: Optional[dict],
+) -> tuple[List[str], bool]:
+    """One director rewrite of ``prompts`` down the model ladder.
+
+    Returns ``(prompts_out, timed_out)``: the rewrites when a model answered with
+    exactly one per input, otherwise the originals.
+    """
     n = len(prompts)
     style_c = _style_clause(style)
     guidance = f"\nExtra direction: {extra_guidance.strip()}." if extra_guidance and extra_guidance.strip() else ""
@@ -275,7 +319,7 @@ def enhance_prompts(
     # silently returned [] → originals (the batch-director no-op bug, fixed 2026-06-23).
     # Mirror storyboard_from_concept: own chat call + _parse_image_prompts (list-aware).
     opts = _options(n, sampling)
-    if (prompt_style or "").lower() == "natural":
+    if prose:
         system = _SYSTEM_ENHANCE_IMAGE_NATURAL
         # Prose descriptions run ~150 words each; the phrase budget clips them.
         opts["num_predict"] = max(int(opts.get("num_predict", 0)), min(4096, 320 * n + 256))
@@ -303,7 +347,7 @@ def enhance_prompts(
             out = _parse_image_prompts(resp["message"]["content"], n)
             if len(out) == n:
                 log.info("media_director.enhance_prompts: %d prompt(s) rewritten by %s", n, resolved)
-                return [p.strip() for p in out]
+                return [p.strip() for p in out], False
             log.warning(
                 "media_director.enhance_prompts: %s parsed %d/%d prompts; trying the next model",
                 resolved, len(out), n,
@@ -314,10 +358,10 @@ def enhance_prompts(
                     "media_director.enhance_prompts: %s timed out after %.0fs; keeping the original prompts",
                     resolved, timeout_s,
                 )
-                break
+                return list(prompts), True
             log.warning("media_director.enhance_prompts: %s failed (%s); trying the next model", resolved, e)
     # Fallback: return originals (caller may still do keyword enhance)
-    return list(prompts)
+    return list(prompts), False
 
 
 _SYSTEM_REFINE_EDIT = """You are an expert prompt writer for an instruction-based image EDITOR (FLUX Kontext).
