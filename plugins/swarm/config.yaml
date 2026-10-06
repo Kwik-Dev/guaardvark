@@ -36,7 +36,8 @@ backends:
 
 offline_detection:
   method: "ping"
-  target: "api.anthropic.com"
+  # Empty: no probe, nothing is contacted. Set a host you choose to enable the online check.
+  target: ""
   timeout_seconds: 2
   auto_fallback: true
 
