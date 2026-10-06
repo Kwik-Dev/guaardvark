@@ -30,7 +30,7 @@ except ImportError as e:
     offline_gen_available = False
 
 try:
-    from backend.services.media_director import expand_image_plan, direct_prompts as media_direct_enhance
+    from backend.services.media_director import expand_image_plan
     MEDIA_DIRECTOR_AVAILABLE = True
 except Exception as e:  # noqa: BLE001
     logger.warning(f"media_director not available for batch image (will skip): {e}")
@@ -1185,9 +1185,10 @@ class BatchImageGenerator:
     def _apply_director(self, request: BatchImageRequest) -> None:
         """If director_mode or storyboard_concept, rewrite prompts via Media Director.
 
-        Mutates in place and disables per-prompt offline auto_enhance (director already
-        produced full visual prompts). Uses stills_policy for the enhance ladder so
-        chat/batch share the same director behavior. Never raises.
+        Mutates in place and disables per-prompt offline auto_enhance on the prompts
+        the director rewrote (those are already full visual prompts). Uses
+        stills_policy for the enhance ladder so chat/batch share the same director
+        behavior. Never raises.
         """
         if not MEDIA_DIRECTOR_AVAILABLE:
             return
@@ -1245,37 +1246,40 @@ class BatchImageGenerator:
             raw = [bp.prompt for bp in request.prompts if (bp.prompt or "").strip()]
             if not raw:
                 return
-            # Prefer stills_policy director path (enhance_prompts); fall back to
-            # media_direct_enhance alias if needed.
-            style = batch_style
-            guidance = getattr(request, "director_guidance", None)
+            # One director attempt. enhance_prompts already walks its model ladder
+            # and hands the originals back when none answers, so a second call
+            # would only repeat the same wait.
             directed = apply_enhance_to_prompts(
-                raw, enhance_mode="director", style=style, extra_guidance=guidance,
+                raw, enhance_mode="director", style=batch_style,
+                extra_guidance=getattr(request, "director_guidance", None),
                 model=batch_model,
             )
-            if (not directed or directed == raw) and prompt_style_for_model(batch_model) != "natural":
-                # Fallback to batch's media_direct_enhance if policy path no-op'd.
-                # Natural families never take this rung: its phrase contract is the
-                # CLIP-era one, and an unchanged prompt is the intended fallback.
-                try:
-                    directed = media_direct_enhance(raw, style=style, extra_guidance=guidance)
-                except Exception:
-                    directed = raw
+            # Only a prompt the director actually rewrote turns the per-prompt
+            # enhancer off; an unchanged one keeps it, so a batch whose director
+            # fell back still gets the family's normal enhancement.
             idx = 0
             changed = 0
             for bp in request.prompts:
-                if (bp.prompt or "").strip() and idx < len(directed) and directed[idx]:
-                    newp = directed[idx].strip()
+                if (bp.prompt or "").strip() and idx < len(directed):
+                    newp = (directed[idx] or "").strip()
                     if newp and newp != (bp.prompt or "").strip():
                         bp.prompt = newp
+                        bp.auto_enhance = False
                         changed += 1
-                    bp.auto_enhance = False
                     idx += 1
-            request.auto_enhance = False
-            logger.info(
-                "Media Director enhanced %s prompts for batch %s (director_mode=%s)",
-                changed, request.batch_id, getattr(request, "director_mode", False),
-            )
+            if changed:
+                request.auto_enhance = False
+                logger.info(
+                    "Media Director enhanced %s/%s prompts for batch %s (director_mode=%s, family=%s)",
+                    changed, len(raw), request.batch_id,
+                    getattr(request, "director_mode", False), prompt_style_for_model(batch_model),
+                )
+            else:
+                logger.warning(
+                    "Media Director returned no rewrites for batch %s; prompts and the "
+                    "per-prompt enhancer stand as they were",
+                    request.batch_id,
+                )
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 "Director pass skipped for batch image %s (non-fatal): %s",

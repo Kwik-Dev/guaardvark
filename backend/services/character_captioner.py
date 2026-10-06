@@ -226,6 +226,27 @@ def caption_dataset(
     }
 
 
+def _class_anchor_re(class_token: str) -> re.Pattern:
+    """Whole-word pattern for the class words a caption may anchor on.
+
+    The subject's own class (``white wolf``) and its head noun (``wolf``) count;
+    a human class also accepts every human word, so a ``person`` subject keeps
+    captions that say ``man`` or ``woman``.
+    """
+    from backend.services.character_identity_prompt import (
+        _CLASS_HUMAN,
+        sanitize_class_token,
+    )
+
+    cls = sanitize_class_token(class_token)
+    head = cls.split()[-1]
+    words = {cls, head}
+    if cls in _CLASS_HUMAN or head in _CLASS_HUMAN:
+        words |= _CLASS_HUMAN
+    alternation = "|".join(re.escape(w) for w in sorted(words, key=len, reverse=True))
+    return re.compile(rf"\b({alternation})\b", re.I)
+
+
 def ensure_subject_image_captions(
     image_paths: list[str],
     *,
@@ -252,7 +273,7 @@ def ensure_subject_image_captions(
         f"a photo of {token}".lower() if token else "",
         f"photo of {token}".lower() if token else "",
     )
-    _class_re = re.compile(r"\b(man|woman|person|boy|girl)\b", re.I)
+    _class_re = _class_anchor_re(class_token)
 
     def _is_bare(text: str) -> bool:
         t = (text or "").strip().lower().rstrip(".")
@@ -268,7 +289,7 @@ def ensure_subject_image_captions(
         return False
 
     def _missing_class_anchor(text: str) -> bool:
-        """True when caption lacks ``a photo of {token}`` + human class (legacy format)."""
+        """True when caption lacks ``a photo of {token}`` + the subject's class early on."""
         t = (text or "").strip().lower()
         if not t:
             return True
