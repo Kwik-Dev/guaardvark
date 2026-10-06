@@ -23,6 +23,17 @@ from backend.utils.ollama_resource_manager import request_options
 logger = logging.getLogger(__name__)
 
 
+def _writes_text(model_name: str) -> bool:
+    """Whether a model can answer with text. When Ollama describes the model its
+    capability list decides: decision-only models (nimble, tev1) and embedding
+    models cannot write a reply. A model Ollama cannot describe keeps the name rule."""
+    from backend.services.model_capabilities import capabilities_for
+    rec = capabilities_for(model_name, with_vision=False)
+    if not rec.exists:
+        return True
+    return rec.completion and not rec.embedding
+
+
 @dataclass
 class VisionResult:
     """Result from a vision analysis call."""
@@ -215,10 +226,10 @@ class VisionAnalyzer:
                                   "mistral:latest", "gemma2:latest"]:
                     if preferred in models:
                         return preferred
-                # Fall back to any non-vision model
+                # Fall back to any non-vision model that can write a text reply
                 vision_patterns = ["moondream", "llava", "bakllava", "gemma4"]
                 for m in models:
-                    if not any(vp in m.lower() for vp in vision_patterns):
+                    if not any(vp in m.lower() for vp in vision_patterns) and _writes_text(m):
                         return m
         except Exception:
             pass

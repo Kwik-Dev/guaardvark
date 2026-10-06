@@ -154,6 +154,35 @@ class TestVisionAnalyzer(unittest.TestCase):
         self.assertEqual(model, "llama3:8b")
         self.assertNotIn("gemma4", model)
 
+    @patch("backend.services.model_capabilities.capabilities_for")
+    @patch("backend.utils.vision_analyzer.requests.get")
+    def test_get_decision_model_skips_models_that_cannot_write_text(self, mock_get, mock_caps):
+        from backend.utils.vision_analyzer import VisionAnalyzer
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "models": [
+                {"name": "nimble:9b-q4_K_M"},
+                {"name": "nomic-embed-text:latest"},
+                {"name": "qwen3:14b"},
+            ]
+        }
+        mock_get.return_value = mock_response
+        caps = {
+            "nimble:9b-q4_K_M": dict(exists=True, completion=False, embedding=False),
+            "nomic-embed-text:latest": dict(exists=True, completion=False, embedding=True),
+            "qwen3:14b": dict(exists=True, completion=True, embedding=False),
+        }
+        mock_caps.side_effect = lambda name, with_vision=False: MagicMock(**caps[name])
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("GUAARDVARK_DECISION_MODEL", None)
+            model = VisionAnalyzer()._get_decision_model()
+        # A decision-only model (capability "decision", no "completion") cannot
+        # answer a text query, and an embedding model cannot either.
+        self.assertEqual(model, "qwen3:14b")
+
 
 if __name__ == "__main__":
     unittest.main()
