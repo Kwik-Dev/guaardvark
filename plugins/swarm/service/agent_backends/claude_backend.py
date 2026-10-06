@@ -14,6 +14,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from ..backend_url import backend_api_url
 from ..models import AgentStatus, SwarmTask
 from .base_backend import AgentProcess, BaseBackend
 
@@ -215,8 +216,7 @@ class ClaudeBackend(BaseBackend):
         return shutil.which("claude") is not None
 
     def _build_prompt(self, task: SwarmTask) -> str:
-        flask_port = os.environ.get("FLASK_PORT", "5002")
-        swarm_api = f"http://localhost:{flask_port}/api/swarm/{task.swarm_id if hasattr(task, 'swarm_id') else 'active'}"
+        swarm_api = f"{backend_api_url()}/swarm/{task.swarm_id if hasattr(task, 'swarm_id') else 'active'}"
         
         parts = [
             f"You are working on task: {task.title}",
