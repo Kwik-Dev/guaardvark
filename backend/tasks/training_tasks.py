@@ -1,7 +1,9 @@
 
 import json
 import logging
+import math
 import os
+import random
 import subprocess
 import sys
 from datetime import datetime
@@ -356,6 +358,108 @@ def filter_dataset_task(self, job_id: str, input_path: str, min_score: float = 0
         raise
 
 
+# Held-out evaluation for text fine-tunes. A slice of the dataset is kept out
+# of training; afterwards the mean loss on it is measured for the trained
+# adapter and for the base model, so a run that diverged can be told from one
+# that learned. A job's config overrides the share with "eval_fraction"
+# (0 turns the split off). None of these numbers has been measured against
+# training runs yet.
+EVAL_SPLIT = {
+    # The usual 90/10 train/held-out split.
+    "fraction": 0.1,
+    # Fewer held-out rows than this and the mean loss rests on a handful of
+    # examples, too few for a comparison with the base model to mean much, so
+    # the split is skipped and the job says so. At 10% that is datasets under
+    # 100 rows.
+    "min_rows": 10,
+    # Caps what a large dataset gives up and the time the two measuring passes
+    # add: 200 rows of chat text is already tens of thousands of tokens.
+    "max_rows": 200,
+    # Fixed, so a resumed run holds out the same rows as its first attempt.
+    "seed": 42,
+}
+
+
+def _hold_out_split(data_path: str, out_dir: Path, fraction: float):
+    """Split a text dataset into training rows and held-out rows.
+
+    Returns (train_path, eval_path, report). When nothing is held out,
+    train_path is data_path unchanged, eval_path is None and report["reason"]
+    says why. JSONL rows are copied byte for byte in their original order."""
+    path = Path(data_path)
+    report = {"fraction": fraction}
+    if fraction <= 0:
+        report["reason"] = "held-out split turned off (eval_fraction 0)"
+        return data_path, None, report
+
+    if path.suffix == ".jsonl":
+        with open(path, "rb") as f:
+            rows = [line.rstrip(b"\r\n") for line in f if line.strip()]
+    elif path.suffix == ".json":
+        with open(path, encoding="utf-8") as f:
+            records = json.load(f)
+        if not isinstance(records, list):
+            report["reason"] = "dataset is not a list of rows"
+            return data_path, None, report
+        rows = [json.dumps(record).encode("utf-8") for record in records]
+    else:
+        report["reason"] = f"no held-out split for '{path.suffix}' datasets"
+        return data_path, None, report
+
+    held = min(int(len(rows) * fraction), EVAL_SPLIT["max_rows"])
+    report["total_rows"] = len(rows)
+    if held < EVAL_SPLIT["min_rows"]:
+        report["reason"] = (
+            f"dataset too small for a held-out split: {len(rows)} rows give {held} "
+            f"at {fraction:.0%}, fewer than the {EVAL_SPLIT['min_rows']} needed"
+        )
+        return data_path, None, report
+
+    held_out = set(random.Random(EVAL_SPLIT["seed"]).sample(range(len(rows)), held))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    train_path = out_dir / "train.jsonl"
+    eval_path = out_dir / "heldout.jsonl"
+    with open(train_path, "wb") as train_file, open(eval_path, "wb") as eval_file:
+        for i, row in enumerate(rows):
+            (eval_file if i in held_out else train_file).write(row + b"\n")
+    report.update(train_rows=len(rows) - held, eval_rows=held, eval_path=str(eval_path))
+    return str(train_path), str(eval_path), report
+
+
+def _finite(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _record_heldout_losses(report: dict, result: dict):
+    """Fold the trainer's held-out result into the job's eval report.
+
+    A loss that is not a finite number is stored as None, since the job config
+    is read as JSON in the browser and JSON has no NaN. For the adapter that is
+    flagged: it is what a run that diverged looks like."""
+    if "reason" in result:
+        report["reason"] = result["reason"]
+        return
+    report["rows"] = result.get("rows")
+    base, adapter = result.get("base_loss"), result.get("adapter_loss")
+    if not _finite(base):
+        report["reason"] = "the base model's held-out loss is not a finite number"
+        return
+    report["base_loss"] = float(base)
+    report["adapter_loss"] = float(adapter) if _finite(adapter) else None
+    if not _finite(adapter):
+        report["adapter_loss_not_finite"] = True
+    report["measured"] = True
+
+
+def _heldout_summary(report: dict) -> str:
+    if not report.get("measured"):
+        return f"Held-out loss not measured: {report.get('reason', 'no result from the trainer')}"
+    adapter = report["adapter_loss"]
+    adapter_text = f"{adapter:.4f}" if adapter is not None else "not a finite number"
+    return (f"Held-out loss {adapter_text} (base model {report['base_loss']:.4f}) "
+            f"on {report['rows']} rows")
+
+
 @shared_task(bind=True, name='training.finetune_model',
              soft_time_limit=86400, time_limit=172800)
 def finetune_model_task(self, job_id: str, config: dict, resume: bool = False):
@@ -404,7 +508,25 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False):
         offload_to_cpu = job_config.get("cpu_offload", device_profile.requires_cpu_offload if device_profile else False)
         
         _update_job_status(job_id, total_steps=max_steps)
-        
+
+        eval_report = {"measured": False}
+        if images_path:
+            train_path, eval_path = data_path, None
+            eval_report["reason"] = "vision runs have no held-out evaluation yet"
+        else:
+            fraction = float(job_config.get("eval_fraction", EVAL_SPLIT["fraction"]))
+            if not 0 <= fraction < 1:
+                raise ValueError(f"eval_fraction must be at least 0 and below 1 (got {fraction})")
+            train_path, eval_path, split = _hold_out_split(
+                data_path, MODELS_DIR / output_name / "heldout", fraction)
+            eval_report.update(split)
+        if eval_path:
+            _emit_progress(job_id, 3,
+                           f"Held out {eval_report['eval_rows']} of {eval_report['total_rows']} rows "
+                           f"to measure the trained model on", "processing")
+        else:
+            _emit_progress(job_id, 3, _heldout_summary(eval_report), "processing")
+
         def progress_callback(step, total_steps, loss, metrics):
             progress = int((step / total_steps) * 100) if total_steps > 0 else 0
             _update_job_status(job_id, 
@@ -458,7 +580,7 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False):
                  _emit_progress(job_id, 10, f"Starting text training loop{resume_msg}...", "processing")
                  model_dir = finetune(
                     base_model=base_model,
-                    data_path=data_path,
+                    data_path=train_path,
                     output_name=output_name,
                     max_steps=max_steps,
                     learning_rate=learning_rate,
@@ -467,8 +589,14 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False):
                     max_seq_length=max_seq_length,
                     offload_to_cpu=offload_to_cpu,
                     progress_callback=progress_callback,
-                    resume=resume
+                    resume=resume,
+                    eval_data_path=eval_path,
+                    eval_callback=lambda result: _record_heldout_losses(eval_report, result)
                 )
+
+        job_config["eval"] = eval_report
+        heldout = _heldout_summary(eval_report)
+        logger.info(f"Job {job_id}: {heldout}")
 
         checkpoint_dir = Path(model_dir) / "checkpoints"
         checkpoint_path = None
@@ -486,12 +614,13 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False):
                           lora_path=str(Path(model_dir) / "lora"),
                           checkpoint_path=checkpoint_path,
                           is_resumable=bool(checkpoint_path),
-                          pid=None)
+                          pid=None,
+                          config_json=json.dumps(job_config))
 
-        _emit_progress(job_id, 100, f"Training complete! Model saved to {model_dir}", "complete")
+        _emit_progress(job_id, 100, f"Training complete! {heldout}. Model saved to {model_dir}", "complete")
 
         logger.info(f"Training task completed for job {job_id}: {model_dir}")
-        return {"model_dir": model_dir, "lora_path": str(Path(model_dir) / "lora")}
+        return {"model_dir": model_dir, "lora_path": str(Path(model_dir) / "lora"), "eval": eval_report}
 
     except Exception as e:
         logger.error(f"Error in finetune_model_task: {e}", exc_info=True)
@@ -769,15 +898,17 @@ def full_training_pipeline_task(self, job_id: str, config: dict):
                           completed_at=utcnow(),
                           progress=100)
         
-        _emit_progress(job_id, 100, "Full pipeline complete!", "complete")
-        
+        heldout = _heldout_summary(train_result.get("eval") or {})
+        _emit_progress(job_id, 100, f"Full pipeline complete! {heldout}", "complete")
+
         logger.info(f"Full pipeline completed for job {job_id}")
         return {
             "parse_output": parse_output_path,
             "filter_output": filter_output_path if job_config.get("min_score") is not None else None,
             "model_dir": model_dir,
             "gguf_path": export_result.get("gguf_path"),
-            "ollama_model_name": import_result.get("ollama_model_name")
+            "ollama_model_name": import_result.get("ollama_model_name"),
+            "eval": train_result.get("eval")
         }
         
     except Exception as e:
