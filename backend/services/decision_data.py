@@ -484,7 +484,7 @@ DECISIONS: dict = {
                      "a post or comment that mentions or links the writer's own project, product, video or "
                      'website, with no limit? Rules that never mention promotion, advertising or links allow it. '
                      'Any limit means no: only on certain days, only in one thread, a ratio such as 9:1 or 10%, a '
-                     "required flair, or moderator approval first. A bare 'no spam' rule is not a limit.",
+                     "required flair, or moderator approval first. A bare 'no spam' rule counts as a limit.",
      'choices': None,
      'state': {'community': ('system', 100), 'rules_text': ('third_party', 2500)},
      'anchor': 'backend/services/social_outreach/reddit_outreach.py is_self_promo_banned '
@@ -506,8 +506,8 @@ DECISIONS: dict = {
                         'injection'),
      'notes': 'The rules are third-party text, so the answer can only veto: False skips the community, True never '
               "overrides a regex ban. A failed rules fetch is not 'no rules'; that is a code fix in "
-              "fetch_subreddit_rules, not a question. How to label a bare 'no spam' rule is Dean's call before the "
-              'set is written. Labelled set not written yet (planned: outreach_sub_allows_promotion.json).'},
+              "fetch_subreddit_rules, not a question. A bare 'no spam' rule counts as a limit (operator decision "
+              '2026-10-06). Labelled set not written yet (planned: outreach_sub_allows_promotion.json).'},
     'outreach_sub_bans_ai_text': {'feature': 'outreach',
      'layer': 'L3',
      'type': 'fit',
