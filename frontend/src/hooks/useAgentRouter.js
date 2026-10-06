@@ -142,10 +142,14 @@ export function useAgentRouter() {
 
   /**
    * Whether this route should use the legacy /tools/route-and-execute path.
-   * Screen automation and agent-screen sessions need unified chat instead.
+   * Screen automation, agent-screen sessions and routes the backend marks
+   * execute_via "unified" (the AgentBrain preview) need unified chat instead.
    */
   const shouldUseLegacyAgentLoop = useCallback((routeDecision, sessionId) => {
     if (!routeDecision || routeDecision.route_type !== RouteType.AGENT_LOOP) {
+      return false;
+    }
+    if (routeDecision.execute_via === "unified") {
       return false;
     }
     const store = useAppStore.getState();

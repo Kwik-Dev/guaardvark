@@ -4,10 +4,15 @@ When the legacy router has nothing to run it returns {"type": "chat",
 "requires_llm": True}. /api/tools/route-and-execute hands that turn back to
 the client (fallback_to_chat) and saves nothing; any other result with no
 answer text is saved as a plain sentence rather than str(result).
+/api/tools/route marks the AgentBrain preview execute_via "unified" so the
+client sends those turns to unified chat in the first place.
 
 Real blueprint through Flask's test client and an in-memory SQLite database.
-The router result is stubbed: no model, GPU or network.
+The router result and the brain are stubbed: no model, GPU or network.
 """
+
+import sys
+import types
 
 import pytest
 from flask import Flask
@@ -15,6 +20,7 @@ from flask import Flask
 from backend.api.tools_api import _NO_REPLY_TEXT, tools_bp
 from backend.models import LLMMessage, LLMSession, db
 from backend.services import agent_router
+from backend.services.brain_state import BrainState
 
 
 @pytest.fixture
@@ -53,6 +59,12 @@ def _execute(client, message):
     )
 
 
+def _brain_ready(monkeypatch, ready):
+    monkeypatch.setattr(
+        BrainState, "get_instance", staticmethod(lambda: types.SimpleNamespace(is_ready=ready))
+    )
+
+
 def test_a_chat_result_falls_back_to_chat_and_saves_nothing(client, monkeypatch):
     chat = {"type": "chat", "requires_llm": True, "message": "what is an agent?"}
     _router_returns(monkeypatch, chat)
@@ -81,3 +93,30 @@ def test_a_result_with_no_answer_text_is_saved_as_a_sentence(client, monkeypatch
     saved = db.session.query(LLMMessage).filter_by(role="assistant").one()
     assert saved.content == _NO_REPLY_TEXT
 
+
+def test_the_agent_brain_preview_is_marked_for_unified_chat(client, monkeypatch):
+    _brain_ready(monkeypatch, True)
+    stub = types.ModuleType("backend.services.agent_brain")
+
+    class AgentBrain:
+        def __init__(self, state=None):
+            self.state = state
+
+        def _is_vision_task(self, message, image_data=None):
+            return False
+
+    stub.AgentBrain = AgentBrain
+    monkeypatch.setitem(sys.modules, "backend.services.agent_brain", stub)
+
+    route = client.post("/api/tools/route", json={"message": "what is an agent?"}).get_json()["route"]
+
+    assert route["route_type"] == "agent_loop"
+    assert route["execute_via"] == "unified"
+
+
+def test_a_legacy_route_carries_no_execute_via(client, monkeypatch):
+    _brain_ready(monkeypatch, False)
+
+    route = client.post("/api/tools/route", json={"message": "what is an agent?"}).get_json()["route"]
+
+    assert route["execute_via"] is None
