@@ -479,7 +479,12 @@ def index_document_task(document_id, process_id=None):
                 'status': 'completed'
             }
         else:
-            error_msg = f"Indexing failed for document {document_id}"
+            try:
+                from backend.services.indexing_service import no_content_reason
+                reason = no_content_reason(document_id)
+            except Exception:
+                reason = None
+            error_msg = reason or f"Indexing failed for document {document_id}"
             logger.error(error_msg)
 
             # Update document status

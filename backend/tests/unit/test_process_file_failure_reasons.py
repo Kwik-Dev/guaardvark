@@ -222,7 +222,11 @@ def test_an_ocr_failure_is_indexed_as_no_text_not_as_the_failure(tmp_path, ocr):
 
 
 def test_the_legacy_image_reader_keeps_the_failure_out_of_the_text(tmp_path, ocr, monkeypatch):
+    from llama_index.core import Document
+    from backend.services import indexing_service
     from backend.services.indexing_service import get_documents_from_file
+    # The class the lazy loader would bind, without its model configuration.
+    monkeypatch.setattr(indexing_service, "LlamaDocument", Document)
     monkeypatch.setattr("backend.utils.file_processor_adapter.is_enhanced_processing_available",
                         lambda path: False)
     (tmp_path / "scan.png").write_bytes(PNG)

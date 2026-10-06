@@ -2560,6 +2560,35 @@ def _docling_load(file_path: str, filename: str, doc_cls):
         return None
 
 
+def _looks_binary(path: Path, sample_bytes: int = 8192) -> bool:
+    """A NUL byte in the first 8 KB, the test git and grep use for binary files."""
+    try:
+        with open(path, "rb") as f:
+            return b"\x00" in f.read(sample_bytes)
+    except OSError:
+        return False
+
+
+def _has_default_reader(file_extension: str) -> bool:
+    """Whether SimpleDirectoryReader has a format reader for the extension,
+    rather than decoding the bytes as text."""
+    try:
+        return file_extension in SimpleDirectoryReader.supported_suffix_fn()
+    except Exception:
+        return False
+
+
+# Why add_file_to_index found nothing to index, by document id, for callers
+# that record the failure on the document.
+_NO_CONTENT_REASONS: Dict[str, str] = {}
+
+
+def no_content_reason(document_id) -> Optional[str]:
+    """Why the last add_file_to_index of this document had nothing to index,
+    or None when it did not stop for that reason."""
+    return _NO_CONTENT_REASONS.get(str(document_id))
+
+
 def get_documents_from_file(file_path: str, client: Optional[str] = None, upload_date: Optional[str] = None) -> List[LlamaDocument]:
     documents: List[LlamaDocument] = []
     try:
@@ -2598,6 +2627,19 @@ def get_documents_from_file(file_path: str, client: Optional[str] = None, upload
                     _d.metadata.setdefault("client", client)
                     _d.metadata.setdefault("upload_date", upload_date)
                 return _md_docs
+
+        # A sitemap is a list of URLs, one document each. Ahead of the enhanced
+        # processor, whose XML reader would flatten it into one run of text.
+        if file_extension == ".xml" and parse_sitemap:
+            from backend.utils.xml_sitemap_handler import is_sitemap
+            if is_sitemap(str(path_obj)):
+                _sm_docs = parse_sitemap(str(path_obj))
+                for _d in _sm_docs:
+                    _d.metadata["file_path"] = str(path_obj)
+                    _d.metadata.setdefault("client", client)
+                    _d.metadata.setdefault("upload_date", upload_date)
+                logger.info("Sitemap %s: %d URL(s)", filename, len(_sm_docs))
+                return _sm_docs
 
         try:
             from backend.utils.file_processor_adapter import (
@@ -2947,15 +2989,24 @@ def get_documents_from_file(file_path: str, client: Optional[str] = None, upload
                     file_extension not in image_extensions and
                     file_extension not in {'.xlsx', '.xls', '.xlsm', '.xlsb'} and
                     file_extension not in code_extensions):
-                    reader = SimpleDirectoryReader(
-                        input_files=[path_obj],
-                        file_metadata=file_metadata_func,
-                        errors="ignore",
-                    )
-                    documents.extend(reader.load_data())
-                    logger.info(
-                        f"Loaded {len(documents)} docs via SimpleDirectoryReader: {filename}"
-                    )
+                    # With no reader for the type, SimpleDirectoryReader decodes
+                    # the bytes as text and drops what does not decode, so a
+                    # binary file would index as noise.
+                    if not _has_default_reader(file_extension) and _looks_binary(path_obj):
+                        logger.warning(
+                            f"{filename} is binary and no reader handles "
+                            f"'{file_extension or 'no extension'}'; nothing to index"
+                        )
+                    else:
+                        reader = SimpleDirectoryReader(
+                            input_files=[path_obj],
+                            file_metadata=file_metadata_func,
+                            errors="ignore",
+                        )
+                        documents.extend(reader.load_data())
+                        logger.info(
+                            f"Loaded {len(documents)} docs via SimpleDirectoryReader: {filename}"
+                        )
                 elif not documents:
                     logger.warning(
                         f"Specific parser for {file_extension} yielded no documents for {filename}, SimpleDirectoryReader not re-attempted under these conditions."
@@ -3066,6 +3117,7 @@ def add_file_to_index(file_path: str, db_document: DBDocument, progress_callback
         if progress_callback:
             progress_callback(30, f"Loading document: {db_document.filename}")
         
+        _NO_CONTENT_REASONS.pop(str(db_document.id), None)
         try:
             with _phase("parse_ms", timings):
                 documents = get_documents_from_file(
@@ -3073,10 +3125,16 @@ def add_file_to_index(file_path: str, db_document: DBDocument, progress_callback
                     client=db_document.project.client_ref.name if db_document.project and db_document.project.client_ref else None,
                     upload_date=db_document.uploaded_at.isoformat() if db_document.uploaded_at else None
                 )
-            
-            if not documents:
-                logger.error(f"No documents loaded from {file_path}")
-                logger.error("No content could be extracted from file")
+
+            # A file with bytes in it that yields no text would index as zero
+            # nodes and read as indexed. A 0-byte file is left to the caller,
+            # which stores it as an empty document.
+            if not documents or (
+                    file_size_bytes and not any((d.text or "").strip() for d in documents)):
+                reason = f"nothing to index: no text could be read from {db_document.filename}"
+                _NO_CONTENT_REASONS[str(db_document.id)] = reason
+                logger.error(f"{reason} ({file_path})")
+                progress_system.error_process(process_id, reason)
                 return False
             
             logger.info(f"Loaded {len(documents)} document(s) from {file_path}")

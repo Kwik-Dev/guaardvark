@@ -23,12 +23,35 @@ SITEMAP_NS = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
 URL_TAG = "{http://www.sitemaps.org/schemas/sitemap/0.9}url"
 LOC_TAG = "{http://www.sitemaps.org/schemas/sitemap/0.9}loc"
 SITEMAP_INDEX_TAG = "{http://www.sitemaps.org/schemas/sitemap/0.9}sitemap"
+SITEMAP_ROOT_TAGS = (
+    "{http://www.sitemaps.org/schemas/sitemap/0.9}urlset",
+    "{http://www.sitemaps.org/schemas/sitemap/0.9}sitemapindex",
+)
+
+
+def is_sitemap(file_path: str) -> bool:
+    """Whether the file's root element is a sitemap <urlset> or <sitemapindex>.
+
+    Reads only up to the root element's start tag.
+    """
+    if not etree:
+        return False
+    try:
+        with open(file_path, "rb") as f:
+            for _, elem in etree.iterparse(f, events=("start",)):
+                return elem.tag in SITEMAP_ROOT_TAGS
+    except Exception as e:
+        logger.debug("Not a sitemap (%s): %s", file_path, e)
+    return False
 
 
 def parse_sitemap(
     file_path: str, doc_id_prefix: Optional[str] = None
 ) -> List[Document]:
-    """Parse an XML sitemap into LlamaIndex Document objects."""
+    """Parse an XML sitemap into LlamaIndex Document objects, one per URL.
+
+    A sitemap index yields the URLs of the sitemaps it lists.
+    """
     if not etree or not Document:
         logger.error("Missing lxml or llama-index library.")
         return []
@@ -45,10 +68,8 @@ def parse_sitemap(
         for _, elem in context:
             if elem.tag == SITEMAP_INDEX_TAG:
                 is_sitemap_index = True
-                elem.clear()
-                continue
 
-            if elem.tag == URL_TAG:
+            if elem.tag in (URL_TAG, SITEMAP_INDEX_TAG):
                 loc_element = elem.find(LOC_TAG, namespaces=SITEMAP_NS)
                 if loc_element is not None and loc_element.text:
                     url_text = loc_element.text.strip()
@@ -56,7 +77,10 @@ def parse_sitemap(
                         url_count += 1
                         metadata = {
                             "source_filename": filename,
-                            "content_type": "sitemap_url",
+                            "content_type": (
+                                "sitemap_index_url" if elem.tag == SITEMAP_INDEX_TAG
+                                else "sitemap_url"
+                            ),
                         }
                         doc_id = f"{doc_id_prefix or filename}_url_{url_count}"
                         documents.append(
