@@ -85,6 +85,18 @@ export const cancelMusicVideo = async (id) => {
   return response.data;
 };
 
+/** Keep a cut a quality check held for review; the video is assembled once none is held. */
+export const approveMusicVideoCut = async (id, index) => {
+  const response = await axios.post(`${API_BASE}/music-video/${id}/cut/${index}/approve`);
+  return response.data;
+};
+
+/** Render a held cut again (checked like the first render). */
+export const rerenderMusicVideoCut = async (id, index) => {
+  const response = await axios.post(`${API_BASE}/music-video/${id}/cut/${index}/rerender`);
+  return response.data;
+};
+
 export const generateMusicVideoStoryboards = async (id, data = {}) => {
   const response = await axios.post(`${API_BASE}/music-video/${id}/generate-storyboards`, data);
   return response.data;

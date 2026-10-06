@@ -61,10 +61,12 @@ def compute_basic_video_stats(video_path: str | Path) -> Dict[str, Any]:
     return stats
 
 
-def _histogram_vec(path: str, bins: int = 16):
+def _histogram_vec(image, bins: int = 16):
+    """Unit-length RGB histogram (``bins`` per channel) of an image path or PIL image."""
     from PIL import Image
     import numpy as np
-    img = Image.open(path).convert("RGB").resize((64, 64))
+    img = image if isinstance(image, Image.Image) else Image.open(image)
+    img = img.convert("RGB").resize((64, 64))
     arr = np.asarray(img, dtype=np.float32)
     hist = []
     for c in range(3):
@@ -73,6 +75,66 @@ def _histogram_vec(path: str, bins: int = 16):
     v = np.concatenate(hist)
     n = float(np.linalg.norm(v)) or 1.0
     return v / n
+
+
+COLOUR_MATCH_LABEL = "colour match"
+
+
+def _clip_frame_count(video_path: str | Path) -> int:
+    """Frames the container declares, or a decode count when it declares none."""
+    import av
+    with av.open(str(video_path)) as container:
+        stream = container.streams.video[0]
+        declared = int(stream.frames or 0)
+        if declared:
+            return declared
+        return sum(1 for _ in container.decode(stream))
+
+
+def _clip_frame(video_path: str | Path, index: int):
+    """Frame ``index`` of a clip as a PIL image, or None past the end."""
+    import av
+    with av.open(str(video_path)) as container:
+        stream = container.streams.video[0]
+        for i, frame in enumerate(container.decode(stream)):
+            if i == index:
+                return frame.to_image()
+    return None
+
+
+def colour_match(
+    reference_path: str | Path, video_path: str | Path, *, frame_count: Optional[int] = None
+) -> Dict[str, Any]:
+    """How closely the middle frame of a clip keeps a still's colours.
+
+    Cosine of the two images' RGB histograms (``_histogram_vec``). It compares
+    palettes and says nothing about who or what is in the frame, so the record
+    carries ``label`` "colour match". The frame is the middle of the clip: an
+    image-to-video clip starts from its keyframe, so an early frame matches by
+    construction and drift only shows later. ``frame_count`` is the decoded
+    length when the caller has it. Never raises; ``score`` is None with a
+    ``reason`` when the match could not run.
+    """
+    out: Dict[str, Any] = {
+        "label": COLOUR_MATCH_LABEL, "method": "rgb_histogram", "score": None,
+        "frame_index": None, "frames": None, "reason": None,
+    }
+    try:
+        import numpy as np
+        total = int(frame_count or 0) or _clip_frame_count(video_path)
+        if total <= 0:
+            out["reason"] = "the clip has no frames"
+            return out
+        index = total // 2
+        frame = _clip_frame(video_path, index)
+        if frame is None:
+            out["reason"] = f"frame {index} of {total} could not be decoded"
+            return out
+        cosine = float(np.dot(_histogram_vec(frame), _histogram_vec(str(reference_path))))
+        out.update(score=round(max(0.0, min(1.0, cosine)), 4), frame_index=index, frames=total)
+    except Exception as e:  # noqa: BLE001 — a measurement that cannot run is a reason
+        out["reason"] = f"the colour match could not run ({str(e)[:160]})"
+    return out
 
 
 def score_identity_preservation(
@@ -84,9 +146,9 @@ def score_identity_preservation(
 ) -> Dict[str, Any]:
     """Identity score between training refs and a generated candidate.
 
-    ``hist`` (default): mean cosine similarity of RGB histograms. Cheap, and a
-    colour-palette proxy rather than an identity measure — enough to tell a clip
-    apart from its own keyframe, which is all batch_video_generator asks of it.
+    ``hist`` (default): mean cosine similarity of RGB histograms. It measures
+    palette, not identity, and its result carries ``label`` "colour match" to
+    say so. Clips are compared with ``colour_match``, which also picks the frame.
 
     ``size``: ratio of file sizes. Kept for callers that still want it. It carries
     no identity signal, and nothing on the Cast smoke path may use it.
@@ -127,9 +189,9 @@ def score_identity_preservation(
                         pass
                 if sims:
                     score = float(sum(sims) / len(sims))
-                    # Cosine of normalized hist is typically ~0.7–0.99 for same subject.
                     result["score"] = max(0.0, min(1.0, score))
                     result["method"] = "hist"
+                    result["label"] = COLOUR_MATCH_LABEL
                     result["details"] = {
                         "n_refs": len(sims),
                         "mean_cosine": round(score, 4),
@@ -138,7 +200,7 @@ def score_identity_preservation(
                     }
                     return result
             except Exception as e:
-                logger.debug("hist identity score failed, falling back to size: %s", e)
+                logger.debug("colour histogram failed, falling back to size: %s", e)
                 method = "size"
 
         if method == "size":
@@ -528,6 +590,16 @@ QUALITY_THRESHOLDS: Dict[str, Dict[str, Any]] = {
         "Models move a length onto their frame grid (4n+1, 8n+1, 17k+5), up or down, so an "
         "expected count is allowed one grid step either way, multiplied by the RIFE factor.")},
     "samples": {"value": 8, "why": "Every Nth frame such that about 8 are checked, plus the first and last."},
+    "colour_match_floor": {"value": 0.5, "why": (
+        "Histogram cosine between a cinematic clip's keyframe and its middle frame (colour_match). "
+        "Frames of one scene usually sit between 0.7 and 0.99, so under 0.5 the palette has moved "
+        "well away from the keyframe. It says nothing about who is in the shot. Uncalibrated; measured on "
+        "a frame from the first second it would almost never fire, since an image-to-video clip "
+        "starts from its keyframe.")},
+    "vlm_score_floor": {"value": 5, "why": (
+        "The vision review's 0-10 quality_score (review_video_quality); under 5 the reviewer "
+        "itself calls the clip below average. Not yet measured against clips a person has "
+        "judged, so it holds a clip for a look rather than failing it.")},
 }
 
 _FLAG_TEXT = {
@@ -542,6 +614,7 @@ _FLAG_TEXT = {
     "frozen": "frozen video (frames do not change)",
     "wrong_size": "wrong frame size",
     "wrong_frame_count": "wrong number of frames",
+    "low_colour_match": "colours drift from the keyframe",
 }
 
 
@@ -561,6 +634,52 @@ OBSERVED_ONLY: Dict[str, str] = {
     "oversaturated": "6 of 171, neon-lit scenes",
     "frozen": "21 of 171, including slow push-ins whose frames do change",
 }
+
+
+# ── What a failed check does to the clip ─────────────────────────────────────
+# Operator decision 2026-10-06 (T014), chosen from: deliver the clip with its
+# flag pill, re-render it once automatically, or hold it for a person's look.
+# A clip with any flag is held: its review state is "needs review" with the
+# flags as the reason, automatic next steps skip it (registration into
+# Documents, the next music-video cut) until a person approves it or
+# re-renders it, and re-rendering is one click and never automatic. An
+# automatic re-render spends GPU time on every misfire and can fail the same
+# way twice; a pill alone let a damaged clip go on as done.
+#
+# Measured against: the same 171 real renders as OBSERVED_ONLY. The checks
+# that stay flags (black frames, clipped highlights, washed out, wrong size,
+# wrong length, unreadable) marked 4 of them: a NaN-damaged clip whose frames
+# go black, two blown-out Wan 14B T2V renders and one high-key CogVideoX shot.
+# So about 1 clip in 40 waits for a person. low_vlm_score and low_colour_match
+# (QUALITY_THRESHOLDS vlm_score_floor, colour_match_floor) are not measured on
+# that set yet. A render that is blank or fully black never reaches this:
+# comfyui_video_generator._looks_like_blank_video fails it outright.
+NEEDS_REVIEW = "needs_review"
+QUALITY_FLAG_OUTCOME: Dict[str, str] = {
+    code: NEEDS_REVIEW for code in (
+        "unreadable", "black_frames", "clipped_highlights", "washed_out",
+        "wrong_size", "wrong_frame_count", "low_vlm_score", "low_colour_match",
+        # Records written before the colour match was named for what it is.
+        "low_identity_score",
+    )
+}
+
+
+def review_hold(quality: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The review state a clip's quality record puts it in, or None when nothing holds it.
+
+    A flag code missing from QUALITY_FLAG_OUTCOME holds the clip too: a new
+    check must not deliver its failures by default.
+    """
+    flags = [f for f in ((quality or {}).get("flags") or []) if isinstance(f, dict) and f.get("code")]
+    held = [f for f in flags if QUALITY_FLAG_OUTCOME.get(f["code"], NEEDS_REVIEW) == NEEDS_REVIEW]
+    if not held:
+        return None
+    return {
+        "state": NEEDS_REVIEW,
+        "codes": [f["code"] for f in held],
+        "reasons": [f.get("message") or _FLAG_TEXT.get(f["code"], f["code"]) for f in held],
+    }
 
 
 def _t(key: str):
@@ -788,6 +907,68 @@ def _extract_frames_b64(video_path: str | Path, n: int = 6, width: int = 448) ->
         return out
 
 
+# A review that produced no score has not passed: the record reads "not
+# reviewed" with the reason, and every reader shows that state rather than
+# nothing, which would look the same as a clean pass.
+REVIEW_REASON_TEXT: Dict[str, str] = {
+    "model_not_installed": "the review model {model} is not installed",
+    "ollama_unreachable": "Ollama could not be asked which models are installed",
+    "no_frames": "no frames could be read from the clip",
+    "vlm_unavailable": "the review model could not be run",
+    "unparseable_review": "the review model's reply was not a review",
+    "no_score": "the review model gave no score",
+    "review_error": "the review could not run",
+}
+
+
+def not_reviewed(reason: str, *, model: Optional[str] = None, detail: str = "") -> Dict[str, Any]:
+    """The record of a clip the vision review did not score, in plain words."""
+    message = REVIEW_REASON_TEXT.get(reason, reason).format(model=model or "?")
+    if detail:
+        message = f"{message} ({detail[:160]})"
+    return {"status": "not_reviewed", "available": False, "model": model,
+            "reason": reason, "message": message}
+
+
+def _installed_ollama_tags() -> Optional[set]:
+    """Tags Ollama reports as pulled, or None when Ollama cannot be asked."""
+    try:
+        import ollama
+        resp = ollama.list()
+    except Exception as e:  # noqa: BLE001 — unreachable is a reason, not a crash
+        logger.debug("video review: ollama.list() failed: %s", e)
+        return None
+    models = resp.get("models", []) if hasattr(resp, "get") else getattr(resp, "models", [])
+    tags: set = set()
+    for m in models or []:
+        tag = getattr(m, "model", None)
+        if tag is None and hasattr(m, "get"):
+            tag = m.get("model") or m.get("name")
+        if tag is None:
+            tag = getattr(m, "name", None)
+        if tag:
+            tags.add(str(tag))
+    return tags
+
+
+def resolve_review_model(model: str) -> tuple:
+    """(installed tag, None) for the review model, or (None, reason code).
+
+    Matches the tag exactly, or a bare name against its ``:latest`` tag. Never
+    substitutes a different vision model: the score would be another reviewer's
+    under this one's name.
+    """
+    tags = _installed_ollama_tags()
+    if tags is None:
+        return None, "ollama_unreachable"
+    want = (model or "").strip()
+    if want in tags:
+        return want, None
+    if ":" not in want and f"{want}:latest" in tags:
+        return f"{want}:latest", None
+    return None, "model_not_installed"
+
+
 def review_video_quality(
     video_path: str | Path,
     *,
@@ -800,24 +981,32 @@ def review_video_quality(
     MiniCPM-V 4.5) to judge scene, temporal coherence, artifacts, and a 0-10 score.
 
     Catches the failure single-frame metrics can't: subject morphing / flicker /
-    teleporting across frames. Best-effort and fails OPEN — returns
-    {"available": False, "reason": ...} when ffmpeg / ollama / the model is missing,
-    so callers can treat it as an optional signal.
+    teleporting across frames. Never raises. ``status`` is "reviewed" only when
+    the model returned a score; otherwise "not_reviewed" with a ``reason`` code
+    and a plain ``message`` (see REVIEW_REASON_TEXT). The model is checked
+    against what Ollama has installed before any frame is read, so a missing
+    model is known up front. ``available`` stays for older readers: the model
+    answered with a parseable review.
 
     annotate=True writes the result into the asset's .metrics.json sidecar.
     """
-    import json as _json
-    import re as _re
-
-    model = model or __import__("os").environ.get(
+    requested = model or __import__("os").environ.get(
         "GUAARDVARK_VIDEO_REVIEW_MODEL", DEFAULT_VIDEO_REVIEW_MODEL
     )
-    result: Dict[str, Any] = {"available": False, "model": model}
+    result = _review_clip(video_path, requested, sample_frames)
+    if annotate:
+        annotate_asset(video_path, {"vlm_review": result})
+    return result
+
+
+def _review_clip(video_path: str | Path, requested: str, sample_frames: int) -> Dict[str, Any]:
+    model, missing = resolve_review_model(requested)
+    if model is None:
+        return not_reviewed(missing, model=requested)
 
     frames = _extract_frames_b64(video_path, n=sample_frames)
     if not frames:
-        result["reason"] = "no_frames"
-        return result
+        return not_reviewed("no_frames", model=model)
 
     dur = compute_basic_video_stats(video_path).get("duration_s", "?")
     prompt = _REVIEW_PROMPT.format(n=len(frames), dur=dur)
@@ -833,23 +1022,22 @@ def review_video_quality(
             **think_payload(model),
         )
         raw = (resp["message"]["content"] or "").strip()
-    except Exception as e:  # noqa: BLE001 — optional signal, never crash the caller
+    except Exception as e:  # noqa: BLE001 — a failed call is a reason, never a crash
         logger.warning("video review: VLM call failed: %s", e)
-        result["reason"] = f"vlm_unavailable: {e}"
-        return result
+        return not_reviewed("vlm_unavailable", model=model, detail=str(e))
 
-    review: Dict[str, Any] = {}
+    review: Any = {}
     try:
-        review = _json.loads(raw)
-    except _json.JSONDecodeError:
-        m = _re.search(r"\{.*\}", raw, _re.DOTALL)
+        review = json.loads(raw)
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
         if m:
             try:
-                review = _json.loads(m.group(0))
-            except _json.JSONDecodeError:
+                review = json.loads(m.group(0))
+            except json.JSONDecodeError:
                 pass
-    if not review:
-        result["reason"] = "unparseable_review"
+    if not review or not isinstance(review, dict):
+        result = not_reviewed("unparseable_review", model=model)
         result["raw"] = raw[:300]
         return result
 
@@ -859,9 +1047,11 @@ def review_video_quality(
     except (TypeError, ValueError):
         review["quality_score"] = None
 
+    if review["quality_score"] is None:
+        result = not_reviewed("no_score", model=model)
+    else:
+        result = {"status": "reviewed", "model": model, "reason": None, "message": None}
     result.update({"available": True, "frames_reviewed": len(frames), "review": review})
-    if annotate:
-        annotate_asset(video_path, {"vlm_review": result})
     return result
 
 

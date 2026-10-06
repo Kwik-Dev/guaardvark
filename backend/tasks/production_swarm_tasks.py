@@ -203,8 +203,11 @@ def run_screenwriter(prod_id: int, llm=None):
         for subj in resolved_subjects:
             existing = Subject.query.filter_by(name=subj["name"], kind=subj["kind"]).first()
             if existing:
-                existing.description = subj["description"]
-                existing.cast_required = subj["cast_required"]
+                # A Cast Library subject belongs to every production that names
+                # it. Link it as it is; this script's text and cast pin stay on
+                # the link. An empty description is the one gap worth filling.
+                if not (existing.description or "").strip():
+                    existing.description = subj["description"]
                 subject_to_link = existing
             else:
                 new_subj = Subject(
@@ -215,9 +218,12 @@ def run_screenwriter(prod_id: int, llm=None):
                 db.session.flush()  # get ID
                 subject_to_link = new_subj
 
-            # Link to production
-            ps = ProductionSubject(production_id=prod_id, subject_id=subject_to_link.id)
-            db.session.add(ps)
+            db.session.add(ProductionSubject(
+                production_id=prod_id,
+                subject_id=subject_to_link.id,
+                script_description=subj["description"],
+                cast_required=subj["cast_required"],
+            ))
         
         for scene in out.scenes:
             for shot in scene.shots:
@@ -302,14 +308,17 @@ def run_casting_director(prod_id: int, llm=None):
 
 
 def _subjects_for_production(prod_id: int) -> list[Subject]:
-    """Prefer production-scoped cast, with a fallback for legacy unlinked rows."""
-    subjects = (
+    """The subjects linked to this production, and only those.
+
+    A production with no linked subjects gets an empty list: the shot planner
+    may only put a Cast LoRA on a shot when that subject belongs to the film.
+    """
+    return (
         db.session.query(Subject)
         .join(ProductionSubject)
         .filter(ProductionSubject.production_id == prod_id)
         .all()
     )
-    return subjects or Subject.query.all()
 
 
 class _DirectorInvocation:
@@ -697,9 +706,20 @@ def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
                     output_dir=output_dir,
                 )
 
+                voice_records = list(getattr(res, "voice_records", None) or [])
                 for i, shot in enumerate(shots):
                     if i < len(res.clip_paths):
                         shot.video_clip_path = res.clip_paths[i]
+                    # Which voice spoke the line, so a fallback shows in the
+                    # production view instead of only in a log.
+                    record = voice_records[i] if i < len(voice_records) else None
+                    shot.voice_record = record if isinstance(record, dict) else None
+                    if shot.voice_record and shot.voice_record.get("fallbacks"):
+                        import logging
+                        logging.getLogger(__name__).warning(
+                            "production %s shot %s/%s voice fallback: %s", prod_id,
+                            shot.scene_number, shot.shot_number,
+                            "; ".join(f["message"] for f in shot.voice_record["fallbacks"]))
 
                 final_doc = register_production_output(
                     production=ctx.production, file_path=res.final_mp4_path, category="final",

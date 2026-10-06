@@ -38,6 +38,8 @@ import {
   pollMusicVideoStoryboards,
   regenMusicVideoStoryboard,
   cancelMusicVideo,
+  approveMusicVideoCut,
+  rerenderMusicVideoCut,
 } from "../api/musicVideoService";
 import { getAllPluginStatus } from "../api/pluginsService";
 import { getAvailableModels } from "../api/modelService";
@@ -45,6 +47,7 @@ import GpuGateBanner from "../components/common/GpuGateBanner";
 import useJobsGate from "../hooks/useJobsGate";
 import { useUnifiedProgress } from "../contexts/UnifiedProgressContext";
 import LiveLatentPreview from "../components/videogen/LiveLatentPreview";
+import CutQualityList from "../components/videogen/CutQualityList";
 import { formatUiError } from "../utils/uiError";
 import { dispatchWarning } from "../api/taskQueue";
 import ChangedElsewhereNotice from "../components/common/ChangedElsewhereNotice";
@@ -1033,6 +1036,25 @@ const MusicVideoPage = () => {
     }
   };
 
+  // A cut the quality check held: keep it, or render it again.
+  const handleHeldCut = async (index, action) => {
+    if (!detail) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = action === "approve"
+        ? await approveMusicVideoCut(detail.id, index)
+        : await rerenderMusicVideoCut(detail.id, index);
+      noteDispatch(detail.id, updated);
+      setDetail(updated);
+    } catch (e) {
+      setError(formatUiError(e?.response?.data?.error) || e.message
+        || (action === "approve" ? "Approve failed." : "Re-render failed."));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleCancel = async () => {
     if (!detail) return;
     const analyzing = detail.current_stage === "analyzing";
@@ -1672,6 +1694,15 @@ const MusicVideoPage = () => {
                     Cancel Generation
                   </Button>
                 </Stack>
+              )}
+
+              {["generating", "assembling", "complete"].includes(detail.current_stage) && (
+                <CutQualityList
+                  clips={detail.clips}
+                  busy={busy}
+                  onApprove={(index) => handleHeldCut(index, "approve")}
+                  onRerender={(index) => handleHeldCut(index, "rerender")}
+                />
               )}
 
               {detail.current_stage === "assembling" && (

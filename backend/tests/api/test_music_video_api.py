@@ -244,3 +244,64 @@ def test_cancel_rejects_non_cancellable_stage(client, app, tmp_path):
 
     resp = client.post(f"/api/music-video/{mv_id}/cancel")
     assert resp.status_code == 409
+
+
+# --- cuts a quality check held -------------------------------------------------
+
+def _generating_with_a_held_cut(tmp_path):
+    doc = _song_doc(tmp_path)
+    svc = MusicVideoService(db.session)
+    mv = svc.create(name="x", song_document_id=doc.id, song_path=str(tmp_path / "song.wav"),
+                    style_prompt="x", project_id=None)
+    mv.current_stage = "generating"
+    mv.status = "generating"
+    clip = tmp_path / "c1.mp4"
+    clip.write_bytes(b"x")
+    mv.clips = [
+        {"index": 0, "status": "done", "clip_path": str(clip), "review": None},
+        {"index": 1, "status": "done", "clip_path": str(clip),
+         "quality": {"flagged": True, "flags": [{"code": "black_frames", "message": "black frames"}]},
+         "review": {"state": "needs_review", "codes": ["black_frames"], "reasons": ["black frames"]}},
+    ]
+    db.session.commit()
+    return mv.id
+
+
+def test_a_held_cut_is_counted_and_approving_it_continues_the_video(client, app, tmp_path, monkeypatch):
+    dispatched = []
+    monkeypatch.setattr(MusicVideoService, "dispatch_agent",
+                        lambda self, mv_id, agent: dispatched.append((mv_id, agent)))
+    with app.app_context():
+        mv_id = _generating_with_a_held_cut(tmp_path)
+
+    assert client.get(f"/api/music-video/{mv_id}").get_json()["clips_needing_review"] == 1
+    resp = client.post(f"/api/music-video/{mv_id}/cut/1/approve")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["clips_needing_review"] == 0
+    cut = next(c for c in data["clips"] if c["index"] == 1)
+    assert cut["review"]["state"] == "approved" and cut["review"]["reasons"] == ["black frames"]
+    assert dispatched == [(mv_id, "clip_generator")]
+
+
+def test_re_rendering_a_held_cut_queues_it_again(client, app, tmp_path, monkeypatch):
+    dispatched = []
+    monkeypatch.setattr(MusicVideoService, "dispatch_agent",
+                        lambda self, mv_id, agent: dispatched.append((mv_id, agent)))
+    with app.app_context():
+        mv_id = _generating_with_a_held_cut(tmp_path)
+
+    resp = client.post(f"/api/music-video/{mv_id}/cut/1/rerender")
+    assert resp.status_code == 200
+    cut = next(c for c in resp.get_json()["clips"] if c["index"] == 1)
+    assert cut["status"] == "pending" and cut["clip_path"] is None
+    assert cut["review"] is None and cut["rerenders"] == 1
+    assert dispatched == [(mv_id, "clip_generator")]
+
+
+def test_only_a_held_cut_can_be_approved_or_re_rendered(client, app, tmp_path):
+    with app.app_context():
+        mv_id = _generating_with_a_held_cut(tmp_path)
+    assert client.post(f"/api/music-video/{mv_id}/cut/0/approve").status_code == 409
+    assert client.post(f"/api/music-video/{mv_id}/cut/0/rerender").status_code == 409
+    assert client.post(f"/api/music-video/{mv_id}/cut/9/approve").status_code == 404

@@ -56,6 +56,7 @@ def test_ti2v_global_serves_i2v(monkeypatch):
 
 
 def test_hardware_prefers_compile_time_default_when_installed(monkeypatch):
+    _always_ready(monkeypatch)
     monkeypatch.setattr(vmr, "_video_setting", lambda k: "")
     monkeypatch.setattr(vmr, "is_model_installed", lambda m: m == "wan22-5b")
     monkeypatch.setattr(vmr, "_probe_total_vram_mb", lambda: 16376)
@@ -95,6 +96,7 @@ def test_clip_defaults_are_native_not_svd():
 def test_hardware_fallback_takes_the_largest_model_that_fits(monkeypatch):
     """Two installed families, no setting: the card gets the bigger one, not the
     one the registry happens to list first."""
+    _always_ready(monkeypatch)
     monkeypatch.setattr(vmr, "_video_setting", lambda k: "")
     installed = {"hunyuan-t2v", "ltx23-distilled-fp8"}
     monkeypatch.setattr(vmr, "is_model_installed", lambda m: m in installed)
@@ -107,6 +109,7 @@ def test_hardware_fallback_takes_the_largest_model_that_fits(monkeypatch):
 
 
 def test_hardware_fallback_skips_models_that_do_not_fit(monkeypatch):
+    _always_ready(monkeypatch)
     monkeypatch.setattr(vmr, "_video_setting", lambda k: "")
     installed = {"hunyuan-t2v", "ltx23-distilled-fp8"}
     monkeypatch.setattr(vmr, "is_model_installed", lambda m: m in installed)
@@ -142,3 +145,81 @@ def test_a_stopped_comfyui_is_accepted_only_where_the_caller_starts_it(monkeypat
     assert vmr.resolve_active_video_model("t2v", "minimax-h3-int8") == (None, down)
     monkeypatch.setattr(vmr, "preflight_video_model", lambda m: (False, missing))
     assert vmr.resolve_active_video_model("t2v", "minimax-h3-int8", comfyui_down_ok=True) == (None, missing)
+
+
+# ── The automatic pick: preflight, an unread card, and no family swap ────────
+
+def test_the_hardware_pick_passes_preflight_like_a_typed_one(monkeypatch):
+    """A candidate missing a companion is not handed out; the next ready one is."""
+    from backend.services.job_types import RenderErrorKind, RenderFailure
+    monkeypatch.setattr(vmr, "_video_setting", lambda k: "")
+    installed = {"hunyuan-t2v", "ltx23-distilled-fp8"}
+    monkeypatch.setattr(vmr, "is_model_installed", lambda m: m in installed)
+    monkeypatch.setattr(vmr, "_probe_total_vram_mb", lambda: 24576)
+    biggest = max(installed, key=vmr.vram_mb_for_model)
+    other = (installed - {biggest}).pop()
+    broken = RenderFailure(RenderErrorKind.COMPANION_MISSING, "is missing companion 'VAE'.")
+    checked = []
+
+    def preflight(m):
+        checked.append(m)
+        return (False, broken) if m == biggest else (True, "")
+
+    monkeypatch.setattr(vmr, "preflight_video_model", preflight)
+    assert vmr.resolve_active_video_model("t2v") == (other, None)
+    assert checked == [biggest, other]
+
+    monkeypatch.setattr(vmr, "preflight_video_model", lambda m: (False, broken))
+    assert vmr.resolve_active_video_model("t2v") == (None, broken)
+
+
+def test_an_unread_card_fits_nothing(monkeypatch):
+    _always_ready(monkeypatch)
+    monkeypatch.setattr(vmr, "_video_setting", lambda k: "")
+    monkeypatch.setattr(vmr, "is_model_installed", lambda m: True)
+    monkeypatch.setattr(vmr, "_probe_total_vram_mb", lambda: 0)
+    assert vmr._fits_card("wan22-5b", 0) is False
+    assert vmr._fits_card("wan22-5b", None) is False
+    mid, err = vmr.resolve_active_video_model("t2v")
+    assert mid is None and "could not be read" in err
+
+
+def test_a_t2v_job_under_an_i2v_only_global_stays_in_its_family(monkeypatch):
+    _always_ready(monkeypatch)
+    monkeypatch.setattr(
+        vmr, "_video_setting",
+        lambda k: "hunyuan-i2v" if k == "active_video_model" else "",
+    )
+    monkeypatch.setattr(vmr, "is_model_installed", lambda m: True)
+    monkeypatch.setattr(vmr, "_probe_total_vram_mb", lambda: 24576)
+    assert vmr.resolve_active_video_model("t2v") == ("hunyuan-t2v", None)
+
+
+def test_a_global_whose_family_cannot_serve_the_role_is_refused_not_swapped(monkeypatch):
+    """No same-family text-to-video model: refuse with the reason rather than
+    hand the job to whatever the hardware pick would choose."""
+    _always_ready(monkeypatch)
+    monkeypatch.delitem(vmr.VIDEO_MODEL_REGISTRY, "hunyuan-t2v")
+    monkeypatch.setattr(
+        vmr, "_video_setting",
+        lambda k: "hunyuan-i2v" if k == "active_video_model" else "",
+    )
+    monkeypatch.setattr(vmr, "is_model_installed", lambda m: True)
+    monkeypatch.setattr(vmr, "_probe_total_vram_mb", lambda: 24576)
+    assert vmr._hardware_candidates("t2v", 24576), "the hardware pick would have had a model"
+    mid, err = vmr.resolve_active_video_model("t2v")
+    assert mid is None
+    assert "HunyuanVideo 13B I2V" in err and "cannot make video from text alone" in err
+
+
+def test_an_i2v_job_under_a_t2v_global_without_a_sibling_is_refused(monkeypatch):
+    _always_ready(monkeypatch)
+    monkeypatch.delitem(vmr.VIDEO_MODEL_REGISTRY, "hunyuan-i2v")
+    monkeypatch.setattr(
+        vmr, "_video_setting",
+        lambda k: "hunyuan-t2v" if k == "active_video_model" else "",
+    )
+    monkeypatch.setattr(vmr, "is_model_installed", lambda m: True)
+    monkeypatch.setattr(vmr, "_probe_total_vram_mb", lambda: 24576)
+    mid, err = vmr.resolve_active_video_model("i2v")
+    assert mid is None and "cannot make video from a start image" in err

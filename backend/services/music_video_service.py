@@ -51,6 +51,19 @@ STAGE_TO_AGENT: dict[str, str | None] = {
 }
 
 
+def held_cuts(clips: list | None) -> list:
+    """Rendered cuts a quality check holds for review (state "needs review").
+
+    The video is not assembled while any is held: a person approves or
+    re-renders each one (video_consistency_metrics.QUALITY_FLAG_OUTCOME).
+    """
+    from backend.services.video_consistency_metrics import NEEDS_REVIEW
+    return [
+        c for c in clips or []
+        if c.get("status") == "done" and (c.get("review") or {}).get("state") == NEEDS_REVIEW
+    ]
+
+
 # --- Cut cadence (pure) ------------------------------------------------------
 
 MIN_CLIP_S = 0.6   # floor: never emit a cut shorter than this

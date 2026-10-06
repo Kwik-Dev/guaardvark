@@ -3433,6 +3433,14 @@ class ProductionSubject(db.Model):
         db.ForeignKey("subjects.id", name="fk_production_subject_subject_id", ondelete="CASCADE"),
         nullable=False, index=True,
     )
+    # What this production's screenwriter said about the subject, and whether
+    # its script makes the subject an identity-locked cast member. Kept here
+    # rather than on the Subject, which the Cast Library shares across
+    # productions: one film's script must not rewrite another film's character.
+    # NULL cast_required (a row not written by the screenwriter) defers to the
+    # Subject's own setting.
+    script_description = db.Column(db.Text, nullable=True)
+    cast_required = db.Column(db.Boolean, nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=db.func.now())
     __table_args__ = (db.UniqueConstraint("production_id", "subject_id", name="uq_production_subject"),)
 
@@ -3475,6 +3483,10 @@ class ProductionShot(db.Model):
     # The curator's advice on the current frame: {"verdict": "approve"|"flag",
     # "reason": str, "confidence": int}. NULL until it has judged this frame.
     curator_advice = db.Column(db.JSON, nullable=True)
+    # Which voice spoke this shot's line in the last render, and every way it
+    # differs from the one asked for (swarm.clients.build_voice_record). NULL
+    # for a shot with no voiced line or not rendered yet.
+    voice_record = db.Column(db.JSON, nullable=True)
     regen_count = db.Column(db.Integer, nullable=False, default=0)
 
     production = db.relationship(

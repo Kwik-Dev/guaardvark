@@ -27,6 +27,7 @@ from backend.services.music_video_service import (
     MusicVideoService,
     compute_cut_plan,
     fill_clip_to_duration,
+    held_cuts,
     probe_duration,
 )
 from backend.services.plugin_bridge import ensure_plugin_running, PluginUnavailable
@@ -643,6 +644,14 @@ def run_clip_generator(mv_id: int):
             break
 
     if target is None:
+        # A cut a quality check held waits for a person: the video is not
+        # assembled until each one is approved or re-rendered (the cut API).
+        held = held_cuts(clips)
+        if held:
+            log.info("music_video %s: all cuts rendered, %d held for review (cuts %s); "
+                     "not assembling until a person approves or re-renders them",
+                     mv_id, len(held), [c.get("index") for c in held])
+            return
         # All clips done → advance + dispatch assembler (atomic; race-safe).
         svc = MusicVideoService(db.session)
         if svc.advance_if_predecessor(mv_id, expected_predecessor="generating"):
@@ -697,6 +706,36 @@ def run_clip_generator(mv_id: int):
     # the next clip doesn't immediately trip "GPU cooling down". Re-queues at the
     # back, so other work interleaves between clips rather than starving.
     celery.send_task("music_video.run_clip_generator", args=[mv_id], countdown=GPU_COOLDOWN_RETRY_S)
+
+
+def _cut_quality(s: dict, video_path, req, keyframe_path) -> tuple:
+    """(quality record, review state) for a rendered cut, as a Video Gen clip gets.
+
+    Checks the model's own output (``video_path``, before the fill re-times it),
+    against the size and length ``req`` resolved to. The keyframe colour match
+    runs when the cut animates a keyframe; the vision review only when the music
+    video asks for it (settings ``high_consistency``), since it is a model pass
+    per cut. A flag holds the cut for review (video_consistency_metrics
+    QUALITY_FLAG_OUTCOME): the video is not assembled until a person approves
+    or re-renders it. Never raises.
+    """
+    from backend.services.batch_video_generator import BatchVideoGenerator, clip_quality_record
+    from backend.services.video_consistency_metrics import review_hold
+    try:
+        expected = BatchVideoGenerator._expected_output(req)
+    except Exception as e:  # noqa: BLE001 — check what can be checked
+        log.debug("music-video cut: expected size/length unavailable: %s", e)
+        expected = None
+    keyframe = str(keyframe_path) if isinstance(keyframe_path, (str, os.PathLike)) else None
+    try:
+        quality = clip_quality_record(
+            str(video_path), expected=expected, keyframe_path=keyframe,
+            cinematic=bool(keyframe), vlm_review=bool(s.get("high_consistency")),
+        )
+    except Exception as e:  # noqa: BLE001 — a check must never fail a rendered cut
+        log.warning("music-video cut quality check failed for %s: %s", video_path, e)
+        return None, None
+    return quality, review_hold(quality)
 
 
 def _generate_one_clip(mv: MusicVideo, clip: dict):
@@ -946,6 +985,9 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
             method=s["fill_method"], max_stretch=float(s["max_stretch"]),
         )
 
+        progress.update_process(process_id, 92, f"Clip {idx + 1}/{clip_count}: checking quality…")
+        quality, review = _cut_quality(s, wan_abs, req, img)
+
         # Persist cursor. DEEP copy then reassign: a shallow list copy shares the
         # dict objects with the stored attribute, so mutating-then-reassigning leaves
         # old == new and SQLAlchemy's JSON column flushes NOTHING (the cursor update
@@ -957,6 +999,8 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
             if c["index"] == idx:
                 c["clip_path"] = final_path
                 c["status"] = "done"
+                c["quality"] = quality
+                c["review"] = review
                 break
         mv.clips = clips
         db.session.commit()
@@ -986,9 +1030,11 @@ def run_assembler(mv_id: int):
         from backend.services.plugin_bridge import ensure_plugins_for_stage
         ensure_plugins_for_stage("music-video", "assembling")
 
+        held = {c.get("index") for c in held_cuts(mv.clips)}
         clips = [
             c for c in (mv.clips or [])
             if c.get("status") == "done" and c.get("clip_path") and os.path.exists(c["clip_path"])
+            and c.get("index") not in held
         ]
         if not clips:
             raise RuntimeError("no completed clips to assemble")

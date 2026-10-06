@@ -12,6 +12,7 @@ import {
 import StageProgress from './StageProgress';
 import CastingPanel from './CastingPanel';
 import StoryboardGrid from './StoryboardGrid';
+import VoiceFallbackNotice from './VoiceFallbackNotice';
 
 const ProductionDetail = ({
   production,
@@ -120,6 +121,8 @@ const ProductionDetail = ({
           Screenwriting in progress (or stuck). Use Re-dispatch if nothing happens after a few minutes.
         </Alert>
       )}
+
+      <VoiceFallbackNotice shots={production.shots} />
 
       <Paper sx={{ p: 2, mb: 3 }}>
         <Typography variant="h6" gutterBottom>Pipeline Progress</Typography>
