@@ -324,3 +324,158 @@ def test_a_clip_whose_palette_left_the_keyframe_is_flagged_as_colour_drift(made,
     assert flag["message"].startswith("colours drift from the keyframe: colour match")
     assert f"at frame {clips.FRAMES // 2} of {clips.FRAMES}" in flag["message"]
     assert "identity" not in flag["message"]
+
+
+# ── What a failed check does (T014: needs review, no automatic re-render) ────
+
+def test_every_flag_has_a_declared_outcome():
+    flags = (set(vcm._FLAG_TEXT) - set(vcm.OBSERVED_ONLY)) | {"low_vlm_score"}
+    assert flags <= set(vcm.QUALITY_FLAG_OUTCOME)
+    assert set(vcm.QUALITY_FLAG_OUTCOME.values()) == {vcm.NEEDS_REVIEW}
+
+
+def test_a_check_with_no_declared_outcome_still_holds_the_clip():
+    hold = vcm.review_hold({"flags": [{"code": "a_new_check", "message": "something new"}]})
+    assert hold == {"state": "needs_review", "codes": ["a_new_check"], "reasons": ["something new"]}
+    assert vcm.review_hold({"flags": [], "observations": [{"code": "frozen"}]}) is None
+
+
+@pytest.fixture
+def registered(monkeypatch):
+    """What reached the Documents registration seam, patched where it is read."""
+    calls = []
+    monkeypatch.setattr("backend.services.output_registration.ensure_subfolder", lambda *a, **k: None)
+    monkeypatch.setattr("backend.services.output_registration.register_file",
+                        lambda **kw: calls.append(Path(kw["physical_path"]).resolve()))
+    return calls
+
+
+def test_a_flagged_clip_is_held_for_review_and_not_registered(tmp_path, monkeypatch, made, registered):
+    status, batch_dir = _run_one(tmp_path, monkeypatch, made["washed_out"])
+    [result] = status.results
+    assert result.success and status.status == "completed"
+    assert result.review["state"] == "needs_review"
+    assert result.review["codes"] == ["washed_out"]
+    assert result.review["reasons"][0].startswith("washed out")
+    clip = (batch_dir / "item1" / "videos" / "clip.mp4").resolve()
+    assert clip not in registered
+    saved = json.loads((batch_dir / "batch_metadata.json").read_text())
+    assert saved["results"][0]["review"]["state"] == "needs_review"
+
+
+def test_a_held_clip_is_not_rendered_again_on_its_own(tmp_path, monkeypatch, made, registered):
+    from backend.services import batch_video_generator as bvg
+
+    renders = []
+    real = _Renderer.generate_video
+
+    def counted(self, request):
+        renders.append(request.metadata["item_id"])
+        return real(self, request)
+
+    monkeypatch.setattr(_Renderer, "generate_video", counted)
+    monkeypatch.setattr(bvg.BatchVideoGenerator, "start_batch_from_prompts",
+                        lambda *a, **k: pytest.fail("a held clip started a new batch"))
+    status, _ = _run_one(tmp_path, monkeypatch, made["washed_out"])
+    assert renders == ["item1"]
+    assert status.results[0].review["state"] == "needs_review"
+
+
+def test_a_clean_clip_is_not_held_and_is_registered(tmp_path, monkeypatch, made, registered):
+    status, batch_dir = _run_one(tmp_path, monkeypatch, made["clean"])
+    [result] = status.results
+    assert result.review is None
+    assert (batch_dir / "item1" / "videos" / "clip.mp4").resolve() in registered
+
+
+def _held_batch(tmp_path, made):
+    """A finished batch whose one clip a check held, as the generator keeps it."""
+    import threading
+
+    from backend.services import batch_video_generator as bvg
+
+    batch_dir = tmp_path / "VideoBatch_held"
+    clip = batch_dir / "item1" / "videos" / "clip.mp4"
+    clip.parent.mkdir(parents=True)
+    shutil.copyfile(made["washed_out"], clip)
+    gen = bvg.BatchVideoGenerator.__new__(bvg.BatchVideoGenerator)
+    gen.batch_lock = threading.Lock()
+    gen.base_output_dir = tmp_path
+    result = bvg.BatchVideoResult(
+        item_id="item1", success=True, video_path="item1/videos/clip.mp4",
+        review={"state": "needs_review", "codes": ["washed_out"], "reasons": ["washed out: spread 13"]},
+    )
+    status = bvg.BatchVideoStatus(
+        batch_id="VideoBatch_held", status="completed", total_videos=1, completed_videos=1,
+        results=[result], output_dir=str(batch_dir),
+        retry_data={"mode": "text", "prompts": ["a fox in snow"], "item_ids": ["item1"],
+                    "params": {"model": "wan22-5b", "seed": 42, "metadata": {"high_consistency": True}}},
+    )
+    gen.active_batches = {"VideoBatch_held": status}
+    return gen, status, clip
+
+
+def test_approving_a_held_clip_registers_it(tmp_path, made, registered):
+    from flask import Flask
+
+    gen, status, clip = _held_batch(tmp_path, made)
+    with Flask(__name__).app_context():
+        result = gen.approve_item("VideoBatch_held", "item1")
+    assert result.review["state"] == "approved"
+    assert result.review["reasons"] == ["washed out: spread 13"]
+    assert registered == [clip.resolve()]
+    saved = json.loads((Path(status.output_dir) / "batch_metadata.json").read_text())
+    assert saved["results"][0]["review"]["state"] == "approved"
+
+
+def test_re_render_is_one_new_batch_with_the_same_settings_and_a_fresh_seed(tmp_path, made, monkeypatch):
+    from types import SimpleNamespace
+
+    gen, status, _ = _held_batch(tmp_path, made)
+    started = []
+
+    def fake_start(prompts, **params):
+        started.append((prompts, params))
+        return SimpleNamespace(batch_id="VideoBatch_new", status="queued")
+
+    monkeypatch.setattr(gen, "start_batch_from_prompts", fake_start)
+    new = gen.rerender_item("VideoBatch_held", "item1")
+
+    assert new.batch_id == "VideoBatch_new"
+    [(prompts, params)] = started
+    assert prompts == ["a fox in snow"]
+    assert params["model"] == "wan22-5b" and params["seed"] is None
+    assert params["metadata"]["high_consistency"] is True
+    assert params["metadata"]["rerender_of"] == {"batch_id": "VideoBatch_held", "item_id": "item1"}
+    assert status.results[0].review["state"] == "rerendered"
+    assert status.results[0].review["rerender_batch_id"] == "VideoBatch_new"
+
+
+def test_re_render_refuses_a_batch_that_kept_no_per_clip_settings(tmp_path, made):
+    gen, status, _ = _held_batch(tmp_path, made)
+    status.retry_data = {"mode": "text", "prompts": ["a fox in snow"], "params": {}}
+    with pytest.raises(ValueError):
+        gen.rerender_item("VideoBatch_held", "item1")
+    assert status.results[0].review["state"] == "needs_review"
+
+
+def test_status_text_says_a_held_clip_waits_for_a_person(monkeypatch):
+    from backend.tools import image_tools
+
+    body = {"status": "completed", "stage": "done", "completed_videos": 1, "total_videos": 1, "results": [
+        {"success": True, "video_path": "a/videos/a.mp4",
+         "metadata": {"quality": {"flagged": True, "frames": {"readable": True},
+                                  "flags": [{"code": "washed_out", "message": "washed out: spread 13"}]}},
+         "review": {"state": "needs_review", "codes": ["washed_out"], "reasons": ["washed out: spread 13"]}},
+    ]}
+
+    def fake_http(method, path, *args, **kwargs):
+        if path.startswith("/api/batch-video/status/"):
+            return body
+        raise RuntimeError("404 not found")
+
+    monkeypatch.setattr(image_tools, "_http_json", fake_http)
+    tool = image_tools.GenerationStatusTool()
+    tool._context = {"transport": "mcp"}
+    out = tool.execute(batch_id="VideoBatch_x")
+    assert "Review: needs review — held until a person approves or re-renders it" in out.output

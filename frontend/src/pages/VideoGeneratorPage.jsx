@@ -75,6 +75,7 @@ import {
 import QualityFlagsPill from "../components/videogen/QualityFlagsPill";
 import VlmReviewPill from "../components/videogen/VlmReviewPill";
 import ColourMatchPill from "../components/videogen/ColourMatchPill";
+import ClipReviewHold, { ReviewStatePill } from "../components/videogen/ClipReviewHold";
 import RenderFailureNote from "../components/videogen/RenderFailureNote";
 import { refusalText } from "../utils/renderFailure";
 import VideoGenEffectiveSettings from "../components/videogen/VideoGenEffectiveSettings";
@@ -934,6 +935,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     handleDeleteBatch,
     handleCancelBatch,
     handleRetryBatch,
+    handleApproveClip,
+    handleRerenderClip,
     handleClearCompletedQueue,
   } = useBatchVideo({ setError, setSuccess, computedParams });
 
@@ -2626,11 +2629,15 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                             )}
                           </Box>
                           <Stack direction="row" spacing={0.5} alignItems="center" flexWrap="wrap">
-                            <Chip
-                              label={res.success ? "Ready" : "Error"}
-                              color={res.success ? "success" : "error"}
-                              size="small"
-                            />
+                            {/* A held clip is not "Ready": its pill says it waits for a person. */}
+                            {res.review?.state !== "needs_review" && (
+                              <Chip
+                                label={res.success ? "Ready" : "Error"}
+                                color={res.success ? "success" : "error"}
+                                size="small"
+                              />
+                            )}
+                            {res.success && <ReviewStatePill review={res.review} />}
                             {res.frame_paths?.length > 0 && (
                               <Chip label={`${res.frame_paths.length}f`} size="small" variant="outlined" />
                             )}
@@ -2639,6 +2646,13 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                             <QualityFlagsPill quality={res.metadata?.quality} />
                           </Stack>
                           {!res.success && <RenderFailureNote failure={res.failure} error={res.error} />}
+                          {res.success && (
+                            <ClipReviewHold
+                              review={res.review}
+                              onApprove={() => handleApproveClip(batchStatus.batch_id, res.item_id)}
+                              onRerender={() => handleRerenderClip(batchStatus.batch_id, res.item_id)}
+                            />
+                          )}
                         </CardContent>
                         <CardActions sx={{ pt: 0 }}>
                           {videoUrl && (

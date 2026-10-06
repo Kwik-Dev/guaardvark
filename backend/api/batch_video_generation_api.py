@@ -23,6 +23,7 @@ from backend.utils.response_utils import success_response, error_response
 from backend.utils.path_guard import PathEscapesRoot, contained
 from backend.services.batch_video_generator import get_batch_video_generator
 from backend.services.job_types import RenderErrorKind, batch_failure, describe_failure, failure_kind
+from backend.services.video_consistency_metrics import NEEDS_REVIEW
 # Single source of truth for video-model file layout (download dst == install
 # check == ComfyUI loader paths). See backend/services/video_model_registry.py.
 from backend.services.video_model_registry import (
@@ -475,6 +476,7 @@ def get_batch_status(batch_id: str):
                 "error_kind": r.error_kind,
                 "failure": None if r.success else describe_failure(r.error_kind, r.error),
                 "metadata": r.metadata,
+                "review": getattr(r, "review", None),
             }
             for r in status.results
         ]
@@ -492,6 +494,11 @@ def get_batch_status(batch_id: str):
                 "flagged_videos": sum(
                     1 for r in status.results
                     if r.success and ((r.metadata or {}).get("quality") or {}).get("flagged")
+                ),
+                # Held until a person approves or re-renders them.
+                "needs_review_videos": sum(
+                    1 for r in status.results
+                    if (getattr(r, "review", None) or {}).get("state") == NEEDS_REVIEW
                 ),
                 "start_time": status.start_time.isoformat() if status.start_time else None,
                 "end_time": status.end_time.isoformat() if status.end_time else None,
@@ -725,6 +732,39 @@ def retry_batch(batch_id: str):
         })
     except Exception as e:
         logger.error(f"Failed to retry batch {batch_id}: {e}")
+        return error_response(str(e), 500)
+
+
+@batch_video_bp.route("/review/<batch_id>/<item_id>/approve", methods=["POST"])
+def approve_held_clip(batch_id: str, item_id: str):
+    """Keep a clip a quality check held for review; it is registered into Documents."""
+    try:
+        result = get_batch_video_generator().approve_item(batch_id, item_id)
+        if result is None:
+            return error_response("Clip not found", 404)
+        return success_response({"batch_id": batch_id, "item_id": item_id, "review": result.review})
+    except Exception as e:
+        logger.error(f"Failed to approve clip {batch_id}/{item_id}: {e}")
+        return error_response(str(e), 500)
+
+
+@batch_video_bp.route("/review/<batch_id>/<item_id>/rerender", methods=["POST"])
+def rerender_held_clip(batch_id: str, item_id: str):
+    """Render one clip again as a new batch with the same settings and a fresh seed."""
+    try:
+        generator = get_batch_video_generator()
+        new_status = generator.rerender_item(batch_id, item_id)
+        if new_status is None:
+            return error_response("Clip not found", 404)
+        return success_response({
+            "batch_id": new_status.batch_id,
+            "status": new_status.status,
+            "rerender_of": {"batch_id": batch_id, "item_id": item_id},
+        })
+    except ValueError as e:
+        return error_response(str(e), 400)
+    except Exception as e:
+        logger.error(f"Failed to re-render clip {batch_id}/{item_id}: {e}")
         return error_response(str(e), 500)
 
 

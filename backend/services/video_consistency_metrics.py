@@ -596,6 +596,10 @@ QUALITY_THRESHOLDS: Dict[str, Dict[str, Any]] = {
         "well away from the keyframe. It says nothing about who is in the shot. Uncalibrated; measured on "
         "a frame from the first second it would almost never fire, since an image-to-video clip "
         "starts from its keyframe.")},
+    "vlm_score_floor": {"value": 5, "why": (
+        "The vision review's 0-10 quality_score (review_video_quality); under 5 the reviewer "
+        "itself calls the clip below average. Not yet measured against clips a person has "
+        "judged, so it holds a clip for a look rather than failing it.")},
 }
 
 _FLAG_TEXT = {
@@ -630,6 +634,52 @@ OBSERVED_ONLY: Dict[str, str] = {
     "oversaturated": "6 of 171, neon-lit scenes",
     "frozen": "21 of 171, including slow push-ins whose frames do change",
 }
+
+
+# ── What a failed check does to the clip ─────────────────────────────────────
+# Operator decision 2026-10-06 (T014), chosen from: deliver the clip with its
+# flag pill, re-render it once automatically, or hold it for a person's look.
+# A clip with any flag is held: its review state is "needs review" with the
+# flags as the reason, automatic next steps skip it (registration into
+# Documents, the next music-video cut) until a person approves it or
+# re-renders it, and re-rendering is one click and never automatic. An
+# automatic re-render spends GPU time on every misfire and can fail the same
+# way twice; a pill alone let a damaged clip go on as done.
+#
+# Measured against: the same 171 real renders as OBSERVED_ONLY. The checks
+# that stay flags (black frames, clipped highlights, washed out, wrong size,
+# wrong length, unreadable) marked 4 of them: a NaN-damaged clip whose frames
+# go black, two blown-out Wan 14B T2V renders and one high-key CogVideoX shot.
+# So about 1 clip in 40 waits for a person. low_vlm_score and low_colour_match
+# (QUALITY_THRESHOLDS vlm_score_floor, colour_match_floor) are not measured on
+# that set yet. A render that is blank or fully black never reaches this:
+# comfyui_video_generator._looks_like_blank_video fails it outright.
+NEEDS_REVIEW = "needs_review"
+QUALITY_FLAG_OUTCOME: Dict[str, str] = {
+    code: NEEDS_REVIEW for code in (
+        "unreadable", "black_frames", "clipped_highlights", "washed_out",
+        "wrong_size", "wrong_frame_count", "low_vlm_score", "low_colour_match",
+        # Records written before the colour match was named for what it is.
+        "low_identity_score",
+    )
+}
+
+
+def review_hold(quality: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The review state a clip's quality record puts it in, or None when nothing holds it.
+
+    A flag code missing from QUALITY_FLAG_OUTCOME holds the clip too: a new
+    check must not deliver its failures by default.
+    """
+    flags = [f for f in ((quality or {}).get("flags") or []) if isinstance(f, dict) and f.get("code")]
+    held = [f for f in flags if QUALITY_FLAG_OUTCOME.get(f["code"], NEEDS_REVIEW) == NEEDS_REVIEW]
+    if not held:
+        return None
+    return {
+        "state": NEEDS_REVIEW,
+        "codes": [f["code"] for f in held],
+        "reasons": [f.get("message") or _FLAG_TEXT.get(f["code"], f["code"]) for f in held],
+    }
 
 
 def _t(key: str):
