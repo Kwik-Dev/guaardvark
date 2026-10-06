@@ -147,6 +147,12 @@ def execute_task():
         if service.is_active:
             return jsonify({"success": False, "error": "Agent already active"}), 409
 
+        # The display starts on demand and stops after a restart or idle; the
+        # chat tool and outreach start it the same way before using the screen.
+        from backend.utils.agent_display_utils import start_agent_display_if_needed
+        if not start_agent_display_if_needed():
+            return jsonify({"success": False, "error": "Agent display could not be started"}), 503
+
         screen = LocalScreenBackend()
 
         mouse_only = data.get("mouse_only", False)
