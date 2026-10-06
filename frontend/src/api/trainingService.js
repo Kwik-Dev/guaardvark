@@ -339,6 +339,27 @@ export const importToOllama = async (jobId, options = {}) => {
   }
 };
 
+/**
+ * Release a run the export gate held as worse than its base model. The
+ * choice (who, from where, when) is recorded on the job; nothing is exported
+ * until exportToOllama is called.
+ */
+export const exportTrainingJobAnyway = async (jobId, options = {}) => {
+  try {
+    const response = await fetch(`${BASE_URL}/training/jobs/${jobId}/export-anyway`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(options),
+    });
+    const data = await handleResponse(response);
+    if (data.error) throw new Error(data.error);
+    return data.data || data;
+  } catch (err) {
+    console.error(`trainingService: Error overriding the export gate for job ${jobId}:`, err.message);
+    throw err;
+  }
+};
+
 export const exportToOllama = async (jobId, options = {}) => {
   try {
     const response = await fetch(`${BASE_URL}/training/jobs/${jobId}/export-to-ollama`, {

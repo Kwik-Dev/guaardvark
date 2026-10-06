@@ -662,6 +662,57 @@ def start_filter_job():
         return error_response(str(e), 500)
 
 
+@training_bp.route("/jobs/<int:job_id>/export-anyway", methods=["POST"])
+@ensure_db_session_cleanup
+def export_anyway(job_id):
+    """Release a run the export gate held, on a person's explicit choice.
+
+    Body (optional): {"by": who chose, "via": where from}. The override is
+    recorded in the job's config as ``export_override`` beside the gate's own
+    verdict, and the job becomes "completed" so the export routes accept it.
+    Nothing is exported until one of them is called."""
+    try:
+        from backend.tasks.training_tasks import WORSE_THAN_BASE
+        from backend.utils.clock import utcnow
+
+        job = db.session.get(TrainingJob, job_id)
+        if not job:
+            return error_response("Job not found", 404)
+        if job.status != WORSE_THAN_BASE:
+            return error_response(
+                f"Only a run held as '{WORSE_THAN_BASE}' can be exported anyway (status: {job.status})",
+                400
+            )
+        if not job.lora_path or not Path(job.lora_path).exists():
+            return error_response(f"LoRA adapter path not found: {job.lora_path}", 400)
+
+        data = request.get_json(silent=True) or {}
+        config = json.loads(job.config_json) if job.config_json else {}
+        config["export_override"] = {
+            "by": str(data.get("by") or "person")[:100],
+            "via": str(data.get("via") or "api")[:50],
+            "at": utcnow().isoformat(timespec="seconds") + "Z",
+            "from_address": request.remote_addr,
+            "held_status": job.status,
+            "gate_note": job.error_message,
+        }
+        job.config_json = json.dumps(config)
+        job.status = "completed"
+        job.error_message = None
+        db.session.commit()
+
+        logger.info(f"Export gate overridden for training job {job_id} by "
+                    f"{config['export_override']['by']} via {config['export_override']['via']}")
+        return success_response(job.to_dict())
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        logger.error(f"Database error overriding the export gate for job {job_id}: {e}", exc_info=True)
+        return error_response(f"Database error: {str(e)}", 500)
+    except Exception as e:
+        logger.error(f"Error overriding the export gate for job {job_id}: {e}", exc_info=True)
+        return error_response(str(e), 500)
+
+
 @training_bp.route("/jobs/<int:job_id>/export", methods=["POST"])
 @ensure_db_session_cleanup
 def export_job_to_gguf(job_id):
@@ -695,8 +746,9 @@ def export_job_to_gguf(job_id):
         from backend.celery_dispatch import TaskNotStarted
         try:
             from backend.tasks.training_tasks import export_gguf_task
+            # export_gguf_task takes the training output folder, which holds lora/.
             task = export_gguf_task.apply_async(
-                args=[job.job_id, str(lora_path), quantization],
+                args=[job.job_id, str(lora_path.parent), quantization],
                 queue="training"
             )
             job.celery_task_id = task.id
@@ -747,8 +799,9 @@ def import_job_to_ollama(job_id):
         from backend.celery_dispatch import TaskNotStarted
         try:
             from backend.tasks.training_tasks import import_ollama_task
+            # import_ollama_task looks for the .gguf files in a folder.
             task = import_ollama_task.apply_async(
-                args=[job.job_id, str(gguf_path), model_name],
+                args=[job.job_id, str(gguf_path.parent), model_name],
                 queue="training"
             )
             job.celery_task_id = task.id
@@ -803,7 +856,7 @@ def export_to_ollama(job_id):
             from backend.tasks.training_tasks import import_ollama_task
             try:
                 task = import_ollama_task.apply_async(
-                    args=[job.job_id, job.gguf_path, model_name],
+                    args=[job.job_id, str(Path(job.gguf_path).parent), model_name],
                     queue="training"
                 )
             except TaskNotStarted as e:
@@ -837,9 +890,13 @@ def export_to_ollama(job_id):
             from backend.tasks.training_tasks import export_gguf_task, import_ollama_task
             from celery import chain
 
+            # Both steps take the training output folder (export reads lora/
+            # in it and writes the .gguf beside it). The import signature is
+            # immutable so the chain does not prepend the export's result.
+            model_dir = str(lora_path.parent)
             workflow = chain(
-                export_gguf_task.s(job.job_id, str(lora_path), quantization),
-                import_ollama_task.s(model_name)
+                export_gguf_task.s(job.job_id, model_dir, quantization),
+                import_ollama_task.si(job.job_id, model_dir, model_name)
             )
             result = workflow.apply_async(queue="training")
             job.celery_task_id = result.id

@@ -420,8 +420,9 @@ EVAL_SPLIT = {
 # than this share is neither exported to GGUF nor registered in Ollama; it ends
 # as WORSE_THAN_BASE with both losses in error_message and its adapter left on
 # disk. A job's config overrides the margin with "eval_gate_margin", and
-# "export_if_worse": true lets such a run through. A run with no measured loss
-# (too small to split, vision, measurement failed) is not gated.
+# "export_if_worse": true lets such a run through; a run already held is
+# released by POST /api/training/jobs/<id>/export-anyway. A run with no measured
+# loss (too small to split, vision, measurement failed) is not gated.
 EVAL_GATE = {
     # Room for measurement noise on a held-out set of tens of rows, so a run
     # that only matched its base is not refused; a run that diverged lands far
@@ -527,7 +528,7 @@ def _export_verdict(report: dict, margin: float, export_if_worse: bool, lora_pat
     if export_if_worse:
         return True, f"Export gate overridden by export_if_worse: {detail}"
     return False, (f"Not exported: {detail}. The adapter is kept at {lora_path}; "
-                   f"set export_if_worse in the job config to export a run like this anyway")
+                   f"choose Export anyway on the job to export it")
 
 
 # File types both trainers read (finetune_model.load_training_data, _hold_out_split).
