@@ -396,6 +396,25 @@ def test_docker_publishes_its_database_queue_and_ollama_on_loopback_only():
     assert services["backend"]["ports"] == ["5000:5000"]
 
 
+def test_docker_database_and_queue_take_the_install_passwords():
+    import yaml
+
+    services = yaml.safe_load((ROOT / "docker-compose.yml").read_text())["services"]
+    pg, redis = "${GUAARDVARK_POSTGRES_PASSWORD:-guaardvark}", "${GUAARDVARK_REDIS_PASSWORD:-guaardvark}"
+    assert services["postgres"]["environment"]["POSTGRES_PASSWORD"] == pg
+    assert services["redis"]["environment"]["REDIS_PASSWORD"] == redis
+    assert "--requirepass" in " ".join(services["redis"]["command"])
+    backend = services["backend"]["environment"]
+    assert backend["DATABASE_URL"] == f"postgresql://guaardvark:{pg}@postgres:5432/guaardvark"
+    for key in ("REDIS_URL", "CELERY_BROKER_URL", "CELERY_RESULT_BACKEND"):
+        assert backend[key] == f"redis://:{redis}@redis:6379/0"
+    start = (ROOT / "start-docker.sh").read_text()
+    # A password is made for PostgreSQL only while no database volume exists.
+    assert "com.docker.compose.volume=pgdata" in start
+    assert "write_env_value GUAARDVARK_REDIS_PASSWORD" in start
+    assert "write_env_value GUAARDVARK_POSTGRES_PASSWORD" in start
+
+
 def test_no_plugin_lets_any_page_read_its_replies():
     for app in sorted((ROOT / "plugins").glob("*/service/app.py")):
         source = app.read_text()

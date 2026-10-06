@@ -15,7 +15,8 @@ echo "[1/5] Locking codebase in database..."
 if [ -f "$GUAARDVARK_ROOT/.env" ]; then
     source "$GUAARDVARK_ROOT/.env"
 fi
-DB_URL="${DATABASE_URL:-postgresql://guaardvark:guaardvark@localhost:5432/guaardvark}"
+# A Docker install keeps only its database password in .env, not DATABASE_URL.
+DB_URL="${DATABASE_URL:-postgresql://guaardvark:${GUAARDVARK_POSTGRES_PASSWORD:-guaardvark}@localhost:5432/guaardvark}"
 
 psql "$DB_URL" -c "
     INSERT INTO system_settings (key, value) VALUES ('codebase_locked', 'true')

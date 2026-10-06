@@ -52,28 +52,75 @@ fi
 # the install's API key. docker compose reads GUAARDVARK_API_KEY from .env next
 # to docker-compose.yml (a value exported in this shell wins over it).
 ENV_FILE="$SCRIPT_DIR/.env"
-env_file_key() {
+env_file_value() {
     [ -f "$ENV_FILE" ] || return 0
-    { grep -E '^GUAARDVARK_API_KEY=' "$ENV_FILE" || true; } | tail -n 1 | cut -d= -f2- | tr -d "\"' \r"
+    { grep -E "^$1=" "$ENV_FILE" || true; } | tail -n 1 | cut -d= -f2- | tr -d "\"' \r"
+}
+env_file_key() { env_file_value GUAARDVARK_API_KEY; }
+# Writes NAME=VALUE into .env, replacing an empty NAME= line rather than adding
+# a second one. Rewriting in place keeps the file's owner and mode.
+write_env_value() {
+    if [ ! -f "$ENV_FILE" ]; then
+        (umask 077 && : > "$ENV_FILE")
+    elif grep -q "^$1=" "$ENV_FILE"; then
+        _kept="$(grep -v "^$1=" "$ENV_FILE" || true)"
+        if [ -n "$_kept" ]; then printf '%s\n' "$_kept" > "$ENV_FILE"; else : > "$ENV_FILE"; fi
+    elif [ -n "$(tail -c 1 "$ENV_FILE")" ]; then
+        # The last line has no newline; do not glue the value onto it.
+        printf '\n' >> "$ENV_FILE"
+    fi
+    printf '%s=%s\n' "$1" "$2" >> "$ENV_FILE"
+    # Same rule as start.sh: .env holds secrets, so only its owner reads it.
+    chmod 600 "$ENV_FILE"
 }
 NEW_API_KEY=""
 if [ -z "${GUAARDVARK_API_KEY:-}" ] && [ -z "$(env_file_key)" ]; then
     # 32 random bytes as URL-safe base64, the same form the backend makes.
     NEW_API_KEY="$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n')"
-    if [ ! -f "$ENV_FILE" ]; then
-        (umask 077 && : > "$ENV_FILE")
-    elif grep -q '^GUAARDVARK_API_KEY=' "$ENV_FILE"; then
-        # Its GUAARDVARK_API_KEY= line is empty: replace it rather than add a
-        # second one. Rewriting in place keeps the file's owner and mode.
-        _kept="$(grep -v '^GUAARDVARK_API_KEY=' "$ENV_FILE" || true)"
-        if [ -n "$_kept" ]; then printf '%s\n' "$_kept" > "$ENV_FILE"; else : > "$ENV_FILE"; fi
-    elif [ -n "$(tail -c 1 "$ENV_FILE")" ]; then
-        # The last line has no newline; do not glue the key onto it.
-        printf '\n' >> "$ENV_FILE"
+    write_env_value GUAARDVARK_API_KEY "$NEW_API_KEY"
+fi
+
+# ── Database and queue passwords ───────────────────────────────────────────
+# docker-compose.yml falls back to the stock "guaardvark" for both when .env
+# does not set them. Hex keeps them safe inside the backend's connection URLs.
+random_hex() { head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
+
+# Redis keeps nothing on disk here, so any install can take a password at once.
+NEW_REDIS_PASSWORD=0
+if [ -z "${GUAARDVARK_REDIS_PASSWORD:-}" ] && [ -z "$(env_file_value GUAARDVARK_REDIS_PASSWORD)" ]; then
+    write_env_value GUAARDVARK_REDIS_PASSWORD "$(random_hex)"
+    NEW_REDIS_PASSWORD=1
+fi
+
+# PostgreSQL reads POSTGRES_PASSWORD only when it creates the database, so a
+# password is generated only while this project has no database volume yet.
+# An existing database keeps the password it was created with.
+compose_project_name() {
+    local name
+    name="$({ "${COMPOSE[@]}" "${COMPOSE_FILES[@]}" config 2>/dev/null || true; } | sed -n 's/^name: *//p' | head -n 1 || true)"
+    if [ -z "$name" ]; then
+        name="${COMPOSE_PROJECT_NAME:-$(env_file_value COMPOSE_PROJECT_NAME)}"
     fi
-    printf 'GUAARDVARK_API_KEY=%s\n' "$NEW_API_KEY" >> "$ENV_FILE"
-    # Same rule as start.sh: .env holds secrets, so only its owner reads it.
-    chmod 600 "$ENV_FILE"
+    if [ -z "$name" ]; then
+        name="$(basename "$SCRIPT_DIR" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')"
+    fi
+    printf '%s' "$name"
+}
+NEW_POSTGRES_PASSWORD=0
+STOCK_POSTGRES_PASSWORD=0
+if [ -z "${GUAARDVARK_POSTGRES_PASSWORD:-}" ] && [ -z "$(env_file_value GUAARDVARK_POSTGRES_PASSWORD)" ]; then
+    PROJECT_NAME="$(compose_project_name)"
+    if PG_VOLUMES="$(docker volume ls -q \
+            --filter "label=com.docker.compose.project=$PROJECT_NAME" \
+            --filter "label=com.docker.compose.volume=pgdata" 2>/dev/null)" \
+        && [ -z "$PG_VOLUMES" ]; then
+        write_env_value GUAARDVARK_POSTGRES_PASSWORD "$(random_hex)"
+        NEW_POSTGRES_PASSWORD=1
+    else
+        # A database already exists (or Docker could not say): keep the stock
+        # password rather than lock the backend out of it.
+        STOCK_POSTGRES_PASSWORD=1
+    fi
 fi
 
 UP_ARGS=(up --build)
@@ -107,6 +154,22 @@ if [ -n "$NEW_API_KEY" ]; then
 else
     echo "  API key:      GUAARDVARK_API_KEY in .env (grep GUAARDVARK_API_KEY .env);"
     echo "                enter it once in Settings → API key in each browser."
+fi
+if [ "$NEW_POSTGRES_PASSWORD" -eq 1 ]; then
+    echo ""
+    echo "  PostgreSQL has this install's own password: GUAARDVARK_POSTGRES_PASSWORD in .env."
+fi
+if [ "$NEW_REDIS_PASSWORD" -eq 1 ]; then
+    echo ""
+    echo "  Redis has this install's own password: GUAARDVARK_REDIS_PASSWORD in .env."
+fi
+if [ "$NEW_POSTGRES_PASSWORD" -eq 1 ] || [ "$NEW_REDIS_PASSWORD" -eq 1 ]; then
+    echo "  The backend reads them from there; you need them only for psql or redis-cli."
+fi
+if [ "$STOCK_POSTGRES_PASSWORD" -eq 1 ]; then
+    echo ""
+    echo "  PostgreSQL still uses the stock password from when its database was"
+    echo "  created. INSTALL.md (Docker → Passwords) shows how to change it."
 fi
 echo ""
 echo "  Note: Docker mode runs the core stack only. Use ./start.sh for the full install."
