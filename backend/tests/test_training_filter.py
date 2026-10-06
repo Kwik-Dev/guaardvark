@@ -139,6 +139,44 @@ def test_filter_route_refuses_a_min_score_that_is_not_a_number(app):
     assert db.session.query(TrainingJob).count() == 0
 
 
+def test_a_broken_line_is_skipped_and_counted_and_the_rest_are_kept(app, progress, tmp_path):
+    job_id = _job()
+    src = tmp_path / "in.jsonl"
+    src.write_bytes(
+        (json.dumps(_pair()) + "\n").encode()
+        + b'{"instruction": "cut off mid-way\n'
+        + (json.dumps(_pair(score=0.9)) + "\n").encode()
+        + b"\n"
+        + (json.dumps(_pair()) + "\n").encode()
+    )
+
+    result = tt.filter_dataset_task(job_id, str(src), 0.5)
+
+    assert len(_kept(result)) == 3
+    assert result["skipped_lines"] == 1
+    row = _row(job_id)
+    assert row.status == "completed"
+    assert json.loads(row.config_json)["skipped_lines"] == 1
+    assert "1 malformed line skipped" in progress[-1][1]
+
+
+def test_lines_that_are_not_utf8_or_not_objects_count_as_malformed(app, progress, tmp_path):
+    job_id = _job()
+    src = tmp_path / "in.jsonl"
+    src.write_bytes(
+        (json.dumps(_pair()) + "\n").encode()
+        + b'{"instruction": "\xff\xfe"}\n'
+        + b'["a", "list"]\n'
+        + b'"a string"\n'
+    )
+
+    result = tt.filter_dataset_task(job_id, str(src), 0.5)
+
+    assert len(_kept(result)) == 1
+    assert result["skipped_lines"] == 3
+    assert "3 malformed lines skipped" in progress[-1][1]
+
+
 def test_in_the_pipeline_the_filter_leaves_the_job_status_alone(app, progress, tmp_path):
     job_id = _job(config={"steps": 5})
     src = _write_jsonl(tmp_path / "in.jsonl", [_pair(), _pair(score=0.1)])

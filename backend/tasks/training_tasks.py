@@ -244,16 +244,36 @@ def filter_dataset_task(self, job_id: str, input_path: str, min_score: float = 0
         
         emit(10, f"Loading dataset from {input_path}...")
         
+        # Read in binary and decode per line, so a line that is not UTF-8 or
+        # not a JSON object is skipped and counted instead of failing the job.
         pairs = []
-        with open(input_path_obj, 'r', encoding='utf-8') as f:
-            for line in f:
-                if line.strip():
-                    pairs.append(json.loads(line))
-        
+        skipped_lines = []
+        with open(input_path_obj, 'rb') as f:
+            for line_number, raw in enumerate(f, 1):
+                if not raw.strip():
+                    continue
+                try:
+                    pair = json.loads(raw.decode('utf-8'))
+                except ValueError:
+                    pair = None
+                if isinstance(pair, dict):
+                    pairs.append(pair)
+                else:
+                    skipped_lines.append(line_number)
+        skipped_note = ""
+        if skipped_lines:
+            plural = "" if len(skipped_lines) == 1 else "s"
+            skipped_note = f"{len(skipped_lines)} malformed line{plural} skipped"
+        if skipped_lines:
+            logger.warning(f"Filter job {job_id}: {skipped_note} in {input_path} "
+                           f"(first: lines {skipped_lines[:10]})")
+
         scores = [_pair_score(pair) for pair in pairs]
         scored_count = sum(1 for score in scores if score is not None)
         min_score_applied = scored_count > 0
         score_rule = f"min_score={min_score}" if min_score_applied else MIN_SCORE_NOT_APPLIED
+        if skipped_note:
+            score_rule += f"; {skipped_note}"
         emit(30, f"Filtering {len(pairs)} pairs ({score_rule})...")
         
         filtered_pairs = []
@@ -285,6 +305,8 @@ def filter_dataset_task(self, job_id: str, input_path: str, min_score: float = 0
                 score_summary += f"; {len(pairs) - scored_count} pairs without a score kept"
         else:
             score_summary = MIN_SCORE_NOT_APPLIED
+        if skipped_note:
+            score_summary += f"; {skipped_note}"
 
         output_filename = f"filtered_dataset_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
         output_path = PROCESSED_DIR / output_filename
@@ -302,6 +324,7 @@ def filter_dataset_task(self, job_id: str, input_path: str, min_score: float = 0
             "min_score_applied": min_score_applied,
             "scored_count": scored_count,
             "below_min_score": below_min_score,
+            "skipped_lines": len(skipped_lines),
             "original_count": len(pairs),
             "filtered_count": len(filtered_pairs),
         }
