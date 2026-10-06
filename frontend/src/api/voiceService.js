@@ -1197,6 +1197,23 @@ class VoiceService {
       throw error;
     }
   }
+
+  /**
+   * Start a voice model download in the background; the Voice models screen
+   * shows its progress from /voice/models/download-status.
+   * @param {string} modelType - "whisper" or "piper"
+   * @param {string} modelId - e.g. "tiny.en" or "libritts"
+   */
+  async downloadVoiceModel(modelType, modelId) {
+    const response = await fetch(`${BASE_URL}/voice/models/download`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ model_type: modelType, model_id: modelId }),
+    });
+    return await handleResponse(response);
+  }
 }
 
 // Create singleton instance

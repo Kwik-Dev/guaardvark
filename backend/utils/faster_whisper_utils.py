@@ -7,25 +7,88 @@ reload overhead on each request.
 
 Safe import: if faster-whisper is not installed, this module loads
 but functions raise ImportError on use.
+
+Loading never downloads. Weights reach the Hugging Face cache only through
+install_model(), which the voice model Install calls; a missing model raises
+SpeechModelMissing, whose message is what the voice clients show.
 """
 
 import os
 import time
 import logging
-from typing import Tuple
+from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 try:
     from faster_whisper import WhisperModel
+    from faster_whisper.utils import download_model
     FASTER_WHISPER_AVAILABLE = True
 except ImportError:
     FASTER_WHISPER_AVAILABLE = False
     WhisperModel = None
+    download_model = None
+
+SPEECH_MODEL_MISSING_MESSAGE = "Install the speech model to use voice"
 
 # Global cache for the loaded model
 _whisper_model = None
 _current_model_size = None
+
+
+class SpeechModelMissing(RuntimeError):
+    """The weights for a model size are not on this machine."""
+
+    def __init__(self, model_size: str):
+        super().__init__(SPEECH_MODEL_MISSING_MESSAGE)
+        self.model_size = model_size
+
+
+def local_model_path(model_size: str) -> Optional[str]:
+    """Folder holding the complete weights for model_size, or None. No network."""
+    if not FASTER_WHISPER_AVAILABLE:
+        return None
+    try:
+        path = download_model(model_size, local_files_only=True)
+    except FileNotFoundError:
+        # huggingface_hub's LocalEntryNotFoundError (nothing cached) and
+        # IncompleteSnapshotError (an interrupted download) are both this.
+        return None
+    if not os.path.isfile(os.path.join(path, "model.bin")):
+        return None
+    return path
+
+
+def is_model_installed(model_size: str) -> bool:
+    return local_model_path(model_size) is not None
+
+
+def install_model(model_size: str) -> str:
+    """Download the weights for model_size into the Hugging Face cache.
+
+    The only call in this module that reaches the network. It belongs behind
+    a visible Install; transcription paths use get_faster_whisper_model().
+    """
+    if not FASTER_WHISPER_AVAILABLE:
+        raise ImportError("faster-whisper is not installed. Run: pip install faster-whisper")
+    return download_model(model_size)
+
+
+def weights_cache_dir(model_size: str) -> Optional[str]:
+    """Hugging Face cache folder install_model() writes model_size into, or None.
+
+    Only used to show download progress, so an unknown layout returns None
+    rather than raising.
+    """
+    try:
+        from faster_whisper.utils import _MODELS
+        from huggingface_hub import constants
+    except ImportError:
+        return None
+    repo_id = _MODELS.get(model_size)
+    if not repo_id:
+        return None
+    return os.path.join(constants.HF_HUB_CACHE, "models--" + repo_id.replace("/", "--"))
 
 
 def get_faster_whisper_model(
@@ -42,15 +105,20 @@ def get_faster_whisper_model(
     if _whisper_model is not None and _current_model_size == model_size:
         return _whisper_model
 
+    if local_model_path(model_size) is None:
+        raise SpeechModelMissing(model_size)
+
     logger.info(f"Loading faster-whisper model '{model_size}' (device={device}, compute_type={compute_type})")
     start = time.time()
 
     try:
-        model = WhisperModel(model_size, device=device, compute_type=compute_type)
+        model = WhisperModel(model_size, device=device, compute_type=compute_type,
+                             local_files_only=True)
     except Exception:
         if compute_type != "int8":
             logger.info("Falling back to compute_type='int8'")
-            model = WhisperModel(model_size, device=device, compute_type="int8")
+            model = WhisperModel(model_size, device=device, compute_type="int8",
+                                 local_files_only=True)
         else:
             raise
 
