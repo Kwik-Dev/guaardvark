@@ -354,6 +354,35 @@ class TestStallRule(unittest.TestCase):
         self.assertEqual(self._run([_stepped("A"), _stepped("A"), _stepped("A")]), 3)
 
 
+class TestRepetitionVerdict(unittest.TestCase):
+    """Three identical steps end the task; it is a success only when none
+    failed and at least one changed the screen."""
+
+    def _verdict(self, steps):
+        from backend.services.agent_control_service import AgentControlService
+        return AgentControlService._repetition_verdict(steps)
+
+    def test_three_clicks_that_changed_nothing_are_no_progress(self):
+        steps = [_stepped("Zebra", effect="no_visible_change") for _ in range(3)]
+        self.assertEqual(self._verdict(steps), (False, "loop_detected_no_progress"))
+        steps = [_stepped("Zebra", effect="not_observed") for _ in range(3)]
+        self.assertEqual(self._verdict(steps), (False, "loop_detected_no_progress"))
+
+    def test_three_verified_clicks_keep_completed_with_repetition(self):
+        steps = [_stepped("Like", verified=True, effect="verified") for _ in range(3)]
+        self.assertEqual(self._verdict(steps), (True, "completed_with_repetition"))
+
+    def test_one_change_among_three_is_enough(self):
+        steps = [_stepped("Next", effect="no_visible_change"), _stepped("Next", effect="no_visible_change"),
+                 _stepped("Next", verified=True, effect="verified")]
+        self.assertEqual(self._verdict(steps), (True, "completed_with_repetition"))
+
+    def test_a_failed_step_is_no_progress(self):
+        steps = [_stepped("Like", verified=True, effect="verified"), _stepped("Like", ok=False),
+                 _stepped("Like", verified=True, effect="verified")]
+        self.assertEqual(self._verdict(steps), (False, "loop_detected_no_progress"))
+
+
 class TestHonestActions(unittest.TestCase):
     """What the loop sends and what it tells the model, from the 2026-10-02
     YouTube comment run (episode 5e877afc): scrolls with no amount sent no

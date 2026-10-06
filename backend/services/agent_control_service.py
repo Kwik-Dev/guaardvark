@@ -2147,33 +2147,21 @@ class AgentControlService:
 
                     if semantic_loop or spatial_loop:
                         loop_type = "Spatial" if spatial_loop else "Semantic"
-                        # Distinguish "stuck repeating a FAILED action" (genuine
-                        # loop — abort as failure) from "repeated a SUCCESSFUL
-                        # action 3x" (model fixation, but the work happened —
-                        # don't lie and call it a failure).
-                        last3_failed = [h.failed for h in self._action_history[-3:]]
-                        all_steps_ok = not any(last3_failed)
+                        repeat_ok, repeat_reason = self._repetition_verdict(self._action_history[-3:])
                         logger.warning(
                             f"[AGENT][LOOP] {loop_type} action repeated 3x: "
                             f"{last3[0][0]} \"{last3[0][1] or last3[0][2]}\" "
                             f"at {self._click_history[-1] if self._click_history else 'n/a'}. "
-                            f"Aborting (steps_ok={all_steps_ok})."
+                            f"Aborting ({repeat_reason})."
                         )
                         # Capture fresh screenshot for prompt/history context
                         try:
                             fail_shot, _ = self._capture_with_retry(screen)
                         except Exception:
                             pass
-                        if all_steps_ok:
-                            return finish(AgentResult(
-                                success=True,
-                                reason="completed_with_repetition",
-                                steps=self._action_history,
-                                total_time_seconds=time.time() - start_time
-                            ))
                         return finish(AgentResult(
-                            success=False,
-                            reason="loop_detected_no_progress",
+                            success=repeat_ok,
+                            reason=repeat_reason,
                             steps=self._action_history,
                             total_time_seconds=time.time() - start_time
                         ))
@@ -3482,6 +3470,24 @@ class AgentControlService:
         if step.action.action_type in cls._CLICK_FAMILY and effect in cls._NO_CHANGE_EFFECTS:
             return "NO CHANGE"
         return "OK"
+
+    @classmethod
+    def _repetition_verdict(cls, repeated) -> Tuple[bool, str]:
+        """(success, reason) for a task whose last three steps were one action.
+
+        Success only when none of them failed and at least one changed the
+        screen (verified, or an effect other than no change): the work
+        happened and the model fixated on it. A click that changed nothing
+        is not a failed step, since [NO CHANGE] is advisory, so it is checked
+        here.
+        """
+        if any(st.failed for st in repeated):
+            return False, "loop_detected_no_progress"
+        for st in repeated:
+            r = st.result or {}
+            if bool(r.get("verified")) or str(r.get("post_action_effect") or "") not in cls._NO_CHANGE_EFFECTS:
+                return True, "completed_with_repetition"
+        return False, "loop_detected_no_progress"
 
     @classmethod
     def _task_has_verified_click(cls, history) -> bool:
