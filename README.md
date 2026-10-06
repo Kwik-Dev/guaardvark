@@ -45,6 +45,8 @@ https://github.com/user-attachments/assets/c6d9d18b-cfff-4ae2-8220-dc7f329fee5d
 curl -fsSL https://guaardvark.com/install.sh | bash
 ```
 
+It is [install.sh](install.sh) from this repository: it clones to `~/guaardvark` and runs `./start.sh`. To read it before it runs, download it first (`curl -fsSL https://guaardvark.com/install.sh -o install.sh`, read it, then `bash install.sh`), or clone and start by hand as in [Quick Start](#quick-start).
+
 **Add it to Claude Code** (two lines, no clone):
 
 ```
