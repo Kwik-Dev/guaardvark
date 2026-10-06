@@ -73,6 +73,24 @@ def test_the_grader_sees_the_draft_and_the_thread(route):
     assert route.state["graded"] == [("A 12GB card runs the 8B models fine.", THREAD)]
 
 
+def test_a_feature_hint_in_the_body_is_the_persons_requested_feature(route, monkeypatch):
+    """feature_hint reaches the persona as requested_feature, the argument
+    that steers the draft; a body without one leaves the angle to the persona."""
+    calls = []
+
+    def draft(**kwargs):
+        calls.append(kwargs)
+        return {"draft": "A 12GB card runs the 8B models fine.", "grade": 0.9, "reason": "r"}
+
+    monkeypatch.setattr(persona, "draft_outreach_text", draft)
+
+    route(feature_hint="rag")
+    route()
+
+    assert [call.get("requested_feature") for call in calls] == ["rag", None]
+    assert all("feature_hint" not in call for call in calls)
+
+
 def test_unsupervised_passed_check_posts(route):
     route.state["ext"] = PASSED
 

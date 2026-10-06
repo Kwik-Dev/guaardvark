@@ -785,6 +785,34 @@ def test_loop_drafts_a_thread_the_judge_passes(app):
     assert report["drafted"] == 1
 
 
+def test_loop_does_not_send_its_keyword_label_as_a_feature_request(monkeypatch):
+    """On /draft-comment a feature_hint is a person asking the draft to lead
+    with that feature; the loop's keyword label must not arrive as one."""
+    from backend.services.social_outreach import reddit_outreach
+
+    sent = []
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"audit_id": 1, "would_post": False, "draft": "d"}
+
+    def post(url, json=None, timeout=None):
+        sent.append((url, json))
+        return _Response()
+
+    monkeypatch.setattr(reddit_outreach.requests, "post", post)
+
+    reddit_outreach.draft_via_backend(_thread("t1", "Searching my PDFs offline"), ["use a vector db"], 7)
+
+    (url, body), = sent
+    assert url.endswith("/social-outreach/draft-comment")
+    assert body["target_thread_id"] == "t1"
+    assert "feature_hint" not in body
+
+
 # ---- a "skip" verdict skips the thread whatever grade came with it ------------------------
 
 SKIP_AT_HIGH_GRADE = {"grade": 0.7, "skipped": False, "verdict": "skip", "reason": "OP already solved it"}

@@ -301,7 +301,7 @@ def draft_comment():
         "thread_context": "OP + top comments concatenated",
         "target_url": "https://...",
         "target_thread_id": "abc123",  # optional, for dedupe
-        "feature_hint": "video_gen",   # optional, override auto-detect
+        "feature_hint": "video_gen",   # optional: a person's pick for the draft to lead with
         "task_id": 42,                 # optional, links audit row to celery task
         "mode": "comment"|"share",     # default "comment"
         "share_target": "r/SideProject",  # required for share mode
@@ -345,7 +345,7 @@ def draft_comment():
         context=context,
         tone=body.get("tone"),
         mode=mode,
-        feature_hint=body.get("feature_hint"),
+        requested_feature=body.get("feature_hint"),
     )
     
     draft_text = result.get("draft", "")

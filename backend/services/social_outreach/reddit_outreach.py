@@ -531,7 +531,6 @@ _backend_url = backend_url
 def draft_via_backend(
     thread: RedditThread,
     comments: list[str],
-    feature_hint: Optional[str],
     task_id: Optional[int],
     *,
     relevance_unchecked: bool = False,
@@ -540,6 +539,9 @@ def draft_via_backend(
 
     ``relevance_unchecked`` says the thread-fit judge could not run on this
     thread; the endpoint then holds an unsupervised draft for approval.
+    The thread's keyword label is not sent: a feature_hint on /draft-comment
+    is a person asking the draft to lead with that feature, and this loop
+    leaves the angle to the pitch sheet.
     """
     thread_context = (
         f"TITLE: {thread.title}\n\n"
@@ -554,7 +556,6 @@ def draft_via_backend(
                 "thread_context": thread_context,
                 "target_url": thread.permalink,
                 "target_thread_id": thread.id,
-                "feature_hint": feature_hint,
                 "task_id": task_id,
                 "mode": "comment",
                 "relevance_unchecked": relevance_unchecked,
@@ -866,7 +867,7 @@ class RedditOutreachLoop:
                 continue
 
             draft_result = draft_via_backend(
-                thread, comments, feature_hint, task_id,
+                thread, comments, task_id,
                 relevance_unchecked=relevance_unchecked,
             )
             if not draft_result:
