@@ -240,6 +240,22 @@ class TestScheduledAndReactiveRunHonesty:
         assert json.loads(run.changes_made)[0]["file"] == "backend/a.py"
         assert svc._current_run_id is None
 
+    def test_heal_marks_its_edits_unattended(self, app):
+        """edit_code holds an Uncle Claude review for 'reactive' runs while
+        Scheduled sends are off, so heal() must say it is one."""
+        svc = self._service()
+        seen = []
+
+        def attempt(failure, message=None):
+            seen.append(svc._current_trigger)
+            return PROSE_ANSWER
+
+        with patch.object(svc, "_attempt_fix", side_effect=attempt):
+            svc.heal("backend/a.py", 12, "KeyError", "Traceback ...")
+
+        assert seen == ["reactive"]
+        assert svc._current_trigger is None
+
     def test_heal_hands_its_run_id_to_the_edit_tool_context(self, app):
         """_attempt_fix forwards the run id as _run_id, which edit_code stages under."""
         from backend.models import SelfImprovementRun

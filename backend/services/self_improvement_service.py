@@ -784,8 +784,10 @@ class SelfImprovementService:
             db.session.add(run_record)
             db.session.commit()
             run_id = run_record.id
-            # _attempt_fix hands this to edit_code, which stages PendingFix rows under it.
+            # _attempt_fix hands these to edit_code, which stages PendingFix rows under
+            # the run; "reactive" marks it unattended, like a scheduled run.
             self._current_run_id = run_id
+            self._current_trigger = "reactive"
 
             failure = {
                 "file": file,
@@ -815,6 +817,7 @@ class SelfImprovementService:
                 self._fail_if_still_running(run_id, error)
             self._running = False
             self._current_run_id = None
+            self._current_trigger = None
 
     def _fail_if_still_running(self, run_id: int, error: Optional[BaseException],
                                duration_seconds: Optional[float] = None) -> None:
