@@ -937,31 +937,65 @@ def select_optimal_whisper_model(audio_duration_seconds, preferred_model=None):
 
 def ensure_whisper_model_downloaded(model_config):
     """
-    Ensure the required Whisper model is downloaded.
-    
+    Report whether a ggml Whisper model is on disk. Never downloads: weights
+    arrive only through the voice model Install (_do_whisper_download).
+
     Args:
         model_config: Model configuration dict
-        
+
     Returns:
-        tuple: (success: bool, model_path: str, error_message: str)
+        tuple: (available: bool, model_path: str, error_message: str)
     """
     backend_path = get_backend_path()
     model_path = os.path.join(backend_path, model_config["path"])
-    
+
     if os.path.exists(model_path):
         return True, model_path, None
-    
-    # Try to download the model
+
+    return False, model_path, f"{os.path.basename(model_path)} is not installed"
+
+
+def _whisper_missing_parts(backend_path, model_id, model_config):
+    """Weights one Whisper model still needs on this machine.
+
+    "ggml" is the file whisper-cli reads (/stream), needed only where
+    whisper.cpp is built; "faster-whisper" is the CTranslate2 weights the
+    in-process engine reads (/speech-to-text and the socket stream), needed
+    only where faster-whisper is installed.
+    """
+    missing = []
+    whisper_cli_built = os.path.exists(os.path.join(backend_path, WHISPER_CLI_PATH))
+    if whisper_cli_built and not os.path.exists(os.path.join(backend_path, model_config["path"])):
+        missing.append("ggml")
     try:
-        model_name = os.path.basename(model_config["path"]).replace("ggml-", "").replace(".bin", "")
-        logger.info(f"Downloading Whisper model: {model_name}")
-        _download_ggml_model_direct(model_name, model_path)
-        logger.info(f"Successfully downloaded Whisper model: {model_name}")
-        return True, model_path, None
-    except (OSError, RuntimeError) as e:
-        error_msg = f"Error downloading model: {str(e)}"
-        logger.error(error_msg)
-        return False, model_path, error_msg
+        from backend.utils import faster_whisper_utils as fw
+        if fw.FASTER_WHISPER_AVAILABLE and not fw.is_model_installed(model_id):
+            missing.append("faster-whisper")
+    except Exception as e:  # noqa: BLE001 - a status read must not fail here
+        logger.warning(f"Voice API: could not check faster-whisper weights for {model_id}: {e}")
+        missing.append("faster-whisper")
+    return missing
+
+
+def _whisper_download_mb(model_id, missing):
+    """Approximate download size for the missing parts of one Whisper model.
+
+    The CTranslate2 weights are about the size of the ggml file (tiny.en: 75 MB
+    of weights against a 74 MB ggml file; small.en: 464 MB against the 466 MB
+    listed in WHISPER_MODEL_SIZES_MB), so each missing part counts once.
+    """
+    return WHISPER_MODEL_SIZES_MB.get(model_id, 100) * max(len(missing), 1)
+
+
+def _speech_model_missing_response(model_id):
+    """409 whose error text voice clients show as-is, naming the model to install."""
+    from backend.utils.faster_whisper_utils import SPEECH_MODEL_MISSING_MESSAGE
+    return jsonify({
+        "error": SPEECH_MODEL_MISSING_MESSAGE,
+        "code": "SPEECH_MODEL_MISSING",
+        "model_type": "whisper",
+        "model_id": model_id,
+    }), 409
 
 
 def _download_ggml_model_direct(model_name, model_path):
@@ -1147,8 +1181,10 @@ def speech_to_text():
         # PERFORMANCE OPTIMIZATION: In-memory audio decoding & STT
         try:
             from faster_whisper.audio import decode_audio
-            from backend.utils.faster_whisper_utils import transcribe_audio_faster, FASTER_WHISPER_AVAILABLE
-            
+            from backend.utils.faster_whisper_utils import (
+                transcribe_audio_faster, FASTER_WHISPER_AVAILABLE, SpeechModelMissing,
+            )
+
             if FASTER_WHISPER_AVAILABLE:
                 logger.info("Voice API: Using faster-whisper with in-memory audio decoding")
                 # Read audio file into memory
@@ -1167,7 +1203,12 @@ def speech_to_text():
                 
                 logger.info(f"Voice API: Using faster-whisper (model={model_id}), duration={audio_duration:.2f}s")
                 start_time = time.time()
-                final_text, processing_time = transcribe_audio_faster(audio_array, model_size=model_id)
+                try:
+                    final_text, processing_time = transcribe_audio_faster(audio_array, model_size=model_id)
+                except SpeechModelMissing as missing:
+                    logger.info(f"Voice API: speech model '{missing.model_size}' is not installed")
+                    release_rate_limit(request)
+                    return _speech_model_missing_response(missing.model_size)
                 logger.info(f"Voice API: faster-whisper completed in {processing_time:.2f}s")
                 
                 if final_text:
@@ -1829,6 +1870,12 @@ def voice_status():
 
         whisper_available = whisper_cli_available and len(available_models) > 0
 
+        # The model voice transcribes with by default, in every format this
+        # install reads; Settings offers its Install while anything is missing.
+        speech_model_installed = not _whisper_missing_parts(
+            backend_path, DEFAULT_WHISPER_MODEL, WHISPER_MODELS[DEFAULT_WHISPER_MODEL]
+        )
+
         # Check FFmpeg availability
         ffmpeg_available = shutil.which("ffmpeg") is not None
 
@@ -1869,6 +1916,8 @@ def voice_status():
             "whisper_installed": whisper_cli_available,
             "whisper_source_available": whisper_source_available,
             "whisper_models_available": available_models,
+            "speech_model_id": DEFAULT_WHISPER_MODEL,
+            "speech_model_installed": speech_model_installed,
             "ffmpeg_available": ffmpeg_available,
             "supported_formats": list(SUPPORTED_AUDIO_FORMATS),
             "available_voices": available_voices,
@@ -2025,7 +2074,7 @@ def stream_voice_chat():
                 model_available, model_path, error_msg = ensure_whisper_model_downloaded(fallback_model)
                 if not model_available:
                     logger.error(f"VOICE API: No Whisper model available: {error_msg}")
-                    return jsonify({"error": f"No Whisper model available: {error_msg}"}), 500
+                    return _speech_model_missing_response("tiny.en")
                 model_config = fallback_model
                 logger.info(f"VOICE API: Falling back to model '{model_config['name']}'")
             
@@ -2404,10 +2453,18 @@ def download_voice_model():
         if not model_type or not model_id:
             return error_response("model_type and model_id are required", 400)
 
+        if model_type not in ("piper", "whisper"):
+            return error_response(f"Unknown model type: {model_type}", 400)
         if model_type == "piper" and model_id not in PIPER_VOICES:
             return error_response(f"Unknown Piper voice: {model_id}", 400)
         if model_type == "whisper" and model_id not in WHISPER_MODELS:
             return error_response(f"Unknown Whisper model: {model_id}", 400)
+
+        whisper_missing = []
+        if model_type == "whisper":
+            whisper_missing = _whisper_missing_parts(
+                get_backend_path(), model_id, WHISPER_MODELS[model_id]
+            )
 
         with _voice_download_lock:
             if _voice_download_status["is_downloading"]:
@@ -2419,7 +2476,7 @@ def download_voice_model():
                 total_mb = PIPER_MODEL_SIZES_MB.get(model_id, 70)
                 display_name = PIPER_VOICES.get(model_id, {}).get("name", model_id)
             else:
-                total_mb = WHISPER_MODEL_SIZES_MB.get(model_id, 100)
+                total_mb = _whisper_download_mb(model_id, whisper_missing)
                 display_name = WHISPER_MODELS.get(model_id, {}).get("name", model_id)
 
             _voice_download_status = {
@@ -2445,6 +2502,8 @@ def download_voice_model():
                     _voice_download_status["status"] = "downloading"
 
                 stop_monitor = threading.Event()
+                # Folders whose every file counts as downloaded bytes.
+                monitor_dirs = []
 
                 if model_type == "piper":
                     voice_config = PIPER_VOICES[model_id]
@@ -2457,7 +2516,12 @@ def download_voice_model():
                     model_config = WHISPER_MODELS[model_id]
                     target_path = os.path.join(backend_path, model_config["path"])
                     target_dir = os.path.dirname(target_path)
-                    monitor_paths = [target_path]
+                    monitor_paths = [target_path] if "ggml" in whisper_missing else []
+                    if "faster-whisper" in whisper_missing:
+                        from backend.utils.faster_whisper_utils import weights_cache_dir
+                        weights_dir = weights_cache_dir(model_id)
+                        if weights_dir:
+                            monitor_dirs.append(os.path.join(weights_dir, "blobs"))
 
                 def _monitor_progress():
                     while not stop_monitor.is_set():
@@ -2469,13 +2533,21 @@ def download_voice_model():
                                         downloaded += os.path.getsize(fpath)
                                     except OSError:
                                         pass
-                            # Also check for partial download files (.tmp, .incomplete)
+                            # Also check for partial download files (.tmp, .incomplete;
+                            # .download is the ggml downloader's)
                             if os.path.isdir(target_dir):
                                 for fname in os.listdir(target_dir):
                                     full = os.path.join(target_dir, fname)
-                                    if fname.endswith(('.tmp', '.incomplete', '.part')):
+                                    if fname.endswith(('.tmp', '.incomplete', '.part', '.download')):
                                         try:
                                             downloaded += os.path.getsize(full)
+                                        except OSError:
+                                            pass
+                            for mdir in monitor_dirs:
+                                if os.path.isdir(mdir):
+                                    for fname in os.listdir(mdir):
+                                        try:
+                                            downloaded += os.path.getsize(os.path.join(mdir, fname))
                                         except OSError:
                                             pass
 
@@ -2600,16 +2672,23 @@ def _do_piper_download(backend_path, voice_id, voice_config):
 
 
 def _do_whisper_download(backend_path, model_id, model_config):
-    """Download a Whisper STT model (called from background thread)."""
-    model_path = os.path.join(backend_path, model_config["path"])
+    """Install one Whisper STT model: whichever of its ggml file and its
+    faster-whisper weights are missing. This is the only path that downloads
+    Whisper weights, and only a person's Install click reaches it."""
+    missing = _whisper_missing_parts(backend_path, model_id, model_config)
 
-    if os.path.exists(model_path):
-        return  # Already exists
+    if "ggml" in missing:
+        model_path = os.path.join(backend_path, model_config["path"])
+        model_name = os.path.basename(model_config["path"]).replace("ggml-", "").replace(".bin", "")
+        # direct HF download — no dependency on the whisper.cpp clone's helper
+        # script (see _download_ggml_model_direct)
+        _download_ggml_model_direct(model_name, model_path)
 
-    model_name = os.path.basename(model_config["path"]).replace("ggml-", "").replace(".bin", "")
-    # direct HF download — no dependency on the whisper.cpp clone's helper
-    # script (see _download_ggml_model_direct)
-    _download_ggml_model_direct(model_name, model_path)
+    if "faster-whisper" in missing:
+        from backend.utils.faster_whisper_utils import install_model, is_model_installed
+        install_model(model_id)
+        if not is_model_installed(model_id):
+            raise RuntimeError(f"faster-whisper weights for '{model_id}' are incomplete after download")
 
 
 @voice_bp.route("/models/all", methods=["GET"])
@@ -2623,8 +2702,14 @@ def list_all_voice_models():
         # Whisper STT models
         for model_id, model_config in WHISPER_MODELS.items():
             model_path = os.path.join(backend_path, model_config["path"])
-            is_installed = os.path.exists(model_path)
-            size_mb = os.path.getsize(model_path) / (1024 * 1024) if is_installed else WHISPER_MODEL_SIZES_MB.get(model_id, 0)
+            missing = _whisper_missing_parts(backend_path, model_id, model_config)
+            is_installed = not missing
+            if not is_installed:
+                size_mb = _whisper_download_mb(model_id, missing)
+            elif os.path.exists(model_path):
+                size_mb = os.path.getsize(model_path) / (1024 * 1024)
+            else:
+                size_mb = WHISPER_MODEL_SIZES_MB.get(model_id, 0)
 
             models.append({
                 "id": model_id,
@@ -2905,21 +2990,25 @@ def install_whisper_model():
             }), 400
 
         model_config = WHISPER_MODELS[model_id]
-        success, model_path, error_msg = ensure_whisper_model_downloaded(model_config)
-
-        if success:
-            model_size = os.path.getsize(model_path) if os.path.exists(model_path) else 0
-            return jsonify({
-                "success": True,
-                "message": f"Whisper model '{model_id}' is ready",
-                "model_id": model_id,
-                "model_size_mb": round(model_size / 1024 / 1024, 1)
-            })
-        else:
+        backend_path = get_backend_path()
+        model_path = os.path.join(backend_path, model_config["path"])
+        try:
+            _do_whisper_download(backend_path, model_id, model_config)
+        except (OSError, RuntimeError, ImportError) as e:
+            error_msg = f"Error downloading model: {str(e)}"
+            logger.error(f"Voice API: {error_msg}")
             return jsonify({
                 "success": False,
-                "error": error_msg or f"Failed to download model '{model_id}'"
+                "error": error_msg
             }), 500
+
+        model_size = os.path.getsize(model_path) if os.path.exists(model_path) else 0
+        return jsonify({
+            "success": True,
+            "message": f"Whisper model '{model_id}' is ready",
+            "model_id": model_id,
+            "model_size_mb": round(model_size / 1024 / 1024, 1)
+        })
 
     except Exception as e:
         logger.error(f"Voice API: Failed to install whisper model: {e}", exc_info=True)

@@ -178,8 +178,8 @@ const VoiceSettingsContent = ({
         </>
       )}
 
-      {/* Whisper Model Download Alert */}
-      {!isVoiceLoading && !voiceError && voiceStatus && voiceStatus.whisper_installed === true && voiceStatus.whisper_models_available?.length === 0 && (
+      {/* Speech model: its weights arrive only through this Install */}
+      {!isVoiceLoading && !voiceError && voiceStatus && voiceStatus.speech_model_installed === false && (
         <MuiAlert
           severity="warning"
           sx={{ mb: 2 }}
@@ -191,11 +191,11 @@ const VoiceSettingsContent = ({
               onClick={installWhisperSpeechModel}
               disabled={isInstallingWhisper}
             >
-              {isInstallingWhisper ? 'Downloading...' : 'Download Model'}
+              Install
             </Button>
           }
         >
-          Whisper.cpp installed but no speech models found. Download a model to enable speech recognition.
+          Install the speech model to use voice
         </MuiAlert>
       )}
 

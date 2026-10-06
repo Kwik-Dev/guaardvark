@@ -681,30 +681,29 @@ const SettingsPage = () => {
     }
   };
 
+  // Starts the speech model download, then opens the Voice models screen,
+  // which shows its progress.
   const installWhisperSpeechModel = async () => {
     setIsInstallingWhisper(true);
     try {
-      showMessage(
-        "Downloading default Whisper speech model (tiny.en)...",
-        "info",
+      await voiceService.downloadVoiceModel(
+        "whisper",
+        voiceStatus?.speech_model_id || "tiny.en",
       );
-      const result = await voiceService.installWhisperModel("tiny.en");
-
-      if (result.success) {
-        showMessage(
-          `Whisper model ready (${result.model_size_mb} MB)`,
-          "success",
-        );
-        await loadVoiceConfiguration();
-      } else {
-        showMessage(`Failed to download model: ${result.error}`, "error");
-      }
     } catch (error) {
-      console.error("Failed to install whisper model:", error);
-      showMessage(`Failed to download model: ${error.message}`, "error");
+      // 409 means a voice model download is already running: show it.
+      if (error.status !== 409) {
+        console.error("Failed to start the speech model install:", error);
+        showMessage(
+          `Could not start the speech model install: ${error.message}`,
+          "error",
+        );
+        return;
+      }
     } finally {
       setIsInstallingWhisper(false);
     }
+    setVoiceModelsModalOpen(true);
   };
 
   const fetchBranding = useCallback(async () => {
@@ -3974,7 +3973,11 @@ const SettingsPage = () => {
       />
       <VoiceModelsModal
         open={voiceModelsModalOpen}
-        onClose={() => setVoiceModelsModalOpen(false)}
+        onClose={() => {
+          setVoiceModelsModalOpen(false);
+          // Clears the voice settings' install prompt once the model is in.
+          loadVoiceConfiguration();
+        }}
         showMessage={showMessage}
       />
       <AudioFoundryModelsModal
