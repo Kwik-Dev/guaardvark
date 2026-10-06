@@ -200,3 +200,32 @@ def test_image_director_natural_family_fallback_keeps_enhancer(monkeypatch):
     assert len(calls) == 1
     assert req.prompts[0].auto_enhance is True
     assert req.auto_enhance is True
+
+
+def test_image_storyboard_concept_fallback_keeps_enhancer(monkeypatch):
+    # storyboard_from_concept's failure contract is {"prompts": [concept] * n}.
+    monkeypatch.setattr(md, "storyboard_from_concept",
+                        lambda concept, n, **k: {"treatment": None, "prompts": [concept] * n})
+    req = _image_req(["placeholder one", "placeholder two"],
+                     storyboard_concept="a lighthouse at dawn")
+
+    BatchImageGenerator._apply_director(SimpleNamespace(), req)
+
+    assert [bp.prompt for bp in req.prompts] == ["a lighthouse at dawn"] * 2
+    assert all(bp.auto_enhance is True for bp in req.prompts)
+    assert req.auto_enhance is True
+
+
+def test_image_storyboard_turns_enhancer_off_only_on_real_shots(monkeypatch):
+    monkeypatch.setattr(md, "storyboard_from_concept",
+                        lambda concept, n, **k: {"treatment": "t",
+                                                 "prompts": ["wide shot of the lighthouse", concept]})
+    req = _image_req(["placeholder one", "placeholder two"],
+                     storyboard_concept="a lighthouse at dawn")
+
+    BatchImageGenerator._apply_director(SimpleNamespace(), req)
+
+    first, second = req.prompts
+    assert (first.prompt, first.auto_enhance) == ("wide shot of the lighthouse", False)
+    assert (second.prompt, second.auto_enhance) == ("a lighthouse at dawn", True)
+    assert req.auto_enhance is False

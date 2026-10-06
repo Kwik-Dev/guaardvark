@@ -1908,19 +1908,21 @@ class OfflineImageGenerator:
         if _has_word(prompt_lower, hand_words):
             detection["has_hands"] = True
 
+        # Whole words only, so 'reading' is not found in 'spreading' nor 'using' in 'focusing'.
         action_map = {
             'building': ['building', 'constructing', 'assembling', 'installing', 'fixing', 'repairing'],
             'working': ['working', 'operating', 'using', 'handling'],
-            'cooking': ['cooking', 'baking', 'preparing food', 'chef', 'kitchen'],
+            'cooking': ['cooking', 'baking', 'preparing food', 'chef', 'chefs', 'kitchen', 'kitchens'],
             'driving': ['driving', 'steering', 'riding', 'in car', 'behind wheel'],
             'typing': ['typing', 'at computer', 'at keyboard', 'coding', 'programming'],
             'reading': ['reading', 'studying', 'with book', 'looking at'],
-            'sports': ['playing', 'running', 'jumping', 'swimming', 'exercising', 'training', 'jogging', 'treadmill', 'workout'],
+            'sports': ['playing', 'running', 'jumping', 'swimming', 'exercising', 'training', 'jogging',
+                       'treadmill', 'treadmills', 'workout', 'workouts'],
             'gardening': ['gardening', 'planting', 'watering', 'pruning', 'mowing']
         }
 
         for action_type, keywords in action_map.items():
-            if any(keyword in prompt_lower for keyword in keywords):
+            if _has_word(prompt_lower, keywords):
                 detection["has_action"] = True
                 detection["detected_actions"].append(action_type)
 
