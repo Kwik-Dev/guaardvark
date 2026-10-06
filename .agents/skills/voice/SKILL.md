@@ -50,7 +50,7 @@ curl -s -X POST $B/api/audio-foundry/generate/voice -H 'Content-Type: applicatio
 1. The reference must go through the upload route; that is what records consent. Arbitrary
    file paths are refused with 403.
    ```bash
-   curl -s -X POST $B/api/audio-foundry/voice-clips/upload -F file=@/abs/path/ref.wav -F name="Dean sample"
+   curl -s -X POST $B/api/audio-foundry/voice-clips/upload -F file=@/abs/path/ref.wav -F name="Narrator sample"
    ```
    The response gives the stored path. `GET $B/api/audio-foundry/voice-clips` lists clips.
 2. Generate with `"backend": "chatterbox", "reference_clip_path": "<that path>"`.
