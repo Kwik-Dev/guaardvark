@@ -113,7 +113,19 @@ def create_job():
             return error_response("Base model is required", 400)
         if not data.get("dataset_id"):
             return error_response("Dataset ID is required", 400)
-        
+
+        # The trainer reads the dataset's file when the config names none, so a
+        # dataset it cannot read is refused here rather than failing the run.
+        dataset = db.session.get(TrainingDataset, data["dataset_id"])
+        if not dataset:
+            return error_response("Dataset not found", 400)
+        job_config = data.get("config") or {}
+        if not (job_config.get("data_path") or job_config.get("dataset_path")):
+            from backend.tasks.training_tasks import dataset_training_files
+            _, reason = dataset_training_files(dataset.path)
+            if reason:
+                return error_response(f"Dataset '{dataset.name}' cannot be trained on: {reason}", 400)
+
         device_profile_id = data.get("device_profile_id")
         device_profile = None
         if device_profile_id:

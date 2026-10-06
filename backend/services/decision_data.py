@@ -1040,8 +1040,9 @@ DECISIONS: dict = {
                  'unclear': 'Anything else, or you cannot tell'},
      'state': {'instruction': ('third_party', 1200), 'response': ('third_party', 1500)},
      'anchor': 'backend/tasks/training_tasks.py filter_dataset_task',
-     'precheck': 'the pair passed the length checks in filter_dataset_task',
-     'fallback': "keep (the length checks are today's only filter; min_score is ignored)",
+     'precheck': 'the pair passed the length checks and min_score in filter_dataset_task',
+     'fallback': 'keep (today the filter drops a pair only on its length checks or a score below min_score; '
+                 'a pair with no score is kept)',
      'safe_side': 'unclear',
      'side_effect': 'file_db_write',
      'mode_default': 'off',
