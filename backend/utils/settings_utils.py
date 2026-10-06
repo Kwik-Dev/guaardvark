@@ -85,19 +85,28 @@ def web_access_block_reason(action: str) -> Optional[str]:
     return disabled
 
 
+# Last llm_debug value read from the database. Worker threads without an app
+# context (the agent brain, Tier 3) use it instead of reading the setting as off.
+_llm_debug_seen: Optional[bool] = None
+
+
 def get_llm_debug() -> bool:
     """Return True if LLM debug logging is enabled."""
+    global _llm_debug_seen
+    env_value = os.environ.get("GUAARDVARK_LLM_DEBUG", "").lower() == "true"
     if not db or not Setting:
-        return os.environ.get("GUAARDVARK_LLM_DEBUG", "").lower() == "true"
+        return env_value
     try:
         if has_app_context():
             setting = db.session.get(Setting, "llm_debug")
+            _llm_debug_seen = setting.value == "true" if setting else None
             if setting:
-                return setting.value == "true"
-        return os.environ.get("GUAARDVARK_LLM_DEBUG", "").lower() == "true"
+                return _llm_debug_seen
+            return env_value
+        return _llm_debug_seen if _llm_debug_seen is not None else env_value
     except Exception as e:
         logger.error(f"Failed to read llm_debug setting: {e}")
-        return os.environ.get("GUAARDVARK_LLM_DEBUG", "").lower() == "true"
+        return env_value
 
 
 def get_rules_enabled() -> bool:
