@@ -647,7 +647,7 @@
     ]
   },
   "bookmark_page": {
-    "description": "Bookmark the current browser page.",
+    "description": "Bookmark the current browser page (Ctrl+D, then Save).",
     "triggers": [
       "^bookmark\\s+(?:this\\s+)?page\\s*$"
     ],
@@ -661,14 +661,18 @@
       },
       {
         "action": "wait_until_visible",
-        "target_description": "Firefox bookmark panel",
-        "timeout_s": 4.0
+        "target_description": "a bookmark dialog with a Name field and a Save button",
+        "timeout_s": 6.0
       },
       {
         "action": "hotkey",
         "keys": [
-          "Escape"
+          "Return"
         ]
+      },
+      {
+        "action": "wait_until_settled",
+        "timeout_s": 1.5
       }
     ]
   },
