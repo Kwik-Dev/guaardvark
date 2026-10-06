@@ -422,6 +422,75 @@ class TestLessonReconciler:
             scan_belief_updates()
             assert db.session.query(PendingFix).count() == 1
 
+    def test_an_applied_fix_is_not_proposed_again(self, app, tmp_path):
+        # Apply the proposal the way the guarded apply does (swap the line),
+        # then scan again on the same counts: nothing new, one hedge.
+        from backend.services.lesson_reconciler import scan_belief_updates
+        from backend.models import db, PendingFix
+        self._seed(app, "Shortcuts panel", count=3)
+        path = tmp_path / "data" / "agent" / "self_knowledge_compact.md"
+        with app.app_context():
+            assert scan_belief_updates() == 1
+            pf = db.session.query(PendingFix).one()
+            text = path.read_text()
+            path.write_text(text.replace(pf.original_content, pf.proposed_new_content, 1))
+            pf.status = "applied"
+            db.session.commit()
+
+            assert scan_belief_updates() == 0
+            assert db.session.query(PendingFix).count() == 1
+            assert path.read_text().count("<!-- belief-update:") == 1
+
+    def test_an_already_hedged_line_gets_no_second_hedge(self, app, tmp_path):
+        # The hedge is in the file but its proposal row is gone.
+        from backend.services.lesson_reconciler import scan_belief_updates
+        from backend.models import db, PendingFix
+        path = tmp_path / "data" / "agent" / "self_knowledge_compact.md"
+        lines = path.read_text().splitlines(keepends=True)
+        lines[49] = lines[49].rstrip("\n") + "  <!-- belief-update: 3 sessions did not see this; verify before assuming -->\n"
+        path.write_text("".join(lines))
+        self._seed(app, "Shortcuts panel", count=4)
+        with app.app_context():
+            assert scan_belief_updates() == 0
+            assert db.session.query(PendingFix).count() == 0
+
+    def test_a_rejected_proposal_is_not_asked_again(self, app):
+        from backend.services.lesson_reconciler import scan_belief_updates
+        from backend.models import db, PendingFix
+        self._seed(app, "Shortcuts panel", count=3)
+        with app.app_context():
+            assert scan_belief_updates() == 1
+            db.session.query(PendingFix).one().status = "rejected"
+            db.session.commit()
+            assert scan_belief_updates() == 0
+            assert db.session.query(PendingFix).count() == 1
+
+    def test_a_proposal_settles_only_its_own_element(self, app):
+        # "panel" is a word inside "shortcuts panel"; it is a different element.
+        from backend.services.lesson_reconciler import scan_belief_updates
+        from backend.models import db, PendingFix
+        self._seed(app, "Shortcuts panel", count=3)
+        with app.app_context():
+            assert scan_belief_updates() == 1
+        self._seed(app, "Panel", count=3, source_line=49)
+        with app.app_context():
+            assert scan_belief_updates() == 1
+            assert db.session.query(PendingFix).count() == 2
+
+    def test_recipes_json_is_not_hedged(self, app, tmp_path):
+        # JSON has no comment syntax: a hedge would make the file invalid.
+        from backend.services.lesson_reconciler import scan_belief_updates
+        from backend.models import db, PendingFix
+        path = tmp_path / "data" / "agent" / "recipes.json"
+        original = '{\n  "open firefox": {"steps": ["click the Firefox icon"]}\n}\n'
+        path.write_text(original)
+        self._seed(app, "Firefox icon", count=5, source="recipes.json", source_line=2)
+        with app.app_context():
+            assert scan_belief_updates() == 0
+            assert db.session.query(PendingFix).count() == 0
+        assert path.read_text() == original
+        json.loads(path.read_text())
+
 
 if __name__ == "__main__":
     unittest.main()

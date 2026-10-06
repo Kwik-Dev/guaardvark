@@ -8,9 +8,10 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from typing import List, Optional, Tuple
 
-from sqlalchemy import case, func
+from sqlalchemy import case, func, or_
 
 from backend.utils import prompt_utils
+from backend.utils.chat_utils import GLOBAL_DEFAULT_SYSTEM_PROMPT_RULE_NAME, QA_DEFAULT_RULE_NAME
 
 try:
     from backend.models import Rule, db
@@ -27,19 +28,51 @@ _formatted_rules_cache_size = 64
 _system_prompt_cache_size = 32
 _qa_template_cache_size = 32
 
+# Rule types the Applicable Rules block lists. PROMPT_TEMPLATE is the type the
+# Rules page saves an ordinary rule as. QA_TEMPLATE, SYSTEM_PROMPT and
+# COMMAND_RULE rows have channels of their own (the retrieval wrapper, a system
+# prompt, a slash command) and are never listed as bullets.
+RULE_BLOCK_TYPES = ("PROMPT_TEMPLATE", "FILTER_RULE", "FORMATTING_RULE", "OTHER")
+
+# Rows that fill a named prompt slot are read whole by their own lookups: the
+# chat persona, the enhanced-chat system prompt and the retrieval wrapper. As
+# bullets they would put the persona or a template inside the rules block.
+PROMPT_SLOT_RULE_NAMES = (
+    GLOBAL_DEFAULT_SYSTEM_PROMPT_RULE_NAME,
+    "enhanced_chat",
+    QA_DEFAULT_RULE_NAME,
+)
+
+
+def _model_key(name: str) -> str:
+    """A model name as Ollama resolves it: lowercased, with the implied
+    ":latest" tag written out ("llama3.2" is "llama3.2:latest")."""
+    key = name.strip().lower()
+    return key if ":" in key.rsplit("/", 1)[-1] else f"{key}:latest"
+
 
 def _model_matches(model_name: Optional[str], target_models: list[str]) -> bool:
-    """Return True if model_name matches target list (case-insensitive, substring)."""
+    """True when a rule's target_models cover model_name.
+
+    "__ALL__" covers every model, an unknown one included. Any other target
+    names one model exactly (case-insensitive, with Ollama's implied ":latest"
+    tag, so "llama3.2" does not cover "llama3.2:1b" nor the reverse), or
+    declares a prefix by ending in "*" ("qwen3*" covers "qwen3:8b" and
+    "qwen3.5:1.5b").
+    """
     if not target_models:
         return False
-    targets = [t.lower() for t in target_models]
+    targets = [str(t).strip().lower() for t in target_models]
     if "__all__" in targets:
         return True
     if not model_name:
         return False
-    lower = model_name.lower()
+    model = _model_key(model_name)
     for t in targets:
-        if t == lower or t in lower or lower in t:
+        if t.endswith("*"):
+            if model.startswith(t[:-1]):
+                return True
+        elif t and _model_key(t) == model:
             return True
     return False
 
@@ -72,6 +105,8 @@ def _cached_formatted_rules(key: Tuple) -> str:
     query = db.session.query(Rule).filter(
         Rule.is_active == True,
         Rule.level.in_(levels),
+        or_(Rule.type == None, Rule.type.in_(RULE_BLOCK_TYPES)),
+        or_(Rule.name == None, ~Rule.name.in_(PROMPT_SLOT_RULE_NAMES)),
     )
     if reference_id:
         query = query.filter(Rule.reference_id == reference_id)
@@ -79,10 +114,11 @@ def _cached_formatted_rules(key: Tuple) -> str:
         (Rule.level == "SYSTEM", 0), (Rule.level == "LEARNED", 1), else_=99
     )
     fetched_rules = query.order_by(level_priority, Rule.created_at).all()
-    if model_name:
-        fetched_rules = [
-            r for r in fetched_rules if _model_matches(model_name, r.target_models)
-        ]
+    # Without a model name only "__ALL__" rules apply: a rule aimed at one
+    # model says nothing about an unknown one.
+    fetched_rules = [
+        r for r in fetched_rules if _model_matches(model_name, r.target_models)
+    ]
     if not fetched_rules:
         return ""
     formatted_rules_list = ["\n--- Applicable Rules & Guidelines ---"]
@@ -182,7 +218,12 @@ def get_formatted_rules(
     model_name: Optional[str] = None,
     reference_id: Optional[str] = None,
 ) -> str:
-    """Return formatted active rules with basic caching based on update timestamp."""
+    """Return formatted active rules with basic caching based on update timestamp.
+
+    The block lists rule rows only (RULE_BLOCK_TYPES, not a prompt slot) that
+    cover model_name. A database error returns "" like no rules: an error
+    string in the prompt would be read by the model as a rule.
+    """
     if not db or not Rule:
         logger.error("DB or Rule model unavailable in get_formatted_rules.")
         return ""
@@ -193,8 +234,8 @@ def get_formatted_rules(
     levels_tuple: Tuple[str, ...] = tuple(
         dict.fromkeys(str(level).upper() for level in levels)
     )
-    key = _rules_cache_key(levels_tuple, model_name, reference_id)
     try:
+        key = _rules_cache_key(levels_tuple, model_name, reference_id)
         result = _cached_formatted_rules(key)
         logger.info(
             "Formatted %d rules for prompt (cached=%s).",
@@ -204,7 +245,7 @@ def get_formatted_rules(
         return result
     except Exception as e:
         logger.error("Database error fetching formatted rules: %s", e, exc_info=True)  # noqa: BLE001 - rule fetch failure returns safe fallback per infra
-        return "[Error fetching rules]\n"
+        return ""
 
 
 def get_active_system_prompt(

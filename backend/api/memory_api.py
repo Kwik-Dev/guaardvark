@@ -26,6 +26,7 @@ from sqlalchemy import or_
 
 from backend.models import db, AgentMemory, AgentMemoryAudit
 from backend.services.memory_contract import (
+    MAX_PREFILTER_TERMS,
     MEMORY_SOURCES,
     MEMORY_STATUSES,
     MEMORY_TYPES,
@@ -37,6 +38,7 @@ from backend.services.memory_contract import (
     normalize_memory_status,
     normalize_memory_type,
     normalize_tags,
+    query_terms,
     source_trust_weight,
     validate_lesson_payload,
 )
@@ -580,6 +582,12 @@ def _query_memories(
     read-only search passes False.
 
     min_importance drops rows below that importance, always-on rows included.
+
+    A query with keywords recalls only rows that share at least one of them as
+    a whole word (memory_match_score above 0); the ILIKE prefilter alone would
+    let "art" through on "start", and importance and recency would fill the
+    remaining slots with unrelated rows. Always-on rows are exempt. A query
+    with no keyword ("what is it?") ranks rows as if none were given.
     """
     try:
         q = db.session.query(AgentMemory)
@@ -626,15 +634,13 @@ def _query_memories(
             if file_hints:
                 recall_query = f"{query or ''} {' '.join(file_hints)}".strip()
         if recall_query:
-            terms = list(recall_query.split())[:8]
             clauses = []
-            for term in terms:
-                if len(term) >= 3:
-                    search_term = f"%{term.lower()}%"
-                    clauses.extend([
-                        AgentMemory.content.ilike(search_term),
-                        AgentMemory.tags.ilike(search_term),
-                    ])
+            for term in query_terms(recall_query)[:MAX_PREFILTER_TERMS]:
+                search_term = f"%{term}%"
+                clauses.extend([
+                    AgentMemory.content.ilike(search_term),
+                    AgentMemory.tags.ilike(search_term),
+                ])
             if clauses:
                 q = q.filter(or_(*clauses))
 
@@ -704,6 +710,11 @@ def _query_memories(
             ).limit(3).all()
 
         ranked = sorted(candidates, key=score, reverse=True)
+        if query_terms(recall_query):
+            ranked = [
+                memory for memory in ranked
+                if memory_match_score(memory.content or "", normalize_tags(memory.tags), recall_query) > 0
+            ]
         selected = []
         seen = set()
         for memory in always_on + ranked:
@@ -814,10 +825,12 @@ def search_memories(
         return [item for _, item in picked]
 
 
-# The ids behind the last memory block built on this thread. Feedback on a
-# reply needs to know which memories shaped it; the block itself is prose and
-# the chat engine must not re-run the query. Pop, never peek: a reused worker
-# thread must not hand one request's selection to the next.
+# The ids behind the last memory block built on this thread: the memories
+# whose lines made it into the block, not every row the query selected, since
+# the character budget can cut the rest. Feedback on a reply credits or blames
+# exactly these; the block itself is prose and the chat engine must not re-run
+# the query. Pop, never peek: a reused worker thread must not hand one
+# request's selection to the next.
 _LAST_SELECTED = threading.local()
 
 
@@ -846,13 +859,14 @@ def _get_memories_for_context_inner(
         workspace_root=workspace_root,
         cli_working_memory=cli_working_memory,
     )
-    _LAST_SELECTED.ids = [m.id for m in (memories or [])]
+    _LAST_SELECTED.ids = []
 
     if not memories:
         return ""
 
     char_budget = max_tokens * 4  # rough chars-to-tokens ratio
     used = 0
+    shown = set()
 
     # Group by category. lesson_summary stays as its own bucket (source-based);
     # everything else groups by type so each lands under a framing header
@@ -889,6 +903,7 @@ def _get_memories_for_context_inner(
                 return out
             out.append(line)
             used += len(line)
+            shown.add(m.id)
         return out
 
     for type_name in ("fact", "note", "preference"):
@@ -956,6 +971,7 @@ def _get_memories_for_context_inner(
                 break
             lesson_lines.append(line)
             used += len(line)
+            shown.add(m.id)
         if lesson_lines:
             sections.append(
                 "\n".join(
@@ -982,6 +998,7 @@ def _get_memories_for_context_inner(
         if body:
             sections.append("\n".join(["Confirmed by your feedback (keep doing this):"] + body))
 
+    _LAST_SELECTED.ids = [m.id for m in memories if m.id in shown]
     if not sections:
         return ""
     return "\n\n".join(sections)

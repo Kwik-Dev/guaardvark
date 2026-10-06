@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from backend.services.agent_tools import BaseTool, ToolParameter, ToolResult
 from backend.models import db, AgentMemory, AgentMemoryAudit
 from backend.api.memory_api import add_memory, _query_memories
+from backend.services.memory_contract import query_terms
 from backend.utils.backend_http import BackendError, is_mcp_transport, request_json, run_tool_in_backend
 
 logger = logging.getLogger(__name__)
@@ -147,12 +148,12 @@ class SearchMemoryTool(BaseTool):
         "save_memory or in the app, and the entries Guaardvark keeps itself, which are lessons "
         "(returned as their stored JSON, a title and steps), lesson summaries, snippets and the "
         "screen agent's 'belief_update' observations. Every type is searched and each line shows "
-        "its type. An entry matches when its content or tags contain any of the "
-        "first eight query words that has three or more characters (case-insensitive text, not "
-        "semantic); results are ranked by "
+        "its type. An entry matches when its content or tags contain, as a whole word, any of the "
+        "query's first eight keywords: words of three or more characters, not counting common words "
+        "such as 'what', 'is', 'my' or 'the' (case-insensitive text, not semantic); results are ranked by "
         "importance, match, source trust, confidence and recency. Returns lines "
-        "'- [ID: <id>] (<type>) <content>', or 'No memories found matching ...'; a query with no such "
-        "word lists the top entries instead. Read-only: searching does not count as a recall. Use it "
+        "'- [ID: <id>] (<type>) <content>', or 'No memories found matching ...'; a query with no "
+        "keyword lists the top entries instead. Read-only: searching does not count as a recall. Use it "
         "to recall what the user said earlier and before "
         "save_memory; for indexed documents use search_knowledge_base, for the web web_search. Needs "
         "the Guaardvark backend running."
@@ -164,7 +165,7 @@ class SearchMemoryTool(BaseTool):
         "query": ToolParameter(
             name="query",
             type="string",
-            description="Keywords to look for, e.g. 'units python'. Only the first eight words count, and words under three characters are ignored; an empty query lists the top entries.",
+            description="Keywords to look for, e.g. 'units python'. Only the first eight keywords count; words under three characters and common words ('what', 'is', 'my', 'the') are ignored, and a query with no keyword lists the top entries.",
             required=True
         ),
         "limit": ToolParameter(
@@ -189,9 +190,8 @@ class SearchMemoryTool(BaseTool):
             # The backend runs this same tool, so MCP and chat match the same way.
             return run_tool_in_backend(self.name, {"query": query, "limit": limit})
 
-        # Only words of 3+ characters among the first eight filter (see _query_memories);
-        # without one, list the top entries.
-        searching = any(len(word) >= 3 for word in query.split()[:8])
+        # The same keywords _query_memories filters on; without one, list the top entries.
+        searching = bool(query_terms(query))
         try:
             memories = _query_memories(
                 query=query if searching else None, limit=limit, raise_errors=True,

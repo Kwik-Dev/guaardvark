@@ -13,17 +13,21 @@ Workflow:
   2. Group rows by (source_file, source_line, lowercased element name) using
      the structured tag set Phase 4 attaches.
   3. For each group whose count is at or above the reconciliation threshold
-     (default 3) and whose source is a real file (not ``model_belief``),
-     synthesise a one-line unified diff against the source file proposing a
-     hedge-strengthened version of that line — and stage it as a
-     ``PendingFix`` row so the user can approve/reject from the existing
+     (default 3) and whose source is a Markdown knowledge file (not
+     ``model_belief``), synthesise a one-line unified diff against the source
+     file proposing a hedge-strengthened version of that line — and stage it
+     as a ``PendingFix`` row so the user can approve/reject from the existing
      self-improvement UI.
 
-The reconciler is deliberately *not* on the Celery beat schedule. It runs from
-the CLI (``scripts/run_lesson_reconciler.py``) or from a manual API call. Auto-
-firing every minute would generate noise for groups that haven't crossed the
-threshold yet; auto-firing every hour would trigger surprise file edits behind
-the user's back. Opt-in is the right cadence.
+It runs on the Celery beat every six hours (``memory.reconcile_belief_updates``;
+``GUAARDVARK_RECONCILER_BEAT_DISABLED=1`` turns that off), from the CLI
+(``scripts/run_lesson_reconciler.py``) and on demand. A scan only stages
+proposals; a person applies them, so nothing here edits a knowledge file.
+
+A group gets one proposal. A proposal for the same file and element that is
+open, applied or rejected settles it, and a line that already carries a
+belief-update hedge is left alone, so repeated scans never stack hedges or
+re-ask a question a person has answered.
 
 Errors degrade gracefully — a single malformed memory row never blocks
 processing of the others.
@@ -46,7 +50,17 @@ DEFAULT_THRESHOLD = 3
 # Sources we know how to edit. "model_belief" rows are recorded by Phase 4 to
 # keep the next-session prompt honest, but they don't correspond to any line
 # in a knowledge file — so the reconciler has nothing to propose for them.
-_EDITABLE_SOURCES = {"self_knowledge_compact.md", "self_knowledge.md", "recipes.json"}
+# recipes.json is left out on purpose: JSON has no comment syntax, so the hedge
+# would make the file invalid and the guarded apply would refuse it. Its belief
+# updates still reach the next-session prompt.
+_EDITABLE_SOURCES = {"self_knowledge_compact.md", "self_knowledge.md"}
+
+# Marks a line the reconciler has hedged. A line carrying it gets no second hedge.
+_HEDGE_MARKER = "<!-- belief-update:"
+
+# PendingFix statuses that settle a (file, element) group: still open, applied,
+# or rejected by a person. Only a deleted proposal lets the scan ask again.
+_SETTLED_STATUSES = ("proposed", "triaged", "approved", "applied", "rejected")
 
 
 def _knowledge_root() -> str:
@@ -100,12 +114,15 @@ def _extract_group_key(tags: List[str]) -> Optional[Tuple[str, Optional[int], st
 
 
 def _hedged_line(original: str, sessions_seen: int) -> str:
-    """Soften a bullet/claim line with an evidence-tagged hedge."""
-    if not original.strip():
+    """Soften a bullet/claim line with an evidence-tagged hedge.
+
+    A blank line, or one already hedged, comes back unchanged.
+    """
+    if not original.strip() or _HEDGE_MARKER in original:
         return original
     stripped = original.rstrip("\n")
     note = (
-        f"  <!-- belief-update: {sessions_seen} sessions did not see this; "
+        f"  {_HEDGE_MARKER} {sessions_seen} sessions did not see this; "
         f"verify before assuming -->"
     )
     return f"{stripped}{note}\n"
@@ -150,17 +167,21 @@ def _build_diff(
 
 
 def _existing_proposal(file_path: str, element: str) -> bool:
-    """True if an active PendingFix already proposes a fix for this (file, element)."""
+    """True if a PendingFix for this (file, element) is open, applied or rejected.
+
+    The element is matched as the quoted name its description starts with, so
+    a proposal for "firefox icon" does not settle one for "icon".
+    """
     from backend.models import db, PendingFix
     rows = (
         db.session.query(PendingFix)
         .filter(PendingFix.file_path == file_path)
-        .filter(PendingFix.status.in_(("proposed", "triaged", "approved")))
+        .filter(PendingFix.status.in_(_SETTLED_STATUSES))
         .all()
     )
-    needle = element.lower()
+    prefix = f"{element.lower()!r} "
     for r in rows:
-        if needle in (r.fix_description or "").lower():
+        if (r.fix_description or "").lower().startswith(prefix):
             return True
     return False
 
@@ -169,7 +190,8 @@ def scan_belief_updates(threshold: int = DEFAULT_THRESHOLD) -> int:
     """Scan belief_update memories and stage PendingFix rows where evidence converges.
 
     Returns the number of PendingFix rows created on this run. Idempotent —
-    running it twice with the same evidence won't create duplicate proposals.
+    running it twice with the same evidence won't create duplicate proposals,
+    whether the first one is still open, was applied or was rejected.
     """
     from backend.models import db, AgentMemory, PendingFix
 
