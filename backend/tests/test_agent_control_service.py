@@ -985,3 +985,46 @@ class TestAssessObstacles(unittest.TestCase):
         outcome, _ = self._escalate('{"action": "hotkey", "keys": ["Escape"], "reasoning": "dismiss"}')
         self.assertEqual(outcome, "escalated")
         self.screen.hotkey.assert_called_once_with("Escape")
+
+
+class TestFocusFirefox(unittest.TestCase):
+    """The focus-firefox shortcut succeeds only when a Firefox window was
+    found and windowactivate returned 0."""
+
+    WINDOW = MagicMock(returncode=0, stdout="4194307\n", stderr="")
+
+    def setUp(self):
+        from backend.services.agent_control_service import AgentControlService
+        self.svc = AgentControlService()
+        self.screen = MagicMock(display=":99")
+        sleep = patch("time.sleep")
+        sleep.start()
+        self.addCleanup(sleep.stop)
+
+    def _focus(self, *runs):
+        with patch("subprocess.run", side_effect=list(runs)) as run:
+            return self.svc._focus_firefox(self.screen), run
+
+    def test_no_window_found_is_a_failure(self):
+        result, run = self._focus(MagicMock(returncode=1, stdout="", stderr=""))
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "recipe:focus_firefox")
+        self.assertEqual(result.steps[0].result["reason"], "no Firefox window")
+        self.assertTrue(result.steps[0].failed)
+        self.assertEqual(run.call_count, 1)
+
+    def test_a_failed_activate_is_a_failure(self):
+        result, _ = self._focus(self.WINDOW, MagicMock(returncode=1, stdout="", stderr="BadWindow"))
+        self.assertFalse(result.success)
+        self.assertEqual(result.steps[0].result["reason"], "BadWindow")
+
+    def test_a_raised_error_is_a_failure(self):
+        result, _ = self._focus(FileNotFoundError("xdotool not found"))
+        self.assertFalse(result.success)
+        self.assertIn("xdotool not found", result.steps[0].result["reason"])
+
+    def test_a_focused_window_is_success(self):
+        result, run = self._focus(self.WINDOW, MagicMock(returncode=0, stdout="", stderr=""))
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "recipe:focus_firefox")
+        self.assertEqual(run.call_args_list[1].args[0][:2], ["xdotool", "windowactivate"])

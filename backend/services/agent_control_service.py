@@ -4490,29 +4490,53 @@ Reply ONLY with JSON:
             return False
 
     def _focus_firefox(self, screen) -> 'AgentResult':
-        """Focus the existing Firefox window instead of launching a new one."""
+        """Focus the existing Firefox window instead of launching a new one.
+
+        Succeeds only when a Firefox window was found and windowactivate
+        returned 0. On failure the reason stays "recipe:focus_firefox" (the
+        recipe name is read from it) and the why is on the one failed step.
+        """
         import subprocess, time as _time
         display = getattr(screen, 'display', os.environ.get('DISPLAY', ':99'))
         env = {**os.environ, "DISPLAY": display}
         start = _time.time()
+        why = ""
         try:
             # Get Firefox window ID and activate it
             result = subprocess.run(
                 ["xdotool", "search", "--name", "Mozilla Firefox"],
                 capture_output=True, text=True, timeout=3, env=env,
             )
-            wids = result.stdout.strip().split()
-            if wids:
-                subprocess.run(
+            wids = (result.stdout or "").strip().split()
+            if not wids:
+                why = "no Firefox window"
+            else:
+                activated = subprocess.run(
                     ["xdotool", "windowactivate", "--sync", wids[0]],
-                    capture_output=True, timeout=3, env=env,
+                    capture_output=True, text=True, timeout=3, env=env,
                 )
-                _time.sleep(0.5)
-                logger.info("[AGENT][RECIPE] Focused existing Firefox window")
+                if activated.returncode != 0:
+                    why = ((activated.stderr or "").strip()
+                           or f"windowactivate exited {activated.returncode}")
+                else:
+                    _time.sleep(0.5)
+                    logger.info("[AGENT][RECIPE] Focused existing Firefox window")
         except Exception as e:
-            logger.warning(f"[AGENT][RECIPE] Firefox focus failed: {e}")
+            why = str(e) or type(e).__name__
 
         elapsed = _time.time() - start
+        if why:
+            logger.warning(f"[AGENT][RECIPE] Firefox focus failed: {why}")
+            return AgentResult(
+                success=False, reason="recipe:focus_firefox",
+                steps=[ActionStep(
+                    scene_description="recipe:focus_firefox",
+                    action=AgentAction(action_type="focus_window", target_description="Firefox"),
+                    result={"success": False, "reason": why},
+                    failed=True,
+                )],
+                total_time_seconds=elapsed,
+            )
         return AgentResult(
             success=True, reason="recipe:focus_firefox",
             steps=[], total_time_seconds=elapsed,
