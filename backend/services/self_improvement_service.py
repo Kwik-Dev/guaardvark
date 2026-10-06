@@ -38,6 +38,17 @@ logger = logging.getLogger(__name__)
 _UNREACHABLE_DATABASE_URL = "postgresql://self-improvement-tests@127.0.0.1:1/none"
 
 
+# The tests the self-check and the snapshot read as the system's health. Tests
+# that drive a live model are marked integration (conftest_sandbox.requires_llm)
+# and left out: they pass or fail by the model's draw, and a "fix" for one would
+# change working code.
+_HEALTH_RUN_TESTS = (
+    "backend/tests/test_self_improvement.py",
+    "backend/tests/test_code_tools.py",
+    "-m", "not integration",
+)
+
+
 def _test_env(**extra) -> Dict[str, str]:
     env = dict(os.environ)
     env.update(DATABASE_URL=_UNREACHABLE_DATABASE_URL, GUAARDVARK_MODE="test", **extra)
@@ -344,9 +355,7 @@ class SelfImprovementService:
         root = os.environ.get("GUAARDVARK_ROOT", ".")
         try:
             result = subprocess.run(
-                ["python3", "-m", "pytest",
-                 "backend/tests/test_self_improvement.py",
-                 "backend/tests/test_code_tools.py",
+                ["python3", "-m", "pytest", *_HEALTH_RUN_TESTS,
                  "-q", "--tb=no", "--no-header"],
                 capture_output=True, text=True, timeout=timeout, cwd=root,
                 env=_test_env(),
@@ -403,8 +412,7 @@ class SelfImprovementService:
             self._emit_progress("testing", "Running test suite", 0.1)
             root = os.environ.get("GUAARDVARK_ROOT", ".")
             result = subprocess.run(
-                ["python3", "-m", "pytest", "backend/tests/test_self_improvement.py",
-                 "backend/tests/test_code_tools.py", "-v", "--tb=short", "--no-header"],
+                ["python3", "-m", "pytest", *_HEALTH_RUN_TESTS, "-v", "--tb=short", "--no-header"],
                 capture_output=True, text=True, timeout=300, cwd=root,
                 env=_test_env(),
             )
