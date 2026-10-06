@@ -407,7 +407,7 @@ const SwarmPage = () => {
           message: `Generate a swarm plan.md file for the following request: ${aiPrompt}. 
           The format must be markdown with ## headers for each task. 
           Each task should have:
-          - Assign to: (research_agent, code_agent, or any)
+          - Assign to: any
           - Files: (list of files)
           - Deps: (IDs of tasks it depends on)
           - Description: (what to do)

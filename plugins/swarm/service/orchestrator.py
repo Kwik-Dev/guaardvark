@@ -471,10 +471,11 @@ class SwarmOrchestrator:
         # select backend
         preferred = task.preferred_backend
         
-        # Check for [Model: ...] or [Backend: ...] tags
-        if "Model" in task.tags:
+        # Check for [Model: ...] or [Backend: ...] tags, in any letter case
+        tags = {str(k).strip().lower(): str(v) for k, v in task.tags.items()}
+        if "model" in tags:
             # see if the tag matches a backend name directly
-            tag_val = task.tags["Model"].lower()
+            tag_val = tags["model"].strip().lower()
             if tag_val in self.config.backends:
                 preferred = tag_val
             else:
@@ -483,10 +484,15 @@ class SwarmOrchestrator:
                     if bcfg.model and tag_val in bcfg.model.lower():
                         preferred = name
                         break
-        elif "Backend" in task.tags:
-            preferred = task.tags["Backend"].lower()
+        elif "backend" in tags:
+            tag_val = tags["backend"].strip().lower()
+            # same "no preference" words the plan's "Assign to:" line accepts
+            if tag_val not in ("any", "auto", "none"):
+                preferred = tag_val
 
-        backend_config = self.config.select_backend(preferred, online=online)
+        backend_config, reason = self.config.select_backend(preferred, online=online)
+        if not backend_config and preferred:
+            raise RuntimeError(f"requested backend {preferred} not available: {reason}")
         if not backend_config:
             configured = list(self.config.backends.keys())
             import shutil

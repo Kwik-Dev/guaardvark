@@ -89,19 +89,30 @@ class SwarmConfig:
         candidates.sort(key=lambda b: b.priority)
         return candidates
 
-    def select_backend(self, preferred: str | None, online: bool = True) -> BackendConfig | None:
-        """Pick the best available backend for a task."""
+    def select_backend(self, preferred: str | None, online: bool = True) -> tuple[BackendConfig | None, str]:
+        """Pick the backend for a task: (backend, "") or (None, reason).
+
+        A named backend is used or refused, never swapped for another: the
+        priority list ranks the cloud CLI first, so a task assigned to a local
+        backend that is missing would otherwise run in the cloud.
+        """
         import shutil
 
-        # explicit preference wins if it's installed and connectivity matches
-        if preferred and preferred in self.backends:
-            b = self.backends[preferred]
-            if (not b.requires_internet or online) and shutil.which(b.command):
-                return b
-            # they asked for something unavailable — fall through
+        if preferred:
+            b = self.backends.get(preferred)
+            if b is None:
+                configured = ", ".join(self.backends) or "none"
+                return None, f"unknown backend (configured: {configured})"
+            if b.requires_internet and (self.flight_mode or not online):
+                return None, "it needs internet and the swarm is offline"
+            if not shutil.which(b.command):
+                return None, f"'{b.command}' is not installed"
+            return b, ""
 
         candidates = self.get_backend_priority_list(online=online)
-        return candidates[0] if candidates else None
+        if candidates:
+            return candidates[0], ""
+        return None, "no configured backend is installed for this mode"
 
 
 def load_config(
