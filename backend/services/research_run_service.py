@@ -623,8 +623,11 @@ class ResearchRunService:
         active = ResearchConfig.query.filter_by(is_active=True).first()
         active_params = dict(active.params) if active else {}
 
-        cand_eval = svc.eval_harness.run_full_eval(dict(best.params))
-        base_eval = svc.eval_harness.run_full_eval(active_params)
+        # Rows hold only the tuned params. Spelled out in full, each eval
+        # measures what that row would serve live, not the row on top of the
+        # active one.
+        cand_eval = svc.eval_harness.run_full_eval(svc._full_params(dict(best.params)))
+        base_eval = svc.eval_harness.run_full_eval(svc._full_params(active_params))
         cand_score = cand_eval.get("composite_score", 0.0)
         base_score = base_eval.get("composite_score", 0.0)
 

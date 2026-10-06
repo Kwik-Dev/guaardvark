@@ -254,7 +254,7 @@ class ProcessFileTool(BaseTool):
         "Extract the text of one document or image, after a header line 'Text of <path> (<format>, "
         "[N pages,] M words)'; nothing is written or indexed. PDF: the text layer of every page, no OCR "
         "(a scanned PDF comes back empty). DOCX: body paragraphs, then table rows. XML: the text of its "
-        "elements, tags dropped. CSV, .txt, .md, .rst, .json, .yaml, .toml, .ini, .log and .html: the "
+        "elements, tags dropped. SVG: its title, desc and text elements, one per line. CSV, .txt, .md, .rst, .json, .yaml, .toml, .ini, .log and .html: the "
         "file as-is (UTF-8, up to 10 MB). Excel (.xlsx, .xlsm): a workbook summary, then for each sheet "
         "with data its size, column names and first 20 rows (up to 50 sheets and 10,000 rows a sheet "
         "are read); .xls needs the xlrd package and .xlsb the pyxlsb package, which a stock install "
@@ -424,7 +424,7 @@ class ProcessFileTool(BaseTool):
             if not extraction.get("success"):
                 reason = extraction.get("error") or "the workbook could not be read"
                 return ToolResult(success=False, error=f"Could not read {shown}: {reason_text(reason)}")
-        if fmt in ("jpg", "jpeg", "png", "gif", "bmp", "webp", "svg"):
+        if fmt in ("jpg", "jpeg", "png", "gif", "bmp", "webp"):
             extraction = result.extraction_results or {}
             if not extraction.get("success"):
                 reason = extraction.get("error") or "no local vision model is available"

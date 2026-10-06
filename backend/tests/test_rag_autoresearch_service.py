@@ -207,3 +207,152 @@ class TestPhaseClamp:
             assert mock_propose.call_args[0][2] == MAX_PHASE
             saved = mock_save.call_args_list[0][0][0]
             assert saved["phase"] == MAX_PHASE and saved["phase_plateau_count"] <= 1  # was 387483
+
+
+@pytest.fixture
+def nomic(monkeypatch):
+    """Active embedding model nomic-embed-text, with no env threshold override."""
+    monkeypatch.delenv("GUAARDVARK_CHUNK_SIMILARITY_THRESHOLD", raising=False)
+    with patch("backend.config.get_active_embedding_model",
+               return_value="nomic-embed-text:latest"):
+        yield
+
+
+@pytest.mark.usefixtures("nomic")
+class TestPromotionStoresOnlyTunedParams:
+    """A promoted row overrides live retrieval key by key, so it must hold only
+    what kept experiments changed, never a copied default."""
+
+    def _keep(self, svc, config, parameter, new_value):
+        with patch.object(svc.agent, "propose_experiment", return_value={
+                 "parameter": parameter, "new_value": new_value, "hypothesis": "t"}), \
+             patch.object(svc.eval_harness, "run_retrieval_eval",
+                          return_value={"num_scored": 0}), \
+             patch.object(svc.eval_harness, "run_full_eval", return_value={
+                 "composite_score": 3.5, "num_pairs": 10, "details": []}), \
+             patch.object(svc, "_load_config", return_value=config), \
+             patch.object(svc, "_save_config"), \
+             patch.object(svc, "_log_experiment"), \
+             patch.object(svc, "_emit_socket_event"), \
+             patch.object(svc, "_broadcast_to_family"):
+            return svc.run_single_experiment()
+
+    def test_top_k_keep_promotes_only_top_k(self, app):
+        from backend.models import ResearchConfig
+        with app.app_context():
+            svc = RAGAutoresearchService()
+            config = {"params": svc._baseline_params(), "tuned": [],
+                      "baseline_score": 3.0, "phase": 1, "phase_plateau_count": 0}
+            result = self._keep(svc, config, "top_k", 8)
+            assert result["status"] == "keep"
+            row = ResearchConfig.query.filter_by(is_active=True).one()
+            assert row.params == {"top_k": 8}
+            assert config["tuned"] == ["top_k"]
+
+    def test_earlier_keeps_stay_in_the_promoted_row(self, app):
+        from backend.models import ResearchConfig
+        with app.app_context():
+            svc = RAGAutoresearchService()
+            params = svc._baseline_params()
+            params["hybrid_search_alpha"] = 0.5
+            config = {"params": params, "tuned": ["hybrid_search_alpha"],
+                      "baseline_score": 3.0, "phase": 1, "phase_plateau_count": 0}
+            self._keep(svc, config, "top_k", 8)
+            row = ResearchConfig.query.filter_by(is_active=True).one()
+            assert row.params == {"top_k": 8, "hybrid_search_alpha": 0.5}
+
+    def test_tuned_back_to_default_is_not_stored(self, app):
+        from backend.models import ResearchConfig
+        with app.app_context():
+            svc = RAGAutoresearchService()
+            config = {"params": svc._baseline_params(), "tuned": ["top_k"]}
+            svc._promote_config(config, 3.5, "local")
+            row = ResearchConfig.query.filter_by(is_active=True).one()
+            assert row.params == {}
+
+    def test_file_without_tuned_record_infers_it(self, app, tmp_path, monkeypatch):
+        import json
+        from backend.config import AUTORESEARCH_DEFAULT_PARAMS
+        monkeypatch.setenv("GUAARDVARK_ROOT", str(tmp_path))
+        (tmp_path / "data").mkdir()
+        cfg_file = tmp_path / "data" / "rag_experiment_config.json"
+        cfg_file.write_text(json.dumps({
+            "version": 1, "baseline_score": 3.0,
+            "params": dict(AUTORESEARCH_DEFAULT_PARAMS, top_k=8),
+            "phase": 1, "phase_plateau_count": 0,
+        }))
+        with app.app_context():
+            svc = RAGAutoresearchService()
+            assert svc._load_config()["tuned"] == ["top_k"]
+            assert json.loads(cfg_file.read_text())["tuned"] == ["top_k"]
+
+
+@pytest.mark.usefixtures("nomic")
+class TestBaselineDedupIsPerModel:
+    """Experiments start from the dedup threshold production uses for the
+    active embedding model (0.96 for nomic-embed-text), not a global 0.85."""
+
+    def _write(self, tmp_path, monkeypatch, body):
+        import json
+        monkeypatch.setenv("GUAARDVARK_ROOT", str(tmp_path))
+        (tmp_path / "data").mkdir()
+        cfg_file = tmp_path / "data" / "rag_experiment_config.json"
+        cfg_file.write_text(json.dumps(body))
+        return cfg_file
+
+    def test_new_config_baseline_carries_the_model_value(self, app, tmp_path, monkeypatch):
+        monkeypatch.setenv("GUAARDVARK_ROOT", str(tmp_path))
+        with app.app_context():
+            config = RAGAutoresearchService()._load_config()
+        assert config["params"]["dedup_threshold"] == 0.96
+        assert config["tuned"] == []
+
+    def test_old_default_is_replaced_and_baseline_remeasured(self, app, tmp_path, monkeypatch):
+        import json
+        from backend.config import AUTORESEARCH_DEFAULT_PARAMS
+        cfg_file = self._write(tmp_path, monkeypatch, {
+            "version": 1, "baseline_score": 3.0, "phase": 1, "phase_plateau_count": 0,
+            "params": dict(AUTORESEARCH_DEFAULT_PARAMS, dedup_threshold=0.85),
+        })
+        with app.app_context():
+            config = RAGAutoresearchService()._load_config()
+        assert config["params"]["dedup_threshold"] == 0.96
+        assert config["tuned"] == []
+        # Measured at 0.85; the next run measures the real baseline.
+        assert config["baseline_score"] == 0.0
+        assert json.loads(cfg_file.read_text())["params"]["dedup_threshold"] == 0.96
+
+    def test_kept_dedup_experiment_is_not_replaced(self, app, tmp_path, monkeypatch):
+        from backend.config import AUTORESEARCH_DEFAULT_PARAMS
+        from backend.models import ExperimentRun
+        self._write(tmp_path, monkeypatch, {
+            "version": 1, "baseline_score": 3.0, "phase": 1, "phase_plateau_count": 0,
+            "params": dict(AUTORESEARCH_DEFAULT_PARAMS, dedup_threshold=0.9),
+        })
+        with app.app_context():
+            db.session.add(ExperimentRun(
+                id="e1", phase=1, parameter_changed="dedup_threshold",
+                old_value="0.85", new_value="0.9", status="keep",
+                composite_score=3.0, baseline_score=2.9, delta=0.1,
+            ))
+            db.session.commit()
+            config = RAGAutoresearchService()._load_config()
+        assert config["params"]["dedup_threshold"] == 0.9
+        assert config["tuned"] == ["dedup_threshold"]
+        assert config["baseline_score"] == 3.0
+
+    def test_experiment_measures_the_model_value_as_baseline(self, app, tmp_path, monkeypatch):
+        monkeypatch.setenv("GUAARDVARK_ROOT", str(tmp_path))
+        with app.app_context():
+            svc = RAGAutoresearchService()
+            with patch.object(svc.agent, "propose_experiment", return_value={
+                     "parameter": "top_k", "new_value": 8, "hypothesis": "t"}), \
+                 patch.object(svc.eval_harness, "run_retrieval_eval",
+                              return_value={"num_scored": 0}) as retr, \
+                 patch.object(svc.eval_harness, "run_full_eval", return_value={
+                     "composite_score": 0.0, "num_pairs": 10, "details": []}), \
+                 patch.object(svc, "_log_experiment"):
+                svc.run_single_experiment()
+        base_params, test_params = (c.args[0] for c in retr.call_args_list)
+        assert base_params["dedup_threshold"] == 0.96
+        assert test_params["dedup_threshold"] == 0.96 and test_params["top_k"] == 8

@@ -86,6 +86,18 @@ def _stash_original(node: TextNode, text: str) -> None:
             setattr(node, attr, current)
 
 
+def source_text(text: str, metadata: Optional[dict]) -> str:
+    """A chunk's text as the chunker produced it, without the context prefix.
+
+    Retrieval returns the embedded text, prefix included; the text the chunker
+    produced is the stashed original when there is one.
+    """
+    original = (metadata or {}).get("original_text")
+    if isinstance(original, str) and original:
+        return original
+    return text or ""
+
+
 def generate_document_context(
     source_filename: str,
     heading_path: Optional[str] = None,

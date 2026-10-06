@@ -73,22 +73,104 @@ class RAGAutoresearchService:
         root = os.environ.get("GUAARDVARK_ROOT", "")
         return os.path.join(root, "data", CONFIG_FILENAME)
 
+    def _baseline_params(self) -> dict:
+        """The params retrieval uses when nothing is promoted, including the
+        dedup threshold measured for the active embedding model."""
+        params = dict(AUTORESEARCH_DEFAULT_PARAMS)
+        try:
+            from backend.config import get_active_embedding_model, get_dedup_threshold
+            params["dedup_threshold"] = get_dedup_threshold(get_active_embedding_model())
+        except Exception as e:
+            # Left out, experiments do not override it and retrieval keeps
+            # resolving its own per-model value.
+            logger.debug(f"Baseline dedup threshold not resolved: {e}")
+        return params
+
+    def _full_params(self, overrides: dict) -> dict:
+        """Baseline params with `overrides` applied: a promoted row, spelled out
+        in full so an eval of it does not inherit whatever else is active."""
+        params = self._baseline_params()
+        params.update(overrides or {})
+        return params
+
+    def _infer_tuned(self, params: dict) -> list:
+        """Tuned param names for a config file without a "tuned" record: the
+        ones whose value differs from the declared default. dedup_threshold
+        has no declared default, so it counts only when the ledger's latest
+        kept dedup_threshold experiment set the stored value."""
+        tuned = {
+            k for k, v in params.items()
+            if k in AUTORESEARCH_DEFAULT_PARAMS and v != AUTORESEARCH_DEFAULT_PARAMS[k]
+        }
+        if "dedup_threshold" in params and self._kept_value_matches(
+                "dedup_threshold", params["dedup_threshold"]):
+            tuned.add("dedup_threshold")
+        return sorted(tuned)
+
+    def _kept_value_matches(self, parameter: str, value) -> bool:
+        """Whether the latest kept experiment on `parameter` set `value`."""
+        try:
+            from backend.models import ExperimentRun
+            row = (
+                ExperimentRun.query
+                .filter_by(parameter_changed=parameter, status="keep")
+                .order_by(ExperimentRun.created_at.desc())
+                .first()
+            )
+            return row is not None and float(row.new_value) == float(value)
+        except Exception as e:
+            logger.debug(f"Ledger check for {parameter} skipped: {e}")
+            return False
+
+    def _rebase_params(self, config: dict) -> bool:
+        """Take every untuned param from the current baseline, so experiments
+        start from what production does now (the dedup threshold follows the
+        active embedding model). A baseline score measured on other values is
+        dropped; the next research run measures it again. Returns whether the
+        config changed."""
+        stored = config.get("params")
+        if not isinstance(stored, dict):
+            stored = {}
+        params = self._baseline_params()
+        params.update({k: stored[k] for k in config.get("tuned") or [] if k in stored})
+        if params == stored:
+            return False
+        if any(params.get(k) != v for k, v in stored.items()):
+            config["baseline_score"] = 0.0
+        config["params"] = params
+        return True
+
     def _load_config(self) -> dict:
-        """Load current experiment config from disk."""
+        """Load current experiment config from disk.
+
+        "tuned" lists the params a kept experiment changed; only those are
+        promoted (see _promote_config), and every other param is re-resolved
+        from the baseline on load.
+        """
         path = self._config_path()
         try:
             with open(path, "r") as f:
-                return json.load(f)
+                config = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             config = {
                 "version": 1,
                 "baseline_score": 0.0,
-                "params": dict(AUTORESEARCH_DEFAULT_PARAMS),
+                "params": self._baseline_params(),
+                "tuned": [],
                 "phase": 1,
                 "phase_plateau_count": 0,
             }
             self._save_config(config)
             return config
+        changed = False
+        if not isinstance(config.get("tuned"), list):
+            config["tuned"] = self._infer_tuned(config.get("params") or {})
+            changed = True
+        if self._rebase_params(config):
+            changed = True
+        if changed:
+            self._save_config(config)
+        return config
 
     def _save_config(self, config: dict):
         """Atomically save config to disk."""
@@ -157,7 +239,7 @@ class RAGAutoresearchService:
             config["phase_plateau_count"] = 0
             self._save_config(config)
         baseline = config.get("baseline_score", 0.0)
-        params = config.get("params", dict(AUTORESEARCH_DEFAULT_PARAMS))
+        params = config.get("params") or self._baseline_params()
 
         # 1. Get experiment history
         history = self._get_recent_history(limit=20)
@@ -333,6 +415,7 @@ class RAGAutoresearchService:
         promoted_id = None
         if status == "keep":
             config["params"][param_name] = new_value
+            config["tuned"] = sorted(set(config.get("tuned") or []) | {param_name})
             config["baseline_score"] = new_score
             config["phase_plateau_count"] = 0
             self._save_config(config)
@@ -565,6 +648,10 @@ class RAGAutoresearchService:
                         activate: bool = True):
         """Save a winning config to the ResearchConfig table.
 
+        Stores only the tuned params that differ from the baseline; every key
+        in the row overrides live retrieval (get_active_rag_params), so a
+        default copied in with them would go live too.
+
         activate=True: goes live immediately (deactivates predecessors).
         activate=False: stored as a CANDIDATE — nightly-run winners stay
         inactive until the run-end A/B confirmation activates the best one.
@@ -572,11 +659,15 @@ class RAGAutoresearchService:
         """
         try:
             from backend.models import ResearchConfig, db
+            from backend.utils.experiment_context import changed_params
+            params = config.get("params") or {}
+            tuned = {k: params[k] for k in (config.get("tuned") or []) if k in params}
+            promoted = changed_params(tuned, self._baseline_params())
             if activate:
                 ResearchConfig.query.filter_by(is_active=True).update({"is_active": False})
             new_config = ResearchConfig(
                 id=str(uuid.uuid4()),
-                params=config["params"],
+                params=promoted,
                 composite_score=score,
                 is_active=activate,
                 promoted_at=utcnow() if activate else None,

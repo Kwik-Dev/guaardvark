@@ -171,6 +171,40 @@ class TestLLMJudge:
             assert result["source_chunk_hashes"][0] != result["source_chunk_hashes"][1]
 
 
+class TestRetrievalScoringMatchesPrefixedChunks:
+    """Indexed prose chunks carry a 'Document: x.' prefix in their text; pairs
+    hash the chunk without it."""
+
+    CHUNK = "The intake valve must be closed before the pump is primed."
+
+    def _indexed_result(self, chunk, filename):
+        # Built the way indexing and search_with_llamaindex build them.
+        from llama_index.core.schema import TextNode
+        from backend.utils.contextual_prepender import prepend_context_to_document_nodes
+        node = TextNode(text=chunk, metadata={"source_filename": filename})
+        prepend_context_to_document_nodes([node])
+        return {"text": node.get_content(), "score": 0.5, "metadata": node.metadata}
+
+    def test_prefixed_chunk_counts_as_a_hit(self):
+        import hashlib
+        pair = {"source_chunk_hashes": [hashlib.sha256(self.CHUNK.encode()).hexdigest()]}
+        results = [
+            self._indexed_result("Unrelated text about something else.", "other.md"),
+            self._indexed_result(self.CHUNK, "manual.md"),
+        ]
+        assert results[1]["text"].startswith("Document: manual.md.")
+        retr = RAGEvalHarness()._score_retrieval(pair, results)
+        assert retr["hit_rate_at_k"] == 1.0
+        assert retr["mrr"] == 0.5
+
+    def test_chunk_without_prefix_still_counts(self):
+        import hashlib
+        pair = {"source_chunk_hashes": [hashlib.sha256(self.CHUNK.encode()).hexdigest()]}
+        retr = RAGEvalHarness()._score_retrieval(pair, [{"text": self.CHUNK, "metadata": {}}])
+        assert retr["hit_rate_at_k"] == 1.0
+        assert retr["mrr"] == 1.0
+
+
 class TestWorkerLLMResolution:
     def test_falls_back_to_saved_active_model_when_app_has_no_llm(self):
         """Research runs execute in a Celery worker whose app has no LLAMA_INDEX_LLM."""

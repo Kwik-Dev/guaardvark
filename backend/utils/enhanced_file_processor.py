@@ -88,6 +88,8 @@ def failure_reason(file_path: str, error: BaseException) -> str:
 
     if suffix == ".xml" and name == "ParseError":
         return f"the XML is not well-formed ({text})"
+    if suffix == ".svg" and name == "ParseError":
+        return f"the SVG is not well-formed XML ({text})"
 
     if isinstance(error, ImportError):
         return text or "a package needed to read this format is not installed"
@@ -138,6 +140,9 @@ class FileMetadata:
     image_dimensions: Optional[Tuple[int, int]] = None
     extraction_confidence: Optional[float] = None
     vision_model_used: Optional[str] = None
+    # Why no text could be read from the file. The text is then empty: a
+    # reason written into the text would be indexed and retrieved as content.
+    extraction_error: Optional[str] = None
 
 @dataclass
 class ProcessedContent:
@@ -493,6 +498,43 @@ class XMLProcessor(FileProcessor):
             logger.error(f"Error generating XML file {output_path}: {e}")
             return False
 
+class SVGProcessor(FileProcessor):
+    """SVG is XML: its words are in title, desc and text elements. The vision
+    models OCR uses take raster images only, so an SVG is read as XML."""
+
+    _TEXT_TAGS = {"title", "desc", "text"}
+
+    def can_process(self, file_path: str) -> bool:
+        return file_path.lower().endswith('.svg')
+
+    def process(self, file_path: str) -> ProcessedContent:
+        import xml.etree.ElementTree as ET
+
+        root = ET.parse(file_path).getroot()
+        lines = []
+        title = None
+        for element in root.iter():
+            tag = element.tag.rsplit("}", 1)[-1] if isinstance(element.tag, str) else ""
+            if tag not in self._TEXT_TAGS:
+                continue
+            # itertext covers tspan and textPath children; whitespace collapsed.
+            text = " ".join("".join(element.itertext()).split())
+            if not text:
+                continue
+            if tag == "title" and title is None:
+                title = text
+            lines.append(text)
+        text_content = "\n".join(lines)
+        metadata = FileMetadata(
+            format=FileFormat.SVG,
+            size_bytes=os.path.getsize(file_path),
+            mime_type="image/svg+xml",
+            encoding="utf-8",
+            word_count=len(text_content.split()),
+            title=title,
+        )
+        return ProcessedContent(text_content=text_content, metadata=metadata)
+
 class ImageProcessor(FileProcessor):
     """Enhanced image processor with OCR capabilities - Phase 2A.1"""
     
@@ -512,8 +554,8 @@ class ImageProcessor(FileProcessor):
     
     def can_process(self, file_path: str) -> bool:
         """Check if file is a supported image format"""
-        # Basic format check even without service
-        image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg'}
+        # Basic format check even without service; .svg goes to SVGProcessor.
+        image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'}
         return Path(file_path).suffix.lower() in image_extensions
     
     def process(self, file_path: str) -> ProcessedContent:
@@ -574,20 +616,21 @@ class ImageProcessor(FileProcessor):
                         else:
                             logger.info(f"Successfully extracted {len(text_content)} characters from {file_path}")
                     else:
-                        # OCR failed but service was available
-                        error_msg = extraction_result.get('error', 'Unknown error')
-                        text_content = f"Image file: {Path(file_path).name} (OCR extraction failed: {error_msg})"
-                        metadata.word_count = len(text_content.split())
+                        error_msg = extraction_result.get('error') or 'Unknown error'
+                        text_content = ""
+                        metadata.word_count = 0
+                        metadata.extraction_error = f"OCR extraction failed: {error_msg}"
                         logger.warning(f"Image extraction failed for {file_path}: {error_msg}")
-                        
+
                 except Exception as e:
                     logger.error(f"Error during OCR extraction for {file_path}: {e}")
-                    text_content = f"Image file: {Path(file_path).name} (OCR processing error: {str(e)})"
-                    metadata.word_count = len(text_content.split())
+                    text_content = ""
+                    metadata.word_count = 0
+                    metadata.extraction_error = f"OCR processing error: {e}"
             else:
-                # Service not available - create basic description
-                text_content = f"Image file: {Path(file_path).name} (OCR service not available - basic image file indexing)"
-                metadata.word_count = len(text_content.split())
+                text_content = ""
+                metadata.word_count = 0
+                metadata.extraction_error = "OCR service not available"
                 logger.debug(f"Processed image {file_path} without OCR - service not available")
             
             return ProcessedContent(
@@ -598,16 +641,15 @@ class ImageProcessor(FileProcessor):
             
         except Exception as e:
             logger.error(f"Error processing image file {file_path}: {e}")
-            # Return basic content even on error
-            text_content = f"Image file: {Path(file_path).name} (processing error: {str(e)})"
             metadata = FileMetadata(
                 format=FileFormat.JPG,  # Default
                 size_bytes=0,
                 mime_type="image/unknown",
-                word_count=len(text_content.split())
+                word_count=0,
+                extraction_error=f"processing error: {e}",
             )
             return ProcessedContent(
-                text_content=text_content,
+                text_content="",
                 metadata=metadata
             )
 
@@ -722,7 +764,7 @@ class EnhancedFileProcessor:
             FileFormat.GIF: ImageProcessor(),
             FileFormat.BMP: ImageProcessor(),
             FileFormat.WEBP: ImageProcessor(),
-            FileFormat.SVG: ImageProcessor(),
+            FileFormat.SVG: SVGProcessor(),
             # Phase 2A.2: Added Excel processors
             FileFormat.XLSX: ExcelProcessor(),
             FileFormat.XLS: ExcelProcessor(),
@@ -928,7 +970,7 @@ class EnhancedFileProcessor:
                 "mime_types": ["image/svg+xml"],
                 "can_generate": False,
                 "can_process": True,
-                "features": ["ocr", "text_extraction", "vision_model"]
+                "features": ["text_extraction"]
             },
             # Phase 2A.2: Added Excel format info
             FileFormat.XLSX: {

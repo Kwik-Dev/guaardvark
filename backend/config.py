@@ -258,12 +258,16 @@ AUTORESEARCH_STALENESS_THRESHOLD = 0.2  # fraction of stale pairs triggering reg
 # Default RAG experiment parameters. These MUST mirror actual production
 # behavior (the values retrieval uses when nothing is promoted), so that an
 # experiment's baseline measures the system users actually experience:
-# rerank defaults ON (GUAARDVARK_RERANK_ENABLED default), alpha matches the
-# GUAARDVARK_HYBRID_SEARCH_ALPHA default, chat returns 3 chunks.
+# reranking defaults ON (the cross-encoder, GUAARDVARK_RERANK_CROSS_ENCODER,
+# else MMR, GUAARDVARK_RERANK_ENABLED; False turns both off in
+# search_with_llamaindex), alpha matches the GUAARDVARK_HYBRID_SEARCH_ALPHA
+# default, chat returns 3 chunks.
+# dedup_threshold is not listed: production resolves it per embedding model
+# (get_dedup_threshold), and rag_autoresearch_service adds that value to the
+# baseline each time it loads the experiment config.
 AUTORESEARCH_DEFAULT_PARAMS = {
     # Phase 1 — query-time
     "top_k": 5,
-    "dedup_threshold": 0.85,
     "context_window_chunks": 3,
     "reranking_enabled": True,
     "query_expansion": False,

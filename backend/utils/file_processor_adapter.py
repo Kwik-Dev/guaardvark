@@ -104,7 +104,9 @@ def processed_content_to_llamaindex_docs(
         metadata["extraction_confidence"] = processed.metadata.extraction_confidence
     if processed.metadata.vision_model_used:
         metadata["vision_model_used"] = processed.metadata.vision_model_used
-    
+    if getattr(processed.metadata, "extraction_error", None):
+        metadata["extraction_error"] = processed.metadata.extraction_error
+
     # Add structured data info
     if processed.structured_data:
         metadata["has_structured_data"] = True
