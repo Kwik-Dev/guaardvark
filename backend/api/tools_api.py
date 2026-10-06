@@ -436,8 +436,18 @@ def route_message():
             pass  # fallthrough to legacy bridge
 
         if route is None:
-            from backend.services.agent_router import route_message as do_route
+            from backend.services.agent_router import (
+                RouteType,
+                is_explicit_agent_request,
+                route_message as do_route,
+            )
             decision = do_route(message, context)
+            # Only an explicit agent request keeps the legacy loop; an
+            # agent-loop match on an ordinary question goes to unified chat.
+            execute_via = None
+            if (decision.route_type == RouteType.AGENT_LOOP
+                    and not is_explicit_agent_request(message, decision)):
+                execute_via = 'unified'
             route = type('obj', (object,), {
                 'route_type': type('rt', (object,), {'value': decision.route_type.value})(),
                 'tool_name': decision.tool_name,
@@ -445,7 +455,7 @@ def route_message():
                 'confidence': decision.confidence,
                 'reasoning': decision.reasoning + ' (legacy bridge; migrate to AgentBrain)',
                 'suggested_mode': getattr(decision, 'suggested_mode', None),
-                'execute_via': None,
+                'execute_via': execute_via,
             })()
 
         return jsonify({

@@ -818,6 +818,25 @@ def route_message(message: str, context: Optional[Dict[str, Any]] = None) -> Rou
     return router.route(message, context)
 
 
+# Requests that name the agent loop itself. Every other AGENT_LOOP match
+# (intelligent_assistant, complex_research, ...) is an everyday question that
+# unified chat answers with RAG, memory and approval cards.
+EXPLICIT_AGENT_COMMANDS = frozenset({"/agent", "/browser", "/desktop", "/mcp"})
+EXPLICIT_AGENT_PATTERNS = frozenset({"explicit_agent", "mcp_automation"})
+
+
+def is_explicit_agent_request(message: str, decision: RouteDecision) -> bool:
+    """True when the message is an agent slash command or matched a pattern
+    that asks for the agent or MCP by name (reasoning from _match_pattern)."""
+    words = (message or "").strip().split(maxsplit=1)
+    if words and words[0].lower() in EXPLICIT_AGENT_COMMANDS:
+        return True
+    return any(
+        decision.reasoning == f"Matched pattern: {name}"
+        for name in EXPLICIT_AGENT_PATTERNS
+    )
+
+
 def execute_routed_message(message: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Convenience function to route and execute a message.
     DEPRECATED/BRIDGE: Prefer AgentBrain + unified paths (see PHASE2_TIGHTENED_PLAN).
