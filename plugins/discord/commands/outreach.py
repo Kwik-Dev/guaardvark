@@ -1,8 +1,12 @@
 """
 Outreach cog — quietly watches configured channels for messages we can usefully
-respond to (Ollama / ComfyUI / local-AI / RAG / self-hosted topics), drafts a
-reply via the backend's /api/social-outreach/draft-comment endpoint, and either
-posts it (full-auto) or queues it for review (supervised).
+respond to (Ollama / ComfyUI / local-AI / RAG / self-hosted topics) and drafts a
+reply via the backend's /api/social-outreach/draft-comment endpoint. The backend
+queues the draft for review, or marks it approved when it may post on its own.
+
+Replies are sent only by poll_approved_drafts, for approved drafts, after the
+cadence check, the claim and the /submit step (where a reject still stops it).
+Drafting never sends.
 
 This is the lowest-risk path of the three loops: API-only, no servo, no browser.
 If something goes wrong here it's confined to a Discord channel — no shadow-ban
@@ -378,31 +382,9 @@ class OutreachCog(commands.Cog):
             msg.channel.id, msg.id, grade, would_post, supervised, len(draft),
         )
 
-        if supervised or not would_post or not draft:
-            return  # queued in audit, not posted
-
-        try:
-            sent = await msg.reply(draft, mention_author=False)
-        except discord.Forbidden:
-            logger.warning("outreach: no send perms in channel %s", msg.channel.id)
-            return
-        except Exception as e:
-            logger.warning("outreach: failed to post reply: %s", e)
-            return
-
-        try:
-            await self.api._post(
-                "/social-outreach/record-post",
-                json={
-                    "audit_id": audit_id,
-                    "platform": "discord",
-                    "posted_text": draft,
-                    "target_url": target_url,
-                    "target_thread_id": str(msg.id),
-                },
-            )
-        except Exception as e:
-            logger.warning("outreach: record-post failed (post still went out, audit may be stale): %s", e)
+        # A would_post draft is stored as approved; poll_approved_drafts sends it.
+        if would_post and draft and not supervised:
+            logger.info("outreach: draft %s approved, poll_approved_drafts will send it", audit_id)
 
 
 async def setup(bot: commands.Bot):
