@@ -133,8 +133,8 @@ class TestParseDecision(unittest.TestCase):
         llm_output = '{"action": "done", "success_proof": "", "reasoning": "I clicked the video and the player is now there"}'
         decision = service._parse_decision(llm_output)
         self.assertTrue(decision.task_complete)
-        # In execute_task the has_recent_verified block would have grounded the proof from the prior target
-        # and taken the advisory (non-failure) path instead of "done rejected — proof not visible".
+        # In execute_task the has_recent_verified block grounds the proof from the prior target; a
+        # grounded proof must then be seen on screen and never takes the advisory path.
         # We assert the objects here; runtime advisory/grounding covered by higher-level tests + manual.
 
     def test_parse_invalid_json_returns_stuck(self):
@@ -352,6 +352,35 @@ class TestStallRule(unittest.TestCase):
     def test_the_threshold_is_the_configured_one(self):
         self.svc.config.max_stall_steps = 2
         self.assertEqual(self._run([_stepped("A"), _stepped("A"), _stepped("A")]), 3)
+
+
+class TestRepetitionVerdict(unittest.TestCase):
+    """Three identical steps end the task; it is a success only when none
+    failed and at least one changed the screen."""
+
+    def _verdict(self, steps):
+        from backend.services.agent_control_service import AgentControlService
+        return AgentControlService._repetition_verdict(steps)
+
+    def test_three_clicks_that_changed_nothing_are_no_progress(self):
+        steps = [_stepped("Zebra", effect="no_visible_change") for _ in range(3)]
+        self.assertEqual(self._verdict(steps), (False, "loop_detected_no_progress"))
+        steps = [_stepped("Zebra", effect="not_observed") for _ in range(3)]
+        self.assertEqual(self._verdict(steps), (False, "loop_detected_no_progress"))
+
+    def test_three_verified_clicks_keep_completed_with_repetition(self):
+        steps = [_stepped("Like", verified=True, effect="verified") for _ in range(3)]
+        self.assertEqual(self._verdict(steps), (True, "completed_with_repetition"))
+
+    def test_one_change_among_three_is_enough(self):
+        steps = [_stepped("Next", effect="no_visible_change"), _stepped("Next", effect="no_visible_change"),
+                 _stepped("Next", verified=True, effect="verified")]
+        self.assertEqual(self._verdict(steps), (True, "completed_with_repetition"))
+
+    def test_a_failed_step_is_no_progress(self):
+        steps = [_stepped("Like", verified=True, effect="verified"), _stepped("Like", ok=False),
+                 _stepped("Like", verified=True, effect="verified")]
+        self.assertEqual(self._verdict(steps), (False, "loop_detected_no_progress"))
 
 
 class TestHonestActions(unittest.TestCase):
@@ -687,6 +716,40 @@ class TestPointActions(unittest.TestCase):
         self.assertIn("the screen is 1000x1000", self.svc._point_rule())
 
 
+class TestLatestClickVerified(unittest.TestCase):
+    """The advisory "done" reads only the latest click since the last
+    navigate; an earlier verified click does not vouch for it."""
+
+    def _has(self, history):
+        from backend.services.agent_control_service import AgentControlService
+        return AgentControlService._task_has_verified_click(history)
+
+    def test_verified_composer_then_unverified_post_is_not_verified(self):
+        history = [_stepped("composer", verified=True, effect="verified"),
+                   _stepped("Post button", effect="no_visible_change")]
+        self.assertFalse(self._has(history))
+
+    def test_verified_post_last_is_verified(self):
+        history = [_stepped("composer", verified=True, effect="verified"),
+                   _stepped("Post button", verified=True, effect="verified")]
+        self.assertTrue(self._has(history))
+
+    def test_a_failed_last_click_is_not_verified(self):
+        history = [_stepped("composer", verified=True, effect="verified"),
+                   _stepped("Post button", ok=False)]
+        self.assertFalse(self._has(history))
+
+    def test_steps_that_are_not_clicks_do_not_hide_the_last_click(self):
+        history = [_stepped("Post button", verified=True, effect="verified"),
+                   _stepped("", action_type="hotkey"), _stepped("", action_type="wait")]
+        self.assertTrue(self._has(history))
+
+    def test_a_navigate_after_the_click_clears_it(self):
+        history = [_stepped("Post button", verified=True, effect="verified"),
+                   _stepped("", action_type="navigate")]
+        self.assertFalse(self._has(history))
+
+
 class TestFailedToolsSayWhy(unittest.TestCase):
     """A failed tool's own explanation reaches the model; a block says how
     long it lasts."""
@@ -847,6 +910,16 @@ class TestCheckEarlyDone(unittest.TestCase):
     def test_open_firefox_done_when_visible(self):
         self.assertEqual(self._check("open firefox", self.FIREFOX), "firefox is now open")
 
+    def test_bare_task_with_please_and_punctuation_still_checked(self):
+        self.assertEqual(self._check("Please open Firefox.", self.FIREFOX), "firefox is now open")
+        self.assertEqual(self._check("close firefox!", self.CHROMIUM), "firefox no longer visible")
+
+    def test_a_task_with_a_second_clause_never_ends_early(self):
+        for task in ("Open Firefox and go to reddit.com",
+                     "open the settings in Firefox",
+                     "Quit Chrome and open Firefox"):
+            self.assertEqual(self._check(task, self.FIREFOX), "", task)
+
     def test_unreachable_display_reads_as_unknown(self):
         from backend.services.agent_control_service import AgentControlService as A
         failed = MagicMock(returncode=1, stdout="", stderr="Error: Can't open display: (null)")
@@ -854,3 +927,104 @@ class TestCheckEarlyDone(unittest.TestCase):
             state = A._get_desktop_state(display=":99")
         self.assertTrue(state.startswith("Desktop state: unknown"), state)
         self.assertEqual(run.call_count, 1)
+
+
+class TestAssessObstacles(unittest.TestCase):
+    """ASSESS leaves a page that only mentions cookies alone, and hands an
+    obstacle it has already tried twice this task to THINK."""
+
+    CONSENT = "A cookie consent banner covers the bottom of the page with Accept and Reject buttons."
+
+    def setUp(self):
+        from backend.services.agent_control_service import AgentControlService
+        self.svc = AgentControlService()
+        self.screen = MagicMock()
+        sleep = patch("time.sleep")
+        sleep.start()
+        self.addCleanup(sleep.stop)
+
+    def _assess(self, scene, iteration=0):
+        return self.svc._assess_obstacles(scene, MagicMock(), self.screen, iteration)
+
+    def test_a_page_about_cookies_is_clear(self):
+        self.assertEqual(self._assess("a recipe page about chocolate chip cookies"), "clear")
+        self.screen.hotkey.assert_not_called()
+
+    def test_a_consent_banner_is_handled_twice_then_left_to_think(self):
+        outcomes = [self._assess(self.CONSENT, i) for i in range(3)]
+        self.assertEqual(outcomes, ["handled", "handled", "clear"])
+        self.assertEqual(self.screen.hotkey.call_count, 2)
+
+    def test_the_cap_is_per_obstacle_type(self):
+        for i in range(2):
+            self._assess(self.CONSENT, i)
+        self.assertEqual(self._assess("example.com wants to use your camera", 2), "handled")
+
+    def _escalate(self, decision_json):
+        from types import SimpleNamespace
+        from backend.services.agent_control_service import AgentControlService
+        analyzer = MagicMock()
+        analyzer.text_query.return_value = SimpleNamespace(success=True, description=decision_json)
+        with patch.object(AgentControlService, "_get_thinking_model", staticmethod(lambda: "thinker")), \
+             patch("backend.services.servo_controller.ServoController") as servo:
+            outcome = self.svc._assess_obstacles(
+                "A dialog asks: Are you sure you want to delete your account?", analyzer, self.screen, 0)
+        analyzer.text_query.assert_called_once()
+        return outcome, servo
+
+    def test_an_escalation_click_on_a_banned_target_is_not_sent(self):
+        self.svc._banned_targets = {"delete account button": "Delete account button"}
+        self.svc._not_found_counts = {"delete account button": 3}
+        outcome, servo = self._escalate(
+            '{"action": "click", "target_description": "Delete account button", "reasoning": "confirm"}')
+        self.assertEqual(outcome, "clear")
+        servo.assert_not_called()
+        self.screen.hotkey.assert_not_called()
+
+    def test_an_allowed_escalation_hotkey_is_sent(self):
+        outcome, _ = self._escalate('{"action": "hotkey", "keys": ["Escape"], "reasoning": "dismiss"}')
+        self.assertEqual(outcome, "escalated")
+        self.screen.hotkey.assert_called_once_with("Escape")
+
+
+class TestFocusFirefox(unittest.TestCase):
+    """The focus-firefox shortcut succeeds only when a Firefox window was
+    found and windowactivate returned 0."""
+
+    WINDOW = MagicMock(returncode=0, stdout="4194307\n", stderr="")
+
+    def setUp(self):
+        from backend.services.agent_control_service import AgentControlService
+        self.svc = AgentControlService()
+        self.screen = MagicMock(display=":99")
+        sleep = patch("time.sleep")
+        sleep.start()
+        self.addCleanup(sleep.stop)
+
+    def _focus(self, *runs):
+        with patch("subprocess.run", side_effect=list(runs)) as run:
+            return self.svc._focus_firefox(self.screen), run
+
+    def test_no_window_found_is_a_failure(self):
+        result, run = self._focus(MagicMock(returncode=1, stdout="", stderr=""))
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "recipe:focus_firefox")
+        self.assertEqual(result.steps[0].result["reason"], "no Firefox window")
+        self.assertTrue(result.steps[0].failed)
+        self.assertEqual(run.call_count, 1)
+
+    def test_a_failed_activate_is_a_failure(self):
+        result, _ = self._focus(self.WINDOW, MagicMock(returncode=1, stdout="", stderr="BadWindow"))
+        self.assertFalse(result.success)
+        self.assertEqual(result.steps[0].result["reason"], "BadWindow")
+
+    def test_a_raised_error_is_a_failure(self):
+        result, _ = self._focus(FileNotFoundError("xdotool not found"))
+        self.assertFalse(result.success)
+        self.assertIn("xdotool not found", result.steps[0].result["reason"])
+
+    def test_a_focused_window_is_success(self):
+        result, run = self._focus(self.WINDOW, MagicMock(returncode=0, stdout="", stderr=""))
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "recipe:focus_firefox")
+        self.assertEqual(run.call_args_list[1].args[0][:2], ["xdotool", "windowactivate"])
