@@ -73,22 +73,50 @@ class RAGAutoresearchService:
         root = os.environ.get("GUAARDVARK_ROOT", "")
         return os.path.join(root, "data", CONFIG_FILENAME)
 
+    def _baseline_params(self) -> dict:
+        """The params retrieval uses when nothing is promoted."""
+        return dict(AUTORESEARCH_DEFAULT_PARAMS)
+
+    def _full_params(self, overrides: dict) -> dict:
+        """Baseline params with `overrides` applied: a promoted row, spelled out
+        in full so an eval of it does not inherit whatever else is active."""
+        params = self._baseline_params()
+        params.update(overrides or {})
+        return params
+
+    def _infer_tuned(self, params: dict) -> list:
+        """Tuned param names for a config file without a "tuned" record: the
+        ones whose value differs from the declared default."""
+        return sorted(
+            k for k, v in params.items()
+            if k in AUTORESEARCH_DEFAULT_PARAMS and v != AUTORESEARCH_DEFAULT_PARAMS[k]
+        )
+
     def _load_config(self) -> dict:
-        """Load current experiment config from disk."""
+        """Load current experiment config from disk.
+
+        "tuned" lists the params a kept experiment changed; only those are
+        promoted (see _promote_config).
+        """
         path = self._config_path()
         try:
             with open(path, "r") as f:
-                return json.load(f)
+                config = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             config = {
                 "version": 1,
                 "baseline_score": 0.0,
-                "params": dict(AUTORESEARCH_DEFAULT_PARAMS),
+                "params": self._baseline_params(),
+                "tuned": [],
                 "phase": 1,
                 "phase_plateau_count": 0,
             }
             self._save_config(config)
             return config
+        if not isinstance(config.get("tuned"), list):
+            config["tuned"] = self._infer_tuned(config.get("params") or {})
+            self._save_config(config)
+        return config
 
     def _save_config(self, config: dict):
         """Atomically save config to disk."""
@@ -333,6 +361,7 @@ class RAGAutoresearchService:
         promoted_id = None
         if status == "keep":
             config["params"][param_name] = new_value
+            config["tuned"] = sorted(set(config.get("tuned") or []) | {param_name})
             config["baseline_score"] = new_score
             config["phase_plateau_count"] = 0
             self._save_config(config)
@@ -565,6 +594,10 @@ class RAGAutoresearchService:
                         activate: bool = True):
         """Save a winning config to the ResearchConfig table.
 
+        Stores only the tuned params that differ from the baseline; every key
+        in the row overrides live retrieval (get_active_rag_params), so a
+        default copied in with them would go live too.
+
         activate=True: goes live immediately (deactivates predecessors).
         activate=False: stored as a CANDIDATE — nightly-run winners stay
         inactive until the run-end A/B confirmation activates the best one.
@@ -572,11 +605,15 @@ class RAGAutoresearchService:
         """
         try:
             from backend.models import ResearchConfig, db
+            from backend.utils.experiment_context import changed_params
+            params = config.get("params") or {}
+            tuned = {k: params[k] for k in (config.get("tuned") or []) if k in params}
+            promoted = changed_params(tuned, self._baseline_params())
             if activate:
                 ResearchConfig.query.filter_by(is_active=True).update({"is_active": False})
             new_config = ResearchConfig(
                 id=str(uuid.uuid4()),
-                params=config["params"],
+                params=promoted,
                 composite_score=score,
                 is_active=activate,
                 promoted_at=utcnow() if activate else None,

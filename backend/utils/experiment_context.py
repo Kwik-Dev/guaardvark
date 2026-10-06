@@ -99,6 +99,18 @@ def _clamp_params(params: dict) -> dict:
     return clamped
 
 
+def changed_params(params: dict, baseline: dict) -> dict:
+    """The entries of `params` whose value differs from `baseline`, both clamped.
+
+    A promoted config must carry only what experiments changed: every key it
+    holds overrides retrieval's own default, including defaults that are
+    resolved per embedding model, so a copied default would go live with it.
+    """
+    mine = _clamp_params(params or {})
+    base = _clamp_params(baseline or {})
+    return {k: v for k, v in mine.items() if k not in base or base[k] != v}
+
+
 def _load_promoted_params() -> Optional[dict]:
     """Read the active ResearchConfig row. Fail-soft: any error → None.
 
