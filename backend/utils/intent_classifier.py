@@ -36,7 +36,7 @@ class IntentType(Enum):
     COMMAND = "COMMAND"              # /codegen, /analyze commands
     DATABASE_QUERY = "DATABASE_QUERY"  # Count/list requests
     RAG_SEARCH = "RAG_SEARCH"        # Document content search
-    WEB_SEARCH = "WEB_SEARCH"        # Current info requests; sizes the context, never sends a search by itself
+    WEB_SEARCH = "WEB_SEARCH"        # Current info requests; sizes the context and offers a search, never sends one by itself
     GENERAL_CHAT = "GENERAL_CHAT"    # Default conversational
 
 class IntentClassifier:
@@ -296,6 +296,68 @@ except ImportError:
 def should_enable_web_search(intent_type: IntentType, message: str) -> bool:
     """Check if web search should be enabled"""
     return intent_classifier.should_use_web_search(intent_type, message)
+
+
+# The two offers a reply can carry; see offer_web_search.
+WEB_SEARCH_OFFER_SEARCH = "search"
+WEB_SEARCH_OFFER_ENABLE = "enable_web_access"
+# The query is the person's message as typed. Longer than this it is a paste or
+# a brief rather than a question, as enhanced chat's _WEB_SEARCH_MAX_CHARS has it.
+WEB_SEARCH_OFFER_MAX_CHARS = 300
+
+
+# Realtime confidence an offer needs: one whole-word realtime keyword ("weather",
+# "score", "latest") gives 0.6 in the keyword fallback, two give 0.8.
+WEB_SEARCH_OFFER_MIN_REALTIME = 0.6
+# A reply that says it cannot know current facts ("I don't have real-time data",
+# "as of my last update", "I can't browse the internet").
+_REPLY_LACKS_CURRENT_INFO_RE = re.compile(
+    r"\b(?:don'?t|do not|cannot|can'?t|unable to)\b[^.!?\n]{0,60}"
+    r"\b(?:real[- ]time|live data|current (?:data|information|events|news)|up[- ]to[- ]date|"
+    r"browse|the internet|look (?:it|that|this) up)\b"
+    r"|\bas of my (?:last|latest) (?:update|training)\b"
+    r"|\bmy (?:training|knowledge) (?:data|cutoff|cut-off)\b",
+    re.IGNORECASE,
+)
+
+
+def offer_web_search(message: str, intent_type: Optional[IntentType] = None,
+                     reply: Optional[str] = None) -> Optional[Dict[str, str]]:
+    """The offer a chat reply carries when ``message`` looks like it needs
+    current information, or None.
+
+    ``{"action": "search", "query": message}`` with web access on: the chat
+    shows "Search the web for this", and a click runs one search of the query.
+    ``{"action": "enable_web_access", "query": message}`` with it off: the
+    chat says how to turn web access on. The offer itself sends nothing, and
+    callers ask only for a turn that sent no search. ``intent_type`` is the
+    caller's own classification of ``message``, when it has one.
+
+    Offered when the message is a current-information question by both
+    signals (a web-search classification and the realtime check), or when
+    ``reply`` says it lacks current information. The web-search keywords
+    alone also fire on "check my code" or "find my invoice"; the chip would
+    then sit under ordinary replies.
+    """
+    text = (message or "").strip()
+    if not text or len(text) > WEB_SEARCH_OFFER_MAX_CHARS:
+        return None
+    if intent_type is None:
+        intent_type, _, _ = intent_classifier.classify_intent(text)
+    asks_current = False
+    if should_enable_web_search(intent_type, text):
+        is_live, confidence = is_realtime_query(text)
+        asks_current = is_live and confidence >= WEB_SEARCH_OFFER_MIN_REALTIME
+    if not asks_current and not (reply and _REPLY_LACKS_CURRENT_INFO_RE.search(reply)):
+        return None
+    try:
+        from backend.utils.settings_utils import get_web_access
+        web_access = bool(get_web_access())
+    except Exception as e:
+        logger.debug(f"Web access setting unreadable, offering to turn it on: {e}")
+        web_access = False
+    action = WEB_SEARCH_OFFER_SEARCH if web_access else WEB_SEARCH_OFFER_ENABLE
+    return {"action": action, "query": text}
 
 
 def is_realtime_query(message: str) -> Tuple[bool, float]:

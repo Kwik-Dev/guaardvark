@@ -44,6 +44,7 @@ import { useAgentRouter } from "../hooks/useAgentRouter";
 import { routeAndExecute } from "../api/toolsService";
 import UnifiedChatService, { steerAgent } from "../api/unifiedChatService";
 import StreamingMessage from "../components/chat/StreamingMessage";
+import { webSearchSend } from "../components/chat/webSearchOffer";
 import { useUnifiedProgress } from "../contexts/UnifiedProgressContext";
 import extractSpeakableText from "../utils/extractSpeakableText";
 import { chatErrorMessage } from "../utils/chatAttachment";
@@ -1293,6 +1294,17 @@ const ChatPage = () => {
     [sessionId, projectId, messageQueueId, isSending]
   );
 
+  // A reply's "Search the web for this" offer. Returns false while a turn is
+  // running (handleSendMessage would drop the send), so the offer stays open.
+  const searchWebRef = useRef(null);
+  searchWebRef.current = (query) => {
+    if (isSending) return false;
+    const { text, options } = webSearchSend(query);
+    handleSendMessage(text, null, options);
+    return true;
+  };
+  const handleSearchWeb = useCallback((query) => searchWebRef.current(query), []);
+
   const processMessage = useCallback(
     async (inputText, file, voiceOptions, chatMode, sessionId, projectId) => {
       let userMessageTempId = null;
@@ -2342,6 +2354,7 @@ const ChatPage = () => {
         messages={messages}
         sessionId={sessionId}
         onOrchestratorUpdate={handleOrchestratorUpdate}
+        onSearchWeb={handleSearchWeb}
       />
 
       {}
@@ -2386,6 +2399,7 @@ const ChatPage = () => {
                   truncated: result.truncated === true,
                   synthesized: result.synthesized === true,
                   verified: result.verified ?? null,
+                  web_search_offer: result.webSearchOffer || null,
                   iterations: result.iterations || 0,
                   budget: result.budget || budgetTelemetry,  // Phase 2.1 surface budget telemetry
                 };
@@ -2440,6 +2454,7 @@ const ChatPage = () => {
                           toolCalls: data.steps || [],
                           synthesized: data.synthesized === true
                             || (Array.isArray(data.steps) && data.steps.some((s) => s?.synthesized === true)),
+                          web_search_offer: data.web_search_offer || null,
                           timestamp: new Date().toISOString(),
                         },
                       ];

@@ -30,6 +30,8 @@ import ToolCallCard from "./ToolCallCard";
 import ThinkingCard from "./ThinkingCard";
 import SynthesizedAnswerChip from "./SynthesizedAnswerChip";
 import { isSynthesizedMessage, isSynthesizedStep } from "./synthesizedAnswer";
+import WebSearchOfferChip from "./WebSearchOfferChip";
+import { webSearchOfferOf } from "./webSearchOffer";
 import AgentThinkingTrail from "./AgentThinkingTrail";
 import OrchestratorPlanView from "../orchestrator/OrchestratorPlanView";
 import ImageLightbox from "../images/ImageLightbox";
@@ -60,7 +62,7 @@ const formatTime = (timestamp) => {
   }
 };
 
-const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate }) => {
+const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate, onSearchWeb }) => {
   const isUser = message.role === "user";
   // Per-message sessionId takes precedence, fall through to the list-level
   // prop so feedback on assistant turns (which often lack message.sessionId)
@@ -376,6 +378,7 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate }
   }
 
   const formattedTime = formatTime(message.timestamp);
+  const webSearchOffer = webSearchOfferOf(message);
 
   return (
     <>
@@ -785,6 +788,9 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate }
             Some of this answer was not checked against the tool results.
           </Typography>
         )}
+        {!isCommand && webSearchOffer && (
+          <WebSearchOfferChip offer={webSearchOffer} onSearch={onSearchWeb} />
+        )}
         {/* Feedback + narrate for assistant replies (not system/command rows) */}
         {message.role === "assistant" && !isCommand && !isProgress && message.content && typeof message.content === 'string' && message.content.length > 10 && (
           <>
@@ -917,9 +923,11 @@ MessageItem.propTypes = {
     extra_data: PropTypes.object,
     message_id: PropTypes.number,
     request_id: PropTypes.string,
+    web_search_offer: PropTypes.object,
   }).isRequired,
   sessionId: PropTypes.string,
   onOrchestratorUpdate: PropTypes.func,
+  onSearchWeb: PropTypes.func,
 };
 
 export default React.memo(MessageItem);
