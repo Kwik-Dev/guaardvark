@@ -3469,6 +3469,12 @@ class ProductionShot(db.Model):
     storyboard_image_path = db.Column(db.String(512), nullable=True)
     video_clip_path = db.Column(db.String(512), nullable=True)
     approved = db.Column(db.Boolean, nullable=False, default=False)
+    # Who set `approved`: 'person' (the storyboard approval) or 'curator' (a
+    # pre-tick from the vision curator, advice only). NULL when nobody has.
+    approved_by = db.Column(db.String(16), nullable=True)
+    # The curator's advice on the current frame: {"verdict": "approve"|"flag",
+    # "reason": str, "confidence": int}. NULL until it has judged this frame.
+    curator_advice = db.Column(db.JSON, nullable=True)
     regen_count = db.Column(db.Integer, nullable=False, default=0)
 
     production = db.relationship(

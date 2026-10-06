@@ -18,6 +18,25 @@ describe('StoryboardGrid', () => {
     expect(screen.getByText(/Approve & Render/i)).toBeDefined();
   });
 
+  it('shows the curator verdict with its reason and tells its tick from a person\'s', () => {
+    const shots = [
+      {
+        id: 1, scene_number: 1, shot_number: 1, description: 'Wide', approved: true,
+        approved_by: 'curator', curator_advice: { verdict: 'approve', reason: 'clean frame', confidence: 90 },
+      },
+      {
+        id: 2, scene_number: 1, shot_number: 2, description: 'Close', approved: false,
+        approved_by: null, curator_advice: { verdict: 'flag', reason: 'distorted face', confidence: 20 },
+      },
+      { id: 3, scene_number: 1, shot_number: 3, description: 'Two shot', approved: true, approved_by: 'person' },
+    ];
+    render(<StoryboardGrid currentStage="awaiting_approval" shots={shots} />);
+    expect(screen.getByText('Curator: approved — clean frame')).toBeDefined();
+    expect(screen.getByText('Curator: flagged — distorted face')).toBeDefined();
+    expect(screen.getByText('Pre-ticked')).toBeDefined();
+    expect(screen.getByText('Approved')).toBeDefined();
+  });
+
   it('opens regenerate dialog when Refresh icon is clicked', () => {
     render(<StoryboardGrid currentStage="awaiting_approval" shots={mockShots} />);
     const regenBtn = screen.getByRole('button', { name: /Regenerate this shot/i });

@@ -30,17 +30,17 @@ def production(app):
     return prod
 
 
-def _shot(prod, number, *, approved=False):
+def _shot(prod, number, *, approved=False, approved_by=None):
     shot = ProductionShot(production_id=prod.id, scene_number=1, shot_number=number,
                           description=f"Shot {number}", storyboard_image_path=f"/tmp/shot_{number}.png",
-                          approved=approved)
+                          approved=approved, approved_by=approved_by)
     db.session.add(shot)
     db.session.commit()
     return shot
 
 
 def test_a_hand_approved_shot_judged_flag_stays_approved(app, production):
-    by_hand = _shot(production, 1, approved=True)
+    by_hand = _shot(production, 1, approved=True, approved_by="person")
     waiting = _shot(production, 2)
 
     with patch("backend.services.film_curator_service.judge_shot", return_value=dict(_FLAG)) as judge:
@@ -49,6 +49,7 @@ def test_a_hand_approved_shot_judged_flag_stays_approved(app, production):
     db.session.refresh(by_hand)
     db.session.refresh(waiting)
     assert by_hand.approved is True
+    assert by_hand.approved_by == "person"
     assert waiting.approved is False
     assert summary["approved"] == 1
     assert summary["flagged"] == 1
@@ -70,6 +71,25 @@ def test_a_rerun_never_clears_an_approval(app, production):
     db.session.refresh(shot)
     assert shot.approved is True
     assert summary["flagged"] == 0
+
+
+def test_the_curator_stores_its_verdict_and_reason_on_each_shot(app, production):
+    passing = _shot(production, 1)
+    flagged = _shot(production, 2)
+
+    verdicts = {1: dict(_PASS), 2: dict(_FLAG)}
+    with patch("backend.services.film_curator_service.judge_shot",
+               side_effect=lambda shot, **kw: verdicts[shot.shot_number]):
+        auto_curate(production.id)
+
+    db.session.refresh(passing)
+    db.session.refresh(flagged)
+    assert passing.approved is True
+    assert passing.approved_by == "curator"
+    assert passing.curator_advice == {"verdict": "approve", "reason": "clean frame", "confidence": 95}
+    assert flagged.approved is False
+    assert flagged.approved_by is None
+    assert flagged.curator_advice == {"verdict": "flag", "reason": "distorted face", "confidence": 20}
 
 
 def test_a_flagged_shot_stays_waiting_for_the_person(app, production):

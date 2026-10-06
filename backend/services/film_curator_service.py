@@ -3,9 +3,11 @@
 The production pipeline parks at the `awaiting_approval` stage with one storyboard
 frame per shot and `ProductionShot.approved=False`, waiting for a person to approve
 the storyboard. This module gives that person a head start: Gemma-4 *looks* at each
-frame, judges whether it's on-model and coherent for that shot's character, and
-pre-ticks `approved` on the frames it judges usable. It is advice only — the stage
-stays at `awaiting_approval` and the render starts when the person approves.
+frame, judges whether it's on-model and coherent for that shot's character, stores
+its verdict and reason on the shot (`curator_advice`), and pre-ticks `approved`
+(with `approved_by='curator'`) on the frames it judges usable. It is advice only —
+the stage stays at `awaiting_approval` and the render starts when the person
+approves.
 
 Design notes:
   - Follows the codebase's see→think split (utils/vision_analyzer): the VISION model
@@ -165,8 +167,14 @@ def auto_curate(prod_id: int, *, analyzer=None, decider=None,
                             "confidence": None, "reason": "already approved", "kept": True})
             continue
         v = judge_shot(shot, analyzer=analyzer, decider=decider, threshold=threshold)
+        shot.curator_advice = {
+            "verdict": "approve" if v["approved"] else "flag",
+            "reason": v["reason"],
+            "confidence": v["confidence"],
+        }
         if v["approved"]:
             shot.approved = True
+            shot.approved_by = "curator"
         results.append({"shot": shot.shot_number, **v})
         logger.info("Curator shot %s: %s conf=%s (%s)",
                     shot.shot_number, "APPROVE" if v["approved"] else "FLAG",

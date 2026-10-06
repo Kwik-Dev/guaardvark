@@ -56,6 +56,8 @@ def _shot_to_dict(shot):
     return {
         "id": shot.id, "scene_number": shot.scene_number, "shot_number": shot.shot_number,
         "description": shot.description, "approved": shot.approved,
+        "approved_by": shot.approved_by,
+        "curator_advice": shot.curator_advice,
         "storyboard_image_path": shot.storyboard_image_path,
         "storyboard_image_url": image_url,
         "video_clip_path": shot.video_clip_path,
@@ -386,6 +388,7 @@ def approve_storyboard(prod_id):
     shots = ProductionShot.query.filter_by(production_id=prod_id).all()
     for s in shots:
         s.approved = True
+        s.approved_by = "person"
     db.session.commit()
 
     svc = ProductionService(db.session)
@@ -415,6 +418,9 @@ def regenerate_shot(prod_id, shot_id):
 
     shot.regen_count = (shot.regen_count or 0) + 1
     shot.approved = False
+    shot.approved_by = None
+    # The advice was about the frame being replaced.
+    shot.curator_advice = None
     db.session.commit()
 
     regen_job_id: str | None = None

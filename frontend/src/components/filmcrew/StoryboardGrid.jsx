@@ -31,6 +31,12 @@ const NO_STORYBOARD_PLACEHOLDER =
     '</svg>'
   );
 
+// The curator's advice on a frame, as one plain line for the card.
+const curatorLine = (advice) => {
+  const verdict = advice.verdict === 'flag' ? 'flagged' : 'approved';
+  return advice.reason ? `Curator: ${verdict} — ${advice.reason}` : `Curator: ${verdict}`;
+};
+
 const StoryboardGrid = ({ currentStage, shots, onRegenerate, onApproveAll, isApproving }) => {
   const [regenShot, setRegenShot] = useState(null);
   const [promptOverride, setPromptOverride] = useState('');
@@ -96,11 +102,12 @@ const StoryboardGrid = ({ currentStage, shots, onRegenerate, onApproveAll, isApp
                 />
                 <Box sx={{ position: 'absolute', top: 8, right: 8, display: 'flex', gap: 1 }}>
                   {shot.approved && (
-                    <Chip 
-                      label="Approved" 
-                      color="success" 
-                      size="small" 
-                      sx={{ height: 24 }}
+                    <Chip
+                      label={shot.approved_by === 'curator' ? 'Pre-ticked' : 'Approved'}
+                      color="success"
+                      variant={shot.approved_by === 'curator' ? 'outlined' : 'filled'}
+                      size="small"
+                      sx={{ height: 24, bgcolor: shot.approved_by === 'curator' ? 'background.paper' : undefined }}
                     />
                   )}
                   <Tooltip title={canRegenerate ? "Regenerate this shot" : "Regeneration is available during storyboard approval"}>
@@ -131,6 +138,16 @@ const StoryboardGrid = ({ currentStage, shots, onRegenerate, onApproveAll, isApp
                 }}>
                   {shot.description}
                 </Typography>
+                {shot.curator_advice?.verdict && (
+                  <Typography
+                    variant="caption"
+                    display="block"
+                    color={shot.curator_advice.verdict === 'flag' ? 'warning.main' : 'success.main'}
+                    sx={{ mt: 1 }}
+                  >
+                    {curatorLine(shot.curator_advice)}
+                  </Typography>
+                )}
               </CardContent>
             </Card>
           </Grid>
