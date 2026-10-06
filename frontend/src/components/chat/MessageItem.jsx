@@ -773,6 +773,18 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate }
             Response reached the output limit.
           </Typography>
         )}
+        {/* An agent answer the facts check could not match to its tool
+            results; true and unset (no tools ran) show nothing. */}
+        {message.role === "assistant" && message.verified === false && (
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            data-testid="unverified-note"
+            sx={{ display: "block", mt: 0.5, fontStyle: "italic", opacity: 0.8 }}
+          >
+            Some of this answer was not checked against the tool results.
+          </Typography>
+        )}
         {/* Feedback + narrate for assistant replies (not system/command rows) */}
         {message.role === "assistant" && !isCommand && !isProgress && message.content && typeof message.content === 'string' && message.content.length > 10 && (
           <>
@@ -901,6 +913,7 @@ MessageItem.propTypes = {
     thinking: PropTypes.string,
     truncated: PropTypes.bool,
     synthesized: PropTypes.bool,
+    verified: PropTypes.bool,
     extra_data: PropTypes.object,
     message_id: PropTypes.number,
     request_id: PropTypes.string,

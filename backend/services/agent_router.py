@@ -713,7 +713,8 @@ User Context: {str(context)}"""
                     for s in result.steps
                 ],
                 "iterations": result.iterations,
-                "success": result.success
+                "success": result.success,
+                "verified": result.verified,
             }
 
         except Exception as e:
@@ -761,7 +762,8 @@ User Context: {str(context)}"""
                     for s in result.steps
                 ],
                 "iterations": result.iterations,
-                "success": result.success
+                "success": result.success,
+                "verified": result.verified,
             }
 
         except Exception as e:
