@@ -516,9 +516,10 @@ class EditCodeTool(BaseTool):
                 from backend.services.claude_advisor_service import (
                     get_claude_advisor, scheduled_sends_allowed,
                 )
-                if ctx.get("_trigger") == "scheduled" and not scheduled_sends_allowed():
-                    # No person started a scheduled run, and the review sends this
-                    # file to Anthropic: it waits for Uncle Claude's Scheduled sends.
+                if ctx.get("_trigger") in ("scheduled", "reactive") and not scheduled_sends_allowed():
+                    # No person started a scheduled or reactive (heal) run, and the
+                    # review sends this file to Anthropic: it waits for Uncle
+                    # Claude's Scheduled sends.
                     review = {"approved": None,
                               "reason": "not sent: scheduled sends to Uncle Claude are off"}
                 else:

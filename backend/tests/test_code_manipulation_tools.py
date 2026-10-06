@@ -338,3 +338,13 @@ def test_a_directed_run_sends_the_review_as_before(tmp_path, monkeypatch):
         tmp_path, monkeypatch, {"_trigger": "directed"}, scheduled_sends=False)
 
     assert len(reviews) == 1
+
+
+def test_a_reactive_heal_holds_the_review_while_scheduled_sends_are_off(tmp_path, monkeypatch):
+    # heal() runs on a repeated error with nobody watching, like a scheduled run.
+    result, staged, reviews, _ = _gated_edit(
+        tmp_path, monkeypatch, {"_trigger": "reactive"}, scheduled_sends=False)
+
+    assert reviews == []
+    assert result.metadata["staged"] is True
+    assert staged[0]["review_notes"] == "not reviewed: not sent: scheduled sends to Uncle Claude are off"
