@@ -381,6 +381,26 @@ Return JSON: {{"draft": "<reply text>", "grade": 0.0-1.0, "reason": "<one line>"
 """
 
 
+def _requested_feature_block(requested_feature: Optional[str], fits: str) -> str:
+    """Prompt lines asking the drafter to lead with a feature a person chose.
+
+    A FEATURE_BLURBS key is shown with its blurb; anything else is passed as
+    the person wrote it. ``fits`` names what the feature has to suit ("this
+    thread", "this community"). Returns "" when no feature was requested.
+    """
+    feature = (requested_feature or "").strip()[:200]
+    if not feature:
+        return ""
+    blurb = FEATURE_BLURBS.get(feature.lower())
+    label = f"{feature} ({blurb})" if blurb else feature
+    return (
+        f"\nREQUESTED FEATURE: {label}\n"
+        f"The person asked for a draft that leads with this feature. If it fits "
+        f"{fits} and the pitch sheet backs it, lead with it. If it does not fit, "
+        f"do not force it: grade below 0.3 and say in reason why it does not fit.\n"
+    )
+
+
 def _build_user_prompt(
     platform: str,
     thread_context: str,
@@ -388,12 +408,14 @@ def _build_user_prompt(
     tone: Optional[str] = None,
     include_link: bool = False,
     link_url: Optional[str] = None,
+    requested_feature: Optional[str] = None,
 ) -> str:
     """Compose the user-side prompt for the LLM.
 
     Facts about Guaardvark live in the system message (the pitch sheet,
     PITCH.md); the drafter picks the talking point that fits the thread
-    from it. This side carries only the thread and the output contract.
+    from it, unless a person passed `requested_feature` for it to lead with.
+    This side carries the thread, that request and the output contract.
 
     `include_link=True` asks for a natural cite of `link_url` (default
     GitHub for YouTube comments, site otherwise). Low-grade spam still
@@ -420,6 +442,8 @@ def _build_user_prompt(
             "Guaardvark mention is optional and only fits sometimes."
         )
 
+    feature_block = _requested_feature_block(requested_feature, "this thread")
+
     return f"""\
 PLATFORM: {platform}
 TARGET URL: {target_url or "(unknown)"}
@@ -430,7 +454,7 @@ THREAD CONTEXT:
 \"\"\"
 {tone_block}
 {closing_line}
-
+{feature_block}
 Respond with JSON: {{"draft": "...", "grade": 0.0-1.0, "reason": "..."}}.
 """
 
@@ -488,11 +512,18 @@ def _unpack_reddit_share(result: Dict[str, Any]) -> Tuple[str, str]:
     return "", ""
 
 
-def _build_share_prompt(platform: str, target: str, link_url: str) -> str:
+def _build_share_prompt(
+    platform: str,
+    target: str,
+    link_url: str,
+    requested_feature: Optional[str] = None,
+) -> str:
     """User-side prompt for self-share posts. Facts come from PITCH.md via
-    the system message; this side carries the platform/target/link.
+    the system message; this side carries the platform/target/link and a
+    feature a person asked the post to lead with, if any.
     """
     framing = SHARE_FRAMING.get(platform, SHARE_FRAMING["reddit"])
+    feature_block = _requested_feature_block(requested_feature, "this community")
     return f"""\
 PLATFORM: {platform}
 TARGET COMMUNITY: {target}
@@ -500,7 +531,7 @@ LINK: {link_url}
 
 INSTRUCTIONS:
 {framing}
-
+{feature_block}
 Respond with JSON: {{"title": "...", "body": "...", "grade": 0.0-1.0, "reason": "..."}} for reddit, or {{"draft": "...", "grade": 0.0-1.0, "reason": "..."}} for other platforms.
 """
 
@@ -515,6 +546,7 @@ def draft_outreach_text(
     campaign: str = "v253",
     include_link: bool = False,
     link_url: Optional[str] = None,
+    requested_feature: Optional[str] = None,
 ) -> dict:
     """Unified entry point for all outreach LLM calls.
 
@@ -534,6 +566,11 @@ def draft_outreach_text(
         feature_hint: accepted from callers that label a thread with a
             feature key; it is not put in the prompt — the drafter chooses
             its angle from the pitch sheet.
+        requested_feature: comment and share modes. A feature a person
+            asked the draft to lead with (a FEATURE_BLURBS key or their own
+            words). The prompt asks the drafter to lead with it when it fits
+            and to grade below 0.3, saying why, when it does not. None leaves
+            the angle to the pitch sheet.
         llm: optional LLM callable (for testing)
         campaign: UTM campaign tag (default "v253")
         include_link: comment-mode only. When True the user prompt asks the
@@ -547,7 +584,7 @@ def draft_outreach_text(
     if mode == "share":
         target = context.get("target", "(unspecified)")
         share_link = context.get("link_url", SITE_URL)
-        prompt = _build_share_prompt(platform, target, share_link)
+        prompt = _build_share_prompt(platform, target, share_link, requested_feature)
         # Use the share-specific system block — the comment-focused one
         # (_compose_outward_facing_system) tells the model to skip when
         # there's "no thread to add value to," which makes it refuse
@@ -605,6 +642,7 @@ def draft_outreach_text(
             tone=tone,
             include_link=include_link,
             link_url=cta,
+            requested_feature=requested_feature,
         )
         result = llm(_compose_outward_facing_system(), prompt)
         draft_text = result.get("draft", "") or result.get("comment", "")

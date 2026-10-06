@@ -109,6 +109,27 @@ def test_draft_mode_is_published_as_an_enum():
     assert schema["properties"]["mode"]["enum"] == ["comment", "share"]
 
 
+# ---- outreach_draft_post: feature_hint ---------------------------------------------
+
+def test_draft_feature_hint_is_the_persons_requested_feature(backend, monkeypatch):
+    """The caller's feature_hint reaches the persona as requested_feature, the
+    argument that steers the draft; without one the persona gets None."""
+    calls = []
+
+    def draft(**kwargs):
+        calls.append(kwargs)
+        return {"draft": "a draft", "grade": 0.9, "reason": "r"}
+
+    monkeypatch.setattr(ot.persona, "draft_outreach_text", draft)
+    tool = _mcp(ot.OutreachDraftPostTool())
+
+    tool.execute(platform="reddit", thread_context="searching my own PDFs offline", feature_hint="rag")
+    tool.execute(platform="reddit", thread_context="searching my own PDFs offline")
+
+    assert [call.get("requested_feature") for call in calls] == ["rag", None]
+    assert all("feature_hint" not in call for call in calls)
+
+
 # ---- outreach_list_queue: status and order -----------------------------------------
 
 @pytest.mark.parametrize("status", ["pending", "queued", "done"])
