@@ -362,3 +362,22 @@ def test_a_failure_that_passes_on_a_re_run_is_left_alone(app, checkout):
     before = json.loads(run_row.test_results_before)
     assert before["total_failures"] == 0
     assert [f["test_name"] for f in before["flaky"]] == ["test_one"]
+
+
+def test_the_health_run_leaves_out_tests_that_drive_a_live_model(app, checkout):
+    """Tests marked integration (requires_llm) pass or fail by the model's draw."""
+    svc = _service()
+    commands = []
+
+    def run(cmd, *args, **kwargs):
+        if "pytest" not in cmd:
+            return REAL_RUN(cmd, *args, **kwargs)
+        commands.append(cmd)
+        return MagicMock(returncode=0, stdout="12 passed\n", stderr="")
+
+    with patch(f"{SVC}.subprocess.run", side_effect=run):
+        svc.run_self_check()
+
+    assert commands, "the check ran pytest"
+    first = commands[0]
+    assert first[first.index("-m", 3) + 1] == "not integration"
