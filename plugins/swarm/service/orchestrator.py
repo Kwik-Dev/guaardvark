@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import threading
 import time
 from pathlib import Path
@@ -28,6 +27,7 @@ from typing import Any, Callable
 import psutil
 import requests
 
+from .backend_url import backend_api_url
 from .config import SwarmConfig, check_internet
 from .gpu_hold import GpuHoldClient, ollama_model_of
 from .merge_manager import MergeManager
@@ -113,8 +113,9 @@ class SwarmOrchestrator:
         self._retries: dict[str, int] = {}
         self.max_retries = 2
 
-        # main backend API, set at launch; handed to the diagnostic agent
-        self._backend_url = ""
+        # main backend API: merges, GPU holds, event pushes and the
+        # diagnostic agent all reach the backend here
+        self._backend_url = backend_api_url()
 
         # GPU holds on the backend's orchestrator for agents running a local
         # Ollama model: task_id -> slot_id, released when the agent exits
@@ -209,17 +210,12 @@ class SwarmOrchestrator:
         )
 
         # set up merge manager
-        flask_port = os.environ.get("FLASK_PORT", "5002")
-        backend_url = f"http://localhost:{flask_port}/api"
-        
         self.merge_mgr = MergeManager(
             self.repo_path, 
             self.worktree_mgr.base_branch,
             enable_merger_agent=self.config.enable_merger_agent,
-            backend_url=backend_url
+            backend_url=self._backend_url
         )
-
-        self._backend_url = backend_url
 
         # Set up inter-agent communication bus
         from .communication_bus import CommunicationBus
@@ -860,9 +856,7 @@ class SwarmOrchestrator:
 
         # 2. Push to main backend for WebSocket broadcast
         try:
-            # Main backend is on 5002 by default
-            port = os.environ.get("FLASK_PORT", "5002")
-            url = f"http://localhost:{port}/api/swarm/event"
+            url = f"{self._backend_url}/swarm/event"
             requests.post(url, json={
                 "event_type": event_type,
                 "task_id": task_id,

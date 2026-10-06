@@ -13,6 +13,8 @@ import time
 import requests
 from typing import Dict, Any
 
+from .backend_url import backend_api_url
+
 logger = logging.getLogger("swarm.resource_monitor")
 
 class ResourceMonitor:
@@ -28,9 +30,7 @@ class ResourceMonitor:
         self.max_cpu_percent = max_cpu_percent
         self.max_ram_percent = max_ram_percent
         self.min_vram_mb = min_vram_mb
-        # resolve main backend URL
-        flask_port = os.environ.get("FLASK_PORT", "5002")
-        self.backend_url = f"http://localhost:{flask_port}/api"
+        self.backend_url = backend_api_url()
         
     def get_system_stats(self) -> Dict[str, Any]:
         """Get current system resource utilization."""

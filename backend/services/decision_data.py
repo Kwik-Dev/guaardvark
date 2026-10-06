@@ -1245,7 +1245,8 @@ DECISIONS: dict = {
      'state': {'failure': ('machine', 1200), 'diff': ('machine', 2000)},
      'anchor': 'backend/services/self_improvement_service.py _attempt_fix, heal, run_self_check',
      'precheck': 'a run staged a PendingFix for a parsed failure (no staged diff is a no without asking)',
-     'fallback': 'any final answer counts as a change',
+     'fallback': "a staged PendingFix under the run id counts as a change; the agent's answer alone does not "
+                 '(heal and self-check record failed, a directed run no_change)',
      'safe_side': False,
      'side_effect': 'file_db_write',
      'mode_default': 'off',

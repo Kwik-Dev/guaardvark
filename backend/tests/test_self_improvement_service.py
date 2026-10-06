@@ -260,6 +260,64 @@ class TestScheduledAndReactiveRunHonesty:
         assert contexts[0]["_self_improvement_context"] is True
         assert run.status == "failed"
 
+    @staticmethod
+    def _latest_run():
+        from backend.models import db, SelfImprovementRun
+        db.session.expire_all()
+        return SelfImprovementRun.query.order_by(SelfImprovementRun.id.desc()).first()
+
+    def test_a_raising_heal_leaves_its_run_failed_with_the_error(self, app):
+        svc = self._service()
+        with patch.object(svc, "_attempt_fix", side_effect=RuntimeError("agent crashed")):
+            svc.heal("backend/a.py", 12, "KeyError", "Traceback ...")
+
+        run = self._latest_run()
+        assert run.trigger == "reactive"
+        assert run.status == "failed"
+        assert run.error_message == "RuntimeError: agent crashed"
+        assert svc._running is False and svc._current_run_id is None
+
+    def test_a_heal_that_breaks_the_session_still_closes_its_run(self, app):
+        from backend.models import db, PendingFix
+        svc = self._service()
+
+        def broken_write(failure, message=None):
+            db.session.add(PendingFix(run_id=svc._current_run_id, file_path=None, proposed_diff="x"))
+            db.session.flush()  # file_path is NOT NULL: IntegrityError, session needs a rollback
+
+        with patch.object(svc, "_attempt_fix", side_effect=broken_write):
+            svc.heal("backend/a.py", 12, "KeyError", "Traceback ...")
+
+        run = self._latest_run()
+        assert run.status == "failed"
+        assert run.error_message.startswith("IntegrityError")
+        assert PendingFix.query.count() == 0
+
+    def test_a_heal_stopped_by_a_base_exception_closes_its_run(self, app):
+        svc = self._service()
+        with patch.object(svc, "_attempt_fix", side_effect=SystemExit(1)):
+            with pytest.raises(SystemExit):
+                svc.heal("backend/a.py", 12, "KeyError", "Traceback ...")
+
+        run = self._latest_run()
+        assert run.status == "failed"
+        assert run.error_message == "Stopped before it finished"
+        assert svc._running is False
+
+    def test_a_cancelled_heal_that_raises_stays_cancelled(self, app):
+        svc = self._service()
+
+        def cancel_then_crash(failure, message=None):
+            svc.request_cancel(svc._current_run_id)
+            raise RuntimeError("agent crashed")
+
+        with patch.object(svc, "_attempt_fix", side_effect=cancel_then_crash):
+            svc.heal("backend/a.py", 12, "KeyError", "Traceback ...")
+
+        run = self._latest_run()
+        assert run.status == svc.CANCELLED
+        assert run.error_message == "Cancelled by the user"
+
     def test_broadcast_skips_answers_that_staged_nothing(self, app):
         from backend.models import SelfImprovementRun, db
         svc = self._service()

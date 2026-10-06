@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -24,6 +23,7 @@ from pathlib import Path
 # make sure the plugin package is importable
 sys.path.insert(0, str(Path(__file__).parent))
 
+from service.backend_url import backend_api_url
 from service.config import SwarmConfig, load_config
 from service.models import SwarmStatus, TimelineEvent, generate_swarm_id
 from service.orchestrator import SwarmOrchestrator
@@ -257,14 +257,11 @@ def cmd_merge(args: argparse.Namespace, config: SwarmConfig) -> None:
 
     base_branch = data.get("base_branch", "main")
     
-    flask_port = os.environ.get("FLASK_PORT", "5002")
-    backend_url = f"http://localhost:{flask_port}/api"
-    
     mgr = MergeManager(
         repo_path, 
         base_branch,
         enable_merger_agent=config.enable_merger_agent,
-        backend_url=backend_url
+        backend_url=backend_api_url()
     )
 
     merge_queue = mgr.merge_queue(tasks)
