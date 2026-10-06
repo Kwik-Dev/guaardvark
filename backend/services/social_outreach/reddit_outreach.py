@@ -698,12 +698,12 @@ def post_comment_via_servo(
     # Look for needle in any rendered comment OR for the
     # composer being empty (no error message and no value)
     # which also implies a successful post.
+    # The pieces join into one line, so the script must not contain // comments.
     check_js = (
         "(() => {"
         "  const needle = " + _json.dumps(needle) + ";"
         "  const url = location.href;"
-        "  // 1) Primary: needle appears in any element on the page"
-        "  //    that smells like a comment body."
+        "  /* 1) Primary: needle appears in an element that looks like a comment body. */"
         "  const sels = ['[data-testid=\"comment\"]', 'shreddit-comment', '[id^=\"comment-tree-content-anchor\"]', 'div[role=\"region\"]'];"
         "  let foundInThread = false;"
         "  for (const s of sels) {"
@@ -713,7 +713,7 @@ def post_comment_via_servo(
         "    }"
         "    if (foundInThread) break;"
         "  }"
-        "  // 2) Secondary: composer is empty AND no error message."
+        "  /* 2) Secondary: composer is empty and no error message. */"
         "  let composerEmpty = false;"
         "  let errorVisible = false;"
         "  const composers = document.querySelectorAll('faceplate-textarea-input, textarea');"
