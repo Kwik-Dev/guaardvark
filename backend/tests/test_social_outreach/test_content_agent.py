@@ -509,3 +509,53 @@ def test_a_share_candidate_is_not_graded_and_waits_for_a_person(app, supervised,
         assert extra["external_reason"] == "share_not_graded"
         db.session.expire_all()
         assert SocialOutreachLog.query.get(row.id).status == "drafted"
+
+
+# ---- recon could not put the thread to the thread-fit judge ------------------------------
+
+def _recon_candidate(relevance_skipped):
+    return _make_candidate(
+        payload={
+            "feature_hint": "local_ai",
+            "stage": "recon",
+            "title": "Anyone tried Ollama with local RAG?",
+            "selftext_preview": "I'm running into context size issues...",
+            "top_comments": ["What hardware?"],
+            "relevance_grade": 0.0 if relevance_skipped else 0.8,
+            "relevance_skipped": relevance_skipped,
+        },
+        platform="youtube",
+    )
+
+
+def test_an_unjudged_thread_holds_a_passed_draft_when_unsupervised(app):
+    with app.app_context():
+        row = _recon_candidate(relevance_skipped=True)
+        outcome, extra, grader = _draft_with_gates(row.id, EXT_PASS)
+
+        grader.assert_called_once()
+        assert outcome["status"] == "drafted"
+        assert outcome["would_post"] is False
+        assert outcome["hold_reason"] == "relevance_unchecked"
+        assert extra["relevance_unchecked"] is True
+        db.session.expire_all()
+        assert SocialOutreachLog.query.get(row.id).status == "drafted"
+
+
+def test_an_unjudged_thread_waits_for_a_person_when_supervised(app):
+    with app.app_context():
+        row = _recon_candidate(relevance_skipped=True)
+        outcome, _, _ = _draft_with_gates(row.id, EXT_PASS, supervised=True)
+
+        assert outcome["status"] == "drafted"
+        assert outcome["hold_reason"] is None
+
+
+def test_a_judged_thread_with_a_passed_draft_is_approved(app):
+    with app.app_context():
+        row = _recon_candidate(relevance_skipped=False)
+        outcome, extra, _ = _draft_with_gates(row.id, EXT_PASS)
+
+        assert outcome["status"] == "approved"
+        assert outcome["hold_reason"] is None
+        assert extra["relevance_unchecked"] is False

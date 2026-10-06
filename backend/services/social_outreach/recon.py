@@ -51,8 +51,9 @@ can't tell "I love local AI" from "I hate local AI" — the LLM sees context
 and rules out hostile/off-topic threads. Below this we skip without queuing.
 The scheduled Reddit loop (reddit_outreach.RedditOutreachLoop) skips on the
 same bar. When the relevance model is unavailable, recon still queues the
-candidate on its keyword match; the loop still drafts, marked relevance
-unchecked, which holds an unsupervised draft for approval."""
+candidate on its keyword match, marked relevance_skipped, and the loop still
+drafts, marked relevance unchecked; either way an unsupervised draft is then
+held for approval (gates.independent_ok)."""
 
 
 def topic_matches_text(text: str, topic_filters: Optional[list[str]]) -> bool:

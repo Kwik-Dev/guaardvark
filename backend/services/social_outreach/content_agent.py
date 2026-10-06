@@ -262,13 +262,17 @@ class ContentAgent:
         # Unsupervised parity with /draft-comment: when enabled, not
         # supervised, grade ≥ MIN_GRADE, cadence allows, and the independent
         # check ran and passed → approved so tick_process_approved_drafts can
-        # post without a human click. An unchecked draft is held as drafted.
+        # post without a human click. An unchecked draft is held as drafted,
+        # and so is one whose thread recon could not put to the thread-fit
+        # judge (relevance_skipped in the candidate payload).
         from backend.services.social_outreach import kill_switch
         enabled = kill_switch.is_enabled()
         supervised = kill_switch.is_supervised()
         cadence_ok, cadence_reason = kill_switch.cadence_allows_post(row.platform)
+        relevance_unchecked = bool(payload.get("relevance_skipped"))
         independent_pass, independent_reason = gates.independent_ok(
             ext, supervised=supervised, action=row.action,
+            relevance_unchecked=relevance_unchecked,
         )
         would_post = (
             enabled
@@ -314,6 +318,7 @@ class ContentAgent:
                 "external_checked": bool(ext.get("checked")),
                 "external_skipped": ext.get("skipped", False),
                 "external_reason": ext.get("reason", ""),
+                "relevance_unchecked": relevance_unchecked,
                 "promoted_status": promote_status,
                 "would_post": would_post,
                 "cadence_block": cadence_reason if not cadence_ok else None,
