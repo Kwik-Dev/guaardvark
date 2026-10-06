@@ -9,6 +9,8 @@ Provides:
     POST /api/gpu/memory/evict    — Force-evict a specific model
     POST /api/gpu/memory/release-kept-image — Unload an image model kept after a batch
     POST /api/gpu/memory/preload  — Manually preload a model
+    POST /api/gpu/memory/begin-use — Pin a registered slot while it is in use
+    POST /api/gpu/memory/end-use  — Drop one pin taken with begin-use
 
 Auto-discovered by blueprint_discovery.py.
 Note: /api/gpu is already used by gpu_api.py (coordinator), so this uses /api/gpu/memory.
@@ -120,12 +122,14 @@ def gpu_preload():
     """
     data = request.get_json(silent=True) or {}
     slot_id = data.get("slot_id", "").strip()
-    vram_mb = data.get("vram_mb", 4000)
     priority = data.get("priority", 50)
     exclusive = bool(data.get("exclusive", False))
 
     if not slot_id:
         return jsonify({"error": "Missing 'slot_id' field"}), 400
+    vram_mb = data.get("vram_mb")
+    if vram_mb is None:
+        vram_mb = _default_vram_mb(slot_id)
 
     try:
         # When the caller wants exclusive VRAM, drop any unregistered Ollama
@@ -144,6 +148,24 @@ def gpu_preload():
     except Exception as e:
         logger.error(f"GPU preload error: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+def _default_vram_mb(slot_id: str) -> int:
+    """VRAM to plan for when a preload names no size.
+
+    An Ollama slot ("ollama:<model>") plans for the model's weights as Ollama
+    reports them, so a caller holding a model it has not loaded yet need not
+    know its size. Anything else, or an Ollama that cannot say, plans for 4000 MB.
+    """
+    if slot_id.lower().startswith("ollama:"):
+        try:
+            from backend.utils.ollama_resource_manager import get_model_info
+            info = get_model_info(slot_id.split(":", 1)[1])
+            if info and info.get("size_mb"):
+                return int(info["size_mb"])
+        except Exception as e:  # noqa: BLE001
+            logger.debug("No size for %s from Ollama (%s); planning 4000 MB", slot_id, e)
+    return 4000
 
 
 def _force_unload_ollama_models() -> None:
@@ -221,4 +243,37 @@ def gpu_release():
         return jsonify({"error": "Missing 'slot_id' field"}), 400
 
     _get_orch().release_model(slot_id)
+    return jsonify({"success": True, "slot_id": slot_id}), 200
+
+
+@gpu_orchestrator_bp.route("/begin-use", methods=["POST"])
+def gpu_begin_use():
+    """Pin a registered slot while an out-of-process caller is using it.
+
+    A pinned slot is not idle-evicted and the orchestrator refuses to unload
+    it to make room. Every begin-use is paired with an end-use; the swarm
+    plugin pins the Ollama model a local agent runs for as long as the agent
+    runs. 404 when the slot is not registered: preload it first.
+    """
+    data = request.get_json(silent=True) or {}
+    slot_id = data.get("slot_id", "").strip()
+
+    if not slot_id:
+        return jsonify({"error": "Missing 'slot_id' field"}), 400
+
+    if not _get_orch().begin_use(slot_id):
+        return jsonify({"success": False, "error": f"{slot_id} is not registered; preload it first"}), 404
+    return jsonify({"success": True, "slot_id": slot_id}), 200
+
+
+@gpu_orchestrator_bp.route("/end-use", methods=["POST"])
+def gpu_end_use():
+    """Drop one pin taken with begin-use."""
+    data = request.get_json(silent=True) or {}
+    slot_id = data.get("slot_id", "").strip()
+
+    if not slot_id:
+        return jsonify({"error": "Missing 'slot_id' field"}), 400
+
+    _get_orch().end_use(slot_id)
     return jsonify({"success": True, "slot_id": slot_id}), 200

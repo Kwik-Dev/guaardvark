@@ -386,15 +386,20 @@ class GPUMemoryOrchestrator:
                 slot.last_used = time.time()
                 slot.use_count += 1
 
-    def begin_use(self, slot_id: str) -> None:
-        """Pin a slot during active inference — blocks idle and mid-call unload."""
+    def begin_use(self, slot_id: str) -> bool:
+        """Pin a slot during active inference — blocks idle and mid-call unload.
+
+        False when the slot is not registered, so nothing was pinned.
+        """
         with self._lock:
             slot = self._registry.get(slot_id)
-            if slot:
-                slot.in_use = max(0, int(slot.in_use or 0)) + 1
-                slot.last_used = time.time()
-                slot.use_count += 1
-                logger.debug(f"Model {slot_id} begin_use (in_use={slot.in_use})")
+            if not slot:
+                return False
+            slot.in_use = max(0, int(slot.in_use or 0)) + 1
+            slot.last_used = time.time()
+            slot.use_count += 1
+            logger.debug(f"Model {slot_id} begin_use (in_use={slot.in_use})")
+            return True
 
     def end_use(self, slot_id: str) -> None:
         """Drop one inference pin; refreshes last_used when the pin count hits zero."""

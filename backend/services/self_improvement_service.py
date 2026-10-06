@@ -197,16 +197,39 @@ class SelfImprovementService:
         return False
 
     def _finish_cancelled(self, run_record, start_time: float, changes: List[Dict]) -> Dict[str, Any]:
-        """Close out a run that hit a cancel checkpoint, keeping what it did."""
+        """Close out a run that hit a cancel checkpoint, keeping the fixes it staged."""
         from backend.models import db
         run_record.status = self.CANCELLED
         run_record.changes_made = json.dumps(changes)
         run_record.duration_seconds = time.time() - start_time
         db.session.commit()
-        self._emit_progress("cancelled", f"Stopped after {len(changes)} fix(es)", 1.0,
-                            status=self.CANCELLED, fixes_applied=len(changes))
+        self._emit_progress("cancelled", f"Stopped after {len(changes)} fix(es) staged", 1.0,
+                            status=self.CANCELLED, fixes_staged=len(changes))
         return {"success": False, "cancelled": True, "run_id": run_record.id,
-                "fixes_applied": len(changes), "changes": changes}
+                "fixes_staged": len(changes), "changes": changes}
+
+    @staticmethod
+    def _staged_fixes(run_id: Optional[int]) -> list:
+        """PendingFix rows this run staged, oldest first."""
+        if run_id is None:
+            return []
+        from backend.models import PendingFix
+        return PendingFix.query.filter_by(run_id=run_id).order_by(PendingFix.id).all()
+
+    @staticmethod
+    def _staged_changes(fixes: list, failure: Dict[str, str],
+                        answer: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """One change record per staged fix for ``failure``.
+
+        The agent's closing answer describes the fix when it gave one; the
+        staged row's own description is the fallback.
+        """
+        answer_text = (answer or {}).get("fix_description") or ""
+        return [
+            {"file": f.file_path, "test": failure["test_name"], "pending_fix_id": f.id,
+             "fix_description": (answer_text or f.fix_description or "")[:500]}
+            for f in fixes
+        ]
 
     def dispatch_precheck(self) -> Dict[str, Any]:
         """Public, side-effect-free check of whether a directed dispatch can run.
@@ -352,6 +375,8 @@ class SelfImprovementService:
             if not failures and result.returncode != 0:
                 failures = [{"file": "unknown", "test_name": "unparsed_failure", "error": test_output[-500:]}]
 
+            # A fix counts only when the agent staged a PendingFix for this run;
+            # its closing answer alone ("I could not find the problem") is not one.
             changes = []
             for i, failure in enumerate(failures):
                 if self._cancel_requested(run_record.id):
@@ -361,43 +386,40 @@ class SelfImprovementService:
                 progress = 0.3 + (0.6 * (i / max(len(failures), 1)))
                 self._emit_progress("fixing", f"Fixing {failure['test_name']} ({i+1}/{len(failures)})",
                                     progress, current_fix=i+1, total_fixes=len(failures))
-                change = self._attempt_fix(failure)
-                if change:
-                    changes.append(change)
+                before = {f.id for f in self._staged_fixes(run_record.id)}
+                answer = self._attempt_fix(failure)
+                new = [f for f in self._staged_fixes(run_record.id) if f.id not in before]
+                changes.extend(self._staged_changes(new, failure, answer))
 
             if self._cancel_requested(run_record.id):
                 return self._finish_cancelled(run_record, start_time, changes)
 
-            # Verification: re-run tests to confirm fixes worked
-            if changes:
-                self._emit_progress("verifying", "Re-running tests to verify fixes", 0.9)
-                test_files = ["backend/tests/test_self_improvement.py", "backend/tests/test_code_tools.py"]
-                verify_results = self._verify_fix(test_files)
-                run_record.test_results_after = json.dumps(verify_results)
-                if not verify_results["all_passed"]:
-                    logger.warning(f"Verification failed: {verify_results['total_failures']} failures remain")
-                    run_record.status = "unverified"
-                else:
-                    logger.info("Verification passed: all tests passing after fixes")
-
+            # Staging writes nothing to disk, so re-running the tests here would
+            # test the same code. A person applies the fix; that is where it is tested.
             run_record.changes_made = json.dumps(changes)
-            # Only set success if verification passed (or no changes to verify)
-            if run_record.status != "unverified":
-                run_record.status = "success" if changes else "failed"
+            if changes:
+                run_record.status = "success"
+                message = f"{len(changes)} fix(es) staged for review"
+            else:
+                run_record.status = "failed"
+                message = f"No fix staged for {len(failures)} failure(s)"
+                run_record.error_message = message
             run_record.duration_seconds = time.time() - start_time
             db.session.commit()
 
-            if changes and run_record.status != "unverified":
+            if changes:
                 self._broadcast_learnings(changes, run_record)
 
-            self._emit_progress("complete", f"{len(changes)} fix(es) applied", 1.0,
-                                status=run_record.status, fixes_applied=len(changes),
+            self._emit_progress("complete", message, 1.0,
+                                status=run_record.status, fixes_staged=len(changes),
                                 failures_found=len(failures))
 
             return {
-                "success": True,
+                "success": bool(changes),
+                "run_id": run_record.id,
+                "message": message,
                 "failures_found": len(failures),
-                "fixes_applied": len(changes),
+                "fixes_staged": len(changes),
                 "changes": changes,
             }
 
@@ -488,10 +510,17 @@ class SelfImprovementService:
             return {"total_failures": -1, "failures": [], "return_code": -1, "all_passed": False}
 
     def _broadcast_learnings(self, changes: List[Dict], run_record):
-        """Create InterconnectorLearning records and broadcast to family."""
+        """Create InterconnectorLearning records and broadcast to family.
+
+        Only staged fixes (records carrying a pending_fix_id) are learnings; an
+        agent's answer without one is not sent to other machines.
+        """
+        staged = [c for c in changes if c.get("pending_fix_id")]
+        if not staged:
+            return
         try:
             from backend.models import db, InterconnectorLearning
-            for change in changes:
+            for change in staged:
                 learning = InterconnectorLearning(
                     source_node_id=os.environ.get("GUAARDVARK_NODE_ID", "local"),
                     learning_type="bug_fix",
@@ -541,25 +570,34 @@ class SelfImprovementService:
             )
             db.session.add(run_record)
             db.session.commit()
+            # _attempt_fix hands this to edit_code, which stages PendingFix rows under it.
+            self._current_run_id = run_record.id
 
             failure = {
                 "file": file,
                 "test_name": f"runtime_error_line_{line}",
                 "error": f"{error_type} at {file}:{line}\n{traceback_str[:500]}",
             }
-            change = self._attempt_fix(failure)
+            answer = self._attempt_fix(failure)
 
+            # Same rule as a directed run: success means a fix was staged.
+            changes = self._staged_changes(self._staged_fixes(run_record.id), failure, answer)
             if self._cancel_requested(run_record.id):
                 run_record.status = self.CANCELLED
+            elif changes:
+                run_record.status = "success"
             else:
-                run_record.status = "success" if change else "failed"
-            run_record.changes_made = json.dumps([change] if change else [])
+                run_record.status = "failed"
+                run_record.error_message = (
+                    (answer or {}).get("fix_description") or "agent produced no answer")
+            run_record.changes_made = json.dumps(changes)
             db.session.commit()
 
         except Exception as e:
             logger.error(f"Self-healing failed: {e}", exc_info=True)
         finally:
             self._running = False
+            self._current_run_id = None
 
     def submit_directed_task(
         self, description: str, target_files: List[str] = None, priority: str = "medium",
@@ -965,9 +1003,12 @@ class SelfImprovementService:
 
         # Call LLM to extract the insight
         try:
-            from backend.utils.llm_service import run_llm_chat_prompt
+            from backend.utils.llm_service import is_llm_failure_reply, run_llm_chat_prompt
             prompt = self._DISTILL_PROMPT.format(task=task, steps=formatted_steps)
             insight = run_llm_chat_prompt(prompt)
+            if is_llm_failure_reply(insight):
+                logger.warning(f"Distillation skipped: the model call failed ({insight.strip()})")
+                return
             if not insight or len(insight.strip()) < 10:
                 logger.warning("Distillation returned empty/short result, skipping")
                 return

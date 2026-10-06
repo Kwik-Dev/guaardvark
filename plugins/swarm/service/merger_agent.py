@@ -141,8 +141,8 @@ Provide the FULL resolved content of the file. Do not include any explanations, 
         # --- Write the resolution ---
         # Targets inside the Guaardvark repo are funneled through the guarded-code
         # chokepoint (apply_exact_replacement) so every code write goes through the
-        # same backup/syntax-verify/rollback path as the rest of the system. We do
-        # NOT git add here — merge_manager re-checks for conflict markers and commits.
+        # same backup/syntax-verify/rollback path as the rest of the system. There
+        # is no git add here: merge_manager stages each resolved path and commits.
         root = _guaardvark_root()
         if not _is_under_repo_root(full_path, root):
             # Outside the repo root: refuse — the merger has no business writing there.

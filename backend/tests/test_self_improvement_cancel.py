@@ -99,7 +99,11 @@ def test_scan_cancelled_between_fixes_keeps_its_work_and_the_status(app):
     calls = []
 
     def first_fix_then_cancel(failure, message=None):
+        from backend.models import PendingFix
         calls.append(failure["test_name"])
+        db.session.add(PendingFix(run_id=svc._current_run_id, file_path="backend/a.py",
+                                  proposed_diff="+x", status="proposed"))
+        db.session.commit()
         _cancel_from_another_process(svc._current_run_id)
         return {"file": "backend/tests/test_a.py", "test": failure["test_name"], "diff": "+x"}
 
@@ -129,7 +133,7 @@ def test_scan_cancelled_during_the_test_step_attempts_no_fix(app):
          patch.object(svc, "_attempt_fix", side_effect=AssertionError("no fix after cancel")):
         result = svc.run_self_check()
 
-    assert result["cancelled"] is True and result["fixes_applied"] == 0
+    assert result["cancelled"] is True and result["fixes_staged"] == 0
     run = db.session.get(SelfImprovementRun, result["run_id"])
     assert run.status == "cancelled"
     assert json.loads(run.test_results_before)["total_failures"] == 2
@@ -141,7 +145,7 @@ def test_scan_not_cancelled_finishes_as_before(app):
     with patch(f"{SVC}.subprocess.run", return_value=FAILING_PYTEST), \
          patch.object(svc, "_attempt_fix", return_value=None):
         result = svc.run_self_check()
-    assert "cancelled" not in result and result["fixes_applied"] == 0
+    assert "cancelled" not in result and result["fixes_staged"] == 0
     assert SelfImprovementRun.query.order_by(SelfImprovementRun.id.desc()).first().status == "failed"
 
 

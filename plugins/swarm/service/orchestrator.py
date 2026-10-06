@@ -29,6 +29,7 @@ import psutil
 import requests
 
 from .config import SwarmConfig, check_internet
+from .gpu_hold import GpuHoldClient, ollama_model_of
 from .merge_manager import MergeManager
 from .models import (
     AgentStatus,
@@ -114,6 +115,11 @@ class SwarmOrchestrator:
 
         # main backend API, set at launch; handed to the diagnostic agent
         self._backend_url = ""
+
+        # GPU holds on the backend's orchestrator for agents running a local
+        # Ollama model: task_id -> slot_id, released when the agent exits
+        self._gpu: GpuHoldClient | None = None
+        self._gpu_holds: dict[str, str] = {}
 
         # threading for async operation
         self._thread: threading.Thread | None = None
@@ -237,6 +243,9 @@ class SwarmOrchestrator:
             self._emit_event("swarm_error", "swarm", {"error": str(e)})
         finally:
             self.result.completed_at = time.time()
+            # nothing polls the agents past this point, so no hold may outlive it
+            for task_id in list(self._gpu_holds):
+                self._release_gpu_hold(task_id)
 
         # merge phase
         if do_merge and self.merge_mgr:
@@ -292,6 +301,7 @@ class SwarmOrchestrator:
             backend = self._backends.get(process.backend_name)
             if backend:
                 backend.kill(process)
+            self._release_gpu_hold(task_id)
             task = self._find_task(task_id)
             if task:
                 task.status = SwarmStatus.CANCELLED
@@ -528,9 +538,14 @@ class SwarmOrchestrator:
         except Exception as e:
             logger.debug(f"Could not record base HEAD for {task.id}: {e}")
 
-        # spawn the agent
+        # spawn the agent, holding its local model on the GPU while it runs
         config_dict = self._backend_call_config(backend_config)
-        process = backend.spawn(wt_info.worktree_path, task, config_dict)
+        self._hold_gpu(task, backend_config)
+        try:
+            process = backend.spawn(wt_info.worktree_path, task, config_dict)
+        except Exception:
+            self._release_gpu_hold(task.id)
+            raise
 
         task.status = SwarmStatus.RUNNING
         task.started_at = time.time()
@@ -562,6 +577,7 @@ class SwarmOrchestrator:
                 continue
 
             if new_status == AgentStatus.FINISHED:
+                self._release_gpu_hold(task_id)
                 completion_state = self._completion_state(task)
                 if completion_state.get("has_uncommitted_diff"):
                     task.status = SwarmStatus.NEEDS_REVIEW
@@ -620,6 +636,7 @@ class SwarmOrchestrator:
                             task.status = SwarmStatus.DONE
                             task.completed_at = time.time()
                             self._emit_event("task_diagnostic_success", task_id, {"message": "Agent fixed the issue autonomously"})
+                            self._release_gpu_hold(task_id)
                             self._processes.pop(task_id, None)
                             continue
 
@@ -632,7 +649,9 @@ class SwarmOrchestrator:
                         "elapsed": task.elapsed_human,
                     })
 
-                # Cleanup the crashed process record
+                # Cleanup the crashed process record. The hold is kept through
+                # the diagnosis above, which runs the same model; a retry takes a new one.
+                self._release_gpu_hold(task_id)
                 self._processes.pop(task_id, None)
 
     def _completion_state(self, task: SwarmTask) -> dict[str, object]:
@@ -729,6 +748,25 @@ class SwarmOrchestrator:
             "args": backend_config.args,
             "model": backend_config.model,
         }
+
+    def _gpu_client(self) -> GpuHoldClient:
+        if self._gpu is None:
+            self._gpu = GpuHoldClient(self._backend_url)
+        return self._gpu
+
+    def _hold_gpu(self, task: SwarmTask, backend_config) -> None:
+        """Hold the Ollama model this task's agent runs, if it runs one."""
+        model = ollama_model_of(backend_config.model)
+        if not model or task.id in self._gpu_holds:
+            return
+        slot_id = self._gpu_client().hold(model)
+        if slot_id:
+            self._gpu_holds[task.id] = slot_id
+
+    def _release_gpu_hold(self, task_id: str) -> None:
+        slot_id = self._gpu_holds.pop(task_id, None)
+        if slot_id:
+            self._gpu_client().release(slot_id)
 
     def _diagnostic_agent_for(self, task: SwarmTask):
         """A DiagnosticAgent on the backend that ran this task, or None.
