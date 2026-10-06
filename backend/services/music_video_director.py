@@ -822,6 +822,65 @@ def _parse_full_director_output(content: str, n: int) -> dict:
     return result
 
 
+# Cue vocabulary for the distinctness guard, one list per energy band. Kept small and
+# style-agnostic so a cue composes cleanly with any global style suffix.
+_LOW_ENERGY_CUES = ("wider calmer framing", "slow atmospheric drift", "soft diffuse light", "sparse open composition")
+_MID_ENERGY_CUES = ("steady medium framing", "measured tracking move", "balanced natural light", "layered midground detail")
+_HIGH_ENERGY_CUES = ("tighter dynamic framing", "sharp pulsing motion", "high contrast strobing light", "dense layered composition")
+# Camera-only axes a repeated cut can add on top of its band cue when the band cue
+# alone is already taken; they change the shot, never the subject or the style.
+_ANGLE_CUES = ("low angle", "high angle", "eye-level view", "overhead view",
+               "profile view", "over-the-shoulder view", "dutch angle", "reverse angle")
+_LENS_CUES = ("wide lens", "telephoto compression", "shallow depth of field",
+              "deep focus", "handheld feel", "locked-off frame")
+# Section labels the song analyzer and LLM plans use, by the band they imply.
+_LOW_SECTIONS = ("intro", "build", "outro", "verse")
+_HIGH_SECTIONS = ("drop", "chorus", "peak", "bridge")
+
+
+def _energy_band_cues(cut: dict[str, Any]) -> tuple[str, ...]:
+    """Cue list for one cut: the section label decides when it names a band, else energy.
+
+    Cut plans carry ``section_label`` (music_video_service.compute_cut_plan); ``section``
+    is read as a fallback for plans built elsewhere.
+    """
+    section = str(cut.get("section_label") or cut.get("section") or "").lower()
+    if any(k in section for k in _HIGH_SECTIONS):
+        return _HIGH_ENERGY_CUES
+    if any(k in section for k in _LOW_SECTIONS):
+        return _LOW_ENERGY_CUES
+    try:
+        energy = float(cut.get("energy", 0.5))
+    except (TypeError, ValueError):
+        energy = 0.5
+    if energy < 0.4:
+        return _LOW_ENERGY_CUES
+    if energy > 0.7:
+        return _HIGH_ENERGY_CUES
+    return _MID_ENERGY_CUES
+
+
+def _cue_candidates(band: tuple[str, ...], i: int, base: str):
+    """Cue phrases for cut ``i`` in preference order: one band cue, then a band cue with
+    a camera angle, then with an angle and a lens. Rotating by ``i`` spreads neighbouring
+    cuts across the vocabulary."""
+    low = (base or "").lower()
+    n = len(band)
+    rotated = [band[(i + off) % n] for off in range(n)]
+    for cue in rotated:
+        if cue not in low:
+            yield cue
+    for a in range(len(_ANGLE_CUES)):
+        angle = _ANGLE_CUES[(i + a) % len(_ANGLE_CUES)]
+        for cue in rotated:
+            yield f"{cue}, {angle}"
+    for a in range(len(_ANGLE_CUES)):
+        angle = _ANGLE_CUES[(i + a) % len(_ANGLE_CUES)]
+        for lens in _LENS_CUES:
+            for cue in rotated:
+                yield f"{cue}, {angle}, {lens}"
+
+
 def _ensure_distinct_and_energy_aware(
     prompts: list[str], cut_plan: list[dict[str, Any]], style_prompt: str, *, max_stretch: float | None = None
 ) -> list[str]:
@@ -831,11 +890,13 @@ def _ensure_distinct_and_energy_aware(
     This is a cheap, deterministic safety net that runs after the LLM (primary or recovery).
     It never calls the model. On any internal error it returns the input unchanged (safe no-op).
 
-    - Distinctness: strip the common style suffix and compare prefixes. If too many are identical,
-      inject a light, style-preserving variation based on the cut's energy and section.
-    - Energy cue injection: for low-energy (intro/build) use calmer/wider/slower/atmospheric language;
-      for high-energy (drop) use tighter/dynamic/denser/contrasty language. Drawn from the Director
-      system prompt contract so it stays consistent with what the model was asked to do.
+    - Distinctness: strip the common style suffix and compare. Every cut whose text repeats an
+      earlier cut's (as written or after cueing) gets a style-preserving cue drawn from its
+      section label or, failing that, its energy band; the first occurrence stays as written.
+    - Energy cue vocabulary: low energy (intro/build/outro, energy < 0.4) uses calmer/wider/
+      slower/atmospheric language; mid energy (0.4-0.7) steadier, measured language; high energy
+      (drop/chorus, energy > 0.7) tighter/dynamic/denser/contrasty language. A repeat that the
+      band cue alone cannot separate also takes a camera angle, then a lens.
     - Style suffix: every entry ends with ", {style_prompt}" (the UI and i2v expect the global look).
     - max_stretch (optional): currently only for future-proofing / diagnostics; not required for the
       core distinctness logic.
@@ -845,77 +906,45 @@ def _ensure_distinct_and_energy_aware(
     if not prompts or not cut_plan or len(prompts) != len(cut_plan):
         return prompts
 
-    # 1. Strip style suffix for comparison (the suffix is what makes many "look the same" in logs/UI).
+    # Strip the style suffix for comparison (the suffix is what makes many "look the same").
     style_suffix = f", {style_prompt}" if not style_prompt.startswith(",") else style_prompt
-    stripped = []
-    for p in prompts:
-        if p.endswith(style_suffix):
-            stripped.append(p[: -len(style_suffix)].strip())
-        else:
-            stripped.append(p.strip())
+    style_core = style_suffix.lstrip(", ")
 
-    # 2. Detect duplicates (by exact stripped text or very similar prefix).
-    from collections import Counter
-    counts = Counter(stripped)
-    num_unique = len(counts)
-    threshold = max(2, len(prompts) // 2)
-    needs_fix = num_unique < threshold
+    def _key(text: str) -> str:
+        return " ".join((text or "").lower().split())
 
-    # 3. Energy-based injection vocabulary (kept tiny and style-agnostic so it composes cleanly).
-    low_energy_cues = ["wider calmer framing", "slow atmospheric drift", "soft diffuse light", "sparse open composition"]
-    high_energy_cues = ["tighter dynamic framing", "sharp pulsing motion", "high contrast strobing light", "dense layered composition"]
-
+    seen: set[str] = set()
     out: list[str] = []
-    for i, (orig, stripped_p, cut) in enumerate(zip(prompts, stripped, cut_plan)):
-        energy = float(cut.get("energy", 0.5))
-        section = str(cut.get("section", "")).lower()
-        is_low = energy < 0.4 or any(k in section for k in ("intro", "build", "outro", "verse"))
-        is_high = energy > 0.7 or any(k in section for k in ("drop", "chorus", "peak", "bridge"))
+    cued = 0
+    for i, (orig, cut) in enumerate(zip(prompts, cut_plan)):
+        base = (orig or "").strip()
+        if base.endswith(style_suffix):
+            base = base[: -len(style_suffix)].strip()
 
-        base = stripped_p
-        if needs_fix:
-            # Pick a cue that is unlikely to already be in the prompt (cheap string check).
-            # Use index rotation so that many consecutive same-energy cuts (common) still
-            # get *different* cue phrases instead of all receiving the first one.
-            cues = low_energy_cues if is_low else (high_energy_cues if is_high else [])
-            cue = None
-            if cues:
-                # rotate by cut index for variety even within same energy band
-                for off in range(len(cues)):
-                    c = cues[(i + off) % len(cues)]
-                    if c not in (base or "").lower():
-                        cue = c
-                        break
-                if cue is None:
-                    cue = cues[i % len(cues)]
-            if cue:
-                # If the stripped base is (or was) the global style itself (LLM echoed it, or
-                # this is the plain-style list from the no-usable director path), do NOT
-                # append cue to the long style text (that produces dups like "style, cue, style").
-                # Instead use *just* the cue as the varying part; the suffix adder below will
-                # produce the clean "cue, style" form. This disables duplicating fallback.
-                if not base or _is_mostly_style(base, style_prompt):
-                    base = cue
-                else:
-                    # Inject near the end, before any trailing style (we'll re-add the suffix).
-                    base = f"{base.rstrip(', ')}, {cue}"
+        if _key(base) in seen:
+            # A base that is (mostly) the global style itself (LLM echo, or the plain-style
+            # list from the no-usable director path) is replaced by the cue alone, so the
+            # suffix below yields "cue, style" rather than "style, cue, style".
+            bare = not base or _is_mostly_style(base, style_prompt)
+            for cue in _cue_candidates(_energy_band_cues(cut), i, "" if bare else base):
+                candidate = cue if bare else f"{base.rstrip(', ')}, {cue}"
+                if _key(candidate) not in seen:
+                    base = candidate
+                    cued += 1
+                    break
+        seen.add(_key(base))
 
         # Guarantee style suffix (some recovery paths or manual edits may have dropped it).
-        # Use the style text itself for endswith (handles inputs that were plain style).
-        style_core = style_suffix.lstrip(", ")
         if not base.endswith(style_core):
             base = f"{base.rstrip(', ')}{style_suffix}"
-
         out.append(base)
 
-    # 4. Lightweight diagnostic if we had to intervene.
-    if needs_fix:
-        log.info(
-            "director post-guard injected energy cues for %d/%d cuts (unique before=%d)",
-            len(out) - num_unique, len(out), num_unique
-        )
+    if cued:
+        log.info("director post-guard cued %d/%d repeated cuts", cued, len(out))
 
     return out
+
+
 
 
 def _augment_prompts_with_arc(prompts: list[str], cut_plan: list[dict[str, Any]], treatment: str) -> list[str]:
