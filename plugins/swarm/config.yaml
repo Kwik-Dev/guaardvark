@@ -5,6 +5,10 @@ defaults:
   # Autonomous merge-conflict resolution. OFF by default — when on, writes to the
   # Guaardvark repo are routed through guarded_code_service (apply_exact_replacement).
   enable_merger_agent: false
+  # Last-ditch fix pass after a task's retries run out. It runs on the backend
+  # that ran the failed task, and a backend that needs internet is never used
+  # in Flight Mode.
+  enable_diagnostic_agent: true
   run_tests_before_merge: true
   test_command: "python3 -m pytest"
   flight_mode: false

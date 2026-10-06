@@ -53,6 +53,21 @@ class ClaudeBackend(BaseBackend):
     name = "claude"
     requires_internet = True
 
+    def command_prefix(self, config: dict[str, Any]) -> list[str]:
+        command = config.get("command", "claude")
+        # Claude Code 2.x does not have --output-file. It writes to stdout in
+        # --print mode and the wrapper script captures that into completion.md.
+        # --bare skips hooks, CLAUDE.md auto-discovery, keychain reads, and
+        # auto-memory, which is what we want for a sandboxed worktree agent
+        # that should stand on its own without parent-session pollution.
+        # --dangerously-skip-permissions is required for non-interactive
+        # execution — without it Claude refuses to use Bash/Edit/Write in
+        # "don't ask mode" and the agent returns a text-only refusal instead
+        # of actually creating files. The worktree is the sandbox; that's
+        # exactly the case this flag is designed for.
+        args = config.get("args", ["--print", "--bare", "--dangerously-skip-permissions"])
+        return [command] + list(args)
+
     def spawn(self, worktree_path: str, task: SwarmTask, config: dict[str, Any]) -> AgentProcess:
         wt = Path(worktree_path)
         log_file = wt / LOG_FILE
@@ -68,22 +83,9 @@ class ClaudeBackend(BaseBackend):
             except FileNotFoundError:
                 pass
 
-        command = config.get("command", "claude")
-        # Claude Code 2.x does not have --output-file. It writes to stdout in
-        # --print mode and the wrapper script captures that into completion.md.
-        # --bare skips hooks, CLAUDE.md auto-discovery, keychain reads, and
-        # auto-memory, which is what we want for a sandboxed worktree agent
-        # that should stand on its own without parent-session pollution.
-        # --dangerously-skip-permissions is required for non-interactive
-        # execution — without it Claude refuses to use Bash/Edit/Write in
-        # "don't ask mode" and the agent returns a text-only refusal instead
-        # of actually creating files. The worktree is the sandbox; that's
-        # exactly the case this flag is designed for.
-        args = config.get("args", ["--print", "--bare", "--dangerously-skip-permissions"])
-
         prompt = self._build_prompt(task)
 
-        claude_parts = [command] + args + [prompt]
+        claude_parts = self.command_prefix(config) + [prompt]
         claude_cmd = " ".join(_shell_quote(p) for p in claude_parts)
 
         # write wrapper script

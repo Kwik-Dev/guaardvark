@@ -20,6 +20,11 @@ from typing import Dict, List, Any, Optional, Callable
 logger = logging.getLogger(__name__)
 
 from backend.utils.display_paths import display_params
+# Shared with AgentExecutor, which refuses these calls instead of showing a card.
+from backend.services.agent_tools import (
+    consent_reference as _consent_reference,
+    tool_needs_approval_card as _tool_needs_approval_card,
+)
 from backend.utils.text_cut import cut_on_whitespace
 from backend.utils.inline_reasoning import (
     InlineReasoningStream, REASONING, RETRACT, VISIBLE, split_inline_reasoning,
@@ -258,40 +263,6 @@ def _served_output_url(path: Optional[str]) -> Optional[str]:
         return None
     m = re.search(r"(?:^|[\\/])(edit_inputs|generated_images)[\\/]([^\\/]+)$", str(path))
     return f"/api/outputs/{m.group(1)}/{m.group(2)}" if m else None
-
-
-def _consent_reference(tool, params: Dict[str, Any]) -> Optional[str]:
-    """The reference image a consent-gated tool would use, or None."""
-    if not getattr(tool, "consent_gate", False):
-        return None
-    ref = params.get("image") or ""
-    return ref or None
-
-
-def _tool_needs_approval_card(tool, tool_name: str, params: Dict[str, Any], preapproved: set) -> bool:
-    """Whether this call must pause for the card.
-
-    A consent-gated tool whose reference image already has a consent record
-    does not ask again: the record is the durable answer.
-    """
-    if not tool or not getattr(tool, "requires_approval", False) or tool_name in preapproved:
-        return False
-    # A tool can narrow its own approval to the calls that need it, e.g.
-    # find_files inside Guaardvark's folders. Unsure means ask.
-    per_call = getattr(tool, "needs_approval", None)
-    if callable(per_call):
-        try:
-            if not per_call(params or {}):
-                return False
-        except Exception:
-            logger.debug("needs_approval check failed for %s; asking", tool_name, exc_info=True)
-    if getattr(tool, "consent_gate", False):
-        ref = _consent_reference(tool, params)
-        if ref:
-            from backend.services.consent_records import has_consent
-            if has_consent(ref):
-                return False
-    return True
 
 
 def _approval_detail(tool, tool_name: str, params: Dict[str, Any], reasoning: str = "") -> Dict[str, Any]:

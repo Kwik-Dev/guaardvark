@@ -10,7 +10,7 @@ from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, field
 import re
 
-from backend.services.agent_tools import ToolRegistry, ToolResult
+from backend.services.agent_tools import ToolRegistry, ToolResult, tool_needs_approval_card
 from backend.services.step_budget import StepBudget
 from backend.utils.agent_output_parser import (
     parse_tool_calls_structured,
@@ -347,6 +347,26 @@ class AgentExecutor:
     def set_tool_context(self, **kwargs):
         """Set extra kwargs that get forwarded to every tool execute() call."""
         self._tool_context.update(kwargs)
+
+    def _refuse_unapproved(self, tool_name: str, params: Dict[str, Any]) -> Optional[ToolResult]:
+        """A refusal for a call that needs a person's approval card, else None.
+
+        This loop has no card to show, so such a call is not run. edit_code
+        under self-improvement is the exception: there it only stages a
+        PendingFix, and a person applies it.
+        """
+        tool = self.tool_registry.get_tool(tool_name)
+        if tool is None:
+            return None
+        if tool_name == "edit_code" and self._tool_context.get("_self_improvement_context"):
+            return None
+        if not tool_needs_approval_card(tool, tool_name, params, set()):
+            return None
+        logger.info(f"Refused {tool_name}: needs an approval card, which this loop cannot show")
+        return ToolResult(
+            success=False,
+            error=f"{tool_name} needs your approval in chat and was not run",
+        )
     
     def execute(self, user_query: str, session_context: str = "", process_id: Optional[str] = None, max_steps: Optional[int] = None, budget: Optional["StepBudget"] = None) -> AgentResult:
         """
@@ -692,6 +712,21 @@ What tool do you need to call next?"""
                     'result': result.to_dict()
                 })
                 observation_texts.append(format_tool_result_for_llm(tool_call.tool_name, result))
+                continue
+
+            refusal = self._refuse_unapproved(tool_call.tool_name, normalized_params)
+            if refusal:
+                self._guard.record_result(
+                    tool_call.tool_name, normalized_params, False, refusal.error, iteration
+                )
+                log_tool_result("agent_executor", tool_call.tool_name, False, refusal.error,
+                                iteration=iteration)
+                observations.append({
+                    'tool': tool_call.tool_name,
+                    'parameters': normalized_params,
+                    'result': refusal.to_dict()
+                })
+                observation_texts.append(format_tool_result_for_llm(tool_call.tool_name, refusal))
                 continue
 
             # Security validation if coordinator available
@@ -1069,6 +1104,14 @@ EXAMPLE - Final answer (no tools needed):
                 result = ToolResult(success=False, error=block_reason)
                 observations.append({'tool': sel.tool_name, 'parameters': normalized_params, 'result': result.to_dict()})
                 observation_texts.append(format_tool_result_for_llm(sel.tool_name, result))
+                continue
+
+            refusal = self._refuse_unapproved(sel.tool_name, normalized_params)
+            if refusal:
+                self._guard.record_result(sel.tool_name, normalized_params, False, refusal.error, iteration)
+                log_tool_result("agent_executor", sel.tool_name, False, refusal.error, iteration=iteration)
+                observations.append({'tool': sel.tool_name, 'parameters': normalized_params, 'result': refusal.to_dict()})
+                observation_texts.append(format_tool_result_for_llm(sel.tool_name, refusal))
                 continue
 
             # Security validation

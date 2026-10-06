@@ -873,6 +873,17 @@ class SelfImprovementService:
             logger.info(f"Scale factor review: approved={review.get('approved')} "
                         f"directive={review.get('directive')}")
 
+            # Only a review that returned approved True or False happened;
+            # anything else is recorded as not reviewed, never as approved.
+            approved = review.get("approved")
+            reason = review.get("reason") or ""
+            if approved is True:
+                reviewed_by, review_notes = "uncle_claude", reason or None
+            elif approved is False:
+                reviewed_by, review_notes = "uncle_claude", f"rejected: {reason or 'no reason given'}"
+            else:
+                reviewed_by, review_notes = None, f"not reviewed: {reason or 'no verdict returned'}"
+
             # Stage as pending fix regardless of review outcome —
             # human can always approve/reject from the Settings UI
             try:
@@ -885,7 +896,8 @@ class SelfImprovementService:
                     proposed_diff=proposed_diff,
                     severity="low",
                     status="proposed",
-                    reviewed_by="uncle_claude" if reviewed and advisor.is_available() else "pending",
+                    reviewed_by=reviewed_by,
+                    review_notes=review_notes,
                 )
                 db.session.add(fix)
                 db.session.commit()

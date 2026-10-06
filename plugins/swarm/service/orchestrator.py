@@ -48,6 +48,9 @@ logger = logging.getLogger("swarm.orchestrator")
 # how often we check on running agents (seconds)
 POLL_INTERVAL = 5
 
+# Tag values that mean "no preference", as the plan's "Assign to:" line reads them.
+_NO_PREFERENCE = ("", "any", "auto", "none")
+
 # Freeze-guard thresholds for the shared 60GB box. Each spawned agent is a
 # `claude`/`cline` subprocess that can balloon RAM (and carry "shadow RAM"
 # before psutil reflects it). Spawning into < this much free RAM, or any swap
@@ -108,6 +111,9 @@ class SwarmOrchestrator:
         # retry tracking
         self._retries: dict[str, int] = {}
         self.max_retries = 2
+
+        # main backend API, set at launch; handed to the diagnostic agent
+        self._backend_url = ""
 
         # threading for async operation
         self._thread: threading.Thread | None = None
@@ -207,10 +213,7 @@ class SwarmOrchestrator:
             backend_url=backend_url
         )
 
-        self._diagnostic_agent = None
-        if self.config.enable_diagnostic_agent:
-            from .diagnostic_agent import DiagnosticAgent
-            self._diagnostic_agent = DiagnosticAgent(backend_url)
+        self._backend_url = backend_url
 
         # Set up inter-agent communication bus
         from .communication_bus import CommunicationBus
@@ -471,22 +474,27 @@ class SwarmOrchestrator:
         # select backend
         preferred = task.preferred_backend
         
-        # Check for [Model: ...] or [Backend: ...] tags
-        if "Model" in task.tags:
-            # see if the tag matches a backend name directly
-            tag_val = task.tags["Model"].lower()
-            if tag_val in self.config.backends:
-                preferred = tag_val
-            else:
-                # otherwise, try to find a backend that uses this model
-                for name, bcfg in self.config.backends.items():
-                    if bcfg.model and tag_val in bcfg.model.lower():
-                        preferred = name
-                        break
-        elif "Backend" in task.tags:
-            preferred = task.tags["Backend"].lower()
+        # [Model: ...] and [Backend: ...] tags, keys in any letter case. A model
+        # tag wins over a backend tag; either one that names something
+        # unavailable fails the task rather than falling back.
+        tags = {str(k).strip().lower(): str(v).strip() for k, v in task.tags.items()}
+        model_tag = tags.get("model", "")
+        backend_tag = tags.get("backend", "")
+        if model_tag.lower() in _NO_PREFERENCE:
+            model_tag = ""
+        if backend_tag.lower() in _NO_PREFERENCE:
+            backend_tag = ""
 
-        backend_config = self.config.select_backend(preferred, online=online)
+        if model_tag:
+            backend_config, reason = self.config.select_backend_for_model(model_tag, online=online)
+            if not backend_config:
+                raise RuntimeError(f"requested model {model_tag} not available: {reason}")
+        else:
+            if backend_tag:
+                preferred = backend_tag.lower()
+            backend_config, reason = self.config.select_backend(preferred, online=online)
+            if not backend_config and preferred:
+                raise RuntimeError(f"requested backend {preferred} not available: {reason}")
         if not backend_config:
             configured = list(self.config.backends.keys())
             import shutil
@@ -521,11 +529,7 @@ class SwarmOrchestrator:
             logger.debug(f"Could not record base HEAD for {task.id}: {e}")
 
         # spawn the agent
-        config_dict = {
-            "command": backend_config.command,
-            "args": backend_config.args,
-            "model": backend_config.model,
-        }
+        config_dict = self._backend_call_config(backend_config)
         process = backend.spawn(wt_info.worktree_path, task, config_dict)
 
         task.status = SwarmStatus.RUNNING
@@ -598,12 +602,13 @@ class SwarmOrchestrator:
                     })
                 else:
                     # Retries exhausted — try one last-ditch diagnosis if enabled
-                    if self._diagnostic_agent and task.worktree_path:
+                    diagnostic_agent = self._diagnostic_agent_for(task) if task.worktree_path else None
+                    if diagnostic_agent:
                         logger.warning(f"Task '{task_id}' retries exhausted — invoking DiagnosticAgent...")
                         self._emit_event("task_diagnostic_start", task_id, {"reason": "retries_exhausted"})
-                        
+
                         logs = self.get_task_logs(task_id, lines=200)
-                        fixed = self._diagnostic_agent.run_diagnosis(
+                        fixed = diagnostic_agent.run_diagnosis(
                             task.worktree_path,
                             task.title,
                             task.description,
@@ -715,6 +720,42 @@ class SwarmOrchestrator:
                 logger.debug(f"Initialized backend: {name}")
             else:
                 logger.warning(f"Unknown backend '{name}' in config — skipping")
+
+    @staticmethod
+    def _backend_call_config(backend_config) -> dict[str, Any]:
+        """The per-call settings a backend's spawn() and command_prefix() read."""
+        return {
+            "command": backend_config.command,
+            "args": backend_config.args,
+            "model": backend_config.model,
+        }
+
+    def _diagnostic_agent_for(self, task: SwarmTask):
+        """A DiagnosticAgent on the backend that ran this task, or None.
+
+        None when enable_diagnostic_agent is off. It never switches backend,
+        so a task that ran locally is diagnosed locally, and a backend that
+        needs internet is never used while the swarm is in Flight Mode.
+        """
+        if not self.config.enable_diagnostic_agent or not task.backend_name:
+            return None
+        backend_config = self.config.backends.get(task.backend_name)
+        backend = self._backends.get(task.backend_name)
+        if backend_config is None or backend is None:
+            return None
+        flight_mode = self.config.flight_mode or bool(self.result and self.result.flight_mode)
+        if flight_mode and (backend_config.requires_internet or backend.requires_internet):
+            logger.info(
+                f"No diagnosis for '{task.id}': {task.backend_name} needs internet "
+                f"and the swarm is in Flight Mode"
+            )
+            return None
+        try:
+            command = backend.command_prefix(self._backend_call_config(backend_config))
+        except NotImplementedError:
+            return None
+        from .diagnostic_agent import DiagnosticAgent
+        return DiagnosticAgent(self._backend_url, command)
 
     def _find_task(self, task_id: str) -> SwarmTask | None:
         if not self.result:

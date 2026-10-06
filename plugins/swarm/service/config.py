@@ -60,6 +60,9 @@ class SwarmConfig:
     # autonomous conflict resolution must be opted into, and self-repo writes are
     # routed through the guarded_code_service chokepoint (see merger_agent.py).
     enable_merger_agent: bool = False
+    # A last pass after a task's retries run out. It runs on the backend that
+    # ran the task, so a local task is diagnosed locally, and a backend that
+    # needs internet is never used in Flight Mode.
     enable_diagnostic_agent: bool = True
     run_tests_before_merge: bool = True
     test_command: str = "python3 -m pytest"
@@ -89,19 +92,57 @@ class SwarmConfig:
         candidates.sort(key=lambda b: b.priority)
         return candidates
 
-    def select_backend(self, preferred: str | None, online: bool = True) -> BackendConfig | None:
-        """Pick the best available backend for a task."""
+    def select_backend(self, preferred: str | None, online: bool = True) -> tuple[BackendConfig | None, str]:
+        """Pick the backend for a task: (backend, "") or (None, reason).
+
+        A named backend is used or refused, never swapped for another: the
+        priority list ranks the cloud CLI first, so a task assigned to a local
+        backend that is missing would otherwise run in the cloud.
+        """
         import shutil
 
-        # explicit preference wins if it's installed and connectivity matches
-        if preferred and preferred in self.backends:
-            b = self.backends[preferred]
-            if (not b.requires_internet or online) and shutil.which(b.command):
-                return b
-            # they asked for something unavailable — fall through
+        if preferred:
+            b = self.backends.get(preferred)
+            if b is None:
+                configured = ", ".join(self.backends) or "none"
+                return None, f"unknown backend (configured: {configured})"
+            if b.requires_internet and (self.flight_mode or not online):
+                return None, "it needs internet and the swarm is offline"
+            if not shutil.which(b.command):
+                return None, f"'{b.command}' is not installed"
+            return b, ""
 
         candidates = self.get_backend_priority_list(online=online)
-        return candidates[0] if candidates else None
+        if candidates:
+            return candidates[0], ""
+        return None, "no configured backend is installed for this mode"
+
+    def select_backend_for_model(self, model: str, online: bool = True) -> tuple[BackendConfig | None, str]:
+        """Pick the backend for a [Model: ...] tag: (backend, "") or (None, reason).
+
+        The tag names a backend, or a model a backend is configured with. Only
+        those backends are candidates, tried in priority order; like a named
+        backend, the tag is never swapped for the general priority list.
+        """
+        wanted = model.strip().lower()
+        if wanted in self.backends:
+            return self.select_backend(wanted, online=online)
+
+        matches = sorted(
+            (b for b in self.backends.values() if b.model and wanted in b.model.lower()),
+            key=lambda b: b.priority,
+        )
+        if not matches:
+            models = ", ".join(sorted({b.model for b in self.backends.values() if b.model})) or "none"
+            return None, f"no configured backend uses it (configured models: {models})"
+
+        reasons = []
+        for b in matches:
+            chosen, reason = self.select_backend(b.name, online=online)
+            if chosen:
+                return chosen, ""
+            reasons.append(f"{b.name}: {reason}")
+        return None, "; ".join(reasons)
 
 
 def load_config(
