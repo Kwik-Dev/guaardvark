@@ -7,8 +7,14 @@ FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures", "sandbox_code
 
 
 @pytest.fixture
-def sandbox_dir(tmp_path):
-    """Create a temporary sandbox with copies of fixture files."""
+def sandbox_dir(tmp_path, monkeypatch):
+    """Create a temporary sandbox with copies of fixture files.
+
+    Saved-memory recall is stubbed: outside an app context it imports
+    backend.app, which boots the whole app inside the test and changes what the
+    model is asked (test_agent_memory_hints.py covers recall itself).
+    """
+    monkeypatch.setattr("backend.api.memory_api.search_memories", lambda *a, **k: [])
     sandbox = tmp_path / "sandbox"
     sandbox.mkdir()
     # Copy all fixture files into sandbox

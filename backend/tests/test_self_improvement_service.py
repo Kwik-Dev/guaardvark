@@ -142,6 +142,7 @@ class TestScheduledAndReactiveRunHonesty:
         svc._initialized = False
         svc.__init__()
         svc._is_safe_to_run = lambda: True
+        svc._gates_open = lambda: True
         SelfImprovementService._cancel_requested_ids.clear()
         return svc
 
@@ -163,40 +164,47 @@ class TestScheduledAndReactiveRunHonesty:
         svc = self._service()
         with patch(f"{SVC}.subprocess.run", return_value=ONE_FAILING_TEST) as pytest_run, \
              patch.object(svc, "_attempt_fix", return_value=PROSE_ANSWER), \
-             patch.object(svc, "_verify_fix", side_effect=AssertionError("unchanged code is not re-tested")):
+             patch.object(svc, "_verify_fix", side_effect=AssertionError("nothing staged, nothing to test")):
             result = svc.run_self_check()
 
         assert result["success"] is False
         assert result["fixes_staged"] == 0 and result["changes"] == []
         assert result["message"] == "No fix staged for 1 failure(s)"
-        assert pytest_run.call_count == 1
+        assert pytest_run.call_count == 2  # the check, then a re-run of its failing tests
         run = SelfImprovementRun.query.order_by(SelfImprovementRun.id.desc()).first()
         assert run.status == "failed"
         assert json.loads(run.changes_made) == []
         assert self._learnings() == 0
 
     def test_self_check_staged_fix_is_a_success_reported_as_staged(self, app):
-        from backend.models import SelfImprovementRun
+        from backend.models import PendingFix, SelfImprovementRun
         svc = self._service()
 
         def stage(failure, message=None):
             self._stage_for(svc)
             return {**PROSE_ANSWER, "fix_description": "Returned the missing key."}
 
+        passed = {"tests": ["backend/tests/test_a.py"], "all_passed": True, "total_failures": 0,
+                  "failures": [], "return_code": 0, "error": None}
         with patch(f"{SVC}.subprocess.run", return_value=ONE_FAILING_TEST) as pytest_run, \
              patch.object(svc, "_attempt_fix", side_effect=stage), \
-             patch.object(svc, "_verify_fix", side_effect=AssertionError("unchanged code is not re-tested")):
+             patch.object(svc, "_verify_fix", return_value=passed) as verify:
             result = svc.run_self_check()
 
         assert result["success"] is True
         assert result["message"] == "1 fix(es) staged for review"
-        assert result["fixes_staged"] == 1
-        assert pytest_run.call_count == 1
+        assert result["fixes_staged"] == 1 and result["fixes_verified"] == 1
+        assert pytest_run.call_count == 2  # the check, then a re-run of its failing tests
+        fix = PendingFix.query.one()
+        verify.assert_called_once_with(["backend/tests/test_a.py"], [fix])
+        assert fix.status == "proposed"
+        assert "passed with this fix applied" in fix.fix_description
         run = SelfImprovementRun.query.order_by(SelfImprovementRun.id.desc()).first()
         assert run.status == "success"
         change = json.loads(run.changes_made)[0]
         assert change["test"] == "test_one" and change["pending_fix_id"]
         assert change["fix_description"] == "Returned the missing key."
+        assert change["verification"]["all_passed"] is True
         assert self._learnings() == 1
 
     def test_heal_prose_answer_is_a_failed_run(self, app):

@@ -41,6 +41,7 @@ def _fresh_service():
     svc._initialized = False
     svc.__init__()
     svc._is_safe_to_run = lambda: True
+    svc._gates_open = lambda: True
     SelfImprovementService._cancel_requested_ids.clear()
     return svc
 
