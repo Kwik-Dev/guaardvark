@@ -245,7 +245,12 @@ def _persist_turn(app, session_id: str, role: str, content: str, extra: Optional
     new_id = None
     try:
         with app.app_context():
-            from backend.models import LLMMessage, db
+            from backend.models import LLMMessage, LLMSession, db
+            # A new chat whose first turn is answered here has no session row
+            # yet, and the message's foreign key needs one.
+            if db.session.get(LLMSession, session_id) is None:
+                db.session.add(LLMSession(id=session_id, user="default", project_id=project_id))
+                db.session.flush()
             msg = LLMMessage(
                 session_id=session_id,
                 role=role,
@@ -1315,6 +1320,11 @@ class AgentBrain:
 
         try:
             from backend.services.agent_executor import AgentExecutor
+
+            # Tier 3 bypasses the engine, which saves the question for the other
+            # tiers; save it before the run so it survives a crash or a reload.
+            if app and message and (options or {}).get("persist", True) is not False:
+                _persist_turn(app, session_id, "user", message, None, project_id=project_id)
 
             if budget is None:
                 budget = StepBudget.from_total(self.TOTAL_STEP_CAP)
