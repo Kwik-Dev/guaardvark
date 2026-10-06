@@ -521,7 +521,9 @@ class EnhancedChatManager:
         elif any(w in msg_lower for w in ['bulk', 'batch', 'many']) and \
              any(w in msg_lower for w in ['csv', 'generate']):
             return "bulk_csv_generation"
-        elif any(w in msg_lower for w in ['website', 'url', 'http']):
+        elif self._URL_RE.search(message):
+            # Only a link the person typed. The words "website" or "url" are not
+            # a link, and a bare name like settings.py reads as a domain.
             return "website_analysis"
         elif any(w in msg_lower for w in ['generate', 'create', 'make']) and \
              any(w in msg_lower for w in ['file', 'csv']):
@@ -1864,7 +1866,9 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
                     return self._handle_file_generation_request(session_id, enhanced_message, project_id=project_id)
                 elif detected_intent == "website_analysis":
                     logger.debug("Routing to website analysis handler")
-                    return self._handle_website_analysis_request(session_id, enhanced_message, project_id=project_id)
+                    website_result = self._handle_website_analysis_request(session_id, message, project_id=project_id)
+                    if website_result is not None:
+                        return website_result
                 elif detected_intent == "file_generation":
                     logger.debug("Routing to file generation handler")
                     return self._handle_file_generation_request(session_id, enhanced_message, project_id=project_id)
@@ -2118,14 +2122,20 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
                 "response_time": (datetime.now() - start_time).total_seconds()
             }
 
-    def _handle_website_analysis_request(self, session_id: str, message: str, project_id: int = None) -> Dict[str, Any]:
+    def _handle_website_analysis_request(self, session_id: str, message: str, project_id: int = None) -> Optional[Dict[str, Any]]:
         """Handle website analysis requests using web search API.
 
         The page is fetched only with web access on in Settings (off by
         default), the check the web tools make, and only from a public address
-        (see enhanced_web_search).
+        (see enhanced_web_search). ``message`` is the person's own text, and
+        only a link typed in it (scheme or www.) is read. A message longer than
+        _WEB_SEARCH_MAX_CHARS is a paste rather than a request to read a page:
+        returns None and the turn goes on as ordinary chat.
         """
         start_time = datetime.now()
+        if len(message) > self._WEB_SEARCH_MAX_CHARS:
+            logger.info(f"Website analysis skipped, message too long (message_len={len(message)})")
+            return None
         try:
             # Import web search functionality
             try:
@@ -2138,19 +2148,9 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
                     "response_time": (datetime.now() - start_time).total_seconds()
                 }
 
-            # Extract URL from message
-            import re
-            url_pattern = r'(?:https?://|www\.)[^\s]+'
-            urls = re.findall(url_pattern, message)
-
-            # If no URL found, try to extract domain names
-            if not urls:
-                # Look for domain patterns like "example.com" or "datacenterknowledge.com"
-                domain_pattern = r'\b[a-zA-Z0-9][a-zA-Z0-9\-]*[a-zA-Z0-9]\.[a-zA-Z]{2,}\b'
-                domains = re.findall(domain_pattern, message)
-                if domains:
-                    # Take the first domain found
-                    urls = [domains[0]]
+            # Only a typed link. A bare name is not one: settings.py and
+            # notes.md end in real country-code domains.
+            urls = self._URL_RE.findall(message)
 
             if not urls:
                 return {
