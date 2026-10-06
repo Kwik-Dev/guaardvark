@@ -122,6 +122,19 @@ class AgentRouter:
                 tool_name="edit_code"
             ),
 
+            # CSV Generation (single). Checked before the generic file pattern,
+            # which also matches "create a CSV file" and would propose a .js name.
+            IntentPattern(
+                name="csv_generation",
+                patterns=[
+                    r"create.*csv",
+                    r"generate.*csv",
+                    r"/createcsv\b",
+                ],
+                route_type=RouteType.TOOL_DIRECT,
+                tool_name="generate_csv"
+            ),
+
             # File Generation
             IntentPattern(
                 name="file_generation",
@@ -133,18 +146,6 @@ class AgentRouter:
                 ],
                 route_type=RouteType.FILE_GENERATION,
                 tool_name="generate_file"
-            ),
-
-            # CSV Generation (single)
-            IntentPattern(
-                name="csv_generation",
-                patterns=[
-                    r"create.*csv",
-                    r"generate.*csv",
-                    r"/createcsv\b",
-                ],
-                route_type=RouteType.TOOL_DIRECT,
-                tool_name="generate_csv"
             ),
 
             # Code Generation
