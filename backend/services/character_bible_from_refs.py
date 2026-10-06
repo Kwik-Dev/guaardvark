@@ -117,9 +117,9 @@ def _parse_consensus_json(raw: str) -> dict[str, str]:
         cls = (data.get("class_token") or data.get("class") or data.get("species") or "").strip()
         if bible:
             return {"bible": bible, "marks": marks, "class_token": cls}
-    # Fallback: treat entire reply as bible prose
-    if len(t) > 40:
-        return {"bible": t, "marks": "", "class_token": ""}
+    # A reply that does not parse is never used as the bible: it may be
+    # truncated JSON, and the bible feeds the class token and every caption.
+    # The caller falls back to the first photo description instead.
     return {}
 
 

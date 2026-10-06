@@ -89,6 +89,33 @@ def test_consensus_fallback_without_llm_json():
     assert "Keep this exact appearance" in out["bible"]
 
 
+def test_unparseable_consensus_reply_is_not_used_as_bible():
+    truncated = (
+        '{"class_token":"white wolf","marks":"thick white fur, amber eyes",'
+        '"bible":"A white wolf with thick pale fur, amber eyes and a bla'
+    )
+    assert _parse_consensus_json(truncated) == {}
+
+
+def test_truncated_consensus_reply_gives_first_description_bible():
+    first = "A white wolf with thick fur, amber eyes, and a black nose."
+    second = "White wolf, dense winter coat, yellow-amber eyes, bushy tail."
+
+    def truncated_llm(*, system, user, model=None):
+        return (
+            '{"class_token":"white wolf","marks":"thick white fur, amber eyes",'
+            '"bible":"A white wolf with thick pale fur, amber eyes and a bla'
+        )
+
+    out = consensus_identity_from_descriptions(
+        [first, second], name="Frost", llm=truncated_llm,
+    )
+    assert out["bible"].startswith(f"Frost: {first}")
+    assert "Keep this exact appearance" in out["bible"]
+    assert "{" not in out["bible"]
+    assert out["class_token"] == ""
+
+
 def test_marks_from_bible():
     marks = marks_from_bible(
         "Frost: thick white fur, amber eyes, bushy tail. "
