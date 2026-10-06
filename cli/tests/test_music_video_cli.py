@@ -1,8 +1,10 @@
 """CLI music-video / film-crew talk HTTP and never POST approve."""
+import json
 from unittest.mock import MagicMock, patch
 
 from typer.testing import CliRunner
 
+from llx.client import LlxError
 from llx.main import app
 
 runner = CliRunner()
@@ -108,3 +110,66 @@ def test_music_video_list_and_cancel():
     assert cancelled.exit_code == 0, cancelled.output
     assert "/api/music-video" in fake.gets
     assert any(p.endswith("/cancel") for p, _ in fake.posts)
+
+
+# --- issue #7: `list` resolves the output Document ---------------------------
+
+
+class _OutputFakeClient(_FakeClient):
+    """The list row carries a real `output_document_id`; the render is a Document."""
+
+    def doc_get(self, endpoint):
+        return {"data": {"filename": "arrangement_abc.mp4", "path": "Videos/arrangement_abc.mp4"}}
+
+    def get(self, endpoint, **params):
+        if endpoint == "/api/music-video":
+            return {"music_videos": [{
+                "id": 7, "name": "Neon", "status": "complete", "current_stage": "complete",
+                "cut_count": 3, "clips_done": 3, "clip_count": 3,
+                "output_document_id": 7, "song_document_id": 12,
+                "clips": [{"index": 0, "clip_path": "/out/cut0.mp4", "prompt": "wide"}],
+                "cut_plan": [{"index": 0, "start_s": 0.0, "end_s": 1.0}],
+            }]}
+        if endpoint.startswith("/api/files/document/"):
+            return self.doc_get(endpoint)
+        return super().get(endpoint, **params)
+
+
+def _invoke_list(client, *extra):
+    with patch("llx.commands.music_video.get_client", return_value=client), \
+         patch("llx.commands.music_video.get_global_server", return_value="http://localhost:5002"), \
+         patch("llx.commands.music_video.get_global_json", return_value=True):
+        return runner.invoke(app, ["music-video", "list", *extra, "--json"])
+
+
+def test_music_video_list_resolves_the_output_document():
+    result = _invoke_list(_OutputFakeClient())
+    assert result.exit_code == 0, result.output
+    row = json.loads(result.output)[0]
+    assert row["output_document_id"] == 7
+    assert row["output_filename"] == "arrangement_abc.mp4"
+    assert row["output_path"] == "Videos/arrangement_abc.mp4"
+    assert row["output_url"] == "/api/files/document/7/download"
+    # The list row is a summary: the per-cut payload belongs to `clips`/`cuts`.
+    assert "clips" not in row and "cut_plan" not in row
+
+
+def test_music_video_list_tolerates_a_missing_output_document():
+    class _MissingDoc(_OutputFakeClient):
+        def doc_get(self, endpoint):
+            raise LlxError("Not Found", 404)
+
+    result = _invoke_list(_MissingDoc())
+    assert result.exit_code == 0, result.output
+    row = json.loads(result.output)[0]
+    assert row["output_document_id"] == 7
+    assert row["output_filename"] == ""
+    assert row["output_url"] == "/api/files/document/7/download"
+
+
+def test_music_video_list_full_keeps_the_raw_records():
+    result = _invoke_list(_OutputFakeClient(), "--full")
+    assert result.exit_code == 0, result.output
+    row = json.loads(result.output)[0]
+    assert "clips" in row and "cut_plan" in row
+    assert "output_filename" not in row

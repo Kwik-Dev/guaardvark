@@ -107,6 +107,15 @@ def _mv_dict(mv: MusicVideo) -> dict:
     out["director_model"] = dm
     out["use_lora_consistency"] = s.get("use_lora_consistency", False)
     out["keyframe_model"] = s.get("keyframe_model", "flux-schnell")
+    # Issue #8: the inputs a caller needs to reproduce this run. Without them the render is
+    # visible but the treatment and the cast that produced it are not, so `--reproduce`
+    # (and a person reading `status`) would have to guess. `settings` carries the rest of
+    # the pipeline knobs; `director_treatment` is derived output and stays out of it.
+    out["user_treatment"] = s.get("user_treatment")
+    out["subject_ids"] = s.get("subject_ids", [])
+    out["settings"] = {
+        k: v for k, v in s.items() if k not in ("director_treatment", "user_treatment")
+    }
     from backend.services.video_model_registry import DEFAULT_I2V_MODEL
     out["i2v_model"] = s.get("i2v_model") or (
         "cogvideox-5b-i2v" if s.get("i2v_engine") == "cogvideox" else DEFAULT_I2V_MODEL

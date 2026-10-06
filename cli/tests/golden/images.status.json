@@ -1,0 +1,21 @@
+{
+  "data": {
+    "batch_id": "ImageBatch_1",
+    "completed_images": 1,
+    "progress": 100,
+    "retry_data": {
+      "mode": "text",
+      "params": {
+        "guidance": 0.0,
+        "model": "zimage-turbo",
+        "steps": 9
+      },
+      "prompts": [
+        "a red fox"
+      ]
+    },
+    "status": "completed",
+    "total_images": 1
+  },
+  "status": "success"
+}

@@ -169,17 +169,17 @@ Commands with no subcommands are marked *(leaf)*.
 ### Generation
 | Command | Subcommands |
 |---|---|
-| `images` | `list, generate, status, models, delete` |
-| `videos` | `list, generate, from-image, status, models, delete, download, combine` |
-| `audio` | `voices, tts, music, sfx, play` |
-| `generate` | `csv, image` |
+| `images` | `list, generate, status, models, delete`; **reproducibility:** `generate --dry-run`, `status` shows the recorded settings, `reproduce <batch>` |
+| `videos` | `list, generate, from-image, status, models, delete, download, combine`; **reproducibility:** `generate --dry-run`, `from-image --dry-run`, `status` shows the recorded settings, `reproduce <batch>` |
+| `audio` | `voices, tts, music, sfx, play`; **reproducibility:** `music|sfx|tts --dry-run` (audio generations are not recorded yet, so there is no `reproduce` — issue #8) |
+| `generate` | `csv, image`; `image --dry-run` |
 | `quality` | `scorecard` |
 
 ### Productions (plan only)
 | Command | Subcommands |
 |---|---|
-| `music-video` | `list, create, status, cancel, delete`; **D6:** `cuts` (the Director's plan, `--prompts` for full text), `clips` (per-cut render state), `storyboard <id> <idx> --out F`, `approve <id> --yes` **(starts the render)** |
-| `film-crew` | `list, create, status, delete`; **D6:** `subjects` (extracted cast + LoRA/training state), `shots`, `shot <id> <shot> [--image F]`, `templates`, `confirm-casting <id> --yes`, `approve-storyboard <id> --yes` **(starts the render)** |
+| `music-video` | `list, create, status, cancel, delete`; `create` accepts `--treatment --cast --lora-consistency --keyframe-model --planning-mode --fill-method --max-stretch --interp` and `--dry-run`; `status` shows the recorded inputs; `reproduce <id>`; **D6:** `cuts` (the Director's plan, `--prompts` for full text), `clips` (per-cut render state), `storyboard <id> <idx> --out F`, `approve <id> --yes` **(starts the render)** |
+| `film-crew` | `list, create, status, delete`; `create` accepts `--settings` (JSON, or `@file.json`) and `--dry-run`; `status` shows the recorded settings; `reproduce <id>`; **D6:** `subjects` (extracted cast + LoRA/training state), `shots`, `shot <id> <shot> [--image F]`, `templates`, `confirm-casting <id> --yes`, `approve-storyboard <id> --yes` **(starts the render)** |
 
 ### Data, RAG & knowledge
 | Command | Subcommands |
@@ -237,7 +237,38 @@ upstream edit — see §11. Their read-only halves are covered by
 
 | Group | Added by the fork |
 |---|---|
-| `audio` | `transcribe` (speech-to-text), `models`, `model-download` — added from a fork module without editing `cli/llx/commands/audio.py` |
+| `audio` | `transcribe` (speech-to-text), `models`, `model-download` — added from a fork module without editing `cli/llx/commands/audio.py`; `music`/`sfx`/`tts` gained `--dry-run` |
+| `images` | `generate --dry-run`, `status` (recorded settings), `reproduce` — fork overrides; upstream file untouched |
+| `videos` | `generate`/`from-image --dry-run`, `status` (recorded settings), `reproduce` |
+| `generate` | `image --dry-run` |
+| `music-video` | `list` output path (issue #7), `create` full inputs + `--dry-run`, `status` inputs, `reproduce` |
+| `film-crew` | `create --settings` + `--dry-run`, `status` settings, `reproduce` |
+
+### Reproducibility (issue #8)
+
+Generation commands must show what they would send, and be replayable:
+
+- **`--dry-run`** on every generation command prints the resolved request — inputs, each
+  setting with its provenance (`explicit` / `command default`), the request method, path
+  and body — and sends **no write**. It may issue read-only GETs, because a command
+  resolves the active model before it builds its body. Implemented by
+  `cli/llx/commands/_fork/dry_run.py`, which runs the **real** upstream command with its
+  write seams (`LlxClient._request`, `upload`, `upload_with_progress`) intercepted, so the
+  preview cannot drift from what is actually sent. A second body-builder would.
+- **Recorded settings** — `images status` / `videos status` show `retry_data` (prompts +
+  params), `music-video status` shows cast + treatment + settings, `film-crew status`
+  shows `settings_json`. `--json` already carried these; the human views now show them,
+  and the backend `_mv_dict` exposes `subject_ids`, `user_treatment` and `settings`.
+- **`reproduce <id>`** rebuilds the create from the record. It prefers the **named**
+  command when that command can carry the whole record (`music-video create`,
+  `film-crew create` — after the flags above), and falls back to a lossless
+  `guaardvark api request <method> <path> --yes --data '<json>'` line when it cannot
+  (`images generate` and `videos generate` expose a subset of the backend's fields;
+  `ui_config` is the standing example). Either way it prints the body, names the fields the
+  named command cannot express, and redacts credential-like keys. It sends nothing unless
+  `--yes`, and `--yes` goes through the **same `_api_guard` gate and audit log** as
+  `api request`. Replaying a create never releases an approval gate: a reproduced music
+  video still stops at `awaiting_approval`, a Film Crew production at casting/storyboards.
 
 ### Generic backend access (D5) — one command, every route
 
@@ -537,7 +568,13 @@ Rules that keep it cheap:
    `repl_help_group()` to `_HELP_GROUPS` and registers `repl_apps()` (two guarded blocks).
    A module that adds commands to an *upstream* group instead (no `COMMAND_NAME`) declares
    `EXTENDS = {group_name: upstream_app}`; `extended_groups()` reads it so those
-   subcommands reach completion and `/help` too. The upstream contract test pins the
+   subcommands reach completion and `/help` too. A module may also **shadow an upstream
+   leaf** by registering the same command name on the shared app: `llx/main.py` imports the
+   upstream modules first and `_fork.registry` after, so the fork registration wins. This is
+   how `music-video list` resolves its output Document (issue #7) without editing the
+   upstream file. Keep it in `_fork/`, name the upstream command in a comment, keep the
+   emitted shape (bare array stays a bare array), and delete the override the day upstream
+   carries the fix. The upstream contract test pins the
    catalog and the router to each other, so if a merge ever stops running the test fails
    rather than the REPL silently losing groups.
 4. Reuse `llx/client.py`; never re-implement transport.

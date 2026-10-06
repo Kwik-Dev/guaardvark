@@ -1,0 +1,17 @@
+[
+  {
+    "clip_count": 3,
+    "clips_done": 3,
+    "created_at": "<volatile:str>",
+    "current_stage": "complete",
+    "cut_count": 3,
+    "id": 7,
+    "name": "Neon",
+    "output_document_id": 234,
+    "output_filename": "arrangement_abc.mp4",
+    "output_path": "Videos/arrangement_abc.mp4",
+    "output_url": "/api/files/document/234/download",
+    "song_document_id": 12,
+    "status": "complete"
+  }
+]

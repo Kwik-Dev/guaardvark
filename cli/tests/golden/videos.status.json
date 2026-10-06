@@ -1,0 +1,25 @@
+{
+  "batch_id": "Batch_1",
+  "completed_videos": 1,
+  "failed_videos": 0,
+  "results": [
+    {
+      "item_id": "0",
+      "success": true,
+      "video_path": "a.mp4"
+    }
+  ],
+  "retry_data": {
+    "mode": "text",
+    "params": {
+      "model": "wan22-5b",
+      "num_inference_steps": 20,
+      "seed": 42
+    },
+    "prompts": [
+      "a kite"
+    ]
+  },
+  "status": "completed",
+  "total_videos": 1
+}

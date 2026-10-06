@@ -28,6 +28,7 @@ def infographic_generate(
     aspect: str = typer.Option("16:9", "--aspect"),
     hashtag: list[str] = typer.Option(None, "--hashtag", help="Repeatable"),
     callout: list[str] = typer.Option(None, "--callout", help="Repeatable"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show the request and resolved settings; send nothing"),
     server: str = typer.Option(None, "--server", "-s"),
     json_out: bool = typer.Option(False, "--json", "-j"),
 ):
@@ -46,6 +47,21 @@ def infographic_generate(
         "hashtags": hashtag or [],
         "callouts": callout or [],
     }
+    if dry_run:
+        from .dry_run import preview
+
+        preview(
+            "infographic generate",
+            lambda: get_client(resolve_server(server)).post(f"{BASE}/generate", json=body),
+            inputs=("scene", "raw_prompt", "title", "footer"),
+            explicit={"scene", "raw_prompt", "title", "footer"}
+            | ({"style"} if style != "editorial" else set())
+            | ({"aspect"} if aspect != "16:9" else set())
+            | ({"hashtags"} if hashtag else set())
+            | ({"callouts"} if callout else set()),
+            json_out=json_out,
+        )
+        return
     try:
         data = get_client(resolve_server(server)).post(f"{BASE}/generate", json=body)
     except LlxError as exc:

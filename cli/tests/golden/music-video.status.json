@@ -1,0 +1,22 @@
+{
+  "clips": [],
+  "current_stage": "complete",
+  "cut_plan": [],
+  "i2v_model": "wan22-5b",
+  "id": 7,
+  "keyframe_model": "from-lora",
+  "name": "Neon",
+  "settings": {
+    "max_stretch": 2,
+    "subject_ids": [
+      1
+    ],
+    "use_lora_consistency": true
+  },
+  "status": "complete",
+  "subject_ids": [
+    1
+  ],
+  "use_lora_consistency": true,
+  "user_treatment": "Elara walks the overgrown path."
+}

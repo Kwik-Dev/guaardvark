@@ -279,6 +279,51 @@ CASES = [
             {"index": 0, "status": "complete", "clip_path": "/out/cut0.mp4", "storyboard_path": "/out/sb0.png"},
         ]}),
     ]),
+    # Issue #7: `list` resolves `output_document_id` to a filename/logical path, and the
+    # second declared route is the point — the CLI must join the document store to know
+    # where the render is. `clips[]`/`cut_plan` are deliberately absent from the row.
+    Case("music-video.list", ["music-video", "list"], [
+        _r("GET", "/api/music-video", {"music_videos": [
+            {"id": 7, "name": "Neon", "status": "complete", "current_stage": "complete",
+             "cut_count": 3, "clips_done": 3, "clip_count": 3,
+             "output_document_id": 234, "song_document_id": 12,
+             "clips": [{"index": 0, "clip_path": "/out/cut0.mp4", "prompt": "wide"}],
+             "cut_plan": [{"index": 0, "start_s": 0.0, "end_s": 3.5}]},
+        ]}),
+        _r("GET", "/api/files/document/234", {"data": {
+            "filename": "arrangement_abc.mp4", "path": "Videos/arrangement_abc.mp4"}}),
+    ]),
+    # Issue #8: settings that produced an artifact must survive `--json` untouched so a script
+    # can feed them back into a re-run. Each case pins the record the CLI passes through.
+    Case("images.status", ["images", "status", "ImageBatch_1"], [
+        _r("GET", "/api/batch-image/status/ImageBatch_1", {"data": {
+            "batch_id": "ImageBatch_1", "status": "completed", "progress": 100,
+            "completed_images": 1, "total_images": 1,
+            "retry_data": {"mode": "text", "prompts": ["a red fox"],
+                           "params": {"model": "zimage-turbo", "steps": 9, "guidance": 0.0}}}}),
+    ]),
+    Case("videos.status", ["videos", "status", "Batch_1"], [
+        _r("GET", "/api/batch-video/status/Batch_1", {
+            "batch_id": "Batch_1", "status": "completed", "total_videos": 1,
+            "completed_videos": 1, "failed_videos": 0,
+            "retry_data": {"mode": "text", "prompts": ["a kite"],
+                           "params": {"model": "wan22-5b", "seed": 42, "num_inference_steps": 20}},
+            "results": [{"item_id": "0", "success": True, "video_path": "a.mp4"}]}),
+    ]),
+    Case("music-video.status", ["music-video", "status", "7"], [
+        _r("GET", "/api/music-video/7", {
+            "id": 7, "name": "Neon", "status": "complete", "current_stage": "complete",
+            "subject_ids": [1], "user_treatment": "Elara walks the overgrown path.",
+            "use_lora_consistency": True, "keyframe_model": "from-lora", "i2v_model": "wan22-5b",
+            "settings": {"subject_ids": [1], "use_lora_consistency": True, "max_stretch": 2},
+            "cut_plan": [], "clips": []}),
+    ]),
+    Case("film-crew.status", ["film-crew", "status", "3"], [
+        _r("GET", "/api/production/3", {
+            "id": 3, "name": "The Last Spark", "status": "complete", "current_stage": "complete",
+            "shots": [], "script_text": "Title: The Last Spark",
+            "settings_json": {"video_model": "wan22-5b"}}),
+    ]),
     # --- api escape hatch --------------------------------------------------
     Case("api.routes", ["api", "routes"], [
         _r("GET", "/api/routes", {"success": True, "data": {"routes": [

@@ -12,6 +12,16 @@ the progress, `storyboard` is the frame.
 Read-only, so no D2 exception is needed. `music-video approve` — the gate that releases the
 spend — lives in `render_gates.py` (CLI_PLAN D6).
 
+This module also **re-registers `list`** (issue #7): upstream's list is a summary in the
+human table but dumps the whole project record under `--json`, and neither form says where
+the finished render is. The override is a fork-owned file, so the upstream command file
+stays unedited and an upstream sync never conflicts; delete it the day upstream resolves #7.
+
+What was missing: the render is a Document (`output_document_id`), not a path on the project
+row — the filename hash is not on the row, so it cannot be derived locally, and `list` never
+joined the document store. `list` now resolves it, `--full` keeps the old raw records, and
+`clips[]`/`cut_plan` keep living in `music-video clips` and `music-video cuts`.
+
 The module-level `EXTENDS` names the upstream group these commands were added to, so the
 REPL catalog (`_fork/registry.py`) offers them to completion and `/help` as well.
 """
@@ -21,6 +31,7 @@ from pathlib import Path
 
 import typer
 
+import llx.commands.music_video as _upstream
 from llx import output
 from llx.client import LlxError, get_client
 from llx.commands.music_video import music_video_app
@@ -166,3 +177,126 @@ def mv_storyboard(
         success({"music_video_id": mv_id, "index": idx, "image": str(dest)})
         return
     output.print_success(f"Cut {idx} storyboard written to {dest}")
+
+
+# ---------------------------------------------------------------------------
+# `music-video list`, overridden — issue #7
+# ---------------------------------------------------------------------------
+# Import order in `llx/main.py` (upstream modules first, then `_fork.registry`) makes this
+# registration replace the upstream one on the same Typer app. It deliberately calls
+# `_upstream.get_client` / `get_global_server` / `get_global_json` rather than the module's
+# own imports, so the fixtures that patch the upstream module still drive this command.
+_DOC_ROUTE = "/api/files/document/%d"
+
+
+def _as_int(value) -> bool:
+    """True when `value` can be read as an int document id."""
+    try:
+        int(value)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _resolve_output_document(client, doc_id, cache: dict) -> dict:
+    """Best-effort Document -> record for one project's output render.
+
+    A missing, unreadable or deleted document is not fatal: the list still prints, with an
+    empty output cell, because a list command that dies on one bad row is worse than a blank.
+    """
+    if not doc_id:
+        return {}
+    try:
+        key = int(doc_id)
+    except (TypeError, ValueError):
+        return {}
+    if key in cache:
+        return cache[key]
+    doc: dict = {}
+    try:
+        info = client.get(_DOC_ROUTE % key)
+        doc = info.get("data", info) if isinstance(info, dict) else {}
+    except LlxError:
+        doc = {}
+    cache[key] = doc
+    return doc
+
+
+@music_video_app.command("list")
+def mv_list(
+    full: bool = typer.Option(
+        False, "--full", help="Print the backend's full project records (the pre-#7 shape)"
+    ),
+    server: str = typer.Option(None, "--server", "-s"),
+    json_out: bool = typer.Option(False, "--json", "-j"),
+):
+    """List music-video projects, with each finished render resolved.
+
+    The render is a Document, not a path on the project row, so this resolves
+    `output_document_id` to a filename and logical path (`output_url` on `--json`).
+    `--full` restores the raw records; per-cut prompts and timing are in
+    `music-video clips` and `music-video cuts`.
+    """
+    as_json = json_mode(json_out or _upstream.get_global_json())
+    try:
+        client = _upstream.get_client(server or _upstream.get_global_server())
+        data = _upstream._unwrap(client.get(_BASE))
+    except LlxError as exc:
+        fail(exc)
+    rows = pick_list(data, "music_videos")
+
+    if full:
+        output.print_json(rows)
+        return
+
+    cache: dict = {}
+    summary = []
+    for row in rows:
+        doc_id = row.get("output_document_id")
+        doc = _resolve_output_document(client, doc_id, cache)
+        summary.append(
+            {
+                "id": row.get("id", ""),
+                "name": row.get("name", ""),
+                "status": row.get("status", ""),
+                "current_stage": row.get("current_stage", ""),
+                "cut_count": row.get("cut_count", 0),
+                "clips_done": row.get("clips_done", 0),
+                "clip_count": row.get("clip_count", 0),
+                "output_document_id": doc_id,
+                "output_filename": doc.get("filename", ""),
+                "output_path": doc.get("path", ""),
+                "output_url": (_DOC_ROUTE % int(doc_id)) + "/download" if _as_int(doc_id) else "",
+                "created_at": row.get("created_at", ""),
+                "song_document_id": row.get("song_document_id"),
+            }
+        )
+
+    if as_json or output.is_pipe():
+        # A bare array, matching the shape upstream's `list` already emitted.
+        output.print_json(summary)
+        return
+    if not summary:
+        output.print_warning("no music videos yet — create one with `music-video create`")
+        return
+
+    table = []
+    for row, item in zip(rows, summary):
+        cell = item["output_path"] or item["output_filename"]
+        if item["output_document_id"]:
+            cell = f"{cell} (doc {item['output_document_id']})" if cell else f"doc {item['output_document_id']}"
+        table.append(
+            {
+                "id": item["id"],
+                "name": item["name"],
+                "stage": item["current_stage"],
+                "status": item["status"],
+                "clips": f"{item['clips_done']}/{item['clip_count']}",
+                "output": cell,
+            }
+        )
+    output.print_table(
+        table,
+        columns=["id", "name", "stage", "status", "clips", "output"],
+        title=f"Music Videos ({len(table)})",
+    )

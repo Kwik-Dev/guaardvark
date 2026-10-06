@@ -1,0 +1,11 @@
+{
+  "current_stage": "complete",
+  "id": 3,
+  "name": "The Last Spark",
+  "script_text": "Title: The Last Spark",
+  "settings_json": {
+    "video_model": "wan22-5b"
+  },
+  "shots": [],
+  "status": "complete"
+}
