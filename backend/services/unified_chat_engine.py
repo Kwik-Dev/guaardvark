@@ -964,6 +964,42 @@ def ollama_eof_user_message(error_str: str, model_name: str, *, has_media: bool 
     )
 
 
+_KEYWORD_RE_CACHE: Dict[tuple, re.Pattern] = {}
+
+
+def _keyword_regex(keywords) -> re.Pattern:
+    """One regex for a keyword list, each keyword matched as whole words."""
+    key = tuple(keywords)
+    pattern = _KEYWORD_RE_CACHE.get(key)
+    if pattern is None:
+        parts = []
+        for kw in key:
+            kw = (kw or "").lower()
+            if not kw:
+                continue
+            # Edges that are punctuation or space (".py", "/vision", "ls ") match as written.
+            left = r"(?<!\w)" if (kw[0].isalnum() or kw[0] == "_") else ""
+            if kw[-1].isalpha():
+                right = r"s?(?!\w)"  # a plural counts: "gpus", "files"
+            elif kw[-1].isalnum() or kw[-1] == "_":
+                right = r"(?!\w)"
+            else:
+                right = ""
+            parts.append(left + re.escape(kw) + right)
+        pattern = re.compile("|".join(parts) or r"(?!)")
+        _KEYWORD_RE_CACHE[key] = pattern
+    return pattern
+
+
+def _mentions_keyword(msg_lower: str, keywords) -> bool:
+    """True when one of the keywords is in the message as whole words.
+
+    "supermarket" does not contain the outreach keyword "market", "display" not
+    the media keyword "play", "last" not the repo keyword "ast".
+    """
+    return bool(_keyword_regex(keywords).search(msg_lower or ""))
+
+
 def select_tools_for_context(message: str, all_tool_names: List[str], max_tools: int = 25) -> List[str]:
     """Select most relevant tools based on message content."""
     # No tools for conversational messages
@@ -979,7 +1015,7 @@ def select_tools_for_context(message: str, all_tool_names: List[str], max_tools:
         if category == "image":
             if not _wants_image_tools(message):
                 continue
-        elif not any(kw in msg_lower for kw in keywords):
+        elif not _mentions_keyword(msg_lower, keywords):
             continue
         keyword_matched = True
         matched_categories.add(category)
@@ -1024,7 +1060,7 @@ def _pin_repo_intel_tools(message: str, selected: List[str], all_tool_names: Lis
     so a downstream cap never truncates them). Cheap: 3 tools, ~60 prompt tokens.
     """
     msg = (message or "").lower()
-    if not any(kw in msg for kw in REPO_INTEL_KEYWORDS):
+    if not _mentions_keyword(msg, REPO_INTEL_KEYWORDS):
         return selected
     available = set(all_tool_names)
     pinned = [t for t in REPO_INTEL_TOOLS if t in available and t not in selected]
@@ -1089,7 +1125,7 @@ def _pin_knowledge_nav_tools(message: str, selected: List[str], all_tool_names: 
     Cheap: four tools, ~80 prompt tokens, and only on a clear keyword match.
     """
     msg = (message or "").lower()
-    if not any(kw in msg for kw in KNOWLEDGE_NAV_KEYWORDS):
+    if not _mentions_keyword(msg, KNOWLEDGE_NAV_KEYWORDS):
         return selected
     available = set(all_tool_names)
     pinned = [t for t in KNOWLEDGE_NAV_TOOLS_PINNED if t in available and t not in selected]
@@ -1158,7 +1194,7 @@ def _pin_workstation_tools(message: str, selected: List[str], all_tool_names: Li
     matches — same pattern as _pin_repo_intel_tools.
     """
     msg = (message or "").lower()
-    if not any(kw in msg for kw in WORKSTATION_KEYWORDS):
+    if not _mentions_keyword(msg, WORKSTATION_KEYWORDS):
         return selected
     available = set(all_tool_names)
     pinned = [t for t in WORKSTATION_TOOLS if t in available and t not in selected]
