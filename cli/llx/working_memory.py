@@ -20,8 +20,10 @@ _IMPLEMENT_RE = re.compile(
     r"\b(implement|apply|make|do)\b.*\b(improvement|improvements|recommendation|recommendations|suggestion|suggestions)\b",
     re.IGNORECASE,
 )
+# Phrases that point at the active file. A bare "that" is not one: it shows up in
+# ordinary questions ("I forgot that part") and would turn document search off.
 _DEICTIC_FILE_RE = re.compile(
-    r"\b(the file|this file|that file|active file|those improvements|these improvements|those recommendations|that)\b",
+    r"\b(the file|this file|that file|active file|those improvements|these improvements|those recommendations)\b",
     re.IGNORECASE,
 )
 
