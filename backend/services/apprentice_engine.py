@@ -14,6 +14,7 @@ backend directly for typing, hotkeys, and scrolling.
 import json
 import logging
 import queue
+import re
 import threading
 import time
 import uuid
@@ -37,6 +38,59 @@ class AttemptResult:
     total_steps: int
     step_results: List[Dict]
     failure_reason: str = ""
+
+
+_MATCHES_FIELD_RE = re.compile(
+    r"""["']?\bmatches["']?\s*[:=]\s*["']?(true|false)\b""", re.IGNORECASE
+)
+_DOES_NOT_MATCH_RE = re.compile(r"\b(?:does|do)\s*(?:not|n['’]t)\s+match", re.IGNORECASE)
+_LEADING_YES_NO_RE = re.compile(r"\W*(yes|no)\b", re.IGNORECASE)
+
+
+def _parse_match_verdict(text: str) -> Optional[bool]:
+    """
+    Read the match verdict from the precondition model's reply.
+
+    Tries, in order: a JSON object's "matches" field (bool, or the strings
+    "true"/"false"), a `matches: true/false` fragment in malformed JSON,
+    "does not match" prose, and a leading yes/no. A JSON object without a
+    readable "matches" field gives no verdict rather than falling through
+    to the prose checks, which could pick up words from its description.
+
+    Returns:
+        True or False, or None when the reply holds no readable verdict.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return None
+
+    # Spanning first "{" to last "}" also unwraps ```json fences and any
+    # prose the model put around the object.
+    start, end = text.find("{"), text.rfind("}")
+    if 0 <= start < end:
+        try:
+            parsed = json.loads(text[start:end + 1])
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            value = parsed.get("matches")
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+                return value.strip().lower() == "true"
+            return None
+
+    field = _MATCHES_FIELD_RE.search(text)
+    if field:
+        return field.group(1).lower() == "true"
+
+    if _DOES_NOT_MATCH_RE.search(text):
+        return False
+
+    leading = _LEADING_YES_NO_RE.match(text)
+    if leading:
+        return leading.group(1).lower() == "yes"
+
+    return None
 
 
 class ApprenticeEngine:
@@ -131,7 +185,7 @@ class ApprenticeEngine:
             precondition_ok = True
             if precondition:
                 pre_result = self._check_precondition(precondition)
-                precondition_ok = pre_result.get("matches", True)
+                precondition_ok = pre_result.get("matches", False)
                 if not precondition_ok:
                     logger.warning(
                         f"[APPRENTICE] Precondition failed for step {step_index}: "
@@ -331,8 +385,14 @@ class ApprenticeEngine:
         Uses VisionAnalyzer: capture screen -> describe it -> ask text model
         if the description matches the precondition.
 
+        Fails closed: when the screen cannot be described, the text model
+        fails, the reply holds no readable verdict, or anything raises,
+        'matches' is False and 'checked' is False. An autonomous replay then
+        stops; guided and supervised runs only log it.
+
         Returns:
-            dict with 'matches' (bool) and 'description' (str)
+            dict with 'matches' (bool), 'checked' (bool, whether a verdict
+            was obtained) and 'description' (str)
         """
         try:
             # Step 1: Capture current screen
@@ -346,7 +406,11 @@ class ApprenticeEngine:
 
             if not vision_result.success:
                 logger.warning(f"[APPRENTICE] Vision analysis failed: {vision_result.error}")
-                return {"matches": True, "description": "Vision unavailable, assuming match"}
+                return {
+                    "matches": False,
+                    "checked": False,
+                    "description": "Vision unavailable, precondition not checked",
+                }
 
             screen_description = vision_result.description
 
@@ -361,24 +425,30 @@ class ApprenticeEngine:
 
             if not text_result.success:
                 logger.warning(f"[APPRENTICE] Text query failed: {text_result.error}")
-                return {"matches": True, "description": "Text model unavailable, assuming match"}
-
-            # Parse JSON response
-            try:
-                parsed = json.loads(text_result.description)
                 return {
-                    "matches": bool(parsed.get("matches", True)),
-                    "description": parsed.get("description", ""),
+                    "matches": False,
+                    "checked": False,
+                    "description": "Text model unavailable, precondition not checked",
                 }
-            except (json.JSONDecodeError, TypeError):
-                # If model didn't return JSON, try to infer from text
-                desc = text_result.description.lower()
-                matches = "yes" in desc or "matches" in desc or "true" in desc
-                return {"matches": matches, "description": text_result.description}
+
+            reply = text_result.description or ""
+            verdict = _parse_match_verdict(reply)
+            if verdict is None:
+                logger.warning(f"[APPRENTICE] No match verdict in precondition reply: {reply[:200]!r}")
+                return {
+                    "matches": False,
+                    "checked": False,
+                    "description": f"No match verdict in model reply: {reply}",
+                }
+            return {"matches": verdict, "checked": True, "description": reply}
 
         except Exception as e:
             logger.error(f"[APPRENTICE] Precondition check error: {e}", exc_info=True)
-            return {"matches": True, "description": f"Error checking precondition: {e}"}
+            return {
+                "matches": False,
+                "checked": False,
+                "description": f"Error checking precondition: {e}",
+            }
 
     # ------------------------------------------------------------------
     # Confidence estimation
