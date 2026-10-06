@@ -1,6 +1,8 @@
 """Natural-language outreach intent: classify then dispatch (no placebo queue)."""
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 def _classifier(payload: dict):
     """Return a classifier fn that ignores prompts and returns payload."""
@@ -317,3 +319,50 @@ def test_queued_ok_unsupervised_does_not_claim_posts_require_approve(app):
         assert "Approve" not in (result.get("message") or "") or "auto-approve" in (
             result.get("message") or ""
         ).lower()
+
+
+# ---- approve and reject act only on a draft id the user typed -----------------------
+
+def _approve_classifier(draft_id):
+    return _classifier({
+        "intent": "approve",
+        "platform": None,
+        "topics": [],
+        "draft_id": draft_id,
+        "confidence": 0.9,
+        "reason": "approve a draft",
+    })
+
+
+@pytest.mark.parametrize("text, model_id, expected", [
+    ("approve the newest draft", 17, None),
+    ("approve #42", None, 42),
+    ("approve #42", 17, 42),
+    ("approve draft 42", 41, 42),
+    ("approve draft 42", 42, 42),
+    ("approve id 42", None, 42),
+    ("approve 42", 42, 42),
+    ("approve the one from 2.5 hours ago", 5, None),
+])
+def test_the_draft_id_is_one_the_user_typed(text, model_id, expected):
+    from backend.services.social_outreach.intent import classify_outreach_utterance
+
+    result = classify_outreach_utterance(text, classifier=_approve_classifier(model_id))
+
+    assert result["draft_id"] == expected
+
+
+def test_an_inferred_draft_id_is_refused_not_approved(app):
+    from backend.services.social_outreach.intent import execute_outreach_intent
+
+    with app.app_context(), \
+         patch("backend.services.social_outreach.intent.transitions.approve") as approve:
+        result = execute_outreach_intent(
+            "approve the newest draft",
+            created_by="test",
+            classifier=_approve_classifier(17),
+        )
+
+    approve.assert_not_called()
+    assert result["refused"] is True
+    assert "Approve needs a draft id" in result["message"]
