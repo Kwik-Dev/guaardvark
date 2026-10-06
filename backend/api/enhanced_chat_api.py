@@ -1538,8 +1538,32 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
         self._save_message(session_id, 'assistant', response, project_id=project_id)
         return {'response': response, 'session_id': session_id, 'enhanced': True}
 
+    # A greeting or acknowledgement that is the whole message, alone or a few
+    # in a row ("ok, thanks!"). Anchored and length-capped like
+    # unified_chat_engine.is_conversational: a greeting that opens a question
+    # ("hi, what does the handbook say about leave?") is not a simple message.
+    _SIMPLE_MESSAGE_MAX_CHARS = 80
+    _SIMPLE_PHRASES = (
+        r"(?:hello|hi|hey)(?: there)?", r"good (?:morning|afternoon|evening)",
+        r"how are you(?: doing)?(?: today)?", r"how do you do", r"what['’]?s up",
+        r"how(?: is|['’]?s) it going", r"(?:nice|pleased) to meet you", r"good to see you",
+        r"(?:thanks|thank you)(?: (?:so|very) much| a lot)?(?: for (?:your|the|all the) (?:help|time))?",
+        r"that['’]?s great", r"awesome", r"cool", r"nice",
+        r"ok", r"okay", r"yes", r"no", r"sure", r"fine", r"good", r"great", r"please",
+        r"(?:bye|goodbye)(?: for now)?", r"see you(?: later)?", r"(?:catch|talk to) you later",
+        r"have a (?:good|nice|great) (?:day|one|night|evening|weekend)",
+    )
+    _SIMPLE_MESSAGE_RE = re.compile(
+        r"^(?:{p})(?:[\s,.!?]+(?:{p}))*[\s,.!?]*$".format(
+            p="|".join(phrase.replace(" ", r"\s+") for phrase in _SIMPLE_PHRASES))
+    )
+
     def _is_simple_message(self, message: str) -> bool:
-        """Detect if a message is simple and doesn't need RAG processing"""
+        """Detect if a message is simple and doesn't need RAG processing.
+
+        Simple mode skips documents, web search and the intent classifier, so
+        only a message that is nothing but a greeting or acknowledgement
+        qualifies, or a few characters of punctuation."""
         message_lower = message.lower().strip()
 
         # Complex keywords that indicate RAG/analysis is needed
@@ -1556,21 +1580,9 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
         if any(keyword in message_lower for keyword in complex_keywords):
             return False
 
-        # Simple greeting patterns - use word boundaries to prevent substring matches
-        import re
-        simple_patterns = [
-            r'\bhello\b', r'\bhi\b(?!\w)', r'\bhey\b', r'\bgood morning\b', r'\bgood afternoon\b', r'\bgood evening\b',
-            r'\bhow are you\b', r'\bhow do you do\b', r'\bwhats up\b', r'\bhow is it going\b',
-            r'\bnice to meet you\b', r'\bpleased to meet you\b', r'\bgood to see you\b',
-            r'\bthanks\b', r'\bthank you\b', r'\bthats great\b', r'\bawesome\b', r'\bcool\b', r'\bnice\b',
-            r'\bok\b', r'\bokay\b', r'\byes\b', r'\bno\b', r'\bsure\b', r'\bfine\b', r'\bgood\b', r'\bgreat\b',
-            r'\bbye\b', r'\bgoodbye\b', r'\bsee you\b', r'\bcatch you later\b', r'\btalk to you later\b'
-        ]
-
-        # Check for WHOLE WORD matches, not substrings
-        for pattern in simple_patterns:
-            if re.search(pattern, message_lower):
-                return True
+        # The whole message, not a greeting word anywhere in it
+        if len(message_lower) < self._SIMPLE_MESSAGE_MAX_CHARS and self._SIMPLE_MESSAGE_RE.match(message_lower):
+            return True
 
         # Check if message is just punctuation or very short
         if len(message.strip()) <= 10 and not any(char.isalpha() for char in message):

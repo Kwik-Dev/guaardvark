@@ -83,3 +83,33 @@ class TestWholeWordKeywords:
     def test_country_question_is_not_a_record_count(self, classifier):
         intent, _confidence, _meta = classifier.classify_intent("how many countries are in the EU")
         assert intent != IntentType.DATABASE_QUERY
+
+
+class TestEnhancedChatSimpleMessage:
+    """Simple mode skips documents, web search and the intent classifier, so
+    only a whole-message greeting or acknowledgement qualifies."""
+
+    @pytest.fixture
+    def manager(self):
+        from backend.api.enhanced_chat_api import EnhancedChatManager
+        return EnhancedChatManager.__new__(EnhancedChatManager)
+
+    @pytest.mark.parametrize("message", [
+        "what does my lease say about pets? no dogs I hope",
+        "hi, what does the handbook say about leave?",
+        "sure thing, and what is the leave policy?",
+    ])
+    def test_greeting_word_inside_a_question_is_not_simple(self, manager, message):
+        assert manager._is_simple_message(message) is False
+
+    @pytest.mark.parametrize("message", [
+        "hi", "thanks!", "Hi there!", "ok, thanks", "how are you today?",
+        "thanks for your time", "what’s up?", "?!",
+    ])
+    def test_whole_greeting_or_acknowledgement_is_simple(self, manager, message):
+        assert manager._is_simple_message(message) is True
+
+    def test_long_run_of_greetings_is_not_simple(self, manager):
+        message = "thanks " * 15
+        assert len(message.strip()) >= manager._SIMPLE_MESSAGE_MAX_CHARS
+        assert manager._is_simple_message(message) is False
