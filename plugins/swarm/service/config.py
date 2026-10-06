@@ -117,6 +117,33 @@ class SwarmConfig:
             return candidates[0], ""
         return None, "no configured backend is installed for this mode"
 
+    def select_backend_for_model(self, model: str, online: bool = True) -> tuple[BackendConfig | None, str]:
+        """Pick the backend for a [Model: ...] tag: (backend, "") or (None, reason).
+
+        The tag names a backend, or a model a backend is configured with. Only
+        those backends are candidates, tried in priority order; like a named
+        backend, the tag is never swapped for the general priority list.
+        """
+        wanted = model.strip().lower()
+        if wanted in self.backends:
+            return self.select_backend(wanted, online=online)
+
+        matches = sorted(
+            (b for b in self.backends.values() if b.model and wanted in b.model.lower()),
+            key=lambda b: b.priority,
+        )
+        if not matches:
+            models = ", ".join(sorted({b.model for b in self.backends.values() if b.model})) or "none"
+            return None, f"no configured backend uses it (configured models: {models})"
+
+        reasons = []
+        for b in matches:
+            chosen, reason = self.select_backend(b.name, online=online)
+            if chosen:
+                return chosen, ""
+            reasons.append(f"{b.name}: {reason}")
+        return None, "; ".join(reasons)
+
 
 def load_config(
     config_path: Path | str | None = None,

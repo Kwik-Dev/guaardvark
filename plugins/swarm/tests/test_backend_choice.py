@@ -13,7 +13,8 @@ def _config(flight_mode=False):
     cfg = SwarmConfig(flight_mode=flight_mode)
     cfg.backends = {
         "claude": BackendConfig(name="claude", command="claude", requires_internet=True, priority=1),
-        "cline": BackendConfig(name="cline", command="cline", requires_internet=False, priority=2),
+        "cline": BackendConfig(name="cline", command="cline", model="ollama/local-model",
+                               requires_internet=False, priority=2),
     }
     return cfg
 
@@ -21,6 +22,12 @@ def _config(flight_mode=False):
 @pytest.fixture
 def only_claude_installed(monkeypatch):
     monkeypatch.setattr("shutil.which", lambda cmd, *a, **k: INSTALLED.get(cmd))
+
+
+@pytest.fixture
+def both_installed(monkeypatch):
+    installed = {**INSTALLED, "cline": "cline-on-path"}
+    monkeypatch.setattr("shutil.which", lambda cmd, *a, **k: installed.get(cmd))
 
 
 class _StopAtWorktree(Exception):
@@ -97,8 +104,51 @@ def test_backend_tag_read_in_any_case(tmp_path, only_claude_installed, key):
 
 def test_model_tag_read_in_any_case(tmp_path, only_claude_installed):
     orch = _orchestrator(tmp_path, _config())
-    with pytest.raises(RuntimeError, match="requested backend cline not available"):
+    with pytest.raises(RuntimeError, match="requested model CLINE not available: 'cline' is not installed"):
         orch._launch_task(_task(tags={"model": "CLINE"}), online=True)
+
+
+def test_model_tag_matching_no_backend_fails(tmp_path, only_claude_installed):
+    orch = _orchestrator(tmp_path, _config())
+    with pytest.raises(RuntimeError,
+                       match="requested model big-cloud-model not available: no configured backend uses it"):
+        orch._launch_task(_task(tags={"Model": "big-cloud-model"}), online=True)
+
+
+def test_model_tag_whose_backend_is_missing_fails(tmp_path, only_claude_installed):
+    orch = _orchestrator(tmp_path, _config())
+    with pytest.raises(RuntimeError, match="requested model local-model not available: cline: "):
+        orch._launch_task(_task(tags={"MODEL": "local-model"}), online=True)
+
+
+def test_model_tag_picks_the_backend_configured_with_it(both_installed):
+    backend, reason = _config().select_backend_for_model("LOCAL-MODEL", online=True)
+    assert backend.name == "cline"
+    assert reason == ""
+
+
+def test_model_tag_names_a_backend(both_installed):
+    backend, _ = _config().select_backend_for_model("Claude", online=True)
+    assert backend.name == "claude"
+
+
+def test_model_tag_offline_does_not_reach_an_online_backend(both_installed):
+    backend, reason = _config().select_backend_for_model("claude", online=False)
+    assert backend is None
+    assert "internet" in reason
+
+
+@pytest.mark.parametrize("value", ["any", "Auto", "none"])
+def test_model_tag_no_preference_keeps_priority_choice(tmp_path, only_claude_installed, value):
+    orch = _orchestrator(tmp_path, _config())
+    with pytest.raises(_StopAtWorktree):
+        orch._launch_task(_task(tags={"Model": value}), online=True)
+
+
+def test_model_tag_no_preference_leaves_backend_tag_in_force(tmp_path, only_claude_installed):
+    orch = _orchestrator(tmp_path, _config())
+    with pytest.raises(RuntimeError, match="requested backend nonexistent not available"):
+        orch._launch_task(_task(tags={"Model": "any", "Backend": "nonexistent"}), online=True)
 
 
 def test_backend_tag_any_keeps_priority_choice(tmp_path, only_claude_installed):

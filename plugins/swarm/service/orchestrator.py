@@ -48,6 +48,9 @@ logger = logging.getLogger("swarm.orchestrator")
 # how often we check on running agents (seconds)
 POLL_INTERVAL = 5
 
+# Tag values that mean "no preference", as the plan's "Assign to:" line reads them.
+_NO_PREFERENCE = ("", "any", "auto", "none")
+
 # Freeze-guard thresholds for the shared 60GB box. Each spawned agent is a
 # `claude`/`cline` subprocess that can balloon RAM (and carry "shadow RAM"
 # before psutil reflects it). Spawning into < this much free RAM, or any swap
@@ -471,28 +474,27 @@ class SwarmOrchestrator:
         # select backend
         preferred = task.preferred_backend
         
-        # Check for [Model: ...] or [Backend: ...] tags, in any letter case
-        tags = {str(k).strip().lower(): str(v) for k, v in task.tags.items()}
-        if "model" in tags:
-            # see if the tag matches a backend name directly
-            tag_val = tags["model"].strip().lower()
-            if tag_val in self.config.backends:
-                preferred = tag_val
-            else:
-                # otherwise, try to find a backend that uses this model
-                for name, bcfg in self.config.backends.items():
-                    if bcfg.model and tag_val in bcfg.model.lower():
-                        preferred = name
-                        break
-        elif "backend" in tags:
-            tag_val = tags["backend"].strip().lower()
-            # same "no preference" words the plan's "Assign to:" line accepts
-            if tag_val not in ("any", "auto", "none"):
-                preferred = tag_val
+        # [Model: ...] and [Backend: ...] tags, keys in any letter case. A model
+        # tag wins over a backend tag; either one that names something
+        # unavailable fails the task rather than falling back.
+        tags = {str(k).strip().lower(): str(v).strip() for k, v in task.tags.items()}
+        model_tag = tags.get("model", "")
+        backend_tag = tags.get("backend", "")
+        if model_tag.lower() in _NO_PREFERENCE:
+            model_tag = ""
+        if backend_tag.lower() in _NO_PREFERENCE:
+            backend_tag = ""
 
-        backend_config, reason = self.config.select_backend(preferred, online=online)
-        if not backend_config and preferred:
-            raise RuntimeError(f"requested backend {preferred} not available: {reason}")
+        if model_tag:
+            backend_config, reason = self.config.select_backend_for_model(model_tag, online=online)
+            if not backend_config:
+                raise RuntimeError(f"requested model {model_tag} not available: {reason}")
+        else:
+            if backend_tag:
+                preferred = backend_tag.lower()
+            backend_config, reason = self.config.select_backend(preferred, online=online)
+            if not backend_config and preferred:
+                raise RuntimeError(f"requested backend {preferred} not available: {reason}")
         if not backend_config:
             configured = list(self.config.backends.keys())
             import shutil
