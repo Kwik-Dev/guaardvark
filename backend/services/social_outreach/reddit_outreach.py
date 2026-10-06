@@ -378,10 +378,16 @@ def _http_get_json(url: str, retries: int = 1) -> Optional[dict]:
         return None
 
 
-def fetch_subreddit_rules(subreddit: str) -> list[str]:
+def fetch_subreddit_rules(subreddit: str) -> Optional[list[str]]:
+    """The community's rules, one "title: description" line each.
+
+    [] means the community has no rules. None means they could not be read
+    (403, 429, timeout, a reply without a rules list); callers skip the
+    community, because unread rules must not read as "promotion allowed".
+    """
     data = _http_get_json(f"{REDDIT_BASE}/r/{subreddit}/about/rules.json")
-    if not data:
-        return []
+    if not isinstance(data, dict) or not isinstance(data.get("rules"), list):
+        return None
     rules = []
     for r in data.get("rules", []):
         title = (r.get("short_name") or "").strip()
@@ -753,6 +759,16 @@ class RedditOutreachLoop:
             return report
 
         rules_list = fetch_subreddit_rules(subreddit)
+        if rules_list is None:
+            report["reason"] = "rules_unreadable"
+            audit.log_outreach_event(
+                platform="reddit", action="abort",
+                target_url=f"{REDDIT_BASE}/r/{subreddit}",
+                status="aborted", abort_reason="rules_unreadable",
+                task_id=task_id,
+            )
+            report["aborted"] += 1
+            return report
         rules_text = "\n".join(rules_list)
         ban_match = is_self_promo_banned(rules_text)
         if ban_match:

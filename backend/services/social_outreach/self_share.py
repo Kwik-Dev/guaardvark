@@ -181,6 +181,16 @@ class SelfShareLoop:
             return report
 
         rules = fetch_subreddit_rules(subreddit)
+        if rules is None:
+            report["reason"] = "rules_unreadable"
+            audit.log_outreach_event(
+                platform="reddit", action="abort",
+                target_url=f"{REDDIT_BASE}/r/{subreddit}",
+                status="aborted", abort_reason="rules_unreadable",
+                task_id=task_id,
+            )
+            report["aborted"] += 1
+            return report
         ban_match = is_self_promo_banned("\n".join(rules))
         if ban_match:
             report["reason"] = f"no_self_promo_rule:{ban_match}"

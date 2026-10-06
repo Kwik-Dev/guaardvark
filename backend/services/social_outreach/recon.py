@@ -150,7 +150,12 @@ class RecondAgent:
             report["reason"] = "kill_switch_off"
             return report
 
-        rules_text = "\n".join(fetch_subreddit_rules(subreddit))
+        rules = fetch_subreddit_rules(subreddit)
+        if rules is None:
+            # Unread rules are not "no rules": skip the community this pass.
+            report["reason"] = "rules_unreadable"
+            return report
+        rules_text = "\n".join(rules)
         ban_match = is_self_promo_banned(rules_text)
         if ban_match:
             # We skip even at recon time — no point queueing candidates we'd

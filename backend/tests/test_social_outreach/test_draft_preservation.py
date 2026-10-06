@@ -144,3 +144,33 @@ def test_self_share_loop_is_draft_only_never_servo_posts(app):
         updated = SocialOutreachLog.query.get(rid)
         assert updated.status == "drafted"
         assert updated.draft_text == draft_content
+
+
+@pytest.mark.parametrize("loop_name", ["reddit", "self_share"])
+def test_unreadable_rules_skip_the_community(app, monkeypatch, tmp_path, loop_name):
+    """A rules fetch that failed is not "no rules": no draft, and an abort row
+    that says why."""
+    from backend.models import SocialOutreachLog
+    from backend.services.social_outreach import audit, reddit_outreach, self_share
+
+    monkeypatch.setattr(audit, "AUDIT_DIR", tmp_path)
+    monkeypatch.setattr(audit, "AUDIT_FILE", tmp_path / "audit.jsonl")
+    module = reddit_outreach if loop_name == "reddit" else self_share
+    monkeypatch.setattr(module, "fetch_subreddit_rules", lambda subreddit: None)
+    monkeypatch.setattr(module.kill_switch, "is_enabled", lambda: True)
+    monkeypatch.setattr(module.kill_switch, "cadence_allows_post", lambda platform: (True, None))
+
+    with app.app_context(), \
+         patch.object(reddit_outreach, "draft_via_backend") as draft_comment, \
+         patch.object(self_share, "_draft_share") as draft_share:
+        if loop_name == "reddit":
+            report = reddit_outreach.RedditOutreachLoop().run_one_pass("test_subreddit")
+        else:
+            report = self_share.SelfShareLoop().run_one_pass("test_subreddit", "https://guaardvark.com")
+
+        assert report["reason"] == "rules_unreadable"
+        assert report["drafted"] == 0
+        draft_comment.assert_not_called()
+        draft_share.assert_not_called()
+        abort, = SocialOutreachLog.query.all()
+        assert (abort.action, abort.status, abort.abort_reason) == ("abort", "aborted", "rules_unreadable")

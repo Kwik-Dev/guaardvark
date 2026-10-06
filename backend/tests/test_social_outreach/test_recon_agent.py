@@ -766,3 +766,53 @@ def test_loop_drafts_a_thread_the_judge_passes(app):
     draft.assert_called_once()
     assert draft.call_args.kwargs["relevance_unchecked"] is False
     assert report["drafted"] == 1
+
+
+# ---- rules that could not be read are not "no rules" -------------------------------------
+
+@pytest.mark.parametrize("reply, rules", [
+    (None, None),                                     # 403 / 429 / timeout
+    ({}, None),                                       # a reply without a rules list
+    ({"rules": "blocked"}, None),
+    ({"rules": []}, []),                              # a community with no rules
+    ({"rules": [{"short_name": "No spam", "description": "No ads."}]}, ["No spam: No ads."]),
+])
+def test_fetch_subreddit_rules_tells_unreadable_from_none(reply, rules):
+    from backend.services.social_outreach import reddit_outreach
+
+    with patch.object(reddit_outreach, "_http_get_json", return_value=reply):
+        assert reddit_outreach.fetch_subreddit_rules("LocalLLaMA") == rules
+
+
+def test_scout_reddit_skips_a_community_whose_rules_could_not_be_read(app):
+    with app.app_context(), \
+            patch("backend.services.social_outreach.recon.kill_switch.is_enabled", return_value=True), \
+            patch("backend.services.social_outreach.recon.fetch_subreddit_rules", return_value=None), \
+            patch("backend.services.social_outreach.recon.fetch_hot_threads") as fetch_hot:
+        report = RecondAgent().scout_reddit("LocalLLaMA")
+
+        assert report["reason"] == "rules_unreadable"
+        assert report["candidates"] == 0
+        fetch_hot.assert_not_called()
+        assert SocialOutreachLog.query.count() == 0
+
+
+def test_loop_skips_a_community_whose_rules_could_not_be_read(app, monkeypatch, tmp_path):
+    from backend.services.social_outreach import audit
+    from backend.services.social_outreach.reddit_outreach import RedditOutreachLoop
+
+    monkeypatch.setattr(audit, "AUDIT_DIR", tmp_path)
+    monkeypatch.setattr(audit, "AUDIT_FILE", tmp_path / "audit.jsonl")
+    with app.app_context(), \
+            patch("backend.services.social_outreach.reddit_outreach.kill_switch.is_enabled", return_value=True), \
+            patch("backend.services.social_outreach.reddit_outreach.fetch_subreddit_rules", return_value=None), \
+            patch("backend.services.social_outreach.reddit_outreach.fetch_hot_threads") as fetch_hot, \
+            patch("backend.services.social_outreach.reddit_outreach.draft_via_backend") as draft:
+        report = RedditOutreachLoop().run_one_pass("LocalLLaMA")
+
+        assert report["reason"] == "rules_unreadable"
+        assert report["drafted"] == 0
+        fetch_hot.assert_not_called()
+        draft.assert_not_called()
+        abort, = SocialOutreachLog.query.all()
+        assert (abort.action, abort.status, abort.abort_reason) == ("abort", "aborted", "rules_unreadable")
