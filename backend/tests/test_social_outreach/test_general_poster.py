@@ -1,4 +1,5 @@
 """Platform-agnostic general poster + grounded-eye login preflight (no browser)."""
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -48,6 +49,66 @@ class TestPreflight:
         assert "preflight_skipped" in reason
 
 
+class _FakeSocket:
+    """BiDi socket that answers each request with the next queued reply."""
+
+    def __init__(self, replies):
+        self.replies = [json.dumps(r) for r in replies]
+        self.sent = []
+        self.closed = False
+
+    def send(self, message):
+        self.sent.append(json.loads(message))
+
+    def recv(self):
+        return self.replies.pop(0)
+
+    def close(self):
+        self.closed = True
+
+
+class TestBidiEvaluateJson:
+    """The shared page reader the posters use after a submit."""
+
+    OPEN = [{"type": "success"},
+            {"type": "success", "result": {"contexts": [{"context": "tab-1"}]}}]
+
+    def _evaluate(self, replies, expression="(() => '{}')()"):
+        from backend.services.social_outreach import reddit_outreach
+        sock = _FakeSocket(replies)
+        with patch("websocket.create_connection", return_value=sock):
+            result = reddit_outreach.bidi_evaluate_json(expression)
+        return result, sock
+
+    def test_returns_the_parsed_object_and_ends_the_session(self):
+        value = json.dumps({"text_on_page": True})
+        (data, why), sock = self._evaluate(
+            self.OPEN + [{"type": "success", "result": {"result": {"type": "string", "value": value}}}])
+        assert (data, why) == ({"text_on_page": True}, "")
+        evaluate = sock.sent[2]
+        assert evaluate["method"] == "script.evaluate"
+        assert evaluate["params"]["target"] == {"context": "tab-1"}
+        assert sock.sent[-1]["method"] == "session.end" and sock.closed
+
+    def test_evaluate_error_is_reported_and_the_session_still_ends(self):
+        (data, why), sock = self._evaluate(
+            self.OPEN + [{"type": "error", "message": "no such frame"}])
+        assert data is None and "no such frame" in why
+        assert sock.sent[-1]["method"] == "session.end"
+
+    def test_unreachable_browser_is_reported(self):
+        from backend.services.social_outreach import reddit_outreach
+        with patch("websocket.create_connection", side_effect=OSError("refused")):
+            data, why = reddit_outreach.bidi_evaluate_json("1")
+        assert data is None and "connect failed" in why
+
+
+# What the post-submit page check reports for a page showing the text in the
+# feed with an empty composer.
+PAGE_POSTED = {"text_on_page": True, "composers": 1, "composers_with_text": 0,
+               "url": "https://x.com/a/status/1"}
+
+
 class TestPostViaAgentLoop:
     def _patch_env(self, service):
         """Patch display/screen/service so the loop runs without a browser."""
@@ -61,6 +122,8 @@ class TestPostViaAgentLoop:
             patch("backend.services.social_outreach.reddit_outreach.SERVO_SETTLE_SECONDS", 0),
             patch.object(gp, "_preflight_logged_in", return_value=(True, "ok")),
             patch.object(gp, "_human_pause", return_value=None),
+            patch("backend.services.social_outreach.reddit_outreach.bidi_evaluate_json",
+                  return_value=(PAGE_POSTED, "")),
         ]
 
     def test_empty_text_rejected(self):
@@ -123,3 +186,61 @@ class TestPostViaAgentLoop:
         assert ok is False
         assert "navigate_failed" in reason
         screen.type_text.assert_not_called()
+
+    def _post_with_page(self, page, text="Check out our new video!"):
+        """Run the loop with every agent task succeeding and the page check
+        answering ``page``; return the result and the expressions evaluated."""
+        service = MagicMock()
+        service.is_active = False
+        service.execute_task.return_value = SimpleNamespace(success=True, reason="ok")
+        seen = []
+
+        def evaluate(expression):
+            seen.append(expression)
+            return page
+
+        patches = self._patch_env(service)
+        patches[-1] = patch(
+            "backend.services.social_outreach.reddit_outreach.bidi_evaluate_json",
+            side_effect=evaluate,
+        )
+        for p in patches:
+            p.start()
+        try:
+            result = gp.post_via_agent_loop("x", "https://x.com/a/status/1", text)
+        finally:
+            for p in patches:
+                p.stop()
+        return result, seen
+
+    def test_text_only_in_the_composer_is_unverified(self):
+        page = {"text_on_page": False, "composers": 1, "composers_with_text": 1,
+                "url": "https://x.com/a/status/1"}
+        (ok, reason), _ = self._post_with_page((page, ""))
+        assert ok is False
+        assert reason.startswith("submit_unverified")
+        assert "text_on_page=False" in reason and "composers_with_text=1" in reason
+
+    def test_text_in_the_feed_with_an_empty_composer_is_posted(self):
+        (ok, reason), seen = self._post_with_page((PAGE_POSTED, ""))
+        assert (ok, reason) == (True, "ok")
+        # The page is searched for the start of the posted text.
+        assert '"Check out our new video!"' in seen[0]
+
+    def test_text_in_the_feed_but_left_in_a_composer_is_unverified(self):
+        page = dict(PAGE_POSTED, composers_with_text=1)
+        (ok, reason), _ = self._post_with_page((page, ""))
+        assert ok is False
+        assert reason.startswith("submit_unverified")
+
+    def test_unreadable_page_is_unverified(self):
+        (ok, reason), _ = self._post_with_page((None, "connect failed: refused"))
+        assert ok is False
+        assert reason.startswith("submit_unverified") and "connect failed" in reason
+
+    def test_the_page_is_searched_for_the_first_60_characters(self):
+        text = "a" * 59 + "bcdefgh"
+        (ok, _), seen = self._post_with_page((PAGE_POSTED, ""), text=text)
+        assert ok is True
+        assert '"' + "a" * 59 + 'b"' in seen[0]
+        assert "a" * 59 + "bc" not in seen[0]
