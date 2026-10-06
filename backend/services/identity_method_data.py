@@ -8,10 +8,8 @@ A method's score is a number a person will act on — retrain, or ship the LoRA 
 so it is withheld until it has earned the right to be shown. Earning it means a
 row in ``measured`` for the model actually used whose 95% lower confidence bound
 clears ``floor``. Until then the method still runs, but the Cast page reads
-"Identity: not measured" rather than a number nobody has checked. This replaces a
-"size" method that divided the smoke PNG's byte count by the mean reference byte
-count and showed the result as an identity score; it carried no identity signal
-and was green above 0.75 on file compression alone.
+"Identity: not measured" rather than a number nobody has checked. A file-size
+ratio is not an identity signal and is never used for this score.
 
 ``measured`` rows ship empty on purpose. scripts/eval_identity_methods.py builds
 labelled pairs from the Cast library on the machine it runs on and prints the row
@@ -34,7 +32,7 @@ from typing import Any, Dict, Optional
 # Accuracy a method must prove on labelled pairs before its score may be shown.
 # 0.9 is what makes the number worth reading: one wrong call in ten is a person
 # retraining a LoRA that was fine, or shipping one that drifted. Below that the
-# score costs more than it tells, which is the lesson of the "size" method.
+# score costs more than it tells.
 DEFAULT_IDENTITY_FLOOR = 0.9
 
 # Confidence for the lower bound. A method that happens to go 9-for-9 has not
