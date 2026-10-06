@@ -19,9 +19,13 @@ jobs:
     name: Inbound code check
     runs-on: ubuntu-latest
     steps:
+      # The base branch as it is now, not pull_request.base.sha: that is where the
+      # pull request branched and it does not move, so on an older pull request
+      # it can predate the guard script, and its range would count anything the
+      # branch merged in from main since as inbound.
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.event.pull_request.base.ref }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -31,9 +35,7 @@ jobs:
         run: git fetch --no-tags origin "+refs/pull/${PR_NUMBER}/head:refs/remotes/pull/head"
 
       - name: Read what it brings in
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: >-
           python3 scripts/check_inbound.py scan
-          --range "${BASE_SHA}...refs/remotes/pull/head"
+          --range "HEAD...refs/remotes/pull/head"
           --source ci --github --exit-zero
