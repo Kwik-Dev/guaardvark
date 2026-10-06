@@ -1246,36 +1246,25 @@ class AgentBrain:
                 budget=budget,
             )
 
-            # Post-response narration check
+            # A reply that names a tool without calling it is logged, never run.
+            # By this point the reply has been streamed and saved, the tool's
+            # arguments could only be guessed from the user's message, and the
+            # engine already re-asks inside its own loop when a search was
+            # skipped. The engine reports tool calls per step, not as tools_used.
             response_text = result.get("response", "")
-            if response_text and not result.get("tools_used"):
+            ran_tools = any(
+                isinstance(s, dict) and s.get("tool_calls")
+                for s in (result.get("steps") or [])
+            )
+            if response_text and not skip_tools and not ran_tools:
                 narrated = self._extract_narrated_tool_intent(
                     response_text, message
                 )
                 if narrated:
-                    tool_name, params = narrated
                     logger.info(
-                        f"Narration detected: '{tool_name}' — executing directly"
+                        f"[narration] reply named '{narrated[0]}' without calling it "
+                        "(logged, not executed)"
                     )
-                    tool_result = self.state.tool_registry.execute_tool(
-                        tool_name, **params
-                    )
-                    if tool_result.success:
-                        # Re-emit with actual tool result
-                        output = tool_result.output
-                        if isinstance(output, dict):
-                            formatted = "\n".join(
-                                f"{k}: {v}" for k, v in output.items()
-                                if v and k != "metadata"
-                            )
-                        else:
-                            formatted = str(output)
-                        self._emit_response(
-                            emit_fn, session_id, formatted,
-                            result.get("request_id", ""),
-                        )
-                        result["response"] = formatted
-                        result["narration_intercepted"] = True
 
             result["tier"] = 2
             return result

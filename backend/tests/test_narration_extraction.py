@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for narration-instead-of-action bug fix — pattern matching + param inference."""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -194,3 +194,113 @@ class TestNarrationExtraction:
             "analyze the competition",  # no URL in message
         )
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Tier 2: a narrated tool is logged, never executed
+# ---------------------------------------------------------------------------
+
+ENGINE = "backend.services.unified_chat_engine.UnifiedChatEngine"
+SEARCH_REPLY = "I should use the web_search tool to find this information"
+SEARCH_MESSAGE = "what is quantum computing"
+
+
+def _run_instinct(brain, engine_result, message, skip_tools=False):
+    """Run Tier 2 against a stub engine that returns ``engine_result``."""
+    brain.state.health.llm_available = True
+    emit_fn = MagicMock()
+    with patch(ENGINE) as engine_cls:
+        engine_cls.return_value.chat.return_value = dict(engine_result)
+        result = brain._instinct(
+            session_id="s1",
+            message=message,
+            options={},
+            emit_fn=emit_fn,
+            skip_tools=skip_tools,
+        )
+    return result, emit_fn
+
+
+def _emitted_events(emit_fn):
+    return [c.args[0] for c in emit_fn.call_args_list]
+
+
+class TestTier2NarrationNoExecute:
+    def test_web_search_narration_does_not_execute(self, brain_with_tools):
+        assert brain_with_tools._extract_narrated_tool_intent(
+            SEARCH_REPLY, SEARCH_MESSAGE
+        ) is not None
+
+        with patch.object(
+            brain_with_tools, "_extract_narrated_tool_intent",
+            wraps=brain_with_tools._extract_narrated_tool_intent,
+        ) as extract:
+            result, emit_fn = _run_instinct(
+                brain_with_tools,
+                {"response": SEARCH_REPLY, "steps": []},
+                SEARCH_MESSAGE,
+            )
+
+        extract.assert_called_once()
+        brain_with_tools.state.tool_registry.execute_tool.assert_not_called()
+        assert result["response"] == SEARCH_REPLY
+        assert "narration_intercepted" not in result
+        assert "chat:response" not in _emitted_events(emit_fn)
+
+    def test_generate_image_narration_does_not_execute(self, brain_with_tools):
+        reply = "Let me use the generate_image tool to draw that"
+        message = "a sunset over mountains"
+        assert brain_with_tools._extract_narrated_tool_intent(
+            reply, message
+        ) is not None
+
+        result, emit_fn = _run_instinct(
+            brain_with_tools, {"response": reply, "steps": []}, message,
+        )
+
+        brain_with_tools.state.tool_registry.execute_tool.assert_not_called()
+        assert result["response"] == reply
+        assert "chat:response" not in _emitted_events(emit_fn)
+
+    def test_skip_tools_does_not_check_narration(self, brain_with_tools):
+        with patch.object(
+            brain_with_tools, "_extract_narrated_tool_intent"
+        ) as extract:
+            result, _ = _run_instinct(
+                brain_with_tools,
+                {"response": SEARCH_REPLY, "steps": []},
+                SEARCH_MESSAGE,
+                skip_tools=True,
+            )
+
+        extract.assert_not_called()
+        brain_with_tools.state.tool_registry.execute_tool.assert_not_called()
+        assert result["response"] == SEARCH_REPLY
+
+    def test_tool_calls_in_steps_skip_narration_check(self, brain_with_tools):
+        steps = [{
+            "iteration": 1,
+            "thoughts": "",
+            "tool_calls": [{"tool_name": "web_search"}],
+        }]
+        with patch.object(
+            brain_with_tools, "_extract_narrated_tool_intent"
+        ) as extract:
+            result, _ = _run_instinct(
+                brain_with_tools,
+                {"response": SEARCH_REPLY, "steps": steps},
+                SEARCH_MESSAGE,
+            )
+
+        extract.assert_not_called()
+        brain_with_tools.state.tool_registry.execute_tool.assert_not_called()
+        assert result["response"] == SEARCH_REPLY
+
+    def test_tier_is_still_set(self, brain_with_tools):
+        result, _ = _run_instinct(
+            brain_with_tools,
+            {"response": SEARCH_REPLY, "steps": []},
+            SEARCH_MESSAGE,
+        )
+
+        assert result["tier"] == 2
