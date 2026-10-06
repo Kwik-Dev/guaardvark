@@ -111,6 +111,10 @@ class TestCommandWordsInEnglish:
             "apply for a passport",
             "stop being so verbose",
             "start a story about dragons",
+            "export my notes",
+            "export controls on chips explained",
+            "history of rome",
+            "history 3 times over, why does it repeat",
         ],
     )
     def test_session_command_word_with_more_text_is_chat(self, line, tmp_path):
@@ -120,6 +124,13 @@ class TestCommandWordsInEnglish:
     def test_bare_session_command_still_runs(self, word):
         assert resolve_repl_line(word) == (word, [])
         assert resolve_repl_line(word.capitalize()) == (word, [])
+
+    def test_history_runs_bare_or_with_one_number(self):
+        assert resolve_repl_line("history") == ("history", [])
+        assert resolve_repl_line("History") == ("history", [])
+        assert resolve_repl_line("history 3") == ("history", ["3"])
+        assert resolve_repl_line("history three") is None
+        assert resolve_repl_line("history -1") is None
 
     def test_start_plugin_rule_still_wins(self):
         assert resolve_repl_line("start comfyui") == ("plugins", ["start", "comfyui"])
