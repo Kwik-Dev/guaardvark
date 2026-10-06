@@ -116,6 +116,64 @@ def test_truncated_consensus_reply_gives_first_description_bible():
     assert out["class_token"] == ""
 
 
+_RESOLVER = "backend.services.ollama_chat_model"
+
+
+def _installed(monkeypatch, tags):
+    monkeypatch.setattr(f"{_RESOLVER}.installed_chat_tags", lambda: set(tags))
+    monkeypatch.setattr(f"{_RESOLVER}._saved_active_model", lambda: None)
+    monkeypatch.setattr(f"{_RESOLVER}._policy_model", lambda: None)
+
+
+def test_consensus_uses_an_installed_text_model_when_the_preference_is_missing(monkeypatch):
+    import ollama
+    _installed(monkeypatch, {"qwen3:8b", "llama3.2:1b"})
+    monkeypatch.setattr("backend.utils.ollama_resource_manager.think_payload", lambda m: {})
+    seen = []
+
+    def chat(*, model, messages, format=None, options=None, **kw):
+        seen.append(model)
+        return {"message": {"content": (
+            '{"class_token":"white wolf","marks":"thick white fur",'
+            '"bible":"A white wolf with thick white fur. Keep this exact appearance in every shot."}'
+        )}}
+
+    monkeypatch.setattr(ollama, "chat", chat)
+
+    out = consensus_identity_from_descriptions(["A white wolf with thick fur."], name="Frost")
+
+    assert seen and seen[0] != "gemma4:12b"
+    assert seen[0] in {"qwen3:8b", "llama3.2:1b"}
+    assert out["class_token"] == "white wolf"
+
+
+def test_consensus_prefers_the_same_family_when_the_exact_tag_is_missing(monkeypatch):
+    from backend.services.character_bible_from_refs import resolve_consensus_model
+    _installed(monkeypatch, {"gemma4:e4b", "qwen3:8b"})
+    assert resolve_consensus_model() == "gemma4:e4b"
+
+
+def test_bible_rebuild_fails_with_a_reason_when_no_chat_model_is_installed(monkeypatch, tmp_path):
+    from PIL import Image
+    from backend.services.character_bible_from_refs import (
+        NO_CONSENSUS_MODEL,
+        rebuild_bible_from_refs,
+    )
+    _installed(monkeypatch, set())
+    ref = tmp_path / "ref.png"
+    Image.new("RGB", (8, 8)).save(ref)
+
+    class _Analyzer:
+        def analyze(self, *a, **k):
+            raise AssertionError("vision should not run without a consensus model")
+
+    out = rebuild_bible_from_refs([str(ref)], name="Frost", analyzer=_Analyzer())
+
+    assert out["ok"] is False
+    assert out["error"] == NO_CONSENSUS_MODEL
+    assert out["bible"] == ""
+
+
 def test_marks_from_bible():
     marks = marks_from_bible(
         "Frost: thick white fur, amber eyes, bushy tail. "
