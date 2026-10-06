@@ -20,6 +20,10 @@ logger = logging.getLogger(__name__)
 # Create blueprint
 tools_bp = Blueprint("tools", __name__, url_prefix="/api/tools")
 
+# Saved and shown when a routed result carries no answer text. The result
+# itself is a Python dict and is never a reply.
+_NO_REPLY_TEXT = "No reply came back for this request."
+
 
 def _extract_and_save_screenshots(result):
     """Extract screenshot base64 data from agent result and save to files.
@@ -499,6 +503,17 @@ def route_and_execute():
         from backend.services.agent_router import execute_routed_message
         result = execute_routed_message(message, context)
 
+        # Nothing to run: the legacy router wants a model reply. Hand the turn
+        # back so the client sends it through unified chat, which saves both
+        # sides of the exchange itself; saving here would put the routing
+        # dict in the history as the answer.
+        if result.get("type") == "chat" and result.get("requires_llm"):
+            return jsonify({
+                "success": True,
+                "fallback_to_chat": True,
+                "result": result,
+            })
+
         # Extract screenshots from agent result and save to files
         screenshot_urls = _extract_and_save_screenshots(result)
         if screenshot_urls:
@@ -510,7 +525,7 @@ def route_and_execute():
         for url in screenshot_urls:
             display_content += f"\n\n![Screenshot]({url})"
         if not display_content.strip():
-            display_content = str(result)
+            display_content = _NO_REPLY_TEXT
 
         # Save messages to DB for chat history persistence
         session_id = context.get("session_id")
