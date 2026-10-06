@@ -109,3 +109,12 @@ def test_relative_root_narrows_to_the_project_root(tool, tmp_path):
         res = tool.execute(query="q", root="frontend/src/pages/", _agent_context={"project_root": str(tmp_path)})
     assert res.success
     assert seen["root"] == str(tmp_path.resolve())
+
+
+def test_a_request_root_that_is_not_a_folder_falls_back_to_the_checkout(tool, tmp_path):
+    seen = {}
+    with patch.object(cst, "_default_root", lambda: str(tmp_path)), \
+            patch.object(cst, "_hybrid_search", lambda root, q, l: seen.setdefault("root", root) and "hit"):
+        res = tool.execute(query="q", _agent_context={"project_root": "/api/users/list"})
+    assert res.success
+    assert seen["root"] == str(tmp_path.resolve())

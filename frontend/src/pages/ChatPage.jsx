@@ -1447,11 +1447,7 @@ const ChatPage = () => {
       // If no high-conf agent/file from router, fall through to normal unified chat (which hits AgentBrain).
       // detectFileGeneration now neutral (no regex).
 
-      let shouldContinueWithNormalChat = true;
-
       if (fileDetection?.isAgentLoopRequest) {
-        shouldContinueWithNormalChat = false;
-
         // The optimistic user bubble is already on screen; mark it sent rather
         // than appending a second copy of the same text.
         if (userMessageTempId) {
@@ -1551,11 +1547,10 @@ const ChatPage = () => {
         }
 
         // This return is what keeps an agent-loop turn out of the normal
-        // send; shouldContinueWithNormalChat is reset to true further down.
+        // send; a fallback_to_chat turn continues to it below.
         if (!fallBackToChat) {
           return;
         }
-        shouldContinueWithNormalChat = true;
       }
 
       if (fileDetection && (fileDetection.isCSVRequest || fileDetection.isCodeRequest)) {
@@ -1612,13 +1607,8 @@ const ChatPage = () => {
               },
               originalMessage: inputText,
             });
-
-
-            shouldContinueWithNormalChat = true;
-
           } catch (error) {
             console.error("Error opening file generation dialog:", error);
-            shouldContinueWithNormalChat = true;
           }
         } else {
           debugLog("File generation dialog already open, allowing normal chat flow");
@@ -1629,14 +1619,7 @@ const ChatPage = () => {
             content: "File generation is already in progress. I'll continue our conversation while that processes.",
           };
           setMessages((prev) => [...prev, infoMessage]);
-          shouldContinueWithNormalChat = true;
         }
-      } else {
-        shouldContinueWithNormalChat = true;
-      }
-
-      if (!shouldContinueWithNormalChat) {
-        shouldContinueWithNormalChat = true;
       }
 
       setIsSending(true);

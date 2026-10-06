@@ -143,7 +143,9 @@ export function useAgentRouter() {
   /**
    * Whether this route should use the legacy /tools/route-and-execute path.
    * Screen automation, agent-screen sessions and routes the backend marks
-   * execute_via "unified" (the AgentBrain preview) need unified chat instead.
+   * execute_via "unified" (the AgentBrain preview, and agent-loop matches that
+   * are not an explicit agent or MCP request; see is_explicit_agent_request in
+   * backend/services/agent_router.py) need unified chat instead.
    */
   const shouldUseLegacyAgentLoop = useCallback((routeDecision, sessionId) => {
     if (!routeDecision || routeDecision.route_type !== RouteType.AGENT_LOOP) {

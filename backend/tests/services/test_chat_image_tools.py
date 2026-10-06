@@ -187,3 +187,190 @@ def test_gpu_refusals_read_as_try_again():
     assert "Stopped" in _gpu_refusal(GpuWaitStopped("stopped"), {"wait_s": 600})
     assert _gpu_refusal(GpuCapacityError("does not fit"), {"wait_s": 600}) is None
     assert _gpu_refusal(RuntimeError("other"), None) is None
+
+
+# ── the live camera frame is context, never the user's picture ────────────
+
+CAMERA_FRAME = "Y2FtZXJhLWZyYW1l"  # base64 of b"camera-frame"
+
+
+def _camera_turn_engine(monkeypatch, sees_images):
+    """An engine whose photo intercepts are real; model, RAG and saves are recorded."""
+    import types
+    import backend.services.unified_chat_engine as uce
+    import backend.utils.chat_utils as chat_utils
+    import backend.utils.settings_utils as settings_utils
+
+    class _Tool:
+        requires_approval = False
+        read_only = True
+        observation_chars = 4000
+        parameters = {}
+        category = "test"
+
+        def __init__(self, name):
+            self.name = name
+            self.description = f"{name} tool"
+
+    class _Registry:
+        def __init__(self, names):
+            self._tools = {n: _Tool(n) for n in names}
+
+        def list_tools(self):
+            return list(self._tools)
+
+        def get_tool(self, name):
+            return self._tools.get(name)
+
+        def get_tool_names(self):
+            return list(self._tools)
+
+        def as_ollama_tools(self, tool_names=None):
+            return []
+
+        def execute_tool(self, name, on_output=None, agent_context=None, **params):
+            raise AssertionError(f"no tool should run on this turn, got {name}")
+
+    e = uce.UnifiedChatEngine.__new__(uce.UnifiedChatEngine)
+    e.registry = _Registry([
+        "edit_image", "remove_background", "outpaint_image", "generate_identity", "web_search",
+    ])
+    e.llm = types.SimpleNamespace(model="test-model")
+    e.max_iterations = 2
+    e.calls = {"rag": [], "direct": [], "llm_messages": [], "saved": []}
+
+    class _Selector:
+        def select(self, message, registry):
+            return ["web_search"]
+
+    e._semantic_selector = _Selector()
+    e._load_history = lambda session_id, limit=None: [
+        {"role": "user", "content": "explain the plan"},
+        {"role": "assistant", "content": "Here is a long explanation of the plan. " * 20},
+    ]
+    e._load_rules = lambda model_name: "ENGINE PERSONA"
+    e._build_system_prompt = lambda *a, **k: "SYSTEM"
+    e._get_routed_tools = lambda message: []
+    e._retrieve_rag_context = lambda message: e.calls["rag"].append(message) or "KB PASSAGE"
+    e._should_skip_rag = lambda message: False
+    e._format_interface_context = lambda options: ""
+    e._compact_history = lambda history, *a, **k: history
+    e._analyze_pasted_image = lambda *a, **k: None
+    e._warmup_chat_llm_async = lambda *a, **k: None
+    e._maybe_summarize_session = lambda session_id: None
+    e._save_message = lambda session_id, role, content, extra_data=None: e.calls["saved"].append(
+        (role, extra_data))
+    e._try_direct_tool = lambda *a, **k: None
+    for name in (
+        "_try_image_generate_retry", "_try_image_edit_retry", "_try_media_direct",
+        "_try_music_video_direct", "_try_film_crew_direct",
+        "_try_video_generate_direct", "_try_image_generate_direct",
+    ):
+        setattr(e, name, lambda *a, **k: None)
+
+    def _direct(tool, params, *a, **k):
+        e.calls["direct"].append(tool)
+        return {"success": True, "tool": tool}
+
+    e._run_direct_tool_execution = _direct
+
+    def _llm(messages, emit_fn, session_id, emit_tokens=True, max_tokens=768, iteration=1):
+        e.calls["llm_messages"].append(list(messages))
+        return "Here is the shorter version.", 1, 1
+
+    e._call_llm_streaming = _llm
+    e._last_llm_call_meta = {}
+
+    monkeypatch.setattr(uce, "is_aborted", lambda session_id: False)
+    monkeypatch.setattr(uce, "match_workstation_direct", lambda message: None)
+    monkeypatch.setattr(settings_utils, "get_setting", lambda key, default=None: default)
+    monkeypatch.setattr(chat_utils, "is_vision_model", lambda model_name: sees_images)
+    return e
+
+
+def _camera_turn(e, message):
+    options = {"camera_frame": CAMERA_FRAME, "think": False, "skip_memory_capture": True}
+    return e.chat("sess-camera", message, options, lambda name, payload: None)
+
+
+def test_camera_frame_is_not_an_edit_source_and_rag_runs(monkeypatch):
+    from backend.utils.vision_context_utils import CAMERA_FRAME_NOTE
+
+    e = _camera_turn_engine(monkeypatch, sees_images=True)
+
+    result = _camera_turn(e, "make it shorter")
+
+    assert result.get("success") is not False, result
+    assert e.calls["direct"] == []
+    assert e.calls["rag"] == ["make it shorter"]
+    user_turn = next(m for m in reversed(e.calls["llm_messages"][0]) if m["role"] == "user")
+    assert user_turn["images"] == [CAMERA_FRAME]
+    assert CAMERA_FRAME_NOTE in user_turn["content"]
+    assert ("user", None) in e.calls["saved"]
+
+
+def test_camera_frame_is_not_sent_to_a_model_that_cannot_see(monkeypatch):
+    e = _camera_turn_engine(monkeypatch, sees_images=False)
+
+    _camera_turn(e, "make it shorter")
+
+    assert e.calls["direct"] == []
+    assert e.calls["rag"] == ["make it shorter"]
+    assert all("images" not in m for m in e.calls["llm_messages"][0])
+
+
+def test_api_sends_the_camera_frame_as_context_not_as_the_image(monkeypatch):
+    import threading
+    import types
+    from flask import Flask
+
+    import backend.api.unified_chat_api as api
+    import backend.config as config
+    import backend.services.unified_chat_engine as uce
+    import backend.tools.tool_registry_init as tool_registry_init
+    import backend.utils.vision_context_utils as vision_context_utils
+
+    received = []
+
+    class _Engine:
+        def __init__(self, *a, **k):
+            pass
+
+        def chat(self, session_id, message, options, emit_fn, **kwargs):
+            received.append((dict(options), kwargs))
+
+    started = []
+
+    class _Thread(threading.Thread):
+        def start(self):
+            started.append(self)
+            super().start()
+
+    monkeypatch.setattr(config, "AGENT_BRAIN_ENABLED", False)
+    monkeypatch.setattr(tool_registry_init, "initialize_all_tools", lambda: object())
+    monkeypatch.setattr(uce, "UnifiedChatEngine", _Engine)
+    monkeypatch.setattr(vision_context_utils, "get_vision_context", lambda: {"is_active": True})
+    monkeypatch.setattr(vision_context_utils, "get_latest_frame", lambda: CAMERA_FRAME)
+    monkeypatch.setattr(api, "_inflight", {})
+    monkeypatch.setattr(api, "threading", types.SimpleNamespace(
+        Thread=_Thread, get_ident=threading.get_ident,
+        current_thread=threading.current_thread, Lock=threading.Lock,
+    ))
+
+    app = Flask("test_camera_frame_api")
+    app.config["LLAMA_INDEX_LLM"] = object()
+    app.register_blueprint(api.unified_chat_bp)
+    response = app.test_client().post("/api/chat/unified", json={
+        "session_id": "sess-camera-api",
+        "message": "make it shorter",
+        "options": {"camera_frame": "sent-by-the-client"},
+    })
+    for thread in started:
+        thread.join(timeout=10)
+
+    assert response.status_code == 200
+    assert len(received) == 1
+    options, kwargs = received[0]
+    assert options["camera_frame"] == CAMERA_FRAME
+    assert kwargs["image_data"] is None
+    assert kwargs["image_url"] is None

@@ -120,3 +120,33 @@ def test_a_legacy_route_carries_no_execute_via(client, monkeypatch):
     route = client.post("/api/tools/route", json={"message": "what is an agent?"}).get_json()["route"]
 
     assert route["execute_via"] is None
+
+
+def _legacy_route(client, monkeypatch, message):
+    _brain_ready(monkeypatch, False)
+    return client.post("/api/tools/route", json={"message": message}).get_json()["route"]
+
+
+@pytest.mark.parametrize("message", [
+    "how should I implement a cache for my API?",
+    "compare A and B and then recommend one",
+    "first outline the plan, then write the summary",
+])
+def test_an_everyday_agent_loop_match_goes_to_unified_chat(client, monkeypatch, message):
+    route = _legacy_route(client, monkeypatch, message)
+
+    assert route["route_type"] == "agent_loop"
+    assert route["execute_via"] == "unified"
+
+
+@pytest.mark.parametrize("message", [
+    "/agent list the files in my project",
+    "/desktop list running apps",
+    "use the agent to tidy my downloads",
+    "list available mcp servers",
+])
+def test_an_explicit_agent_request_keeps_the_legacy_loop(client, monkeypatch, message):
+    route = _legacy_route(client, monkeypatch, message)
+
+    assert route["route_type"] == "agent_loop"
+    assert route["execute_via"] is None
