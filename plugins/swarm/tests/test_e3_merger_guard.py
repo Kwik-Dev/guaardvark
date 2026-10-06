@@ -4,8 +4,10 @@ Also verifies enable_merger_agent now defaults OFF, and that a merge the
 merger agent resolves is staged and committed, or aborted cleanly.
 """
 
+import json
 import os
 import subprocess
+import sys
 
 import pytest
 
@@ -162,8 +164,7 @@ def _commit_file(repo, text, message):
     _git(repo, "commit", "-q", "-m", message)
 
 
-@pytest.fixture
-def conflicted_repo(tmp_path, monkeypatch):
+def _make_conflicted_repo(tmp_path, monkeypatch, with_test=False):
     import service.merge_manager as merge_mod
 
     # Not the subject here, and it would read this machine's guard settings.
@@ -178,12 +179,27 @@ def conflicted_repo(tmp_path, monkeypatch):
     for key, value in (("user.name", "Swarm Test"), ("user.email", "t@example.invalid"),
                        ("commit.gpgsign", "false"), ("core.hooksPath", str(no_hooks))):
         _git(repo, "config", key, value)
+    if with_test:
+        (repo / "tests").mkdir()
+        (repo / "tests" / "test_thing.py").write_text("def test_a():\n    pass\n")
+        _git(repo, "add", "tests/test_thing.py")
     _commit_file(repo, "a = 0\n", "base")
     _git(repo, "checkout", "-q", "-b", "swarm/t1")
     _commit_file(repo, "a = 2\n", "branch sets a to 2")
     _git(repo, "checkout", "-q", "main")
     _commit_file(repo, "a = 1\n", "main sets a to 1")
     return repo
+
+
+@pytest.fixture
+def conflicted_repo(tmp_path, monkeypatch):
+    return _make_conflicted_repo(tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def conflicted_repo_with_test(tmp_path, monkeypatch):
+    """The conflicted module has a test file, tests/test_thing.py."""
+    return _make_conflicted_repo(tmp_path, monkeypatch, with_test=True)
 
 
 class _StubMerger:
@@ -256,6 +272,72 @@ def test_an_unresolved_conflict_is_aborted(conflicted_repo):
     result, task = _merge(conflicted_repo, _StubMerger(resolved=False))
 
     assert result.success is False
+    assert task.status == SwarmStatus.NEEDS_REVIEW
+    assert _git(conflicted_repo, "rev-parse", "HEAD").stdout.strip() == head
+    _assert_not_mid_merge(conflicted_repo)
+
+
+# ---- tests on the resolved merge --------------------------------------------------
+
+def _recording_test_command(tmp_path, exit_code):
+    """A test command that records its arguments and working directory, then exits."""
+    record = tmp_path / "test-run.json"
+    script = tmp_path / "fake_test_runner.py"
+    script.write_text(
+        "import json, os, sys\n"
+        f"open({str(record)!r}, 'w').write(json.dumps({{'args': sys.argv[1:], 'cwd': os.getcwd()}}))\n"
+        f"sys.exit({exit_code})\n"
+    )
+
+    def ran():
+        return json.loads(record.read_text()) if record.exists() else None
+
+    return f"{sys.executable} {script}", ran
+
+
+def test_failing_tests_on_the_resolved_merge_abort_it(conflicted_repo_with_test, tmp_path):
+    from service.models import SwarmStatus
+
+    repo = conflicted_repo_with_test
+    head = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    command, ran = _recording_test_command(tmp_path, exit_code=1)
+
+    result, task = _merge(repo, _StubMerger(), run_tests=True, test_command=command)
+
+    assert ran() == {"args": ["tests/test_thing.py"], "cwd": str(repo.resolve())}
+    assert result.success is False
+    assert "Tests failed on the resolved merge" in result.error
+    assert task.status == SwarmStatus.NEEDS_REVIEW
+    assert _git(repo, "rev-parse", "HEAD").stdout.strip() == head
+    assert (repo / "thing.py").read_text() == "a = 1\n"
+    _assert_not_mid_merge(repo)
+
+
+def test_passing_tests_let_the_resolution_commit(conflicted_repo_with_test, tmp_path):
+    from service.models import SwarmStatus
+
+    repo = conflicted_repo_with_test
+    command, ran = _recording_test_command(tmp_path, exit_code=0)
+
+    result, task = _merge(repo, _StubMerger(), run_tests=True, test_command=command)
+
+    assert ran() == {"args": ["tests/test_thing.py"], "cwd": str(repo.resolve())}
+    assert result.success is True, result.error
+    assert task.status == SwarmStatus.MERGED
+    _assert_not_mid_merge(repo)
+
+
+def test_a_resolution_no_test_covers_is_not_committed(conflicted_repo, tmp_path):
+    from service.models import SwarmStatus
+
+    head = _git(conflicted_repo, "rev-parse", "HEAD").stdout.strip()
+    command, ran = _recording_test_command(tmp_path, exit_code=0)
+
+    result, task = _merge(conflicted_repo, _StubMerger(), run_tests=True, test_command=command)
+
+    assert ran() is None, "nothing to run, and never the whole suite"
+    assert result.success is False
+    assert "No tests cover" in result.error
     assert task.status == SwarmStatus.NEEDS_REVIEW
     assert _git(conflicted_repo, "rev-parse", "HEAD").stdout.strip() == head
     _assert_not_mid_merge(conflicted_repo)

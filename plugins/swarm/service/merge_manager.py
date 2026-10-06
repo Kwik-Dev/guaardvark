@@ -13,7 +13,7 @@ import importlib
 import logging
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .models import MergeResult, SwarmTask, SwarmStatus
 
@@ -185,7 +185,7 @@ class MergeManager:
         
         # If conflicts found and MergerAgent is enabled, try to resolve them
         if not check.success and self._merger:
-            return self._merge_with_resolution(task, check)
+            return self._merge_with_resolution(task, check, run_tests, test_command)
 
         if not check.success:
             task.status = SwarmStatus.NEEDS_REVIEW
@@ -216,12 +216,20 @@ class MergeManager:
                 error=result.stderr.strip(),
             )
 
-    def _merge_with_resolution(self, task: SwarmTask, check: MergeResult) -> MergeResult:
+    def _merge_with_resolution(
+        self,
+        task: SwarmTask,
+        check: MergeResult,
+        run_tests: bool = False,
+        test_command: str = "python3 -m pytest",
+    ) -> MergeResult:
         """Merge ``task``'s branch with the merger agent resolving the conflicts.
 
-        Commits only when every conflicted path was resolved and staged. Any
-        other outcome, an exception included, runs ``git merge --abort`` so the
-        checkout is never left mid-merge, and leaves the task for review.
+        Commits only when every conflicted path was resolved and staged and,
+        with ``run_tests``, the tests for the files the merge touches pass on
+        the resolved tree. Any other outcome, an exception included, runs
+        ``git merge --abort`` so the checkout is never left mid-merge, and
+        leaves the task for review.
         """
         logger.info(f"Conflict detected for {task.id}, invoking MergerAgent...")
         try:
@@ -243,6 +251,11 @@ class MergeManager:
                 return self._abort_for_review(
                     task, check, f"Still unmerged after resolution: {', '.join(unmerged)}")
 
+            if run_tests:
+                failure = self._test_resolved_merge(test_command)
+                if failure:
+                    return self._abort_for_review(task, check, failure)
+
             self._git("commit", "-m", f"swarm: merge {task.id} (resolved by MergerAgent)")
         except Exception as exc:
             logger.error(f"Merge with MergerAgent failed for {task.id}: {exc}")
@@ -251,6 +264,46 @@ class MergeManager:
         logger.info(f"MergerAgent resolved conflicts for {task.id}; merged.")
         task.status = SwarmStatus.MERGED
         return MergeResult(task_id=task.id, success=True)
+
+    def _test_resolved_merge(self, test_command: str) -> str | None:
+        """Run the tests for the files this merge touches, on the resolved tree.
+
+        Only those test files are passed to the test command, never the whole
+        suite: this is the main checkout, where a full run can reach the live
+        database. A merge no test covers is not committed untested. Returns
+        the reason to abort, or None when the tests passed.
+        """
+        touched = self._git("diff", "--cached", "--name-only", "HEAD").stdout.splitlines()
+        targets = self._test_targets(touched)
+        if not targets:
+            return ("No tests cover the files this merge touches, so the "
+                    "MergerAgent's resolution was not committed untested")
+        if not self._run_tests(str(self.repo_path), test_command, targets):
+            return f"Tests failed on the resolved merge: {' '.join(targets)}"
+        return None
+
+    def _test_targets(self, touched: list[str]) -> list[str]:
+        """Test files for ``touched`` paths: the test files among them, and
+        test_<name>.py / <name>_test.py anywhere in the repo for each touched
+        Python module."""
+        by_name: dict[str, list[str]] = {}
+        for path in self._git("ls-files", check=False).stdout.splitlines():
+            by_name.setdefault(PurePosixPath(path).name, []).append(path)
+
+        targets: list[str] = []
+        for path in touched:
+            name = PurePosixPath(path).name
+            if not name.endswith(".py"):
+                continue
+            if name.startswith("test_") or name.endswith("_test.py"):
+                candidates = [path]
+            else:
+                stem = name[:-3]
+                candidates = by_name.get(f"test_{stem}.py", []) + by_name.get(f"{stem}_test.py", [])
+            for candidate in candidates:
+                if candidate not in targets and (self.repo_path / candidate).is_file():
+                    targets.append(candidate)
+        return targets
 
     def _abort_for_review(self, task: SwarmTask, check: MergeResult, reason: str) -> MergeResult:
         """Abort the merge in progress and leave the task for a person."""
@@ -356,12 +409,13 @@ class MergeManager:
             return result.stdout.strip().split("\n")
         return []
 
-    def _run_tests(self, worktree_path: str, test_command: str) -> bool:
-        """Run tests in a worktree. Returns True if they pass."""
-        logger.info(f"Running tests in {worktree_path}: {test_command}")
+    def _run_tests(self, worktree_path: str, test_command: str, targets: list[str] | None = None) -> bool:
+        """Run tests in a worktree, limited to ``targets`` when given. Returns True if they pass."""
+        command = test_command.split() + list(targets or [])
+        logger.info(f"Running tests in {worktree_path}: {' '.join(command)}")
         try:
             result = subprocess.run(
-                test_command.split(),
+                command,
                 cwd=worktree_path,
                 capture_output=True,
                 text=True,
