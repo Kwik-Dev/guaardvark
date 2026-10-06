@@ -51,6 +51,19 @@ def torch_channel(gpu: dict[str, Any], rocm_whl: str = DEFAULT_ROCM_WHL) -> str:
     return "cpu"
 
 
+def gpu_memory_mb(gpu: dict[str, Any]) -> int:
+    """Memory the GPU can use, in MB: its VRAM, or for an NVIDIA GPU that shares
+    the machine's memory (GB10 / DGX Spark, where nvidia-smi has no VRAM figure)
+    the unified pool. 0 when unknown."""
+    gpu = gpu or {}
+    vram = gpu.get("vram_mb") or 0
+    if vram > 0:
+        return int(vram)
+    if gpu.get("vendor") == "nvidia" and (gpu.get("unified_memory_gb") or 0) > 0:
+        return int(gpu["unified_memory_gb"] * 1024)
+    return 0
+
+
 def ollama_tuning(gpu: dict[str, Any]) -> dict[str, Any]:
     """Derive Ollama server env from VRAM.
 
@@ -65,7 +78,7 @@ def ollama_tuning(gpu: dict[str, Any]) -> dict[str, Any]:
     Gemma4 box_2d spatial outputs; May-2026 working aim used full-precision KV.
     """
     vendor = (gpu or {}).get("vendor", "none")
-    vram = (gpu or {}).get("vram_mb") or 0
+    vram = gpu_memory_mb(gpu)
     if vendor not in ("nvidia", "amd") or vram <= 0:
         return {
             "NUM_PARALLEL": 1,
@@ -104,9 +117,11 @@ def ollama_tuning(gpu: dict[str, Any]) -> dict[str, Any]:
 def model_tier(ram_gb: float, gpu: dict[str, Any], arch: str) -> dict[str, str]:
     """Pick chat + embed models for the host.
 
-    Mirrors start.sh's bootstrap tiers: <=8 GB RAM or ARM -> 1B chat model;
-    otherwise the standard vision-capable Gemma4 chat model. Embed model is
-    constant.
+    Mirrors start.sh's bootstrap tiers: <=8 GB RAM, or an ARM board without an
+    NVIDIA GPU (a Raspberry Pi class machine) -> 1B chat model; otherwise the
+    standard vision-capable Gemma4 chat model. An ARM machine with an NVIDIA GPU
+    (GB10 / DGX Spark, Jetson) gets the standard tier when it has the memory.
+    Embed model is constant.
 
     Gemma4 is the default because it's the model the agentic screen-control
     system (servo / box_2d) is validated against — see the "validate non-Gemma4
@@ -117,8 +132,8 @@ def model_tier(ram_gb: float, gpu: dict[str, Any], arch: str) -> dict[str, str]:
     selection is RAM/arch-driven only.
     """
     arch = (arch or "").lower()
-    is_arm = arch in ("aarch64", "arm64")
-    if is_arm or (0 < (ram_gb or 0) <= 8):
+    small_arm = arch in ("aarch64", "arm64") and (gpu or {}).get("vendor") != "nvidia"
+    if small_arm or (0 < (ram_gb or 0) <= 8):
         return {"chat": "llama3.2:1b", "embed": "nomic-embed-text"}
     return {"chat": "gemma4:e2b", "embed": "nomic-embed-text"}
 

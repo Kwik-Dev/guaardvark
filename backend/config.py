@@ -381,8 +381,9 @@ def _hardware_default_llm() -> str:
     """Hardware-aware hard fallback for the default chat model.
 
     Mirrors the get_chat_keep_alive / default_advanced_rag hardware-detection pattern
-    in this file: on a small box (≤8GB RAM) or ARM (aarch64/arm64), a fresh install
-    should default to a 1-3B tag so first-run chat actually loads; otherwise the
+    in this file: on a small box (≤8GB RAM) or an ARM board without an NVIDIA GPU, a
+    fresh install should default to a 1-3B tag so first-run chat actually loads
+    (hardware_policy.model_tier is the source of truth); otherwise the
     standard vision-capable Gemma4 default (gemma4:e2b — the model the agentic
     system is validated against). GUAARDVARK_DEFAULT_LLM always overrides.
     Detection failure stays defensive and never crashes.
@@ -402,7 +403,8 @@ def _hardware_default_llm() -> str:
                         break
         except OSError:
             ram_gb = 0
-        if arch in ("aarch64", "arm64") or (0 < ram_gb <= 8):
+        nvidia = os.path.exists("/proc/driver/nvidia/version")
+        if (arch in ("aarch64", "arm64") and not nvidia) or (0 < ram_gb <= 8):
             return "llama3.2:1b"
     except Exception:
         pass

@@ -110,6 +110,33 @@ def test_nvidia_probe_includes_compute_cap(monkeypatch):
     assert gpu["compute_cap"] == "12.0"
 
 
+def test_nvidia_probe_keeps_a_unified_memory_gpu(monkeypatch):
+    # GB10 (DGX Spark) shares RAM with the GPU; nvidia-smi prints [N/A] for
+    # memory.total. The GPU must still be found, with the RAM as its memory.
+    import subprocess
+    from backend.services import hardware_detector as hd
+
+    def fake_run(args, **kwargs):
+        if "--query-gpu=name,memory.total,driver_version,compute_cap" in args:
+            class R:
+                returncode = 0
+                stdout = "NVIDIA GB10, [N/A], 580.95.05, 12.1\n"
+            return R()
+        class Empty:
+            returncode = 1
+            stdout = ""
+        return Empty()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    det = hd.HardwareDetector(node_id_path="/tmp/_gx_nodeid_test")
+    monkeypatch.setattr(det, "_probe_ram", lambda: {"total_gb": 119.7})
+    gpu = det._probe_gpu_nvidia()
+    assert gpu["vendor"] == "nvidia"
+    assert gpu["vram_mb"] is None
+    assert gpu["unified_memory_gb"] == 119.7
+    assert gpu["compute_cap"] == "12.1"
+
+
 def test_network_probe_flags_e1000e_quirk(tmp_path):
     """A physical NIC on the e1000e driver carries the tx_unit_hang quirk;
     virtual interfaces (no device entry) are skipped."""
