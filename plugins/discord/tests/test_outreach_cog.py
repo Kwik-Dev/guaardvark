@@ -6,6 +6,8 @@ next poll, after the cadence check, the claim and /submit. Discord and the
 backend are stand-ins: FakeBackend keeps one status per draft and answers the
 routes the cog calls.
 """
+import logging
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -21,17 +23,22 @@ MSG_ID = 999
 
 
 class FakeBackend:
-    """The /social-outreach routes the cog uses, with the backend's transitions."""
+    """The /social-outreach routes the cog uses, with the backend's transitions
+    and its Discord cadence (a recorded post starts the 30-minute gap)."""
 
     def __init__(self, *, would_post=True):
         self.would_post = would_post
         self.rows = {}
         self.calls = []
+        self.recorded_at = []
+        self.record_fails = False
 
     async def _get(self, path):
         if path == "/social-outreach/status":
+            last = int(time.time() - self.recorded_at[-1]) if self.recorded_at else None
             return {"enabled": True, "supervised": False, "cadence": {"discord": {
-                "posts_in_24h": 0, "daily_cap": 8, "last_post_seconds_ago": None, "min_gap_s": 1800,
+                "posts_in_24h": len(self.recorded_at), "daily_cap": 8,
+                "last_post_seconds_ago": last, "min_gap_s": 1800,
             }}}
         if path == "/social-outreach/approved":
             return [dict(row, id=i) for i, row in self.rows.items() if row["status"] == "approved"]
@@ -47,7 +54,10 @@ class FakeBackend:
             }
             return {"draft": DRAFT, "grade": 0.9, "would_post": self.would_post, "audit_id": audit_id}
         if path == "/social-outreach/record-post":
+            if self.record_fails:
+                raise APIError("outreach disabled (kill switch)", status_code=403)
             self.rows[json["audit_id"]]["status"] = "posted"
+            self.recorded_at.append(time.time())
             return {"ok": True}
         verb, audit_id = path.rsplit("/", 2)[-2:]
         row = self.rows[int(audit_id)]
@@ -169,3 +179,76 @@ async def test_a_held_draft_is_never_sent(cog):
 
     msg.reply.assert_not_called()
     assert cog.api.rows[1]["status"] == "drafted"
+
+
+# ---- a reply that went out counts even when record-post fails ----------------------------
+
+def _approve(cog, *audit_ids):
+    for audit_id in audit_ids:
+        cog.api.rows[audit_id] = {"platform": "discord", "draft_text": DRAFT, "status": "approved",
+                                  "target_url": f"https://discord.com/channels/1/{CHANNEL_ID}/{MSG_ID}"}
+
+
+@pytest.mark.asyncio
+async def test_a_sent_reply_ends_the_tick_when_record_post_fails(cog, caplog):
+    msg = _message()
+    _route_to(cog, msg)
+    _approve(cog, 7, 8)
+    cog.api.record_fails = True
+
+    with caplog.at_level(logging.ERROR, logger="discord_bot"):
+        await cog.poll_approved_drafts()
+
+    msg.reply.assert_awaited_once()
+    assert cog.api.rows[8]["status"] == "approved"
+    assert "/social-outreach/reject/7" not in cog.api.calls
+    assert any(
+        r.levelno == logging.ERROR and "WAS SENT but record-post failed" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_unrecorded_reply_holds_the_gap_and_is_recorded_later(cog):
+    msg = _message()
+    _route_to(cog, msg)
+    _approve(cog, 7, 8)
+    cog.api.record_fails = True
+    await cog.poll_approved_drafts()
+
+    # The backend still knows of no post; the unrecorded reply holds the gap.
+    await cog.poll_approved_drafts()
+    msg.reply.assert_awaited_once()
+    assert cog.api.rows[8]["status"] == "approved"
+
+    # Record-post works again: the retry records the reply, and the backend's
+    # own cadence now holds the gap.
+    cog.api.record_fails = False
+    await cog.poll_approved_drafts()
+    msg.reply.assert_awaited_once()
+    assert cog.api.rows[7]["status"] == "posted"
+    assert cog.api.rows[8]["status"] == "approved"
+    assert cog._unrecorded == []
+
+
+@pytest.mark.asyncio
+async def test_an_unrecorded_reply_counts_toward_the_daily_cap(cog):
+    _approve(cog, 8)
+    _route_to(cog, _message())
+    cog._unrecorded = [{"payload": {"audit_id": i, "platform": "discord"}, "sent_at": time.time() - 3 * 3600}
+                       for i in range(8)]
+    cog.api.record_fails = True
+
+    await cog.poll_approved_drafts()
+
+    assert cog.api.rows[8]["status"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_an_unrecorded_reply_is_dropped_after_a_day(cog):
+    cog._unrecorded = [{"payload": {"audit_id": 7, "platform": "discord"}, "sent_at": time.time() - 25 * 3600}]
+
+    await cog.poll_approved_drafts()
+
+    assert cog._unrecorded == []
+    assert "/social-outreach/record-post" not in cog.api.calls
