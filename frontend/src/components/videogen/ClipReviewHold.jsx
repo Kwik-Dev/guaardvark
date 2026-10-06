@@ -27,14 +27,18 @@ export const ReviewStatePill = ({ review }) => {
  * @param {Function} onApprove   keep the clip as rendered
  * @param {Function} onRerender  render it again as a new batch
  * @param {boolean}  [busy]
+ * @param {string}   [heldText]  what waits on the person's answer
  */
-const ClipReviewHold = ({ review, onApprove, onRerender, busy = false }) => {
+const ClipReviewHold = ({
+  review, onApprove, onRerender, busy = false,
+  heldText = "It is not added to Files until you approve it.",
+}) => {
   if (review?.state !== "needs_review") return null;
   const reasons = (review.reasons || []).join("; ");
   return (
     <Box sx={{ mt: 1 }}>
       <Typography variant="caption" color="warning.main" sx={{ display: "block" }}>
-        Held for review{reasons ? `: ${reasons}` : ""}. It is not added to Files until you approve it.
+        Held for review{reasons ? `: ${reasons}` : ""}. {heldText}
       </Typography>
       <Stack direction="row" spacing={1} sx={{ mt: 0.75 }}>
         <ActionButton onClick={onApprove} loading={busy}>Approve</ActionButton>

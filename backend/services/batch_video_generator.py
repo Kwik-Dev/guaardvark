@@ -241,6 +241,92 @@ def auto_retry_enabled() -> bool:
     return (os.environ.get(AUTO_RETRY_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def clip_quality_record(
+    video_path: str,
+    *,
+    expected: Optional[Dict] = None,
+    keyframe_path: Optional[str] = None,
+    cinematic: bool = False,
+    vlm_review: bool = False,
+) -> Optional[Dict]:
+    """The quality record of a finished clip, shared by Video Gen batches and
+    music-video cuts. Never raises; None only when the checks cannot be imported.
+
+    The frame checker's flags (``flags``: code and a plain message) mark a clip
+    that finished but is not usable; ``expected`` holds the width, height and
+    frame count the request resolved to. ``cinematic`` with a ``keyframe_path``
+    adds the keyframe colour match; ``vlm_review`` adds the vision review.
+    """
+    try:
+        from backend.services.video_consistency_metrics import (
+            compute_basic_video_stats,
+            inspect_video_frames,
+            colour_match,
+            QUALITY_THRESHOLDS,
+            review_video_quality,
+            not_reviewed,
+        )
+    except Exception as e:
+        logger.debug("quality metrics import failed: %s", e)
+        return None
+
+    quality: Dict = {"flagged": False, "flag_reasons": [], "flags": []}
+    try:
+        quality["stats"] = compute_basic_video_stats(video_path)
+    except Exception as e:
+        logger.debug("basic video stats failed: %s", e)
+
+    try:
+        check = inspect_video_frames(video_path, **(expected or {}))
+        quality["frames"] = {k: check.get(k) for k in (
+            "readable", "width", "height", "frames", "fps", "duration_s", "sampled", "metrics",
+            "observations")}
+        quality["flags"] = check.get("flags") or []
+        if quality["flags"]:
+            quality["flagged"] = True
+            quality["flag_reasons"].extend(f["code"] for f in quality["flags"])
+    except Exception as e:  # noqa: BLE001 — the checker must never fail a render
+        logger.warning("frame quality check skipped for %s: %s", video_path, e)
+
+    if cinematic and keyframe_path and Path(keyframe_path).exists():
+        # The keyframe's palette against the middle frame: a colour match,
+        # not a check of who is in the shot.
+        match = colour_match(
+            keyframe_path, video_path, frame_count=(quality.get("frames") or {}).get("frames"),
+        )
+        quality["colour_match"] = match
+        score = match.get("score")
+        if isinstance(score, (int, float)) and score < QUALITY_THRESHOLDS["colour_match_floor"]["value"]:
+            quality["flagged"] = True
+            quality["flag_reasons"].append(f"low_colour_match:{score:.2f}")
+            quality["flags"].append({
+                "code": "low_colour_match",
+                "message": (f"colours drift from the keyframe: colour match {score:.2f} "
+                            f"at frame {match['frame_index']} of {match['frames']}"),
+            })
+
+    # The VLM review, where the caller enables it. A review that did not
+    # produce a score is recorded as "not reviewed" with its reason, never
+    # left out: a missing review must not read as a clean pass.
+    if vlm_review:
+        try:
+            review = review_video_quality(video_path, annotate=False)
+        except Exception as e:  # noqa: BLE001 — the review must never fail a render
+            logger.warning("VLM video review failed for %s: %s", video_path, e)
+            review = not_reviewed("review_error", detail=str(e))
+        quality["vlm_review"] = review
+        if review.get("status") == "reviewed":
+            qscore = (review.get("review") or {}).get("quality_score")
+            if isinstance(qscore, (int, float)) and qscore < QUALITY_THRESHOLDS["vlm_score_floor"]["value"]:
+                quality["flagged"] = True
+                quality["flag_reasons"].append(f"low_vlm_score:{qscore}")
+                quality["flags"].append({
+                    "code": "low_vlm_score",
+                    "message": f"the vision review scored it {qscore}/10",
+                })
+    return quality
+
+
 class BatchVideoGenerator:
     """Service for generating multiple videos in batch with basic progress tracking."""
 
@@ -437,79 +523,16 @@ class BatchVideoGenerator:
     ) -> None:
         """Quality record for a completed clip (never raises / never fails the item).
 
-        ``video_path`` is the clip's absolute path. The frame checker's flags
-        (``quality.flags``: code and a plain message) mark a clip that finished
-        but is not usable; ``expected`` holds the width, height and frame count
-        the request resolved to."""
-        try:
-            from backend.services.video_consistency_metrics import (
-                compute_basic_video_stats,
-                inspect_video_frames,
-                colour_match,
-                QUALITY_THRESHOLDS,
-                review_video_quality,
-                review_hold,
-                not_reviewed,
-                annotate_asset,
-            )
-        except Exception as e:
-            logger.debug("quality metrics import failed: %s", e)
+        ``video_path`` is the clip's absolute path. See clip_quality_record for
+        what is checked; a flag holds the clip for review (review_hold). The VLM
+        review runs for cinematic and high-consistency runs."""
+        quality = clip_quality_record(
+            video_path, expected=expected, keyframe_path=keyframe_path,
+            cinematic=cinematic, vlm_review=bool(high_consistency or cinematic),
+        )
+        if quality is None:
             return
-
-        quality: Dict = {"flagged": False, "flag_reasons": [], "flags": []}
-        try:
-            quality["stats"] = compute_basic_video_stats(video_path)
-        except Exception as e:
-            logger.debug("basic video stats failed: %s", e)
-
-        try:
-            check = inspect_video_frames(video_path, **(expected or {}))
-            quality["frames"] = {k: check.get(k) for k in (
-                "readable", "width", "height", "frames", "fps", "duration_s", "sampled", "metrics",
-                "observations")}
-            quality["flags"] = check.get("flags") or []
-            if quality["flags"]:
-                quality["flagged"] = True
-                quality["flag_reasons"].extend(f["code"] for f in quality["flags"])
-        except Exception as e:  # noqa: BLE001 — the checker must never fail a render
-            logger.warning("frame quality check skipped for %s: %s", video_path, e)
-
-        if cinematic and keyframe_path and Path(keyframe_path).exists():
-            # The keyframe's palette against the middle frame: a colour match,
-            # not a check of who is in the shot.
-            match = colour_match(
-                keyframe_path, video_path, frame_count=(quality.get("frames") or {}).get("frames"),
-            )
-            quality["colour_match"] = match
-            score = match.get("score")
-            if isinstance(score, (int, float)) and score < QUALITY_THRESHOLDS["colour_match_floor"]["value"]:
-                quality["flagged"] = True
-                quality["flag_reasons"].append(f"low_colour_match:{score:.2f}")
-                quality["flags"].append({
-                    "code": "low_colour_match",
-                    "message": (f"colours drift from the keyframe: colour match {score:.2f} "
-                                f"at frame {match['frame_index']} of {match['frames']}"),
-                })
-
-        # VLM review for high-consistency / cinematic runs. A review that did not
-        # produce a score is recorded as "not reviewed" with its reason, never
-        # left out: a missing review must not read as a clean pass.
-        if high_consistency or cinematic:
-            try:
-                review = review_video_quality(video_path, annotate=False)
-            except Exception as e:  # noqa: BLE001 — the review must never fail a render
-                logger.warning("VLM video review failed for %s: %s", video_path, e)
-                review = not_reviewed("review_error", detail=str(e))
-            quality["vlm_review"] = review
-            if review.get("status") == "reviewed":
-                qscore = (review.get("review") or {}).get("quality_score")
-                if isinstance(qscore, (int, float)) and qscore < QUALITY_THRESHOLDS["vlm_score_floor"]["value"]:
-                    quality["flagged"] = True
-                    quality["flag_reasons"].append(f"low_vlm_score:{qscore}")
-                    quality["flags"].append({
-                        "code": "low_vlm_score",
-                        "message": f"the vision review scored it {qscore}/10",
-                    })
+        from backend.services.video_consistency_metrics import annotate_asset, review_hold
 
         batch_result.metadata = dict(batch_result.metadata or {})
         batch_result.metadata["quality"] = quality
