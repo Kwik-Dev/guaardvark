@@ -73,7 +73,7 @@ def _train_impl(subject_id: int, job_id: str | None = None) -> dict:
         if not marks and cfg.get("bible_vision_tags"):
             marks = ", ".join(cfg["bible_vision_tags"][:12])[:200]
         # Do NOT dump invented full bible into captions — that fights the pixels.
-        # Legacy captions missing "a photo of {token}, man|person" are rewritten.
+        # Captions missing "a photo of {token}" or the subject's class are rewritten.
         cap_sum = ensure_subject_image_captions(
             [p for p in train_images if p],
             trigger=token,
