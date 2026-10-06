@@ -10,12 +10,38 @@ if the model is unavailable.
 
 import logging
 import os
+import re
 from pathlib import Path
-from typing import Tuple, Optional, List, Dict, Any
+from typing import Iterable, Tuple, Optional, List, Dict, Any
 
 logger = logging.getLogger(__name__)
 
 from backend.services.local_weights import from_pretrained_local  # noqa: E402
+
+
+def whole_word_pattern(keywords: Iterable[str]) -> "re.Pattern[str]":
+    """One pattern that finds any of `keywords` as whole words.
+
+    An apostrophe counts as part of a word, so "won" does not match "won't"
+    (nor "now" "know", "rain" "train"), while a possessive "'s" may follow
+    ("today's"). Longer keywords are tried first, so a phrase is found whole
+    rather than as a word inside it. Words of a phrase may be separated by
+    any run of whitespace.
+    """
+    alternatives = sorted({k.strip().lower() for k in keywords if k.strip()}, key=len, reverse=True)
+    body = "|".join(r"\s+".join(re.escape(word) for word in k.split()) for k in alternatives)
+    return re.compile(rf"(?<![\w'’])({body})(?:['’]s)?(?![\w'’])", re.IGNORECASE)
+
+
+def find_keywords(pattern: "re.Pattern[str]", text: str) -> List[str]:
+    """The distinct keywords `pattern` (from whole_word_pattern) finds in
+    `text`, lowercased, in order of first appearance."""
+    found: List[str] = []
+    for match in pattern.finditer(text):
+        keyword = " ".join(match.group(1).lower().split())
+        if keyword not in found:
+            found.append(keyword)
+    return found
 
 _INTENT_INSTALL_HINT = (
     "Train the intent classifier once with allow_download=True (or ship the "
@@ -254,23 +280,25 @@ class SemanticIntentClassifier:
             logger.error(f"SetFit inference error: {e}")
             return self._classify_keywords(query)
 
+    _REALTIME_KEYWORDS = (
+        'lottery', 'lotto', 'powerball', 'mega millions',
+        'stock price', 'trading at', 'market',
+        'weather', 'temperature', 'forecast', 'rain',
+        'score', 'game', 'match', 'won', 'winning',
+        'bitcoin', 'crypto', 'ethereum', 'price today',
+        'news', 'breaking', 'latest', 'current',
+        'right now', 'today', 'tonight', 'live',
+        'traffic', 'flight status', 'delayed',
+        'trending', 'viral', 'election results'
+    )
+    _REALTIME_PATTERN = whole_word_pattern(_REALTIME_KEYWORDS)
+
     def _classify_keywords(self, query: str) -> Tuple[str, float]:
-        """Fallback keyword-based classification."""
+        """Fallback keyword-based classification. Keywords match whole words:
+        "I won't train today" counts only "today", not "won" or "rain"."""
         query_lower = query.lower()
 
-        realtime_keywords = [
-            'lottery', 'lotto', 'powerball', 'mega millions',
-            'stock price', 'trading at', 'market',
-            'weather', 'temperature', 'forecast', 'rain',
-            'score', 'game', 'match', 'won', 'winning',
-            'bitcoin', 'crypto', 'ethereum', 'price today',
-            'news', 'breaking', 'latest', 'current',
-            'right now', 'today', 'tonight', 'live',
-            'traffic', 'flight status', 'delayed',
-            'trending', 'viral', 'election results'
-        ]
-
-        matches = sum(1 for kw in realtime_keywords if kw in query_lower)
+        matches = len(find_keywords(self._REALTIME_PATTERN, query_lower))
 
         if matches >= 2:
             return "realtime", min(0.9, 0.5 + matches * 0.15)

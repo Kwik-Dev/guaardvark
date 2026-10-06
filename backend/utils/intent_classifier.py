@@ -13,6 +13,8 @@ import re
 from typing import Dict, List, Tuple, Optional
 from enum import Enum
 
+from backend.services.intent_service import find_keywords, whole_word_pattern
+
 logger = logging.getLogger(__name__)
 
 # Try to import semantic classifier
@@ -78,6 +80,9 @@ class IntentClassifier:
             'how are you today', 'today?', 'doing today', 'feel today'
         ]
         
+        # One whole-word pattern per keyword list, compiled on first use
+        self._keyword_patterns: Dict[Tuple[str, ...], "re.Pattern[str]"] = {}
+
         # Context length thresholds
         self.max_context_lengths = {
             IntentType.COMMAND: 5000,        # Minimal context for commands
@@ -191,25 +196,28 @@ class IntentClassifier:
     def _check_keywords(self, message: str, keywords: List[str]) -> Tuple[float, List[str]]:
         """
         Check for keyword matches and return confidence score
-        
+
+        Keywords match as whole words, never inside another word: "now" is
+        not found in "know", "count" not in "account", "list" not in "listen".
+
         Args:
             message: Lowercase message text
             keywords: List of keywords to check
-            
+
         Returns:
             Tuple of (confidence_score, matched_keywords)
         """
-        matched_keywords = []
-        total_matches = 0
-        
-        for keyword in keywords:
-            if keyword in message:
-                matched_keywords.append(keyword)
-                # Weight longer keywords more heavily
-                total_matches += len(keyword.split())
-        
+        key = tuple(keywords)
+        pattern = self._keyword_patterns.get(key)
+        if pattern is None:
+            pattern = self._keyword_patterns[key] = whole_word_pattern(keywords)
+
+        matched_keywords = find_keywords(pattern, message)
         if not matched_keywords:
             return 0.0, []
+
+        # Weight longer keywords more heavily
+        total_matches = sum(len(keyword.split()) for keyword in matched_keywords)
         
         # Calculate confidence based on matches and message length
         confidence = min(0.95, (total_matches / max(1, len(message.split()))) + 0.3)
