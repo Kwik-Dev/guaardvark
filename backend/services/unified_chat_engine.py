@@ -815,6 +815,10 @@ def user_wants_image_edit(message: str, has_recent_image: bool,
     if _TEXT_OR_CODE_TOPIC_RE.search(message) and not _PICTURE_WORD_RE.search(message):
         return False
     msg_lower = message.lower()
+    # "/video make it rain" and "make a video of it" ask for a video; the video
+    # step animates the picture in focus instead.
+    if _SLASH_VIDEO_RE.match(msg_lower) or user_wants_video_generation(message):
+        return False
     names_image = bool(_NAMES_THE_IMAGE_RE.search(msg_lower))
     # "Draw me a cat wearing a top hat" has an edit verb but asks for a new picture.
     new_request = (bool(_SLASH_IMAGE_RE.match(msg_lower) or _SLASH_VIDEO_RE.match(msg_lower))
@@ -841,7 +845,7 @@ _VIDEO_REQUEST_RE = re.compile(
     r"(?:(?:i(?:'d|\s+would)\s+like|i\s+(?:want|need))\s+you\s+to\s+|let'?s\s+)?"
     r"(?:generate|create|make|render|produce)\s+(?:me\s+|us\s+)?"
     r"(?:(?!(?:sure|certain|the|this|that|these|those|my|your|our|his|her|its|their"
-    r"|of|for|to|about|with|from|in|on|at|into|and|or|than|then)\b)[\w'-]+\s+){0,5}?"
+    r"|of|for|to|about|with|from|in|on|at|into|and|or|than|then)\b)[\w'-]+\s+){0,8}?"
     r"video\b(?!\s+(?:games?|calls?|chats?|conferenc\w*|cards?|edit\w*|players?|codecs?"
     r"|drivers?|scripts?|files?|formats?)\b)",
     re.IGNORECASE,
@@ -4372,10 +4376,29 @@ class UnifiedChatEngine:
             return None
 
         prompt = _VIDEO_CHROME_RE.sub("", message).strip() or message.strip()
-        logger.info("Video-gen direct (natural lang): generate_video(prompt=%r)", prompt[:80])
+        params = {"prompt": prompt}
+        first_frame = self._video_first_frame(message, session_id)
+        if first_frame:
+            params["first_image"] = first_frame
+        logger.info("Video-gen direct (natural lang): generate_video(prompt=%r, first_image=%s)",
+                    prompt[:80], bool(first_frame))
         return self._run_direct_tool_execution(
-            "generate_video", {"prompt": prompt}, session_id, emit_fn, request_id, message, options
+            "generate_video", params, session_id, emit_fn, request_id, message, options
         )
+
+    def _video_first_frame(self, message: str, session_id: str) -> Optional[str]:
+        """The picture a video request animates, when it points back at one
+        ("/video make it rain", "make a video of this"): an image attached to
+        this turn, else the session's last picture while it is in focus. A
+        request that names its own scene gets no first frame."""
+        if not _REFERS_BACK_RE.search(message or ""):
+            return None
+        if getattr(self, "_image_data", None):
+            return self._materialize_attached_image()
+        last = _SESSION_LAST_EDIT.get(session_id)
+        if last and session_id in _SESSION_IMAGE_FOCUS and os.path.exists(last):
+            return last
+        return None
 
     def _pipeline_usage_notice(
         self, session_id: str, emit_fn: Callable, request_id: str,

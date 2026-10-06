@@ -445,6 +445,54 @@ class TestSlashMediaCommands:
         assert uce.user_wants_image_generation("/video a red fox") is False
 
 
+class TestVideoFromPictureInFocus:
+    """A video request that points back at the picture animates it; it is never an image edit."""
+
+    @pytest.fixture
+    def uce(self, monkeypatch):
+        import backend.services.unified_chat_engine as uce
+        monkeypatch.setattr(uce, "_media_requires_explicit_command", lambda: False)
+        return uce
+
+    def test_long_run_of_describing_words_is_still_a_request(self, uce):
+        assert uce.user_wants_video_generation(
+            "create a short cinematic slow motion aerial drone video of a waterfall") is True
+        assert uce.user_wants_video_generation("make the function that saves my video faster") is False
+
+    @pytest.mark.parametrize("message", ["/video make it rain", "make a video of it"])
+    def test_video_request_is_not_an_image_edit(self, uce, message):
+        assert uce.user_wants_image_edit(message, has_recent_image=True) is False
+
+    def test_plain_edit_still_edits(self, uce):
+        assert uce.user_wants_image_edit("make it brighter", has_recent_image=True) is True
+
+    def _engine(self, uce, calls):
+        engine = uce.UnifiedChatEngine.__new__(uce.UnifiedChatEngine)
+        engine.registry = type("R", (), {"get_tool": lambda self, n: object()})()
+        engine._image_data = None
+        engine._run_direct_tool_execution = lambda tool, params, *a, **k: calls.append((tool, params)) or {}
+        return engine
+
+    def test_picture_in_focus_is_the_first_frame(self, uce, tmp_path):
+        sid = "sess-video-focus"
+        picture = tmp_path / "last.png"
+        picture.write_bytes(b"png")
+        calls = []
+        engine = self._engine(uce, calls)
+        try:
+            uce._remember_session_image(sid, str(picture))
+            engine._try_video_generate_direct("/video make it rain", sid, lambda *a, **k: None, "req", {})
+            engine._try_video_generate_direct("/video a fox in the snow", sid, lambda *a, **k: None, "req", {})
+            uce._SESSION_IMAGE_FOCUS.discard(sid)
+            engine._try_video_generate_direct("/video make it rain", sid, lambda *a, **k: None, "req", {})
+        finally:
+            uce._SESSION_LAST_EDIT.pop(sid, None)
+            uce._SESSION_IMAGE_FOCUS.discard(sid)
+        assert calls[0] == ("generate_video", {"prompt": "make it rain", "first_image": str(picture)})
+        assert "first_image" not in calls[1][1], "a request with its own scene gets no first frame"
+        assert "first_image" not in calls[2][1], "a picture out of focus is not animated"
+
+
 class TestNamedPhotoToolsSkipHowTo:
     """Background removal, outpaint and identity run with no model in the loop."""
 
