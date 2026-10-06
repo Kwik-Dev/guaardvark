@@ -1108,8 +1108,10 @@ def _held_rag_ready(step_info: Dict[str, Any]) -> bool:
 
 
 def _asks_about_code(message: str) -> bool:
-    msg = (message or "").lower()
-    return any(kw in msg for kw in CODE_SEARCH_KEYWORDS)
+    """True when the message names a code keyword as whole words: "route" is
+    not found in "router", nor "class " in "subclass ". Keywords that start
+    with punctuation (".py") still match after a file name ("app.py")."""
+    return _mentions_keyword((message or "").lower(), CODE_SEARCH_KEYWORDS)
 
 
 def _pin_code_search_tools(message: str, selected: List[str], all_tool_names: List[str]) -> List[str]:
