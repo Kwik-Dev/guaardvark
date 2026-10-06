@@ -62,7 +62,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install CLI package
-        run: pip install -e ./cli pytest
+        run: pip install -e ./cli pytest pytest-cov
 
       - name: Run CLI test suite (fast tiers)
         # e2e is deselected here on purpose. The suite's one e2e test
@@ -71,7 +71,12 @@ jobs:
         # `-m e2e` would select nothing, so a separate job here would be green
         # having exercised nothing. The e2e tier runs where the backend stack is
         # already installed; see docs/CLI_PLAN.md section 4.5.
-        run: python -m pytest cli/tests -q -m "not e2e"
+        #
+        # The coverage floor is a regression guard, not a quality bar: 44% is the
+        # measured baseline of `llx` under the fast tiers, and 40 leaves headroom
+        # for a new module that lands with few tests. Raise it as tests land; see
+        # docs/CLI_PLAN.md section 4.1.
+        run: python -m pytest cli/tests -q -m "not e2e" --cov=llx --cov-report=term-missing --cov-fail-under=40
 
   frontend:
     name: Frontend Lint & Build
