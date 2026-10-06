@@ -233,6 +233,37 @@ def test_the_legacy_image_reader_keeps_the_failure_out_of_the_text(tmp_path, ocr
     assert docs[0].metadata["extraction_error"] == "No vision models available in Ollama"
 
 
+SVG = (b'<svg xmlns="http://www.w3.org/2000/svg" width="80" height="20">'
+       b'<title>Badge</title><desc>Build status</desc>'
+       b'<path d="M0 0h80v20H0z"/>'
+       b'<text x="4" y="14">Hello <tspan font-weight="bold">world</tspan></text></svg>')
+
+
+def test_an_svg_is_read_as_text_not_sent_to_ocr(uploads, ocr):
+    def no_ocr(path):
+        raise AssertionError("an SVG must not reach the OCR extractor")
+    ocr(no_ocr)
+    result = read(uploads, "badge.svg", SVG)
+    assert result.success, result.error
+    assert "Hello world" in result.output
+    assert "Badge" in result.output and "Build status" in result.output
+    assert "M0 0h80v20H0z" not in result.output
+
+
+def test_svg_text_is_what_gets_indexed(tmp_path, ocr):
+    from backend.utils.file_processor_adapter import process_file_to_llamaindex
+    ocr(lambda path: {"success": False, "error": "Unsupported image format: .svg"})
+    (tmp_path / "badge.svg").write_bytes(SVG)
+    docs = process_file_to_llamaindex(str(tmp_path / "badge.svg"))
+    assert docs[0].text == "Badge\nBuild status\nHello world"
+    assert "Unsupported image format" not in docs[0].text
+
+
+def test_a_broken_svg_says_so(uploads):
+    result = read(uploads, "broken.svg", b"<svg><text>Hello</svg>")
+    assert not result.success and "not well-formed" in result.error
+
+
 def test_the_encryption_marker_is_found_across_a_read_boundary(tmp_path):
     marker = "EncryptedPackage".encode("utf-16-le")
     path = tmp_path / "split.xlsx"
