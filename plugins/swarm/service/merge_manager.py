@@ -185,38 +185,7 @@ class MergeManager:
         
         # If conflicts found and MergerAgent is enabled, try to resolve them
         if not check.success and self._merger:
-            logger.info(f"Conflict detected for {task.id}, invoking MergerAgent...")
-            
-            # Step 1: Perform the real merge to get into conflict state
-            self._git("checkout", self.base_branch)
-            self._git(
-                "merge", "--no-ff", task.branch_name,
-                check=False
-            )
-            
-            # Step 2: Invoke the agent
-            resolved = self._merger.resolve_conflicts(
-                self.repo_path,
-                task.branch_name,
-                check.conflict_files,
-                task.title,
-                task.description
-            )
-            
-            if resolved:
-                # Step 3: Commit the resolution
-                logger.info(f"MergerAgent resolved conflicts for {task.id}. Committing.")
-                self._git(
-                    "commit", "-m", f"swarm: merge {task.id} (resolved by MergerAgent)"
-                )
-                task.status = SwarmStatus.MERGED
-                return MergeResult(task_id=task.id, success=True)
-            else:
-                # Resolution failed — abort the merge and leave as NEEDS_REVIEW
-                logger.warning(f"MergerAgent failed to resolve conflicts for {task.id}. Aborting.")
-                self._git("merge", "--abort", check=False)
-                task.status = SwarmStatus.NEEDS_REVIEW
-                return check
+            return self._merge_with_resolution(task, check)
 
         if not check.success:
             task.status = SwarmStatus.NEEDS_REVIEW
@@ -246,6 +215,50 @@ class MergeManager:
                 conflict_files=self._get_conflict_files(),
                 error=result.stderr.strip(),
             )
+
+    def _merge_with_resolution(self, task: SwarmTask, check: MergeResult) -> MergeResult:
+        """Merge ``task``'s branch with the merger agent resolving the conflicts.
+
+        Commits only when every conflicted path was resolved and staged. Any
+        other outcome, an exception included, runs ``git merge --abort`` so the
+        checkout is never left mid-merge, and leaves the task for review.
+        """
+        logger.info(f"Conflict detected for {task.id}, invoking MergerAgent...")
+        try:
+            self._git("checkout", self.base_branch)
+            self._git("merge", "--no-ff", "--no-commit", task.branch_name, check=False)
+            conflicts = self._get_conflict_files() or check.conflict_files
+
+            if not self._merger.resolve_conflicts(
+                self.repo_path, task.branch_name, conflicts, task.title, task.description,
+            ):
+                return self._abort_for_review(task, check, "MergerAgent could not resolve every conflict")
+
+            # The merger writes the resolved content; git still lists the paths
+            # as unmerged until they are added, and refuses to commit before that.
+            for path in conflicts:
+                self._git("add", "--", path)
+            unmerged = self._get_conflict_files()
+            if unmerged:
+                return self._abort_for_review(
+                    task, check, f"Still unmerged after resolution: {', '.join(unmerged)}")
+
+            self._git("commit", "-m", f"swarm: merge {task.id} (resolved by MergerAgent)")
+        except Exception as exc:
+            logger.error(f"Merge with MergerAgent failed for {task.id}: {exc}")
+            return self._abort_for_review(task, check, f"Merge with MergerAgent failed: {exc}")
+
+        logger.info(f"MergerAgent resolved conflicts for {task.id}; merged.")
+        task.status = SwarmStatus.MERGED
+        return MergeResult(task_id=task.id, success=True)
+
+    def _abort_for_review(self, task: SwarmTask, check: MergeResult, reason: str) -> MergeResult:
+        """Abort the merge in progress and leave the task for a person."""
+        logger.warning(f"{reason} ({task.id}); aborting the merge.")
+        self._git("merge", "--abort", check=False)
+        task.status = SwarmStatus.NEEDS_REVIEW
+        return MergeResult(task_id=task.id, success=False,
+                           conflict_files=check.conflict_files, error=reason)
 
     def merge_queue(self, tasks: list[SwarmTask]) -> list[SwarmTask]:
         """
