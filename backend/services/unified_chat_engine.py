@@ -510,10 +510,12 @@ _IMAGE_GEN_NEGATIVE_PATTERNS = (
     r"\bdescribe (this|the|that) (image|photo|picture)\b",
     r"\b(analyze|explain) (this|the|that) (image|photo|picture)\b",
 )
+# "How do I ...", "how to ...": asks how something is done, not for it to be done.
+_HOW_TO_QUESTION_RE = re.compile(r"^\s*how\s+(?:do|can|could|should|would|does|to)\b", re.IGNORECASE)
 # Image requests only: a how-to question or front-end work ("how do I animate a
 # CSS button", "make an image responsive") is a question for the chat model.
 _IMAGE_REQUEST_NEGATIVE_PATTERNS = _IMAGE_GEN_NEGATIVE_PATTERNS + (
-    r"^\s*how\s+(?:do|can|could|should|would|does|to)\b",
+    _HOW_TO_QUESTION_RE.pattern,
     r"\b(?:css|html|javascript|jsx?|tsx|react|svg|keyframes?|hover|tailwind|stylesheet)\b",
 )
 
@@ -1263,17 +1265,21 @@ def user_wants_identity_generate(message: str) -> bool:
     """True for 'this person as …' / 'put this person in …'; false for 'put a hat on this person'."""
     if not (message or "").strip():
         return False
-    if _EDIT_ON_PERSON_RE.search(message):
+    if _HOW_TO_QUESTION_RE.search(message) or _EDIT_ON_PERSON_RE.search(message):
         return False
     return bool(_IDENTITY_INTENT_RE.search(message))
 
 
+# The named photo tools run with no model in the loop, so "how do I remove the
+# background in GIMP?" must not start one.
 def user_wants_background_remove(message: str) -> bool:
-    return bool(_BG_REMOVE_RE.search(message or ""))
+    message = message or ""
+    return bool(_BG_REMOVE_RE.search(message)) and not _HOW_TO_QUESTION_RE.search(message)
 
 
 def user_wants_outpaint(message: str) -> bool:
-    return bool(_OUTPAINT_RE.search(message or ""))
+    message = message or ""
+    return bool(_OUTPAINT_RE.search(message)) and not _HOW_TO_QUESTION_RE.search(message)
 
 
 def parse_outpaint_pad(message: str) -> dict:

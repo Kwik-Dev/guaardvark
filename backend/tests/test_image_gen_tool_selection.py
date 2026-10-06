@@ -445,6 +445,28 @@ class TestSlashMediaCommands:
         assert uce.user_wants_image_generation("/video a red fox") is False
 
 
+class TestNamedPhotoToolsSkipHowTo:
+    """Background removal, outpaint and identity run with no model in the loop."""
+
+    @pytest.mark.parametrize("gate,message", [
+        ("user_wants_background_remove", "how do I remove the background in GIMP?"),
+        ("user_wants_outpaint", "how to outpaint in Krita"),
+        ("user_wants_identity_generate", "how can I put this person in a different scene?"),
+    ])
+    def test_how_to_question_is_not_a_request(self, gate, message):
+        import backend.services.unified_chat_engine as uce
+        assert getattr(uce, gate)(message) is False
+
+    @pytest.mark.parametrize("gate,message", [
+        ("user_wants_background_remove", "remove the background"),
+        ("user_wants_outpaint", "extend the canvas to the left"),
+        ("user_wants_identity_generate", "put this person in a rainy alley"),
+    ])
+    def test_request_still_runs(self, gate, message):
+        import backend.services.unified_chat_engine as uce
+        assert getattr(uce, gate)(message) is True
+
+
 class TestCommandOnlyMode:
     """chat_media_requires_command: only an explicit command may create media."""
 
