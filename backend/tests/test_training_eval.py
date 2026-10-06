@@ -247,3 +247,129 @@ def test_a_vision_run_says_its_loss_was_not_measured(app, progress, trainer, tmp
     saved = _saved_config(job_id)["eval"]
     assert saved["measured"] is False
     assert "vision" in saved["reason"]
+
+
+# ---- export gate -------------------------------------------------------------
+
+
+@pytest.fixture
+def export_steps(monkeypatch):
+    """Spies on the two steps the gate must hold back, and on the ollama CLI
+    behind the second one, plus the Ollama unload the pipeline does first."""
+    calls = SimpleNamespace(export=[], register=[])
+
+    def export_gguf(job_id, model_dir, quantization):
+        calls.export.append(model_dir)
+        return {"gguf_path": f"{model_dir}/model.gguf"}
+
+    def import_ollama(job_id, model_dir, model_name):
+        calls.register.append(model_name)
+        return {"ollama_model_name": model_name}
+
+    def no_cli(*args, **kwargs):
+        raise AssertionError(f"ollama CLI called: {args}")
+
+    monkeypatch.setattr(tt, "export_gguf_task", export_gguf)
+    monkeypatch.setattr(tt, "import_ollama_task", import_ollama)
+    monkeypatch.setattr(tt.subprocess, "run", no_cli)
+    monkeypatch.setattr("backend.services.gpu_resource_coordinator.get_available_vram", lambda: {})
+    monkeypatch.setattr("backend.services.gpu_resource_coordinator.unload_ollama_models",
+                        lambda *a, **k: {"success": True, "models_unloaded": []})
+    return calls
+
+
+def test_a_run_worse_than_base_is_held_with_both_losses_and_its_adapter_kept(app, progress, trainer, tmp_path):
+    trainer.losses = {"adapter_loss": 3.0, "base_loss": 1.5}
+    data, _ = _dataset(tmp_path / "data.jsonl", 120)
+    job_id = _job(data)
+
+    result = tt.finetune_model_task(job_id, {})
+
+    row = _row(job_id)
+    assert row.status == "failed: worse than base"
+    assert "3.0000" in row.error_message and "1.5000" in row.error_message
+    assert Path(row.lora_path).is_dir()
+    gate = _saved_config(job_id)["eval"]["gate"]
+    assert gate["export_allowed"] is False
+    assert gate["margin"] == tt.EVAL_GATE["margin"]
+    assert result["export_allowed"] is False
+    assert progress[-1][2] == "error"
+
+
+def test_the_pipeline_skips_export_and_ollama_create_for_a_run_worse_than_base(
+        app, progress, trainer, export_steps, tmp_path):
+    trainer.losses = {"adapter_loss": 3.0, "base_loss": 1.5}
+    data, _ = _dataset(tmp_path / "data.jsonl", 120)
+    job_id = _job(data)
+
+    result = tt.full_training_pipeline_task(job_id, {})
+
+    assert export_steps.export == []
+    assert export_steps.register == []
+    assert result["gguf_path"] is None and result["ollama_model_name"] is None
+    row = _row(job_id)
+    assert row.status == "failed: worse than base"
+    assert row.gguf_path is None and row.ollama_model_name is None
+    assert Path(row.lora_path).is_dir()
+
+
+def test_a_diverged_run_whose_loss_is_not_a_number_is_held(app, progress, trainer, export_steps, tmp_path):
+    trainer.losses = {"adapter_loss": math.inf, "base_loss": 1.5}
+    data, _ = _dataset(tmp_path / "data.jsonl", 120)
+    job_id = _job(data)
+
+    tt.full_training_pipeline_task(job_id, {})
+
+    assert export_steps.export == [] and export_steps.register == []
+    row = _row(job_id)
+    assert row.status == "failed: worse than base"
+    assert "not a finite number" in row.error_message
+
+
+def test_a_run_within_the_margin_is_exported(app, progress, trainer, export_steps, tmp_path):
+    trainer.losses = {"adapter_loss": 1.55, "base_loss": 1.5}
+    data, _ = _dataset(tmp_path / "data.jsonl", 120)
+    job_id = _job(data)
+
+    tt.full_training_pipeline_task(job_id, {})
+
+    assert len(export_steps.export) == 1 and len(export_steps.register) == 1
+    assert _row(job_id).status == "completed"
+    assert _saved_config(job_id)["eval"]["gate"]["export_allowed"] is True
+
+
+def test_export_if_worse_set_by_the_person_still_exports(app, progress, trainer, export_steps, tmp_path):
+    trainer.losses = {"adapter_loss": 3.0, "base_loss": 1.5}
+    data, _ = _dataset(tmp_path / "data.jsonl", 120)
+    job_id = _job(data, export_if_worse=True)
+
+    tt.full_training_pipeline_task(job_id, {})
+
+    assert len(export_steps.export) == 1 and len(export_steps.register) == 1
+    assert _row(job_id).status == "completed"
+    assert "overridden" in _saved_config(job_id)["eval"]["gate"]["note"]
+
+
+def test_a_margin_set_in_the_job_config_wins(app, progress, trainer, export_steps, tmp_path):
+    trainer.losses = {"adapter_loss": 1.7, "base_loss": 1.5}
+    data, _ = _dataset(tmp_path / "data.jsonl", 120)
+    job_id = _job(data, eval_gate_margin=0.2)
+
+    tt.full_training_pipeline_task(job_id, {})
+
+    assert len(export_steps.register) == 1
+    assert _saved_config(job_id)["eval"]["gate"]["margin"] == 0.2
+
+
+def test_a_dataset_too_small_to_measure_skips_the_gate_and_says_so(app, progress, trainer, export_steps, tmp_path):
+    trainer.losses = {"adapter_loss": 3.0, "base_loss": 1.5}
+    data, _ = _dataset(tmp_path / "data.jsonl", 30)
+    job_id = _job(data)
+
+    tt.full_training_pipeline_task(job_id, {})
+
+    assert len(export_steps.register) == 1
+    assert _row(job_id).status == "completed"
+    saved = _saved_config(job_id)["eval"]
+    assert "too small" in saved["reason"]
+    assert saved["gate"]["note"].startswith("Export gate skipped")

@@ -379,6 +379,20 @@ EVAL_SPLIT = {
     "seed": 42,
 }
 
+# Export gate. A run whose held-out loss is worse than the base model's by more
+# than this share is neither exported to GGUF nor registered in Ollama; it ends
+# as WORSE_THAN_BASE with both losses in error_message and its adapter left on
+# disk. A job's config overrides the margin with "eval_gate_margin", and
+# "export_if_worse": true lets such a run through. A run with no measured loss
+# (too small to split, vision, measurement failed) is not gated.
+EVAL_GATE = {
+    # Room for measurement noise on a held-out set of tens of rows, so a run
+    # that only matched its base is not refused; a run that diverged lands far
+    # above it. Not yet measured against training runs.
+    "margin": 0.05,
+}
+WORSE_THAN_BASE = "failed: worse than base"
+
 
 def _hold_out_split(data_path: str, out_dir: Path, fraction: float):
     """Split a text dataset into training rows and held-out rows.
@@ -460,6 +474,25 @@ def _heldout_summary(report: dict) -> str:
             f"on {report['rows']} rows")
 
 
+def _export_verdict(report: dict, margin: float, export_if_worse: bool, lora_path: str):
+    """Whether the trained adapter may be exported, and the sentence saying why."""
+    if not report.get("measured"):
+        return True, "Export gate skipped: nothing was measured"
+    adapter, base = report["adapter_loss"], report["base_loss"]
+    if adapter is None:
+        detail = f"the held-out loss is not a finite number (base model {base:.4f}), so the run diverged"
+    elif adapter > base * (1 + margin):
+        worse = (adapter - base) / base if base else math.inf
+        detail = (f"held-out loss {adapter:.4f} is {worse:.1%} worse than the base model's "
+                  f"{base:.4f} (allowed margin {margin:.0%})")
+    else:
+        return True, f"Export gate passed (allowed margin {margin:.0%})"
+    if export_if_worse:
+        return True, f"Export gate overridden by export_if_worse: {detail}"
+    return False, (f"Not exported: {detail}. The adapter is kept at {lora_path}; "
+                   f"set export_if_worse in the job config to export a run like this anyway")
+
+
 @shared_task(bind=True, name='training.finetune_model',
              soft_time_limit=86400, time_limit=172800)
 def finetune_model_task(self, job_id: str, config: dict, resume: bool = False):
@@ -508,6 +541,10 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False):
         offload_to_cpu = job_config.get("cpu_offload", device_profile.requires_cpu_offload if device_profile else False)
         
         _update_job_status(job_id, total_steps=max_steps)
+
+        gate_margin = float(job_config.get("eval_gate_margin", EVAL_GATE["margin"]))
+        if gate_margin < 0:
+            raise ValueError(f"eval_gate_margin must not be negative (got {gate_margin})")
 
         eval_report = {"measured": False}
         if images_path:
@@ -594,9 +631,13 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False):
                     eval_callback=lambda result: _record_heldout_losses(eval_report, result)
                 )
 
-        job_config["eval"] = eval_report
+        lora_path = str(Path(model_dir) / "lora")
         heldout = _heldout_summary(eval_report)
-        logger.info(f"Job {job_id}: {heldout}")
+        export_allowed, gate_note = _export_verdict(
+            eval_report, gate_margin, job_config.get("export_if_worse") is True, lora_path)
+        eval_report["gate"] = {"margin": gate_margin, "export_allowed": export_allowed, "note": gate_note}
+        job_config["eval"] = eval_report
+        logger.info(f"Job {job_id}: {heldout}. {gate_note}")
 
         checkpoint_dir = Path(model_dir) / "checkpoints"
         checkpoint_path = None
@@ -606,21 +647,28 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False):
                 checkpoints.sort(key=lambda x: int(x.name.split("-")[1]) if "-" in x.name else 0)
                 checkpoint_path = str(checkpoints[-1])
 
+        # A refused run keeps lora_path, so the adapter can be inspected; the
+        # export routes and the Training page offer export only to "completed".
         _update_job_status(job_id,
-                          status="completed",
+                          status="completed" if export_allowed else WORSE_THAN_BASE,
                           pipeline_stage="training",
                           completed_at=utcnow(),
                           progress=100,
-                          lora_path=str(Path(model_dir) / "lora"),
+                          lora_path=lora_path,
                           checkpoint_path=checkpoint_path,
                           is_resumable=bool(checkpoint_path),
                           pid=None,
+                          error_message=None if export_allowed else gate_note,
                           config_json=json.dumps(job_config))
 
-        _emit_progress(job_id, 100, f"Training complete! {heldout}. Model saved to {model_dir}", "complete")
+        if export_allowed:
+            _emit_progress(job_id, 100, f"Training complete! {heldout}. {gate_note}. Model saved to {model_dir}", "complete")
+        else:
+            _emit_progress(job_id, 100, f"Training finished. {gate_note}", "error")
 
         logger.info(f"Training task completed for job {job_id}: {model_dir}")
-        return {"model_dir": model_dir, "lora_path": str(Path(model_dir) / "lora"), "eval": eval_report}
+        return {"model_dir": model_dir, "lora_path": lora_path, "eval": eval_report,
+                "export_allowed": export_allowed}
 
     except Exception as e:
         logger.error(f"Error in finetune_model_task: {e}", exc_info=True)
@@ -875,7 +923,21 @@ def full_training_pipeline_task(self, job_id: str, config: dict):
         
         train_result = finetune_model_task(job_id, job_config)
         model_dir = train_result.get("model_dir")
-        
+
+        # Refused by the export gate: finetune_model_task has already set the
+        # job's status and error_message with the losses, and kept the adapter.
+        if not train_result.get("export_allowed", True):
+            logger.warning(f"Pipeline job {job_id} stopped before export: "
+                           f"{train_result['eval']['gate']['note']}")
+            return {
+                "parse_output": parse_output_path,
+                "filter_output": filter_output_path if job_config.get("min_score") is not None else None,
+                "model_dir": model_dir,
+                "gguf_path": None,
+                "ollama_model_name": None,
+                "eval": train_result.get("eval")
+            }
+
         _update_job_status(job_id, pipeline_stage="exporting")
         _emit_progress(job_id, 80, "Step 4/5: Exporting to GGUF...", "processing")
         
