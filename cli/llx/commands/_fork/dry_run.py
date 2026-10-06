@@ -100,9 +100,16 @@ def _entry(value: Any, source: str) -> dict:
 
 
 def _split(body: Any, inputs: Iterable[str], explicit: Iterable[str]):
-    """Split a request body into inputs and settings, each carrying its source."""
+    """Split a request body into inputs and settings, each carrying its source.
+
+    A non-dict body (an upload, or no body at all) has no keys to attribute: return two
+    empty maps so the caller renders the upload/body section and never iterates a shape
+    that is not key->entry. Getting this wrong crashed the human TTY branch -- the one
+    branch the pipe-based tests never reach -- and emitted
+    ``{"value": null, "source": "explicit"}`` under ``--json``.
+    """
     if not isinstance(body, dict):
-        return {}, _entry(body, "explicit")
+        return {}, {}
     in_keys, ex_keys = set(inputs), set(explicit)
     in_map, set_map = {}, {}
     for key, value in body.items():

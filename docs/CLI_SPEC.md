@@ -249,9 +249,10 @@ upstream edit — see §11. Their read-only halves are covered by
 Generation commands must show what they would send, and be replayable:
 
 - **`--dry-run`** on every generation command: `images generate`, `generate image`,
-  `videos generate`, `videos from-image`, `music-video create`, `film-crew create`,
-  `audio music|sfx|tts`, `infographic generate`, plus the render commands in fork modules —
-  `cast generate`, `upscale image`, `upscale video`, `video-editor render`,
+  `generate csv`, `videos generate`, `videos from-image`, `videos combine`,
+  `music-video create`, `film-crew create`, `audio music|sfx|tts`,
+  `infographic generate`, plus the render commands in fork modules — `cast generate`,
+  `upscale image`, `upscale video`, `video-editor render`, `video-editor analyze`,
   `video-editor captions-burn`. It prints the resolved request — inputs, each setting with
   its provenance (`explicit` / `command default`), the request method, path and body — and
   sends **no write**. It may issue read-only GETs, because a command resolves the active

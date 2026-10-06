@@ -171,6 +171,21 @@ def test_music_video_reproduce_refuses_when_the_song_link_is_gone(fake_backend, 
     assert fake_backend.posted_paths() == []
 
 
+def test_music_video_reproduce_carries_project_id(fake_backend, cli_runner, isolated_home):
+    fake_backend.route("GET", "/api/music-video/7", json={
+        "id": 7, "name": "Neon", "style_prompt": "neon noir", "song_document_id": 20,
+        "project_id": 42, "settings": {"subject_ids": [1]}})
+
+    result = cli_runner.invoke(app, ["music-video", "reproduce", "7", "--json"])
+
+    payload = json.loads(result.output)
+    assert payload["body"]["project_id"] == 42
+    # create has no --project flag, so the record must fall back to the lossless api line
+    # rather than silently re-create the video unattached.
+    assert "project_id" in payload["inexpressible"]
+    assert payload["named_command_line"] is None
+
+
 def test_reproduce_without_a_record_exits_2(fake_backend, cli_runner, isolated_home):
     fake_backend.route("GET", "/api/batch-video/status/B9", json={
         "batch_id": "B9", "retry_data": None, "results": []})

@@ -301,6 +301,11 @@ def music_video_reproduce(
                   "style_prompt": row.get("style_prompt")}
     if row.get("user_treatment"):
         body["user_treatment"] = row["user_treatment"]
+    if row.get("project_id") is not None:
+        # `music-video create` has no --project flag, so this field makes the named command
+        # inexpressible and pushes the record to the lossless api line. Dropping it would
+        # silently re-create a project-linked video unattached.
+        body["project_id"] = row["project_id"]
     if row.get("settings"):
         body["settings"] = row["settings"]
     _emit("music-video", str(mv_id), "POST", "/api/music-video", body,

@@ -276,6 +276,7 @@ def ve_render(
 def ve_analyze(
     audio: str = typer.Option(None, "--audio", "-a", help="Song path on the server"),
     from_file: str = typer.Option(None, "--from-file", help="Full analyze payload as JSON"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show the request and resolved settings; send nothing"),
     server: str = typer.Option(None, "--server", "-s"),
     json_out: bool = typer.Option(False, "--json", "-j"),
 ):
@@ -289,6 +290,13 @@ def ve_analyze(
         else:
             output.print_error("Need --audio or --from-file.", code="MISSING_INPUT")
             raise typer.Exit(2)
+        if dry_run:
+            from .dry_run import preview
+
+            preview("video-editor analyze",
+                    lambda: get_client(resolve_server(server)).post(f"{BASE}/analyze", json=body),
+                    inputs=("audio_path",), explicit={"audio_path"}, json_out=json_out)
+            return
         data = get_client(resolve_server(server)).post(f"{BASE}/analyze", json=body)
     except LlxError as exc:
         fail(exc)

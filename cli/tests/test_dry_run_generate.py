@@ -101,6 +101,12 @@ EXTRA_CASES = [
      "POST", "/api/video-editor/beat-sync/render"),
     ("video-editor captions-burn", ["video-editor", "captions-burn", "17", "--srt", "/tmp/x.srt"],
      "POST", "/api/video-editor/captions/import"),
+    ("generate csv", ["generate", "csv", "a list of five fruits"],
+     "POST", "/api/generate/csv"),
+    ("videos combine", ["videos", "combine", "Batch_1"],
+     "POST", "/api/batch-video/combine-frames/Batch_1"),
+    ("video-editor analyze", ["video-editor", "analyze", "--audio", "/a.wav"],
+     "POST", "/api/video-editor/analyze"),
 ]
 
 
@@ -119,3 +125,50 @@ def test_extra_generation_dry_runs_send_no_write(_id, argv, method, path,
     assert fake_backend.posted_paths() == [], (
         f"{_id}: --dry-run wrote to {fake_backend.posted_paths()}"
     )
+
+
+def test_dry_run_human_branch_handles_an_upload(fake_backend, cli_runner, isolated_home,
+                                                 monkeypatch, tmp_path):
+    """The TTY branch iterates inputs/settings; an upload has no body keys, and getting
+    that shape wrong crashed the one branch the pipe-based tests never reach."""
+    import llx.output as output
+
+    monkeypatch.setattr(output, "is_pipe", lambda: False)
+    fake_backend.default(status=200, json={})
+    song = tmp_path / "hook.mp3"
+    song.write_bytes(b"ID3")
+
+    result = cli_runner.invoke(app, ["music-video", "create", "--song", str(song),
+                                     "--style", "x", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "DRY RUN" in result.output
+    assert fake_backend.posted_paths() == []
+
+
+def test_dry_run_human_branch_handles_a_multipart_upload(fake_backend, cli_runner,
+                                                          isolated_home, monkeypatch):
+    import llx.output as output
+
+    monkeypatch.setattr(output, "is_pipe", lambda: False)
+    fake_backend.default(status=200, json={})
+
+    result = cli_runner.invoke(app, ["upscale", "image", "/tmp/a.png", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "DRY RUN" in result.output
+    assert fake_backend.posted_paths() == []
+
+
+def test_dry_run_json_has_no_garbage_for_an_upload(fake_backend, cli_runner,
+                                                   isolated_home, tmp_path):
+    fake_backend.default(status=200, json={})
+    song = tmp_path / "hook.mp3"
+    song.write_bytes(b"ID3")
+
+    result = cli_runner.invoke(app, ["music-video", "create", "--song", str(song),
+                                     "--style", "x", "--dry-run", "--json"])
+
+    payload = json.loads(result.output)
+    assert payload["inputs"] == {} and payload["settings"] == {}
+    assert payload["upload"]["file"].endswith("hook.mp3")

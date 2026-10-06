@@ -89,6 +89,31 @@ def generate_image(
             json_out=json_out)
 
 
+@generate_app.command("csv")
+def generate_csv(
+    prompt: str = typer.Argument(..., help="Generation prompt"),
+    output_file: str = typer.Option("output.csv", "--output", "-o", help="Output filename"),
+    client_name: str = typer.Option(None, "--client", "-c", help="Client name"),
+    project_name: str = typer.Option(None, "--project", "-p", help="Project name"),
+    word_count: int = typer.Option(500, "--words", "-w", help="Target word count"),
+    dry_run: bool = _DRY,
+    server: str = typer.Option(None, "--server", "-s"),
+    json_out: bool = typer.Option(False, "--json", "-j"),
+):
+    """Generate CSV content from a prompt."""
+    if not dry_run:
+        return _generate.generate_csv(prompt=prompt, output_file=output_file, client_name=client_name,
+                                      project_name=project_name, word_count=word_count,
+                                      server=server, json_out=json_out)
+    preview("generate csv",
+            lambda: _generate.generate_csv(prompt=prompt, output_file=output_file, client_name=client_name,
+                                           project_name=project_name, word_count=word_count,
+                                           server=server, json_out=True),
+            inputs=("prompt",), explicit={"target_word_count"} | ({"client"} if client_name else set())
+            | ({"project"} if project_name else set()),
+            json_out=json_out)
+
+
 @videos_app.command("generate")
 def videos_generate(
     prompt: str = typer.Argument(..., help="Video description prompt"),
@@ -166,6 +191,25 @@ def videos_from_image(
             json_out=json_out,
             notes=("server clamps (model duration/fps/steps floors) are applied on send and are "
                    "not shown here",))
+
+
+@videos_app.command("combine")
+def videos_combine(
+    batch_id: str = typer.Argument(..., help="Batch ID with generated frames"),
+    fps: int = typer.Option(7, "--fps", help="Output frame rate"),
+    item_id: str = typer.Option(None, "--item", help="Specific item ID (omit for all)"),
+    dry_run: bool = _DRY,
+    server: str = typer.Option(None, "--server", "-s"),
+    json_out: bool = typer.Option(False, "--json", "-j"),
+):
+    """Combine generated frames into a video."""
+    if not dry_run:
+        return _videos.videos_combine(batch_id=batch_id, fps=fps, item_id=item_id,
+                                      server=server, json_out=json_out)
+    preview("videos combine",
+            lambda: _videos.videos_combine(batch_id=batch_id, fps=fps, item_id=item_id,
+                                           server=server, json_out=True),
+            inputs=("item_id",), explicit=_explicit(item_id=item_id), json_out=json_out)
 
 
 @audio_app.command("music")
