@@ -204,6 +204,11 @@ class ActionStep:
     timestamp: float = field(default_factory=time.time)
 
 
+# Reason prefix of an AgentResult from a recipe that refused to run. The task
+# ends there instead of falling back to the see-think-act loop.
+RECIPE_REFUSED = "recipe_refused"
+
+
 @dataclass
 class AgentResult:
     """Final result of a task execution."""
@@ -1029,6 +1034,15 @@ class AgentControlService:
 
         # Check for recipe match — skip see-think-act loop for known patterns
         recipe_result = self._try_recipe(task, screen)
+        if recipe_result is not None and (recipe_result.reason or "").startswith(RECIPE_REFUSED):
+            # A recipe that publishes matched on a page it is not for. The
+            # see-think-act loop would post the text on that page instead, so
+            # the task ends with the refusal.
+            with self._lock:
+                if self._active_task_id == task_id:
+                    self._active = False
+            recipe_result.total_time_seconds = time.time() - start_time
+            return finish(recipe_result)
         if recipe_result is not None:
             _rname = (recipe_result.reason or "").replace("recipe:", "", 1).strip() or None
             if _rname:
@@ -4306,6 +4320,17 @@ Reply ONLY with JSON:
                     if recipe_name in ("open_firefox",) and self._is_firefox_running(screen):
                         logger.info(f"[AGENT][RECIPE] Skipping '{recipe_name}' — Firefox already running, focusing it")
                         return self._focus_firefox(screen)
+                    # A recipe that posts publicly runs only on the site it is
+                    # for. Anywhere else it refuses, before the gates below can
+                    # defer it to the loop, which would post on the open page.
+                    refusal = self._page_host_refusal(recipe_name)
+                    if refusal:
+                        logger.warning(f"[AGENT][RECIPE] Refusing '{recipe_name}' — {refusal}")
+                        return AgentResult(
+                            success=False,
+                            reason=f"{RECIPE_REFUSED}: {recipe_name} {refusal}",
+                            task=task,
+                        )
                     # Recipes can declare preconditions for the UI state they assume.
                     # When the world doesn't match (e.g. Firefox is already up but the
                     # recipe wants to click a desktop launcher), skip — the see-think-act
@@ -4352,6 +4377,39 @@ Reply ONLY with JSON:
                 # the recipe on a typo'd gate name.
                 logger.warning(f"[AGENT][RECIPE] Unknown precondition '{cond}' — ignoring")
         return True
+
+    # Recipes that post under the user's name, and the sites they post to.
+    _RECIPE_PAGE_HOSTS = {"youtube_comment": ("youtube.com",)}
+
+    def _page_host_refusal(self, recipe_name: str) -> str:
+        """Why `recipe_name` may not run on the open page, or "" when it may.
+
+        Only recipes in _RECIPE_PAGE_HOSTS are checked. A page whose address
+        cannot be read is refused too: a public post needs a known target.
+        """
+        hosts = self._RECIPE_PAGE_HOSTS.get(recipe_name)
+        if not hosts:
+            return ""
+        from backend.utils.hosts import host_matches, url_host
+        wanted = " or ".join(hosts)
+        url = self._current_page_url()
+        if not url:
+            return f"posts publicly and needs a {wanted} page open; the current page address could not be read"
+        host = url_host(url)
+        if host_matches(host, *hosts):
+            return ""
+        return f"posts publicly and needs a {wanted} page open; the current page is {host or url[:80]}"
+
+    def _current_page_url(self) -> str:
+        """Address of the page open in the agent Firefox, or "" when it cannot be read."""
+        try:
+            from backend.services.dom_metadata_extractor import DOMMetadataExtractor
+            snap = DOMMetadataExtractor.get_instance().extract()
+        except Exception:
+            return ""
+        if not snap or not getattr(snap, "success", False):
+            return ""
+        return getattr(snap, "url", "") or ""
 
     def _is_firefox_running(self, screen) -> bool:
         """Check if Firefox has a window on the virtual display."""
