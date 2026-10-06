@@ -474,8 +474,10 @@ _CREATE_PICTURE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# An explicit slash command is always honoured, even in command-only mode.
-_SLASH_MEDIA_RE = re.compile(r"^\s*/(imagine|image|video)\b", re.IGNORECASE)
+# An explicit slash command is always honoured, even in command-only mode:
+# /imagine and /image make a picture, /video a clip.
+_SLASH_IMAGE_RE = re.compile(r"^\s*/(?:imagine|image)\b", re.IGNORECASE)
+_SLASH_VIDEO_RE = re.compile(r"^\s*/video\b", re.IGNORECASE)
 
 
 def _media_requires_explicit_command() -> bool:
@@ -766,7 +768,7 @@ def _image_generation_gate(message: str, draw_anywhere: bool) -> bool:
     if is_music_video_request(message) or is_film_crew_request(message):
         return False
     msg_lower = message.lower()
-    if _SLASH_MEDIA_RE.match(msg_lower):
+    if _SLASH_IMAGE_RE.match(msg_lower):
         return True
     if _media_requires_explicit_command():
         return False
@@ -813,7 +815,8 @@ def user_wants_image_edit(message: str, has_recent_image: bool,
     msg_lower = message.lower()
     names_image = bool(_NAMES_THE_IMAGE_RE.search(msg_lower))
     # "Draw me a cat wearing a top hat" has an edit verb but asks for a new picture.
-    new_request = bool(_SLASH_MEDIA_RE.match(msg_lower)) or _is_new_image_request(msg_lower)
+    new_request = (bool(_SLASH_IMAGE_RE.match(msg_lower) or _SLASH_VIDEO_RE.match(msg_lower))
+                   or _is_new_image_request(msg_lower))
     if new_request and not names_image and not _REFERS_BACK_RE.search(msg_lower):
         return False
     return has_recent_image or names_image
@@ -880,8 +883,10 @@ def user_wants_video_generation(message: str) -> bool:
     if is_music_video_request(message) or is_film_crew_request(message):
         return False
     msg_lower = message.lower()
-    if _SLASH_MEDIA_RE.match(msg_lower):
+    if _SLASH_VIDEO_RE.match(msg_lower):
         return True
+    if _SLASH_IMAGE_RE.match(msg_lower):
+        return False
     if _media_requires_explicit_command():
         return False
     if not (_VIDEO_REQUEST_RE.search(msg_lower) or msg_lower.startswith("video of ")):

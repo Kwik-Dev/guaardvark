@@ -424,6 +424,27 @@ class TestVideoRequests:
         assert uce.user_wants_image_generation(message) is True
 
 
+class TestSlashMediaCommands:
+    """/imagine and /image make a picture; only /video makes a clip."""
+
+    @pytest.mark.parametrize("message", ["/imagine a red fox", "/image a red fox"])
+    def test_image_commands_never_start_a_video(self, monkeypatch, message):
+        import backend.services.unified_chat_engine as uce
+        monkeypatch.setattr(uce, "_media_requires_explicit_command", lambda: False)
+        assert uce.user_wants_video_generation(message) is False
+        assert uce.user_wants_image_generation(message) is True
+
+        engine = uce.UnifiedChatEngine.__new__(uce.UnifiedChatEngine)
+        engine.registry = type("R", (), {"get_tool": lambda self, n: object()})()
+        assert engine._try_video_generate_direct(message, "sess", lambda *a, **k: None, "req", {}) is None
+
+    def test_video_command_is_a_video(self, monkeypatch):
+        import backend.services.unified_chat_engine as uce
+        monkeypatch.setattr(uce, "_media_requires_explicit_command", lambda: False)
+        assert uce.user_wants_video_generation("/video a red fox") is True
+        assert uce.user_wants_image_generation("/video a red fox") is False
+
+
 class TestCommandOnlyMode:
     """chat_media_requires_command: only an explicit command may create media."""
 
