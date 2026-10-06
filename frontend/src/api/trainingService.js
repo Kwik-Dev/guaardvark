@@ -249,6 +249,35 @@ export const getBaseModelStatus = async (name) => {
   return data.data || data;
 };
 
+// Settings > Training libraries (Unsloth, TRL, Datasets). plan: also ask for
+// the one-use token that the Install and Remove buttons send back; the backend
+// refuses an install or remove without it.
+export const getTrainingLibraries = async ({ plan = false } = {}) => {
+  const response = await fetch(`${BASE_URL}/training/libraries${plan ? "?plan=1" : ""}`);
+  const data = await handleResponse(response);
+  return data.data || data;
+};
+
+export const installTrainingLibraries = async (planToken, { anyway = false } = {}) => {
+  const response = await fetch(`${BASE_URL}/training/libraries/install`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm: "install", plan_token: planToken, anyway }),
+  });
+  const data = await handleResponse(response);
+  return data.data || data;
+};
+
+export const removeTrainingLibraries = async (planToken) => {
+  const response = await fetch(`${BASE_URL}/training/libraries/remove`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm: "remove", plan_token: planToken }),
+  });
+  const data = await handleResponse(response);
+  return data.data || data;
+};
+
 export const getImageFolders = async () => {
   try {
     const response = await fetch(`${BASE_URL}/training/images`);

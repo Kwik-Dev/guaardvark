@@ -360,9 +360,11 @@ def test_a_failed_run_is_resumable_from_the_checkpoints_it_wrote(app, progress, 
 
 
 @pytest.fixture
-def client(app):
+def client(app, monkeypatch):
     from backend.api.training.routes import training_bp
 
+    # The training libraries count as installed; the trainer itself is a stand-in.
+    monkeypatch.setattr("backend.services.training_libraries.unavailable_reason", lambda: None)
     app.register_blueprint(training_bp)
     return app.test_client()
 

@@ -165,3 +165,55 @@ def test_ollama_tuning_12gb_holds_one_model():
     t = hp.ollama_tuning({"vendor": "nvidia", "vram_mb": 12288})
     assert t["NUM_PARALLEL"] == 1
     assert t["MAX_LOADED_MODELS"] == 1
+
+
+# ---- training_fit: Settings > Training libraries ---------------------------------
+
+NVIDIA_16GB = {"vendor": "nvidia", "vram_mb": 16311, "compute_cap": "12.0"}
+
+
+def test_training_is_practical_on_a_16gb_nvidia_card_with_ram():
+    fit = hp.training_fit(64, NVIDIA_16GB, "x86_64")
+    assert fit["practical"] is True
+    assert "16 GB" in fit["reason"]
+
+
+def test_training_is_practical_at_the_8gb_floor():
+    assert hp.training_fit(32, {"vendor": "nvidia", "vram_mb": 7680}, "x86_64")["practical"] is True
+
+
+def test_training_is_not_practical_without_a_gpu():
+    fit = hp.training_fit(64, {"vendor": "none"}, "x86_64")
+    assert fit["practical"] is False
+    assert "No GPU" in fit["reason"]
+
+
+def test_training_is_not_practical_on_a_raspberry_pi():
+    assert hp.training_fit(8, {"vendor": "none"}, "aarch64")["practical"] is False
+
+
+def test_training_is_not_practical_on_a_card_under_8gb():
+    fit = hp.training_fit(32, {"vendor": "nvidia", "vram_mb": 6144}, "x86_64")
+    assert fit["practical"] is False
+    assert "6.0 GB" in fit["reason"]
+
+
+def test_training_is_not_practical_when_the_gpu_memory_is_unknown():
+    assert hp.training_fit(32, {"vendor": "nvidia", "vram_mb": None}, "x86_64")["practical"] is False
+
+
+def test_training_is_not_practical_with_8gb_of_ram_even_on_a_big_card():
+    fit = hp.training_fit(8, NVIDIA_16GB, "x86_64")
+    assert fit["practical"] is False
+    assert "8 GB of memory" in fit["reason"]
+
+
+def test_training_names_the_gpu_vendor_it_is_not_set_up_for():
+    for vendor, word in (("amd", "AMD"), ("apple", "Apple"), ("intel", "Intel")):
+        fit = hp.training_fit(64, {"vendor": vendor, "vram_mb": 24576}, "x86_64")
+        assert fit["practical"] is False
+        assert word in fit["reason"]
+
+
+def test_training_fit_tolerates_a_missing_gpu_dict():
+    assert hp.training_fit(0, None, "")["practical"] is False

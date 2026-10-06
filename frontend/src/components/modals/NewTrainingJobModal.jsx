@@ -26,7 +26,9 @@ import {
   getBaseModelStatus,
   getImageFolders,
   getHardwareCapabilities,
+  getTrainingLibraries,
 } from "../../api";
+import TrainingLibrariesModal from "./TrainingLibrariesModal";
 
 import ComputerIcon from "@mui/icons-material/Computer";
 
@@ -62,6 +64,17 @@ const NewTrainingJobModal = ({
   const [loading, setLoading] = useState(false);
   // null = unknown / not checked yet; otherwise the backend's download_status.
   const [baseModelStatus, setBaseModelStatus] = useState(null);
+  // Settings > Training libraries status; null until read. Jobs need them, so
+  // when they are missing the form points there instead of creating a job
+  // that would fail.
+  const [libraries, setLibraries] = useState(null);
+  const [librariesOpen, setLibrariesOpen] = useState(false);
+
+  const checkLibraries = () => {
+    getTrainingLibraries()
+      .then(setLibraries)
+      .catch(() => setLibraries(null));
+  };
 
   // Nothing leaves this machine unannounced: before Create, say whether the
   // chosen base model is on disk or will be fetched from huggingface.co.
@@ -99,6 +112,7 @@ const NewTrainingJobModal = ({
       });
       setFormError(null);
       loadOptions();
+      checkLibraries();
     }
   }, [open]);
 
@@ -233,6 +247,27 @@ const NewTrainingJobModal = ({
             </Typography>
             <Typography variant="caption">
               Intelligent defaults applied based on your {(hardwareCaps.vram_total_mb / 1024).toFixed(0)}GB {hardwareCaps.gpu_name}.
+            </Typography>
+          </Alert>
+        )}
+        {libraries && !libraries.ready && (
+          <Alert
+            severity="warning"
+            sx={{ mb: 2 }}
+            action={
+              <Button color="inherit" size="small" onClick={() => setLibrariesOpen(true)}>
+                Training libraries
+              </Button>
+            }
+          >
+            <Typography variant="body2">
+              <strong>Training libraries are not installed.</strong>{" "}
+              Fine-tuning needs{" "}
+              {libraries.libraries
+                .filter((l) => l.state === "missing")
+                .map((l) => l.name)
+                .join(", ")}
+              . Install them from Training libraries (also in Settings), then create the job.
             </Typography>
           </Alert>
         )}
@@ -496,10 +531,22 @@ const NewTrainingJobModal = ({
         <Button onClick={onClose} disabled={isSaving}>
           Cancel
         </Button>
-        <Button onClick={handleSave} variant="contained" disabled={isSaving}>
+        <Button
+          onClick={handleSave}
+          variant="contained"
+          disabled={isSaving || (libraries !== null && !libraries.ready)}
+        >
           Create Job
         </Button>
       </DialogActions>
+      <TrainingLibrariesModal
+        open={librariesOpen}
+        onClose={() => {
+          setLibrariesOpen(false);
+          checkLibraries();
+        }}
+        onChanged={setLibraries}
+      />
     </Dialog>
   );
 };

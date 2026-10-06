@@ -101,18 +101,104 @@ def get_hardware_capabilities():
         return error_response(str(e), 500)
 
 
+@training_bp.route("/libraries", methods=["GET"])
+def get_training_libraries():
+    """Settings > Training libraries: the pinned libraries, what is installed,
+    the hardware verdict and the install or remove in progress. ?plan=1 also
+    hands out the one-use token the modal's Install and Remove buttons send."""
+    try:
+        from backend.services import training_libraries
+        return success_response(training_libraries.status(with_plan_token=request.args.get("plan") == "1"))
+    except Exception as e:
+        logger.error(f"Error reading training libraries: {e}", exc_info=True)
+        return error_response(str(e), 500)
+
+
+def _libraries_in_use():
+    """Why the training libraries may not change now, or None. A running job
+    (training, export or import) has them loaded."""
+    running = db.session.query(TrainingJob).filter(TrainingJob.status == "running").count()
+    if running:
+        return (f"{running} training job(s) running. Installing or removing the training "
+                f"libraries now could stop them; wait for them to finish or cancel them.")
+    return None
+
+
+@training_bp.route("/libraries/install", methods=["POST"])
+@ensure_db_session_cleanup
+def install_training_libraries():
+    """Install the pinned training libraries into the backend's Python.
+
+    Only the modal's Install click sends what this needs:
+    {"confirm": "install", "plan_token": <from GET /libraries?plan=1>,
+     "anyway": true when the hardware verdict says not practical}."""
+    from backend.services import training_libraries
+    data = request.get_json(silent=True) or {}
+    if data.get("confirm") != "install":
+        return error_response(training_libraries.NEEDS_CLICK, 403, "NEEDS_CLICK")
+    try:
+        in_use = _libraries_in_use()
+        if in_use:
+            return error_response(in_use, 409, "TRAINING_RUNNING")
+        result = training_libraries.start_install(data.get("plan_token"), anyway=data.get("anyway") is True)
+        logger.info("Training libraries install started (anyway=%s)", data.get("anyway") is True)
+        return success_response(result, "Install started", status_code=202)
+    except training_libraries.Refused as e:
+        return error_response(str(e), e.status, e.code)
+    except Exception as e:
+        logger.error(f"Error starting the training libraries install: {e}", exc_info=True)
+        return error_response(str(e), 500)
+
+
+@training_bp.route("/libraries/remove", methods=["POST"])
+@ensure_db_session_cleanup
+def remove_training_libraries():
+    """Uninstall the training libraries and what their install added.
+    Body: {"confirm": "remove", "plan_token": <from GET /libraries?plan=1>}."""
+    from backend.services import training_libraries
+    data = request.get_json(silent=True) or {}
+    if data.get("confirm") != "remove":
+        return error_response(training_libraries.NEEDS_CLICK, 403, "NEEDS_CLICK")
+    try:
+        in_use = _libraries_in_use()
+        if in_use:
+            return error_response(in_use, 409, "TRAINING_RUNNING")
+        result = training_libraries.start_remove(data.get("plan_token"))
+        logger.info("Training libraries remove started")
+        return success_response(result, "Remove started", status_code=202)
+    except training_libraries.Refused as e:
+        return error_response(str(e), e.status, e.code)
+    except Exception as e:
+        logger.error(f"Error starting the training libraries remove: {e}", exc_info=True)
+        return error_response(str(e), 500)
+
+
+def _libraries_missing_response():
+    """The refusal for a job that would fail for want of the training
+    libraries, naming where to install them; None when they are there."""
+    from backend.services import training_libraries
+    reason = training_libraries.unavailable_reason()
+    if reason:
+        return error_response(reason, 409, "TRAINING_LIBRARIES_MISSING")
+    return None
+
+
 @training_bp.route("/jobs", methods=["POST"])
 @ensure_db_session_cleanup
 def create_job():
     try:
         data = request.get_json()
-        
+
         if not data.get("name"):
             return error_response("Job name is required", 400)
         if not data.get("base_model"):
             return error_response("Base model is required", 400)
         if not data.get("dataset_id"):
             return error_response("Dataset ID is required", 400)
+
+        missing_libraries = _libraries_missing_response()
+        if missing_libraries:
+            return missing_libraries
 
         # The trainer reads the dataset's file when the config names none, so a
         # dataset it cannot read is refused here rather than failing the run.
@@ -336,6 +422,10 @@ def resume_job(job_id):
 
         if not job.is_resumable:
             return error_response("Job is not resumable (no checkpoint available)", 400)
+
+        missing_libraries = _libraries_missing_response()
+        if missing_libraries:
+            return missing_libraries
 
         before = (job.status, job.pipeline_stage)
         job.status = "pending"
