@@ -1,0 +1,15 @@
+{
+  "data": {
+    "nodes": [
+      {
+        "host": "10.0.0.5",
+        "id": "n1",
+        "name": "Studio-2",
+        "port": 5000,
+        "role": "member",
+        "status": "online"
+      }
+    ]
+  },
+  "status": "success"
+}

@@ -1,0 +1,14 @@
+{
+  "models": [
+    {
+      "active": true,
+      "capabilities": [
+        "text2video"
+      ],
+      "id": "wan",
+      "is_ready": true,
+      "name": "Wan 2.1",
+      "vram_mb": 12000
+    }
+  ]
+}

@@ -511,7 +511,7 @@ Rules that keep it cheap:
 6. Follow the pattern of the two output-registration fixes: when a backend call can fail
    silently, log an error rather than returning a body with a missing id.
 7. Add a `--json` branch and a golden snapshot test (see `cli/tests/conftest.py` for the
-   shared fixtures and tier markers, and `cli/tests/test_fork_golden_json.py` for the
+   shared fixtures and tier markers, and `cli/tests/test_golden_json.py` for the
    snapshot harness; regenerate deliberately with `pytest cli/tests --update-golden`).
 
 The plan for closing the rest of the gap, group by group, is [`docs/CLI_PLAN.md`](CLI_PLAN.md).

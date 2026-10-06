@@ -1,0 +1,12 @@
+{
+  "data": {
+    "swarms": [
+      {
+        "id": "sw1",
+        "status": "complete",
+        "task_count": 3
+      }
+    ]
+  },
+  "status": "success"
+}

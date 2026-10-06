@@ -1,0 +1,17 @@
+{
+  "data": {
+    "documents": [
+      {
+        "filename": "spec.pdf",
+        "id": 9,
+        "size": 2048
+      }
+    ],
+    "folders": [
+      {
+        "name": "docs"
+      }
+    ]
+  },
+  "status": "success"
+}

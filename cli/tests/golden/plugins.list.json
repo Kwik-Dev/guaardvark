@@ -1,0 +1,13 @@
+{
+  "data": {
+    "plugins": [
+      {
+        "enabled": true,
+        "id": "comfyui",
+        "port": 8188,
+        "status": "running"
+      }
+    ]
+  },
+  "status": "success"
+}

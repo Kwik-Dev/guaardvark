@@ -1,0 +1,13 @@
+{
+  "data": {
+    "websites": [
+      {
+        "id": 1,
+        "name": "Blog",
+        "page_count": 3,
+        "url": "https://example.test"
+      }
+    ]
+  },
+  "status": "success"
+}

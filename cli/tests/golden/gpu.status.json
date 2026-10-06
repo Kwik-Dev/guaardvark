@@ -1,0 +1,10 @@
+{
+  "data": {
+    "available": true,
+    "gpu_name": "Apple M2 Max",
+    "owner": "none",
+    "utilization": 12,
+    "vram_total": "64 GB"
+  },
+  "status": "success"
+}

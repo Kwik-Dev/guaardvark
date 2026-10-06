@@ -1,0 +1,10 @@
+{
+  "data": {
+    "connected_nodes": 1,
+    "enabled": true,
+    "node_id": "abcdef0123456789",
+    "pending_updates": 2,
+    "role": "primary"
+  },
+  "status": "success"
+}

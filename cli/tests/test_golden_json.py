@@ -1,10 +1,11 @@
-"""Golden ``--json`` snapshots for the fork-owned command surface (CLI_PLAN 4.4).
+"""Golden ``--json`` snapshots for the read-only command surface (CLI_PLAN 4.4).
 
-The ad-hoc contract tests (`test_fork_phase*_commands.py`) assert the *values* a
-command maps a response into; they only catch shape drift where someone remembered to
-look. This tier pins the whole emitted payload of each command against a file in
-``cli/tests/golden/``. A renamed or dropped key is a breaking change for every script
-that reads ``--json``, and it now fails CI naming the exact path that moved.
+Covers the fork-owned groups and the read-only upstream groups alike. The ad-hoc
+contract tests (`test_fork_phase*_commands.py`, `test_system_json_contracts.py`) assert
+the *values* a command maps a response into; they only catch shape drift where someone
+remembered to look. This tier pins the whole emitted payload of each command against a
+file in ``cli/tests/golden/``. A renamed or dropped key is a breaking change for every
+script that reads ``--json``, and it now fails CI naming the exact path that moved.
 
 Regenerate deliberately::
 
@@ -14,9 +15,11 @@ then read the diff before committing it. Volatile fields (clocks, measured spans
 temporary home) are normalised by the ``golden`` fixture, so a snapshot is identical on
 every machine; their *presence* is still part of the contract.
 
-Only read-only commands are snapshotted. The ``--yes``-gated writes are covered by
-their own gate tests, which assert the refusal (and the request body) rather than the
-emitted shape, and a command that spends GPU is covered by `test_fork_gpu_gate.py`.
+Only read-only commands are snapshotted — read-only queries, including a diagnostic
+`POST` that changes nothing (e.g. `quality scorecard`), but nothing that writes, approves
+or renders. The ``--yes``-gated writes are covered by their own gate tests, which assert
+the refusal (and the request body) rather than the emitted shape, and a command that
+spends GPU is covered by `test_fork_gpu_gate.py`.
 The fake backend answers each route with a fixed body, so the snapshot is about
 *shape*, not about the backend.
 """
@@ -285,6 +288,143 @@ CASES = [
     # --- captions ----------------------------------------------------------
     Case("captions.status", ["video-editor", "captions-status", "j1"], [
         _r("GET", "/api/video-overlay/render-status/j1", {"job_id": "j1", "status": "running", "progress": 40}),
+    ]),
+
+    # --- upstream read-only groups ----------------------------------------
+    # The groups below are upstream-owned. Only the read-only leaves are pinned: a leaf
+    # that writes, spends GPU, opens a live loop or reads local files is left to its own
+    # gate tests (the `--yes` refusal, the GPU gate), because the fake backend cannot
+    # model it and the emitted shape is not the contract there.
+    Case("agents.list", ["agents", "list"], [
+        _r("GET", "/api/agents", {"agents": [
+            {"id": "a1", "name": "Scout", "enabled": True, "tools": ["search_codebase"]},
+        ]}),
+    ]),
+    Case("audio.voices", ["audio", "voices"], [
+        _r("GET", "/api/audio-foundry/voices", {"data": {"voices": [
+            {"id": "af_heart", "name": "Heart", "engine": "kokoro"},
+        ]}}),
+    ]),
+    Case("backup.list", ["backup", "list"], [
+        _r("GET", "/api/backups", {"backups": ["guaardvark-2026-09-01.tar.gz"]}),
+    ]),
+    Case("clients.list", ["clients", "list"], [
+        _r("GET", "/api/clients", {"data": [{"id": 1, "name": "Acme", "project_count": 2}]}),
+    ]),
+    Case("family.list", ["family", "list"], [
+        _r("GET", "/api/interconnector/nodes", {"nodes": [
+            {"id": "n1", "name": "Studio-2", "host": "10.0.0.5", "port": 5000,
+             "status": "online", "role": "member"},
+        ]}),
+    ]),
+    Case("family.status", ["family", "status"], [
+        _r("GET", "/api/interconnector/status", {"data": {
+            "enabled": True, "role": "primary", "connected_nodes": 1,
+            "pending_updates": 2, "node_id": "abcdef0123456789"},
+        }),
+    ]),
+    Case("files.list", ["files", "list"], [
+        _r("GET", "/api/files/browse", {"data": {
+            "folders": [{"name": "docs"}],
+            "documents": [{"id": 9, "filename": "spec.pdf", "size": 2048}]},
+        }),
+    ]),
+    Case("gpu.status", ["gpu", "status"], [
+        _r("GET", "/api/gpu/status", {"data": {
+            "available": True, "owner": "none", "gpu_name": "Apple M2 Max",
+            "vram_total": "64 GB", "utilization": 12},
+        }),
+    ]),
+    Case("health", ["health"], [
+        _r("GET", "/api/health", {"status": "ok", "version": "1.2.3", "uptime_seconds": 3600}),
+    ]),
+    Case("images.models", ["images", "models"], [
+        _r("GET", "/api/batch-image/models", {"models": [
+            {"id": "flux", "name": "FLUX.1", "installed": True},
+        ]}),
+    ]),
+    Case("index.status", ["index", "status"], [
+        _r("GET", "/api/entity-indexing/status", {"entity_counts": {"characters": 4, "props": 2}}),
+    ]),
+    Case("jobs.list", ["jobs", "list"], [
+        _r("GET", "/api/meta/active_jobs", {"active_jobs": [
+            {"task_id": "t1", "name": "Render", "type": "video", "status": "running"},
+        ]}),
+    ]),
+    Case("lessons.list", ["lessons", "list", "--session", "s1"], [
+        _r("GET", "/api/lessons/active", {"data": {
+            "active": True, "lesson_id": "l1", "title": "Debugging the dispatch loop"},
+        }),
+    ]),
+    Case("models.list", ["models", "list"], [
+        _r("GET", "/api/model/list", {"data": {"models": [
+            {"id": "gemma4:e4b", "name": "gemma4:e4b"},
+        ]}}),
+    ]),
+    Case("plugins.list", ["plugins", "list"], [
+        _r("GET", "/api/plugins", {"plugins": [
+            {"id": "comfyui", "status": "running", "enabled": True, "port": 8188},
+        ]}),
+    ]),
+    Case("plugins.status", ["plugins", "status"], [
+        _r("GET", "/api/plugins/orchestrator/state", {"data": {
+            "state": "ready", "plugins": [{"id": "comfyui", "status": "running"}]},
+        }),
+    ]),
+    Case("projects.list", ["projects", "list"], [
+        _r("GET", "/api/projects", {"data": [{"id": 1, "name": "The Last Spark", "client_id": 1}]}),
+    ]),
+    Case("quality.scorecard", ["quality", "scorecard"], [
+        _r("POST", "/api/meta/quality-scorecard", {"data": {
+            "score": 88, "checks": [{"name": "coverage", "ok": True}]},
+        }),
+    ]),
+    Case("rag.status", ["rag", "status"], [
+        _r("POST", "/api/tools/execute", {"success": True, "result": {
+            "success": True,
+            "output": "Documents (2):\nElara — 12 passages\nNoir — 3 passages",
+            "metadata": {"total": 2},
+        }}),
+        _r("GET", "/api/meta/index-info", {"embedding_model": "bge-m3"}),
+    ]),
+    Case("rules.list", ["rules", "list"], [
+        _r("GET", "/api/rules", {"data": [
+            {"id": 1, "name": "no emojis", "level": "global", "type": "style", "is_active": True},
+        ]}),
+    ]),
+    Case("settings.list", ["settings", "list"], [
+        _r("GET", "/api/settings", {"data": {
+            "settings": {"active_video_model": "wan", "theme": "dark"},
+            "settable": {"active_video_model": True, "theme": False},
+        }}),
+    ]),
+    Case("status", ["status"], [
+        _r("GET", "/api/health", {"status": "ok", "version": "9.9.9", "uptime_seconds": 3600}),
+        _r("GET", "/api/model/status", {"data": {"text_model": "gemma4:e4b"}}),
+        _r("GET", "/api/health/celery", {"status": "up", "workers": ["w1"]}),
+        _r("GET", "/api/meta/metrics", {"data": {"gpu_mem": 12.0, "cpu_percent": 18.0}}),
+        _r("GET", "/api/automation/mcp/status", {"mcp_enabled": False}),
+    ]),
+    Case("swarm.list", ["swarm", "list"], [
+        _r("GET", "/api/swarm/history", {"swarms": [
+            {"id": "sw1", "status": "complete", "task_count": 3},
+        ]}),
+    ]),
+    Case("tasks.list", ["tasks", "list"], [
+        _r("GET", "/api/tasks", {"data": [
+            {"id": "t1", "name": "Render", "task_type": "video", "status": "running", "progress": 40},
+        ]}),
+    ]),
+    Case("videos.models", ["videos", "models"], [
+        _r("GET", "/api/batch-video/models", {"data": {"models": [
+            {"id": "wan", "name": "Wan 2.1", "is_ready": True, "active": True,
+             "vram_mb": 12000, "capabilities": ["text2video"]},
+        ]}}),
+    ]),
+    Case("websites.list", ["websites", "list"], [
+        _r("GET", "/api/websites/", {"data": [
+            {"id": 1, "name": "Blog", "url": "https://example.test", "page_count": 3},
+        ]}),
     ]),
 ]
 

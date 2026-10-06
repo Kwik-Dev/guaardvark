@@ -1,0 +1,14 @@
+{
+  "data": {
+    "rules": [
+      {
+        "id": 1,
+        "is_active": true,
+        "level": "global",
+        "name": "no emojis",
+        "type": "style"
+      }
+    ]
+  },
+  "status": "success"
+}

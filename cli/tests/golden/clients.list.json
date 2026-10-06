@@ -1,0 +1,12 @@
+{
+  "data": {
+    "clients": [
+      {
+        "id": 1,
+        "name": "Acme",
+        "project_count": 2
+      }
+    ]
+  },
+  "status": "success"
+}

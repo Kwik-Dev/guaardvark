@@ -1,0 +1,18 @@
+{
+  "data": {
+    "documents": 2,
+    "documents_listed": [
+      {
+        "document": "Elara",
+        "passages": "12"
+      },
+      {
+        "document": "Noir",
+        "passages": "3"
+      }
+    ],
+    "embedding_model": "bge-m3",
+    "passages_listed": 15
+  },
+  "status": "success"
+}

@@ -1,0 +1,14 @@
+{
+  "data": {
+    "tasks": [
+      {
+        "id": "t1",
+        "name": "Render",
+        "progress": 40,
+        "status": "running",
+        "task_type": "video"
+      }
+    ]
+  },
+  "status": "success"
+}

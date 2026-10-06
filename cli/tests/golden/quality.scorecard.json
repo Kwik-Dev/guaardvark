@@ -1,0 +1,12 @@
+{
+  "data": {
+    "checks": [
+      {
+        "name": "coverage",
+        "ok": true
+      }
+    ],
+    "score": 88
+  },
+  "status": "success"
+}

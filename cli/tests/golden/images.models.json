@@ -1,0 +1,12 @@
+{
+  "data": {
+    "models": [
+      {
+        "id": "flux",
+        "installed": true,
+        "name": "FLUX.1"
+      }
+    ]
+  },
+  "status": "success"
+}

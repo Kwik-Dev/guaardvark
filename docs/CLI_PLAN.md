@@ -445,22 +445,25 @@ machine-checked, so the docs cannot drift from the code.
 - The point is to catch *shape* drift (a renamed key is a breaking change for scripts),
   which the ad-hoc asserts today only catch for the commands someone remembered.
 
-**Shipped (fork surface).** The harness lives in `cli/tests/conftest.py`: a `--update-golden`
+**Shipped (fork surface and the read-only upstream groups).** The harness lives in `cli/tests/conftest.py`: a `--update-golden`
 option (`pytest_addoption`), a `golden` fixture that accepts a `CliRunner` result, a recursive
 normaliser for volatile keys and the isolated-home temp path, and a path-annotated `_diff`
 (`$.data.cloud_models_enabled` names the exact key that moved). Snapshots live in
-`cli/tests/golden/<group>.<cmd>.json`; `cli/tests/test_fork_golden_json.py` drives the
+`cli/tests/golden/<group>.<cmd>.json`; `cli/tests/test_golden_json.py` drives the
 fork-owned surface (guard, improve, system-map, content, websearch, connections, approvals,
 cast, upscale, infographic, audio models, video-editor, training, llm, wordpress, the
-film-crew and music-video extensions, the `api` escape hatch and captions status) through the
+film-crew and music-video extensions, the `api` escape hatch and captions status) and the
+read-only upstream groups (agents, backup, clients, family, files, gpu, health, images, index,
+jobs, lessons, models, plugins, projects, quality, rag, rules, settings, status, swarm, tasks,
+videos, websites, audio voices) through the
 shared `fake_backend`. Each case also asserts the exact set of calls it made, so a dropped
 call or a wrong route path fails beside the shape (query strings and bodies are left to the
 phase tests). The files are marked `contract` by the filename rule, so the existing `cli` CI
 job runs them with no workflow change.
 
-Still open: snapshots for the upstream command groups, and the `InProcessBackend` e2e tier
-(§4.5). The `pytest-cov` floor (§4.1) is also not wired yet — the CI job installs only
-`pytest`, so a floor needs `pytest-cov` added there and a measured starting number.
+Still open: the `InProcessBackend` e2e tier (§4.5). The `pytest-cov` floor (§4.1) is also
+not wired yet — the CI job installs only `pytest`, so a floor needs `pytest-cov` added there
+and a measured starting number.
 
 ### 4.5 E2E harness
 

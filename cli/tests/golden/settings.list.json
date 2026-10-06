@@ -1,0 +1,13 @@
+{
+  "data": {
+    "settable": {
+      "active_video_model": true,
+      "theme": false
+    },
+    "settings": {
+      "active_video_model": "wan",
+      "theme": "dark"
+    }
+  },
+  "status": "success"
+}

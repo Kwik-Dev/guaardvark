@@ -1,0 +1,15 @@
+{
+  "data": {
+    "agents": [
+      {
+        "enabled": true,
+        "id": "a1",
+        "name": "Scout",
+        "tools": [
+          "search_codebase"
+        ]
+      }
+    ]
+  },
+  "status": "success"
+}

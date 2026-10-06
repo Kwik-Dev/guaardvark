@@ -1,0 +1,30 @@
+{
+  "data": {
+    "celery": {
+      "status": "up",
+      "workers": [
+        "w1"
+      ]
+    },
+    "health": {
+      "status": "ok",
+      "uptime_seconds": 3600,
+      "version": "9.9.9"
+    },
+    "mcp": {
+      "mcp_enabled": false
+    },
+    "metrics": {
+      "data": {
+        "cpu_percent": 18.0,
+        "gpu_mem": 12.0
+      }
+    },
+    "model": {
+      "data": {
+        "text_model": "gemma4:e4b"
+      }
+    }
+  },
+  "status": "success"
+}

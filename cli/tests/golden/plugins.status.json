@@ -1,0 +1,12 @@
+{
+  "data": {
+    "plugins": [
+      {
+        "id": "comfyui",
+        "status": "running"
+      }
+    ],
+    "state": "ready"
+  },
+  "status": "success"
+}

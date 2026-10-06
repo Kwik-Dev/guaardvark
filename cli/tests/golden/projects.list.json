@@ -1,0 +1,12 @@
+{
+  "data": {
+    "projects": [
+      {
+        "client_id": 1,
+        "id": 1,
+        "name": "The Last Spark"
+      }
+    ]
+  },
+  "status": "success"
+}
