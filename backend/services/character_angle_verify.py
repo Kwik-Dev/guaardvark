@@ -53,6 +53,19 @@ _ANGLE_ALIASES = {
     "wide shot": "full-body front",
 }
 
+# Fuzzy lookup tries the longest label first, on word boundaries, so a longer
+# label wins over a shorter one inside it: "full-body three-quarter left" is
+# full-body three-quarter (not three-quarter left), and "full body, front-facing"
+# is full-body front (not the alias "front").
+_FUZZY_LABELS = tuple(
+    (re.compile(rf"\b{re.escape(label)}\b"), canon)
+    for label, canon in sorted(
+        [(c, c) for c in CANONICAL_ANGLES] + list(_ANGLE_ALIASES.items()),
+        key=lambda pair: len(pair[0]),
+        reverse=True,
+    )
+)
+
 _CLASSIFY_PROMPT = (
     "Classify the camera framing of the MAIN person in this image. "
     "Reply with EXACTLY one label from this list and nothing else:\n"
@@ -73,12 +86,8 @@ def normalize_angle(label: str | None) -> Optional[str]:
         return t
     if t in _ANGLE_ALIASES:
         return _ANGLE_ALIASES[t]
-    # Fuzzy contains
-    for canon in CANONICAL_ANGLES:
-        if canon in t:
-            return canon
-    for alias, canon in _ANGLE_ALIASES.items():
-        if alias in t:
+    for pattern, canon in _FUZZY_LABELS:
+        if pattern.search(t):
             return canon
     if "profile" in t and "left" in t:
         return "profile left"

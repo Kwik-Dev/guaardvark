@@ -23,6 +23,14 @@ def test_normalize_angle_aliases():
     assert normalize_angle("headshot") == "face-forward"
 
 
+def test_normalize_angle_prefers_the_longest_label():
+    assert normalize_angle("full-body three-quarter left") == "full-body three-quarter"
+    assert normalize_angle("full body three-quarter left") == "full-body three-quarter"
+    assert normalize_angle("full body, front-facing") == "full-body front"
+    assert normalize_angle("Three-Quarter Left.") == "three-quarter left"
+    assert normalize_angle("a front view") == "face-forward"
+
+
 def test_angles_match_and_unknown_observed_skips_regen():
     assert angles_match("profile right", "profile right") is True
     assert angles_match("profile right", "full-body front") is False
