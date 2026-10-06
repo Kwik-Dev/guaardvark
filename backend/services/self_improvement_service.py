@@ -20,11 +20,14 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -116,6 +119,7 @@ class SelfImprovementService:
         self._running = False
         self._current_run = None
         self._current_run_id = None  # tagged onto every progress event so the UI can pin
+        self._current_trigger = None  # handed to edit_code with the run id
         logger.info("SelfImprovementService initialized")
 
     def _emit_progress(self, stage: str, detail: str = "", progress: float = 0.0, **extra):
@@ -140,12 +144,22 @@ class SelfImprovementService:
         except Exception:
             pass  # Socket may not be available in test mode
 
-    def _is_safe_to_run(self) -> bool:
+    def _gates_open(self) -> bool:
+        """The codebase is unlocked and self-improvement is switched on.
+
+        A running scan re-reads these between fixes, so locking the codebase
+        or switching self-improvement off stops it at the next one.
+        """
         if _is_codebase_locked():
             logger.warning("Self-improvement blocked: codebase is locked")
             return False
         if not _is_self_improvement_enabled():
             logger.info("Self-improvement is disabled")
+            return False
+        return True
+
+    def _is_safe_to_run(self) -> bool:
+        if not self._gates_open():
             return False
         if self._running:
             logger.warning("Self-improvement already running")
@@ -317,13 +331,21 @@ class SelfImprovementService:
         }
 
     def run_self_check(self) -> Dict[str, Any]:
-        """Mode 1: Run test suite, identify failures, dispatch agent to fix."""
+        """Mode 1: Run test suite, identify failures, dispatch agent to fix.
+
+        Each fix the agent stages is tested against its failing test file in a
+        scratch copy of the checkout (_verify_fix), and the result is written
+        on the pending fix for the person who reviews it.
+        """
         if not self._is_safe_to_run():
             return {"success": False, "reason": "Self-improvement cannot run"}
 
         self._running = True
+        self._current_trigger = "scheduled"
         start_time = time.time()
         run_record = None
+        run_id = None
+        error = None
         self._emit_progress("starting", "Initializing self-check", 0.0)
 
         try:
@@ -335,7 +357,8 @@ class SelfImprovementService:
             )
             db.session.add(run_record)
             db.session.commit()
-            self._current_run_id = run_record.id
+            run_id = run_record.id
+            self._current_run_id = run_id
 
             # Re-emit now that we have a run_id so late subscribers still catch it
             self._emit_progress("starting", "Initializing self-check", 0.05,
@@ -358,7 +381,7 @@ class SelfImprovementService:
                 "return_code": result.returncode,
             })
 
-            if self._cancel_requested(run_record.id):
+            if self._cancel_requested(run_id):
                 return self._finish_cancelled(run_record, start_time, [])
 
             self._emit_progress("analyzed", f"Found {len(failures)} failure(s)", 0.3,
@@ -378,25 +401,40 @@ class SelfImprovementService:
             # A fix counts only when the agent staged a PendingFix for this run;
             # its closing answer alone ("I could not find the problem") is not one.
             changes = []
+            verifications = []
             for i, failure in enumerate(failures):
-                if self._cancel_requested(run_record.id):
+                if self._cancel_requested(run_id):
                     return self._finish_cancelled(run_record, start_time, changes)
-                if not self._is_safe_to_run():
+                # Not _is_safe_to_run: this run is the one running, so it would always stop here.
+                if not self._gates_open():
                     break
                 progress = 0.3 + (0.6 * (i / max(len(failures), 1)))
                 self._emit_progress("fixing", f"Fixing {failure['test_name']} ({i+1}/{len(failures)})",
                                     progress, current_fix=i+1, total_fixes=len(failures))
-                before = {f.id for f in self._staged_fixes(run_record.id)}
+                before = {f.id for f in self._staged_fixes(run_id)}
                 answer = self._attempt_fix(failure)
-                new = [f for f in self._staged_fixes(run_record.id) if f.id not in before]
-                changes.extend(self._staged_changes(new, failure, answer))
+                new = [f for f in self._staged_fixes(run_id) if f.id not in before]
+                staged = self._staged_changes(new, failure, answer)
+                if new and not self._cancel_requested(run_id):
+                    self._emit_progress("verifying", f"Testing the fix for {failure['test_name']} in a scratch copy",
+                                        progress, current_fix=i+1, total_fixes=len(failures))
+                    verification = self._verify_fix([failure["file"]], new)
+                    self._attach_verification(new, verification)
+                    summary = {k: verification.get(k) for k in
+                               ("tests", "all_passed", "total_failures", "return_code", "error")}
+                    for change in staged:
+                        change["verification"] = summary
+                    verifications.append({"test": failure["test_name"],
+                                          "pending_fix_ids": [f.id for f in new], **verification})
+                changes.extend(staged)
 
-            if self._cancel_requested(run_record.id):
+            if self._cancel_requested(run_id):
                 return self._finish_cancelled(run_record, start_time, changes)
 
-            # Staging writes nothing to disk, so re-running the tests here would
-            # test the same code. A person applies the fix; that is where it is tested.
             run_record.changes_made = json.dumps(changes)
+            if verifications:
+                run_record.test_results_after = json.dumps(verifications)
+            fixes_verified = sum(1 for c in changes if (c.get("verification") or {}).get("all_passed"))
             if changes:
                 run_record.status = "success"
                 message = f"{len(changes)} fix(es) staged for review"
@@ -412,33 +450,29 @@ class SelfImprovementService:
 
             self._emit_progress("complete", message, 1.0,
                                 status=run_record.status, fixes_staged=len(changes),
-                                failures_found=len(failures))
+                                fixes_verified=fixes_verified, failures_found=len(failures))
 
             return {
                 "success": bool(changes),
-                "run_id": run_record.id,
+                "run_id": run_id,
                 "message": message,
                 "failures_found": len(failures),
                 "fixes_staged": len(changes),
+                "fixes_verified": fixes_verified,
                 "changes": changes,
             }
 
         except Exception as e:
+            error = e
             logger.error(f"Self-check failed: {e}", exc_info=True)
             self._emit_progress("error", str(e)[:200], 0.0, status="failed")
-            if run_record:
-                run_record.status = "failed"
-                run_record.error_message = str(e)
-                run_record.duration_seconds = time.time() - start_time
-                try:
-                    from backend.models import db
-                    db.session.commit()
-                except Exception:
-                    pass
             return {"success": False, "reason": str(e)}
         finally:
+            if run_id is not None:
+                self._fail_if_still_running(run_id, error, time.time() - start_time)
             self._running = False
             self._current_run_id = None
+            self._current_trigger = None
 
     def _attempt_fix(self, failure: Dict[str, str], message: str = None) -> Optional[Dict[str, Any]]:
         """Dispatch code_assistant agent to fix a test failure (or run `message`)."""
@@ -472,6 +506,7 @@ class SelfImprovementService:
                 _self_improvement_context=True,
                 _reasoning=message,
                 _run_id=self._current_run_id,
+                _trigger=getattr(self, "_current_trigger", None),
             )
 
             result = executor.execute(message, session_context=agent_config.system_prompt)
@@ -489,25 +524,152 @@ class SelfImprovementService:
             logger.error(f"Agent fix attempt failed for {failure['test_name']}: {e}", exc_info=True)
             return None
 
-    def _verify_fix(self, test_files):
-        """Re-run tests after agent fixes to verify they pass."""
+    # The same limit as the self-check's own test run.
+    VERIFY_TIMEOUT_SECONDS = 300
+
+    def _verify_fix(self, test_files: List[str], fixes: list) -> Dict[str, Any]:
+        """Run the failing test file(s) with staged fixes applied, in a scratch copy.
+
+        The copy is a temporary git worktree, in the system temp dir, of the
+        checkout as it is now (uncommitted changes to tracked files included);
+        the fixes' exact replacements are made there and nowhere else, and the
+        copy is removed afterwards. Only the named test files run, with
+        GUAARDVARK_MODE=test, GUAARDVARK_ROOT pointing at the copy and
+        DATABASE_URL removed, so the tests cannot reach the app's database.
+
+        Returns all_passed, total_failures, failures and return_code from that
+        run, the test files run, and ``error`` saying why nothing ran (no test
+        file, no git checkout, a fix that no longer matches, a timeout).
+        """
+        result: Dict[str, Any] = {
+            "tests": self._runnable_test_files(test_files), "all_passed": False,
+            "total_failures": 0, "failures": [], "return_code": None, "error": None,
+        }
+        if not result["tests"]:
+            result["error"] = "no failing test file to run"
+            return result
+
+        root = Path(os.environ.get("GUAARDVARK_ROOT", ".")).resolve()
+        scratch = Path(tempfile.mkdtemp(prefix="guaardvark-verify-"))
+        tree = scratch / "checkout"
+        made = False
         try:
-            root = os.environ.get("GUAARDVARK_ROOT", ".")
-            result = subprocess.run(
-                ["python3", "-m", "pytest"] + test_files + ["-v", "--tb=short", "--no-header"],
-                capture_output=True, text=True, timeout=300, cwd=root,
-                env={**os.environ, "GUAARDVARK_MODE": "test"},
+            # HEAD when the working tree has no changes or git cannot record them.
+            snapshot = self._git(root, "stash", "create")
+            base = snapshot.stdout.strip() if snapshot.returncode == 0 else ""
+            added = self._git(root, "worktree", "add", "--detach", str(tree), base or "HEAD")
+            if added.returncode != 0:
+                detail = (added.stderr or added.stdout or "").strip()[-200:]
+                result["error"] = f"could not make a scratch copy: {detail}"
+                return result
+            made = True
+
+            for fix in fixes:
+                problem = self._apply_in_copy(fix, root, tree)
+                if problem:
+                    result["error"] = problem
+                    return result
+
+            env = {k: v for k, v in os.environ.items() if k != "DATABASE_URL"}
+            env.update(GUAARDVARK_MODE="test", GUAARDVARK_ROOT=str(tree))
+            run = subprocess.run(
+                ["python3", "-m", "pytest", *result["tests"], "-v", "--tb=short", "--no-header"],
+                capture_output=True, text=True, timeout=self.VERIFY_TIMEOUT_SECONDS,
+                cwd=str(tree), env=env,
             )
-            failures = self._parse_test_failures(result.stdout + result.stderr)
-            return {
-                "total_failures": len(failures),
-                "failures": failures,
-                "return_code": result.returncode,
-                "all_passed": result.returncode == 0 and len(failures) == 0,
-            }
+            failures = self._parse_test_failures(run.stdout + run.stderr)
+            result.update(failures=failures, total_failures=len(failures),
+                          return_code=run.returncode,
+                          all_passed=run.returncode == 0 and not failures)
+        except subprocess.TimeoutExpired as e:
+            result["error"] = f"timed out after {e.timeout:g} s"
         except Exception as e:
             logger.error(f"Verification run failed: {e}")
-            return {"total_failures": -1, "failures": [], "return_code": -1, "all_passed": False}
+            result["error"] = f"{type(e).__name__}: {e}"
+        finally:
+            self._remove_scratch_copy(root, tree, scratch, made)
+        return result
+
+    @staticmethod
+    def _runnable_test_files(test_files: List[str]) -> List[str]:
+        """Relative .py paths that stay inside the checkout, each once."""
+        runnable: List[str] = []
+        for name in test_files or []:
+            name = (name or "").strip()
+            path = Path(name)
+            if (not name.endswith(".py") or path.is_absolute() or ".." in path.parts
+                    or name in runnable):
+                continue
+            runnable.append(name)
+        return runnable
+
+    @staticmethod
+    def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", "-C", str(root), *args],
+                              capture_output=True, text=True, timeout=120)
+
+    @staticmethod
+    def _apply_in_copy(fix, root: Path, tree: Path) -> Optional[str]:
+        """Make one staged replacement in the scratch copy; the reason when it cannot be made."""
+        old, new = fix.original_content, fix.proposed_new_content
+        if old is None or new is None:
+            return f"pending fix #{fix.id} has no exact replacement to apply"
+        path = Path(fix.file_path)
+        if not path.is_absolute():
+            path = root / path
+        try:
+            relative = path.resolve().relative_to(root)
+        except ValueError:
+            return f"pending fix #{fix.id} is outside the checkout"
+        target = tree / relative
+        if (target.is_symlink() or not target.is_file()
+                or not target.resolve().is_relative_to(tree.resolve())):
+            return f"{relative.as_posix()} is not a tracked file in the scratch copy"
+        text = target.read_text(encoding="utf-8")
+        if text.count(old) != 1:
+            return f"pending fix #{fix.id} no longer matches {relative.as_posix()}"
+        target.write_text(text.replace(old, new, 1), encoding="utf-8")
+        return None
+
+    def _remove_scratch_copy(self, root: Path, tree: Path, scratch: Path, made: bool) -> None:
+        """Remove the scratch worktree and its temp dir; never raises."""
+        try:
+            if made and self._git(root, "worktree", "remove", "--force", str(tree)).returncode != 0:
+                shutil.rmtree(tree, ignore_errors=True)
+                self._git(root, "worktree", "prune")
+        except Exception as e:
+            logger.warning(f"Could not remove the scratch copy {tree}: {e}")
+        shutil.rmtree(scratch, ignore_errors=True)
+
+    @staticmethod
+    def _verification_note(verification: Dict[str, Any]) -> str:
+        """One line on the pending fix saying how its failing test did."""
+        from backend.utils.display_paths import display_text
+        tests = ", ".join(verification.get("tests") or []) or "the failing test"
+        if verification.get("error"):
+            return f"Scratch-copy test run: not run ({display_text(verification['error'])})."
+        if verification.get("all_passed"):
+            return f"Scratch-copy test run: {tests} passed with this fix applied."
+        failures = verification.get("failures") or []
+        if failures:
+            names = ", ".join(f["test_name"] for f in failures[:5])
+            if len(failures) > 5:
+                names += f" and {len(failures) - 5} more"
+            return f"Scratch-copy test run: {tests} fails with this fix applied ({names})."
+        return (f"Scratch-copy test run: {tests} did not pass with this fix applied "
+                f"(pytest exit code {verification.get('return_code')}).")
+
+    def _attach_verification(self, fixes: list, verification: Dict[str, Any]) -> None:
+        """Add the verification line to each fix's description.
+
+        The description is what the Fixes dialog shows every reviewer, and
+        approving a fix replaces its review notes.
+        """
+        from backend.models import db
+        note = self._verification_note(verification)
+        for fix in fixes:
+            fix.fix_description = f"{fix.fix_description}\n\n{note}" if fix.fix_description else note
+        db.session.commit()
 
     def _broadcast_learnings(self, changes: List[Dict], run_record):
         """Create InterconnectorLearning records and broadcast to family.
@@ -605,7 +767,8 @@ class SelfImprovementService:
             self._running = False
             self._current_run_id = None
 
-    def _fail_if_still_running(self, run_id: int, error: Optional[BaseException]) -> None:
+    def _fail_if_still_running(self, run_id: int, error: Optional[BaseException],
+                               duration_seconds: Optional[float] = None) -> None:
         """Close a run row its runner left 'running' as failed, with the error.
 
         Otherwise /scans, /runs and the scan progress view report the run as
@@ -624,6 +787,8 @@ class SelfImprovementService:
                 f"{type(error).__name__}: {error}" if error is not None
                 else "Stopped before it finished"
             )
+            if duration_seconds is not None:
+                run.duration_seconds = duration_seconds
             db.session.commit()
         except Exception as e:
             logger.error(f"Could not close self-improvement run {run_id}: {e}")
@@ -647,6 +812,8 @@ class SelfImprovementService:
             return {"success": False, "reason": "Self-improvement cannot run"}
 
         self._running = True
+        run_id = None
+        error = None
         try:
             from backend.models import db, SelfImprovementRun
             run_record = SelfImprovementRun(
@@ -656,8 +823,9 @@ class SelfImprovementService:
             )
             db.session.add(run_record)
             db.session.commit()
+            run_id = run_record.id
 
-            self._current_run_id = run_record.id
+            self._current_run_id = run_id
             change = None
             if proposal:
                 change = self._stage_proposal(proposal, run_record.id)
@@ -699,9 +867,12 @@ class SelfImprovementService:
             return {"success": bool(staged), "change": change,
                     "pending_fix_ids": [f.id for f in staged]}
         except Exception as e:
+            error = e
             logger.error(f"Directed improvement failed: {e}", exc_info=True)
             return {"success": False, "reason": str(e)}
         finally:
+            if run_id is not None:
+                self._fail_if_still_running(run_id, error)
             self._running = False
             self._current_run_id = None
 
