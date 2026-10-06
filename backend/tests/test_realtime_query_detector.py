@@ -111,6 +111,27 @@ class TestShouldUseWebSearch:
     def test_current_info_word_triggers(self, _access, manager):
         assert manager._should_use_web_search("weather in Boston now") is True
 
+    @pytest.mark.parametrize("message", [
+        "what is a closure?",
+        "what are the SOLID principles",
+        "find my notes on taxes",
+        "check my code for bugs",
+        "is my website config in settings.py right?",
+        "what time is it",
+    ])
+    @patch("backend.utils.settings_utils.get_web_access", return_value=True)
+    def test_generic_words_do_not_send_a_search(self, _access, manager, message):
+        assert manager._should_use_web_search(message) is False
+
+    @pytest.mark.parametrize("message", [
+        "search the web for flights to Denver",
+        "look up the opening hours of the library",
+        "latest release of Ollama",
+    ])
+    @patch("backend.utils.settings_utils.get_web_access", return_value=True)
+    def test_explicit_search_and_live_words_still_search(self, _access, manager, message):
+        assert manager._should_use_web_search(message) is True
+
     def test_long_query_never_reaches_search(self, manager):
         query = ("latest news on " * 30)[:400]
         assert len(query) == 400
