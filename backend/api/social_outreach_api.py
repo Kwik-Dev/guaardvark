@@ -376,6 +376,7 @@ def draft_comment():
             "cadence_block": cadence_reason if not cadence_ok else None,
             "independent_check": independent_check,
             "external_grade": ext.get("grade"),
+            "external_passed": ext.get("passed"),
             "external_reason": ext.get("reason", ""),
             "relevance_unchecked": relevance_unchecked,
             "hold_reason": hold_reason,

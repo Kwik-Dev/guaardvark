@@ -15,8 +15,8 @@ from backend.api import social_outreach_api
 from backend.models import Setting, SocialOutreachLog, db
 from backend.services.social_outreach import audit, external_grader, kill_switch, persona
 
-PASSED = {"grade": 0.75, "checked": True, "skipped": False, "model": "g", "reason": "fine"}
-FAILED = {"grade": 0.25, "checked": True, "skipped": False, "model": "g", "reason": "generic"}
+PASSED = {"grade": 0.75, "passed": True, "checked": True, "skipped": False, "model": "g", "reason": "fine"}
+FAILED = {"grade": 0.75, "passed": False, "checked": True, "skipped": False, "model": "g", "reason": "generic"}
 UNCHECKED = {"grade": 0.0, "checked": False, "skipped": True, "model": None,
              "reason": "no_grader_model_loaded"}
 

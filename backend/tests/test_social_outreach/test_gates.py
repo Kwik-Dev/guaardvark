@@ -13,8 +13,8 @@ import pytest
 from backend.models import Setting, db
 from backend.services.social_outreach import gates, kill_switch
 
-PASSED = {"grade": 0.75, "checked": True, "skipped": False}
-FAILED = {"grade": 0.25, "checked": True, "skipped": False}
+PASSED = {"grade": 0.75, "passed": True, "checked": True, "skipped": False}
+FAILED = {"grade": 0.25, "passed": False, "checked": True, "skipped": False}
 UNCHECKED = {"grade": 0.0, "checked": False, "skipped": True, "reason": "no_grader_model_loaded"}
 
 
@@ -29,10 +29,18 @@ def test_a_check_that_ran_decides_on_its_grade(app, supervised):
     assert gates.independent_ok(FAILED, supervised=supervised) == (False, "failed")
 
 
-def test_the_threshold_is_inclusive_and_unchanged(app):
-    assert gates.MIN_EXTERNAL_GRADE == 0.5
-    at_threshold = {"grade": 0.5, "checked": True}
-    assert gates.independent_ok(at_threshold, supervised=False) == (True, "passed")
+@pytest.mark.parametrize("ext", [
+    {"grade": 0.75, "passed": False, "checked": True},   # the grade does not pass a draft
+    {"grade": 1.0, "checked": True},                      # no passed answer is not a pass
+    {"grade": 1.0, "passed": "yes", "checked": True},
+])
+def test_only_passed_true_passes(app, ext):
+    assert gates.independent_check_label(ext) == "failed"
+    assert gates.independent_ok(ext, supervised=False) == (False, "failed")
+
+
+def test_passed_decides_whatever_the_grade(app):
+    assert gates.independent_check_label({"grade": 0.0, "passed": True, "checked": True}) == "passed"
 
 
 def test_unchecked_and_unsupervised_is_held(app):

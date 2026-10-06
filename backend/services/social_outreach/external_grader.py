@@ -7,8 +7,11 @@ believes is good. An independent grader, run on a different model family
 with a fixed rubric, catches drafts that the writer overrated.
 
 This is intentionally NOT a generation model — it's a binary fitness check.
-Grade is 0-1; the threshold and what an unchecked draft may do live in
-gates.py (MIN_EXTERNAL_GRADE, independent_ok).
+The grader answers three yes/no questions (engages, on_topic,
+appropriate_tone); concise is counted in code. A draft passes only when all
+three answers are yes. Grade is the four items over 4, for display; the
+grader's own total is not read. What a failed or unchecked draft may do lives
+in gates.py (independent_check_label, independent_ok).
 """
 
 from __future__ import annotations
@@ -50,7 +53,12 @@ Return ONLY this JSON shape:
 {"grade": 0.75, "engages": 1, "on_topic": 1, "appropriate_tone": 1, "concise": 0, "reason": "Solid engagement and on-topic, but too long for Reddit's casual feel."}"""
 
 
-RUBRIC_ITEMS = ("engages", "on_topic", "appropriate_tone", "concise")
+RUBRIC_QUESTIONS = ("engages", "on_topic", "appropriate_tone")
+"""The items the grader answers; a draft passes only when all are yes."""
+
+CONCISE_MAX_WORDS = 120
+"""A draft of this many words or fewer is concise. Counted in code, from the
+rubric's own "under ~120 words", so the grader's reading of it does not count."""
 
 _YES = frozenset({"1", "true", "yes"})
 _NO = frozenset({"0", "false", "no"})
@@ -69,6 +77,10 @@ def _rubric_bit(value) -> Optional[int]:
         if word in _NO:
             return 0
     return None
+
+
+def _is_concise(draft_text: str) -> int:
+    return int(len((draft_text or "").split()) <= CONCISE_MAX_WORDS)
 
 
 def _list_loaded_models() -> list[str]:
@@ -108,20 +120,21 @@ def grade_draft_externally(draft_text: str, thread_context: str) -> dict:
 
     Returns:
         {
-            "grade": float in [0, 1],
+            "grade": float in [0, 1],   # the four items over 4, for display
+            "passed": bool,             # engages and on_topic and appropriate_tone
             "engages": int 0/1,
             "on_topic": int 0/1,
             "appropriate_tone": int 0/1,
-            "concise": int 0/1,
+            "concise": int 0/1,         # CONCISE_MAX_WORDS or fewer, counted here
             "reason": str,
-            "checked": bool,    # true only when a grade actually came back
+            "checked": bool,    # true only when the grader's answers came back
             "skipped": bool,    # not checked (model unavailable, call or parse error)
             "model": str | None,
         }
 
-    A rubric item the grader answered with anything but true/yes/1 or
-    false/no/0 (or a grade that is not a number) leaves the draft unchecked,
-    reason "grader_reply_unparsed".
+    The grader's own "grade" and "concise" are not read. A question answered
+    with anything but true/yes/1 or false/no/0, or not answered, leaves the
+    draft unchecked, reason "grader_reply_unparsed".
 
     An unchecked result is not a rejection, but it is no independent signal
     either: gates.independent_ok holds an unchecked draft for a person's
@@ -166,19 +179,18 @@ def grade_draft_externally(draft_text: str, thread_context: str) -> dict:
         return {"grade": 0.0, "checked": False, "skipped": True, "model": model,
                 "reason": f"grader_call_failed: {e}"}
 
-    items = {name: _rubric_bit(data.get(name)) for name in RUBRIC_ITEMS}
-    try:
-        grade = float(data.get("grade") or 0.0)
-    except (TypeError, ValueError):
-        grade = None
-    if grade is None or None in items.values():
+    answers = {name: _rubric_bit(data.get(name)) for name in RUBRIC_QUESTIONS}
+    if None in answers.values():
         logger.warning("external grader reply unparsed: %.300r", data)
         return {"grade": 0.0, "checked": False, "skipped": True, "model": model,
                 "reason": "grader_reply_unparsed"}
 
+    concise = _is_concise(draft_text)
     return {
-        "grade": max(0.0, min(1.0, grade)),
-        **items,
+        "grade": (sum(answers.values()) + concise) / 4,
+        "passed": all(answers.values()),
+        **answers,
+        "concise": concise,
         "reason": str(data.get("reason") or "")[:300],
         "checked": True,
         "skipped": False,

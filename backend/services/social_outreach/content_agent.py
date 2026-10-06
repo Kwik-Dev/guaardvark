@@ -210,12 +210,13 @@ class ContentAgent:
             # whether it may still post.
             ext = external_grader.grade_draft_externally(draft_text, thread_context)
         if gates.independent_check_label(ext) == "failed":
-            reason = f"external_grade_too_low:{ext['grade']:.2f} ({ext.get('reason', '')[:120]})"
+            missed = ",".join(q for q in external_grader.RUBRIC_QUESTIONS if not ext.get(q))
+            reason = f"external_check_failed:{missed or 'not_passed'} ({ext.get('reason', '')[:120]})"
             audit.mark_rejected(audit_id, reason)
             return {
                 "status": "rejected",
                 "grade": grade,
-                "reason": "external_grade_too_low",
+                "reason": "external_check_failed",
                 "external": ext,
             }
 
@@ -309,6 +310,7 @@ class ContentAgent:
                 "subreddit": payload.get("subreddit"),
                 "self_grade": grade,
                 "external_grade": ext.get("grade"),
+                "external_passed": ext.get("passed"),
                 "external_checked": bool(ext.get("checked")),
                 "external_skipped": ext.get("skipped", False),
                 "external_reason": ext.get("reason", ""),

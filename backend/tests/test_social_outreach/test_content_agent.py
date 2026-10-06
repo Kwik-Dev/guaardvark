@@ -24,8 +24,8 @@ import pytest
 # model isn't installed. The draft is not rejected; whether it may post on its
 # own is the would_post gate's call. Individual tests override to test the gate.
 EXT_SKIPPED = {"grade": 0.0, "checked": False, "skipped": True, "model": None, "reason": "test_default"}
-EXT_PASS = {"grade": 0.9, "checked": True, "skipped": False, "model": "test", "reason": "looks good", "engages": 1, "on_topic": 1, "appropriate_tone": 1, "concise": 1}
-EXT_FAIL = {"grade": 0.25, "checked": True, "skipped": False, "model": "test", "reason": "generic boilerplate", "engages": 0, "on_topic": 1, "appropriate_tone": 0, "concise": 1}
+EXT_PASS = {"grade": 1.0, "passed": True, "checked": True, "skipped": False, "model": "test", "reason": "looks good", "engages": 1, "on_topic": 1, "appropriate_tone": 1, "concise": 1}
+EXT_FAIL = {"grade": 0.5, "passed": False, "checked": True, "skipped": False, "model": "test", "reason": "generic boilerplate", "engages": 0, "on_topic": 1, "appropriate_tone": 0, "concise": 1}
 
 
 @pytest.fixture(autouse=True)
@@ -252,9 +252,9 @@ def test_min_grade_threshold_is_07(app):
 
 
 def test_external_grader_low_score_rejects_even_if_self_grade_high(app):
-    """Self-grade is 0.9 (clearly above 0.7) but external grader says 0.25 →
-    reject. This is the whole point of the second-opinion gate: catch drafts
-    that the writer overrated."""
+    """Self-grade is 0.9 (clearly above 0.7) but the external grader says the
+    draft does not engage and has the wrong tone → reject. This is the whole
+    point of the second-opinion gate: catch drafts that the writer overrated."""
     with app.app_context():
         row = _make_candidate()
         with patch(
@@ -266,11 +266,11 @@ def test_external_grader_low_score_rejects_even_if_self_grade_high(app):
         ):
             outcome = ContentAgent().draft_candidate(row.id)
         assert outcome["status"] == "rejected"
-        assert outcome["reason"] == "external_grade_too_low"
+        assert outcome["reason"] == "external_check_failed"
         db.session.expire_all()
         updated = SocialOutreachLog.query.get(row.id)
         assert updated.status == "rejected"
-        assert "external_grade_too_low" in updated.abort_reason
+        assert updated.abort_reason.startswith("external_check_failed:engages,appropriate_tone")
 
 
 def test_external_grader_skipped_falls_through_to_self_grade(app):

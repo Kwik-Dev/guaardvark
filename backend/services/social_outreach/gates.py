@@ -18,23 +18,21 @@ from __future__ import annotations
 
 from backend.services.social_outreach import kill_switch
 
-MIN_EXTERNAL_GRADE = 0.5
-"""Second-opinion threshold (different model, rubric-based). Lower than the
-self-grade threshold because the rubric is binary on each axis (each item is
-0 or 1), so 0.5 means "passes 2 of 4". A checked draft below this is not
-allowed to post even if its self-grade was high."""
-
 
 def independent_check_label(ext: dict) -> str:
     """passed, failed or unavailable: what the independent check concluded.
 
     ``ext`` is a grade_draft_externally result. Only ``checked`` counts as a
-    check having run; a result without it is unavailable.
+    check having run; a result without it is unavailable. A check that ran
+    passed only when its ``passed`` is True: the draft engages with the thread,
+    is on topic and has the right tone. Its 0-1 grade is for display and does
+    not decide; a checked draft that did not pass may not post on its own,
+    whatever its self-grade.
     """
     ext = ext or {}
     if not ext.get("checked"):
         return "unavailable"
-    return "passed" if float(ext.get("grade") or 0.0) >= MIN_EXTERNAL_GRADE else "failed"
+    return "passed" if ext.get("passed") is True else "failed"
 
 
 def independent_ok(
@@ -49,11 +47,11 @@ def independent_ok(
     ``action`` is the audit row's action; a "share" is decided before ``ext``
     is read, because no check applies to it. ``relevance_unchecked`` says the
     thread-fit judge (external_grader.score_thread_relevance) could not run on
-    the thread; a draft for it counts as unchecked even when its grade passed.
+    the thread; a draft for it counts as unchecked even when its check passed.
 
     Returns one of:
-      (True,  "passed")               checked, grade at or above MIN_EXTERNAL_GRADE
-      (False, "failed")               checked, grade below it
+      (True,  "passed")               checked and passed (independent_check_label)
+      (False, "failed")               checked and did not pass
       (True,  "human_review")         unchecked, supervised: a person approves it;
                                       also every supervised share
       (False, "no_independent_check") unchecked, unsupervised: hold for approval
