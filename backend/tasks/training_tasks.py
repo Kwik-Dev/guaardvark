@@ -40,6 +40,27 @@ MODEL_TEMPLATES = {
     'gemma2': 'gemma-3-text.modelfile',
 }
 
+# Fields the filter reads a pair's quality score from, first match wins.
+# plugins/training/scripts/quality_filter.py writes _quality_score; a plain
+# "score" covers datasets scored by other tools.
+PAIR_SCORE_FIELDS = ("_quality_score", "score")
+MIN_SCORE_NOT_APPLIED = "min_score not applied: pairs have no score"
+
+
+def _pair_score(pair: dict):
+    """The pair's numeric quality score, or None when it carries none."""
+    for field in PAIR_SCORE_FIELDS:
+        value = pair.get(field)
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            score = float(value)
+        except (TypeError, ValueError):
+            continue
+        if score == score:  # NaN is no score
+            return score
+    return None
+
 
 def _update_job_status(job_id: str, **kwargs):
     if not db or not TrainingJob:
@@ -188,9 +209,13 @@ def parse_transcripts_task(self, job_id: str, input_path: str, recursive: bool =
 
 @shared_task(bind=True, name='training.filter_dataset')
 def filter_dataset_task(self, job_id: str, input_path: str, min_score: float = 0.5):
+    """Drop pairs that are empty, too short, too long, or scored below
+    min_score. Pairs without a score are kept; when no pair has one, the job
+    says min_score was not applied rather than implying it filtered."""
     logger.info(f"Starting filter_dataset_task for job {job_id}")
-    
+
     try:
+        min_score = float(min_score)
         _update_job_status(job_id, status="running", pipeline_stage="filtering", started_at=utcnow(), celery_task_id=self.request.id)
         _emit_progress(job_id, 0, "Starting dataset filtering...", "start")
         
@@ -206,54 +231,77 @@ def filter_dataset_task(self, job_id: str, input_path: str, min_score: float = 0
                 if line.strip():
                     pairs.append(json.loads(line))
         
-        _emit_progress(job_id, 30, f"Filtering {len(pairs)} pairs (min_score={min_score})...", "processing")
+        scores = [_pair_score(pair) for pair in pairs]
+        scored_count = sum(1 for score in scores if score is not None)
+        min_score_applied = scored_count > 0
+        score_rule = f"min_score={min_score}" if min_score_applied else MIN_SCORE_NOT_APPLIED
+        _emit_progress(job_id, 30, f"Filtering {len(pairs)} pairs ({score_rule})...", "processing")
         
         filtered_pairs = []
-        for i, pair in enumerate(pairs):
+        below_min_score = 0
+        for i, (pair, score) in enumerate(zip(pairs, scores)):
             if not pair.get("instruction") or not pair.get("output"):
                 continue
-            
+
             inst_len = len(pair.get("instruction", ""))
             out_len = len(pair.get("output", ""))
             if inst_len < 10 or out_len < 10:
                 continue
             if inst_len > 10000 or out_len > 10000:
                 continue
-            
+
+            if score is not None and score < min_score:
+                below_min_score += 1
+                continue
+
             filtered_pairs.append(pair)
-            
+
             if (i + 1) % 100 == 0:
-                _emit_progress(job_id, 30 + int(50 * (i + 1) / len(pairs)), 
+                _emit_progress(job_id, 30 + int(50 * (i + 1) / len(pairs)),
                              f"Filtered {len(filtered_pairs)}/{i+1} pairs...", "processing")
-        
+
+        if min_score_applied:
+            score_summary = f"{below_min_score} below min_score {min_score}"
+            if scored_count < len(pairs):
+                score_summary += f"; {len(pairs) - scored_count} pairs without a score kept"
+        else:
+            score_summary = MIN_SCORE_NOT_APPLIED
+
         output_filename = f"filtered_dataset_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
         output_path = PROCESSED_DIR / output_filename
-        
+
         _emit_progress(job_id, 90, f"Saving {len(filtered_pairs)} filtered pairs...", "processing")
-        
+
         with open(output_path, 'w', encoding='utf-8') as f:
             for pair in filtered_pairs:
                 f.write(json.dumps(pair) + '\n')
-        
+
+        report = {
+            "input_path": input_path,
+            "output_path": str(output_path),
+            "min_score": min_score,
+            "min_score_applied": min_score_applied,
+            "scored_count": scored_count,
+            "below_min_score": below_min_score,
+            "original_count": len(pairs),
+            "filtered_count": len(filtered_pairs),
+        }
+        if not min_score_applied:
+            report["min_score_note"] = MIN_SCORE_NOT_APPLIED
+
         _update_job_status(job_id,
                           status="completed",
                           pipeline_stage="filtering",
                           completed_at=utcnow(),
                           progress=100,
-                          config_json=json.dumps({
-                              "input_path": input_path,
-                              "output_path": str(output_path),
-                              "min_score": min_score,
-                              "original_count": len(pairs),
-                              "filtered_count": len(filtered_pairs)
-                          }))
-        
-        _emit_progress(job_id, 100, 
-                     f"Completed: {len(filtered_pairs)}/{len(pairs)} pairs passed filtering", 
+                          config_json=json.dumps(report))
+
+        _emit_progress(job_id, 100,
+                     f"Completed: {len(filtered_pairs)}/{len(pairs)} pairs passed filtering ({score_summary})",
                      "complete")
-        
-        logger.info(f"Filter task completed for job {job_id}: {len(filtered_pairs)}/{len(pairs)} pairs")
-        return {"output_path": str(output_path), "filtered_count": len(filtered_pairs), "original_count": len(pairs)}
+
+        logger.info(f"Filter task completed for job {job_id}: {len(filtered_pairs)}/{len(pairs)} pairs ({score_summary})")
+        return report
         
     except Exception as e:
         logger.error(f"Error in filter_dataset_task: {e}", exc_info=True)
