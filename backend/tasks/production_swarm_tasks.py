@@ -302,14 +302,17 @@ def run_casting_director(prod_id: int, llm=None):
 
 
 def _subjects_for_production(prod_id: int) -> list[Subject]:
-    """Prefer production-scoped cast, with a fallback for legacy unlinked rows."""
-    subjects = (
+    """The subjects linked to this production, and only those.
+
+    A production with no linked subjects gets an empty list: the shot planner
+    may only put a Cast LoRA on a shot when that subject belongs to the film.
+    """
+    return (
         db.session.query(Subject)
         .join(ProductionSubject)
         .filter(ProductionSubject.production_id == prod_id)
         .all()
     )
-    return subjects or Subject.query.all()
 
 
 class _DirectorInvocation:

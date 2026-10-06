@@ -84,6 +84,13 @@ def production(app):
     return prod
 
 
+def _link(production, subject):
+    """Cast ``subject`` in ``production``, as the screenwriter does."""
+    from backend.models import ProductionSubject
+    db.session.add(ProductionSubject(production_id=production.id, subject_id=subject.id))
+    db.session.commit()
+
+
 def test_run_screenwriter_persists_subjects_and_shots(app, production):
     def fake_llm(*args, **kwargs):
         return json.dumps({
@@ -229,6 +236,7 @@ def test_run_cinematographer_updates_shots_with_camera_and_image_prompt(app, pro
     subj = Subject(name="Alice", kind="character", description="A test character")
     db.session.add(subj)
     db.session.commit()
+    _link(production, subj)
     shot = ProductionShot(production_id=production.id, scene_number=1, shot_number=1, description="Wide shot")
     db.session.add(shot)
     db.session.commit()
@@ -272,6 +280,7 @@ def test_run_cinematographer_falls_back_to_agent_llm_when_director_fails(app, pr
     subj = Subject(name="Alice", kind="character", description="A test character")
     db.session.add(subj)
     db.session.commit()
+    _link(production, subj)
     shot = ProductionShot(production_id=production.id, scene_number=1, shot_number=1, description="Wide shot")
     db.session.add(shot)
     db.session.commit()
@@ -320,6 +329,7 @@ def test_run_cinematographer_drops_hallucinated_subject_ids(app, production, mon
     production.current_stage = "cinematography"
     real = Subject(name="Alice", kind="character", description="real subject")
     db.session.add(real); db.session.commit()
+    _link(production, real)
     real_id = real.id
     shot = ProductionShot(production_id=production.id, scene_number=1, shot_number=1, description="Wide")
     db.session.add(shot); db.session.commit()
@@ -343,6 +353,49 @@ def test_run_cinematographer_drops_hallucinated_subject_ids(app, production, mon
     rows = ProductionShotSubject.query.filter_by(shot_id=shot.id).all()
     assert len(rows) == 1
     assert rows[0].subject_id == real_id
+
+
+def test_subjects_for_production_without_linked_subjects_is_empty(app, production):
+    """The Cast Library is not the cast of every film: with no ProductionSubject
+    rows the planner is offered no subjects at all."""
+    from backend.tasks.production_swarm_tasks import _subjects_for_production
+    db.session.add_all([
+        Subject(name="Library Anna", kind="character", lora_path="/loras/anna.safetensors"),
+        Subject(name="Library Bob", kind="character"),
+    ])
+    db.session.commit()
+
+    assert _subjects_for_production(production.id) == []
+
+
+def test_subjects_for_production_returns_only_this_films_cast(app, production):
+    from backend.tasks.production_swarm_tasks import _subjects_for_production
+    cast = Subject(name="Alice", kind="character")
+    other = Subject(name="Library Anna", kind="character")
+    db.session.add_all([cast, other])
+    db.session.commit()
+    _link(production, cast)
+
+    assert [s.id for s in _subjects_for_production(production.id)] == [cast.id]
+
+
+def test_run_cinematographer_puts_no_library_lora_on_an_uncast_production(app, production, monkeypatch):
+    production.current_stage = "cinematography"
+    library = Subject(name="Library Anna", kind="character", lora_path="/loras/anna.safetensors")
+    db.session.add(library)
+    db.session.commit()
+    shot = ProductionShot(production_id=production.id, scene_number=1, shot_number=1, description="Wide")
+    db.session.add(shot)
+    db.session.commit()
+    # The planner names the library subject anyway; it is not in this film.
+    _director_plans(monkeypatch, [library.id], prompt="x", duration=3.0)
+
+    with patch("backend.celery_app.celery.send_task"):
+        run_cinematographer(production.id, llm=lambda *a, **k: json.dumps({"plans": []}))
+
+    assert ProductionShotSubject.query.filter_by(shot_id=shot.id).count() == 0
+    msg = SwarmMessage.query.filter_by(production_id=production.id, agent_name="cinematographer").first()
+    assert msg.input_json["subjects"] == []
 
 
 def test_run_storyboard_artist_advances_to_awaiting_approval(app, production):
@@ -544,6 +597,7 @@ def test_run_cinematographer_retry_does_not_duplicate_shot_subjects(app, product
     subj = Subject(name="Alice", kind="character", description="A test character")
     db.session.add(subj)
     db.session.commit()
+    _link(production, subj)
     shot = ProductionShot(production_id=production.id, scene_number=1, shot_number=1, description="Wide shot")
     db.session.add(shot)
     db.session.commit()
