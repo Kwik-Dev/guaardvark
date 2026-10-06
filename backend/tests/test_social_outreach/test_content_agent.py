@@ -24,8 +24,8 @@ import pytest
 # model isn't installed. The draft is not rejected; whether it may post on its
 # own is the would_post gate's call. Individual tests override to test the gate.
 EXT_SKIPPED = {"grade": 0.0, "checked": False, "skipped": True, "model": None, "reason": "test_default"}
-EXT_PASS = {"grade": 0.9, "checked": True, "skipped": False, "model": "test", "reason": "looks good", "engages": 1, "on_topic": 1, "appropriate_tone": 1, "concise": 1}
-EXT_FAIL = {"grade": 0.25, "checked": True, "skipped": False, "model": "test", "reason": "generic boilerplate", "engages": 0, "on_topic": 1, "appropriate_tone": 0, "concise": 1}
+EXT_PASS = {"grade": 1.0, "passed": True, "checked": True, "skipped": False, "model": "test", "reason": "looks good", "engages": 1, "on_topic": 1, "appropriate_tone": 1, "concise": 1}
+EXT_FAIL = {"grade": 0.5, "passed": False, "checked": True, "skipped": False, "model": "test", "reason": "generic boilerplate", "engages": 0, "on_topic": 1, "appropriate_tone": 0, "concise": 1}
 
 
 @pytest.fixture(autouse=True)
@@ -252,9 +252,9 @@ def test_min_grade_threshold_is_07(app):
 
 
 def test_external_grader_low_score_rejects_even_if_self_grade_high(app):
-    """Self-grade is 0.9 (clearly above 0.7) but external grader says 0.25 →
-    reject. This is the whole point of the second-opinion gate: catch drafts
-    that the writer overrated."""
+    """Self-grade is 0.9 (clearly above 0.7) but the external grader says the
+    draft does not engage and has the wrong tone → reject. This is the whole
+    point of the second-opinion gate: catch drafts that the writer overrated."""
     with app.app_context():
         row = _make_candidate()
         with patch(
@@ -266,11 +266,11 @@ def test_external_grader_low_score_rejects_even_if_self_grade_high(app):
         ):
             outcome = ContentAgent().draft_candidate(row.id)
         assert outcome["status"] == "rejected"
-        assert outcome["reason"] == "external_grade_too_low"
+        assert outcome["reason"] == "external_check_failed"
         db.session.expire_all()
         updated = SocialOutreachLog.query.get(row.id)
         assert updated.status == "rejected"
-        assert "external_grade_too_low" in updated.abort_reason
+        assert updated.abort_reason.startswith("external_check_failed:engages,appropriate_tone")
 
 
 def test_external_grader_skipped_falls_through_to_self_grade(app):
@@ -488,3 +488,74 @@ def test_unsupervised_reply_is_held_because_replies_are_not_graded(app):
         assert outcome["status"] == "drafted"
         assert outcome["hold_reason"] == "no_independent_check"
         assert extra["external_reason"] == "skip_for_reply_action"
+
+
+@pytest.mark.parametrize("supervised, hold", [(False, "share_needs_person"), (True, None)])
+def test_a_share_candidate_is_not_graded_and_waits_for_a_person(app, supervised, hold):
+    """A self-share has no thread for the rubric, so the grader is not asked and
+    the share waits as drafted, supervised or not."""
+    with app.app_context():
+        row = _make_candidate(
+            payload={"stage": "recon", "target": "r/SideProject", "link_url": "https://example.com/x"},
+            target_url="https://www.reddit.com/r/SideProject",
+            action="share",
+        )
+        outcome, extra, grader = _draft_with_gates(row.id, EXT_PASS, supervised=supervised)
+
+        grader.assert_not_called()
+        assert outcome["status"] == "drafted"
+        assert outcome["would_post"] is False
+        assert outcome["hold_reason"] == hold
+        assert extra["external_reason"] == "share_not_graded"
+        db.session.expire_all()
+        assert SocialOutreachLog.query.get(row.id).status == "drafted"
+
+
+# ---- recon could not put the thread to the thread-fit judge ------------------------------
+
+def _recon_candidate(relevance_skipped):
+    return _make_candidate(
+        payload={
+            "feature_hint": "local_ai",
+            "stage": "recon",
+            "title": "Anyone tried Ollama with local RAG?",
+            "selftext_preview": "I'm running into context size issues...",
+            "top_comments": ["What hardware?"],
+            "relevance_grade": 0.0 if relevance_skipped else 0.8,
+            "relevance_skipped": relevance_skipped,
+        },
+        platform="youtube",
+    )
+
+
+def test_an_unjudged_thread_holds_a_passed_draft_when_unsupervised(app):
+    with app.app_context():
+        row = _recon_candidate(relevance_skipped=True)
+        outcome, extra, grader = _draft_with_gates(row.id, EXT_PASS)
+
+        grader.assert_called_once()
+        assert outcome["status"] == "drafted"
+        assert outcome["would_post"] is False
+        assert outcome["hold_reason"] == "relevance_unchecked"
+        assert extra["relevance_unchecked"] is True
+        db.session.expire_all()
+        assert SocialOutreachLog.query.get(row.id).status == "drafted"
+
+
+def test_an_unjudged_thread_waits_for_a_person_when_supervised(app):
+    with app.app_context():
+        row = _recon_candidate(relevance_skipped=True)
+        outcome, _, _ = _draft_with_gates(row.id, EXT_PASS, supervised=True)
+
+        assert outcome["status"] == "drafted"
+        assert outcome["hold_reason"] is None
+
+
+def test_a_judged_thread_with_a_passed_draft_is_approved(app):
+    with app.app_context():
+        row = _recon_candidate(relevance_skipped=False)
+        outcome, extra, _ = _draft_with_gates(row.id, EXT_PASS)
+
+        assert outcome["status"] == "approved"
+        assert outcome["hold_reason"] is None
+        assert extra["relevance_unchecked"] is False

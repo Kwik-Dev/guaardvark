@@ -196,8 +196,11 @@ class ContentAgent:
         # the reply is good. We keep the self-grade threshold (MIN_REPLY_GRADE).
         # With no independent check, an unsupervised reply waits for approval
         # (gates.independent_ok) rather than posting on its self-grade.
+        # A share has no thread for the rubric at all; gates holds every share.
         if row.action == "reply":
             ext = {"checked": False, "skipped": True, "reason": "skip_for_reply_action"}
+        elif row.action == "share":
+            ext = {"checked": False, "skipped": True, "reason": "share_not_graded"}
         else:
             # Second-opinion grade — different model family, rubric-based,
             # blind to the self-grade. Drafter is biased toward its own
@@ -207,12 +210,13 @@ class ContentAgent:
             # whether it may still post.
             ext = external_grader.grade_draft_externally(draft_text, thread_context)
         if gates.independent_check_label(ext) == "failed":
-            reason = f"external_grade_too_low:{ext['grade']:.2f} ({ext.get('reason', '')[:120]})"
+            missed = ",".join(q for q in external_grader.RUBRIC_QUESTIONS if not ext.get(q))
+            reason = f"external_check_failed:{missed or 'not_passed'} ({ext.get('reason', '')[:120]})"
             audit.mark_rejected(audit_id, reason)
             return {
                 "status": "rejected",
                 "grade": grade,
-                "reason": "external_grade_too_low",
+                "reason": "external_check_failed",
                 "external": ext,
             }
 
@@ -258,12 +262,18 @@ class ContentAgent:
         # Unsupervised parity with /draft-comment: when enabled, not
         # supervised, grade ≥ MIN_GRADE, cadence allows, and the independent
         # check ran and passed → approved so tick_process_approved_drafts can
-        # post without a human click. An unchecked draft is held as drafted.
+        # post without a human click. An unchecked draft is held as drafted,
+        # and so is one whose thread recon could not put to the thread-fit
+        # judge (relevance_skipped in the candidate payload).
         from backend.services.social_outreach import kill_switch
         enabled = kill_switch.is_enabled()
         supervised = kill_switch.is_supervised()
         cadence_ok, cadence_reason = kill_switch.cadence_allows_post(row.platform)
-        independent_pass, independent_reason = gates.independent_ok(ext, supervised=supervised)
+        relevance_unchecked = bool(payload.get("relevance_skipped"))
+        independent_pass, independent_reason = gates.independent_ok(
+            ext, supervised=supervised, action=row.action,
+            relevance_unchecked=relevance_unchecked,
+        )
         would_post = (
             enabled
             and not supervised
@@ -304,9 +314,11 @@ class ContentAgent:
                 "subreddit": payload.get("subreddit"),
                 "self_grade": grade,
                 "external_grade": ext.get("grade"),
+                "external_passed": ext.get("passed"),
                 "external_checked": bool(ext.get("checked")),
                 "external_skipped": ext.get("skipped", False),
                 "external_reason": ext.get("reason", ""),
+                "relevance_unchecked": relevance_unchecked,
                 "promoted_status": promote_status,
                 "would_post": would_post,
                 "cadence_block": cadence_reason if not cadence_ok else None,

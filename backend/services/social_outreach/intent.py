@@ -95,6 +95,31 @@ def _default_classifier(system: str, user: str) -> dict[str, Any]:
     return nl_control_plane.json_chat(system, user, on_error={})
 
 
+_DRAFT_ID_RX = re.compile(r"(?:\b(?:draft|item|id)\b\s*#?|#)\s*(\d+)", re.I)
+# Digit runs that stand alone as a whole number: not part of a longer number
+# or of a decimal such as 2.5.
+_WHOLE_NUMBER_RX = re.compile(r"(?<![\d.])\d+(?!\d|\.\d)")
+
+
+def _typed_draft_id(model_id: Optional[int], raw_text: str) -> Optional[int]:
+    """The draft id the user typed, or None.
+
+    Approve and reject act on this id. A draft the text names explicitly
+    ("draft 42", "id 42", "#42") wins over any other number in it and over the
+    classifier's draft_id. Without one, the classifier's draft_id counts only
+    when that number appears in the text as a whole number, so an id it
+    inferred ("the newest draft") is dropped.
+    """
+    m = _DRAFT_ID_RX.search(raw_text or "")
+    if m:
+        return int(m.group(1))
+    if model_id is not None and any(
+        int(n) == model_id for n in _WHOLE_NUMBER_RX.findall(raw_text or "")
+    ):
+        return model_id
+    return None
+
+
 def _normalize_classification(raw: dict[str, Any], *, raw_text: str) -> dict[str, Any]:
     # Generic skeleton (intent whitelist, confidence clamp, int coercion) from the
     # shared control plane; outreach-specific validation layered on top.
@@ -119,11 +144,7 @@ def _normalize_classification(raw: dict[str, Any], *, raw_text: str) -> dict[str
             topics.append(s)
     topics = topics[:8]
 
-    draft_id = base.get("draft_id")
-    if draft_id is None:
-        m = re.search(r"\b(?:draft|item|id|#)\s*#?\s*(\d+)\b", raw_text, re.I)
-        if m:
-            draft_id = int(m.group(1))
+    draft_id = _typed_draft_id(base.get("draft_id"), raw_text)
 
     reason = str(raw.get("reason") or "").strip() or intent
 

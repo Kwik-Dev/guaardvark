@@ -15,8 +15,8 @@ from backend.api import social_outreach_api
 from backend.models import Setting, SocialOutreachLog, db
 from backend.services.social_outreach import audit, external_grader, kill_switch, persona
 
-PASSED = {"grade": 0.75, "checked": True, "skipped": False, "model": "g", "reason": "fine"}
-FAILED = {"grade": 0.25, "checked": True, "skipped": False, "model": "g", "reason": "generic"}
+PASSED = {"grade": 0.75, "passed": True, "checked": True, "skipped": False, "model": "g", "reason": "fine"}
+FAILED = {"grade": 0.75, "passed": False, "checked": True, "skipped": False, "model": "g", "reason": "generic"}
 UNCHECKED = {"grade": 0.0, "checked": False, "skipped": True, "model": None,
              "reason": "no_grader_model_loaded"}
 
@@ -139,12 +139,56 @@ def test_an_empty_draft_is_not_sent_to_the_grader(route):
     assert body["gates"]["independent_check"] == "unavailable"
 
 
-def test_a_share_draft_is_graded_against_its_target(route):
+def test_a_passed_draft_on_a_thread_the_judge_did_not_see_is_held(route):
     route.state["ext"] = PASSED
 
-    body = route(mode="share", share_target="r/SideProject", share_link="https://example.com/x",
+    body = route(relevance_unchecked=True)
+
+    assert body["would_post"] is False
+    assert body["gates"]["independent_check"] == "passed"
+    assert body["gates"]["independent_reason"] == "relevance_unchecked"
+    assert _status(body["audit_id"]) == "drafted"
+    assert route.audit_extra()["relevance_unchecked"] is True
+    assert route.audit_extra()["hold_reason"] == "relevance_unchecked"
+
+
+def _share(route):
+    return route(mode="share", share_target="r/SideProject", share_link="https://example.com/x",
                  thread_context=None)
 
-    (draft, context), = route.state["graded"]
-    assert "r/SideProject" in context and "https://example.com/x" in context
-    assert body["would_post"] is True
+
+def test_an_unsupervised_share_is_not_graded_and_waits_for_a_person(route):
+    route.state["ext"] = PASSED
+
+    body = _share(route)
+
+    assert route.state["graded"] == []
+    assert body["would_post"] is False
+    assert body["gates"]["independent_check"] == "unavailable"
+    assert body["gates"]["independent_reason"] == "share_needs_person"
+    assert _status(body["audit_id"]) == "drafted"
+    assert route.audit_extra()["hold_reason"] == "share_needs_person"
+    assert route.audit_extra()["external_reason"] == "share_not_graded"
+
+
+def test_a_share_waits_even_when_the_check_is_switched_off(route):
+    db.session.add(Setting(key="outreach_require_independent_check", value="false"))
+    db.session.commit()
+
+    body = _share(route)
+
+    assert body["would_post"] is False
+    assert _status(body["audit_id"]) == "drafted"
+    assert route.audit_extra()["hold_reason"] == "share_needs_person"
+
+
+def test_a_supervised_share_waits_as_before_without_a_grader_call(route):
+    route.state["supervised"] = True
+
+    body = _share(route)
+
+    assert route.state["graded"] == []
+    assert body["would_post"] is False
+    assert body["gates"]["independent_reason"] == "human_review"
+    assert _status(body["audit_id"]) == "drafted"
+    assert route.audit_extra()["hold_reason"] is None

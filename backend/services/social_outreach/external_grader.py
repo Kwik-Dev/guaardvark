@@ -7,8 +7,11 @@ believes is good. An independent grader, run on a different model family
 with a fixed rubric, catches drafts that the writer overrated.
 
 This is intentionally NOT a generation model — it's a binary fitness check.
-Grade is 0-1; the threshold and what an unchecked draft may do live in
-gates.py (MIN_EXTERNAL_GRADE, independent_ok).
+The grader is asked only three yes/no questions (engages, on_topic,
+appropriate_tone); concise is counted in code. A draft passes only when all
+three answers are yes. Grade is the four items over 4, for display. What a
+failed or unchecked draft may do lives in gates.py (independent_check_label,
+independent_ok).
 """
 
 from __future__ import annotations
@@ -25,8 +28,8 @@ from backend.utils.ollama_resource_manager import think_payload
 logger = logging.getLogger(__name__)
 
 
-# The grader follows a 4-item rubric, not writing anything, so a smaller
-# variant is plenty.
+# The grader answers three yes/no questions, not writing anything, so a
+# smaller variant is plenty.
 DEFAULT_GRADER_MODEL = "gemma4:e2b"
 """Override via env GUAARDVARK_OUTREACH_GRADER_MODEL if you want a different one.
 Falls back to gemma4:e2b if the configured model isn't loaded — same family but
@@ -36,18 +39,45 @@ FALLBACK_GRADER_MODEL = "gemma4:e2b"
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 
-GRADER_SYSTEM = """You are a strict outreach-comment grader. You did NOT write this draft. You score it against the rubric below and return only JSON.
+GRADER_SYSTEM = """You are a strict outreach-comment grader. You did NOT write this draft. Answer each question below about it with 1 (yes) or 0 (no) and return only JSON.
 
-Rubric (each 0 or 1):
+Questions:
   engages: Does the comment substantively engage with the specific thread, not generic boilerplate?
   on_topic: Is the comment relevant to the thread's actual subject?
   appropriate_tone: Does the tone fit a casual Reddit thread (not corporate, not sycophantic, not spammy)?
-  concise: Is it under ~120 words? Reddit favors short comments.
-
-Final grade = sum / 4 (so 0.0, 0.25, 0.50, 0.75, 1.00).
 
 Return ONLY this JSON shape:
-{"grade": 0.75, "engages": 1, "on_topic": 1, "appropriate_tone": 1, "concise": 0, "reason": "Solid engagement and on-topic, but too long for Reddit's casual feel."}"""
+{"engages": 1, "on_topic": 1, "appropriate_tone": 0, "reason": "Engages with the question and stays on topic, but reads like an advert."}"""
+
+
+RUBRIC_QUESTIONS = ("engages", "on_topic", "appropriate_tone")
+"""The items the grader answers; a draft passes only when all are yes."""
+
+CONCISE_MAX_WORDS = 120
+"""A draft of this many words or fewer is concise (Reddit favours short
+comments). Counted in code; the grader is not asked."""
+
+_YES = frozenset({"1", "true", "yes"})
+_NO = frozenset({"0", "false", "no"})
+
+
+def _rubric_bit(value) -> Optional[int]:
+    """1 for true/yes/1, 0 for false/no/0, None for any other answer."""
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return int(value)
+    if isinstance(value, str):
+        word = value.strip().lower()
+        if word in _YES:
+            return 1
+        if word in _NO:
+            return 0
+    return None
+
+
+def _is_concise(draft_text: str) -> int:
+    return int(len((draft_text or "").split()) <= CONCISE_MAX_WORDS)
 
 
 def _list_loaded_models() -> list[str]:
@@ -81,18 +111,27 @@ def _resolve_grader_model() -> Optional[str]:
 def grade_draft_externally(draft_text: str, thread_context: str) -> dict:
     """Score a draft against the rubric using a different-family LLM.
 
+    For replies to a thread only. A self-share has no thread to engage with,
+    so callers do not grade it; gates.independent_ok holds every share for a
+    person instead.
+
     Returns:
         {
-            "grade": float in [0, 1],
+            "grade": float in [0, 1],   # the four items over 4, for display
+            "passed": bool,             # engages and on_topic and appropriate_tone
             "engages": int 0/1,
             "on_topic": int 0/1,
             "appropriate_tone": int 0/1,
-            "concise": int 0/1,
+            "concise": int 0/1,         # CONCISE_MAX_WORDS or fewer, counted here
             "reason": str,
-            "checked": bool,    # true only when a grade actually came back
+            "checked": bool,    # true only when the grader's answers came back
             "skipped": bool,    # not checked (model unavailable, call or parse error)
             "model": str | None,
         }
+
+    Only the three answers are read; a "grade" or "concise" in the reply is
+    ignored. A question answered with anything but true/yes/1 or false/no/0,
+    or not answered, leaves the draft unchecked, reason "grader_reply_unparsed".
 
     An unchecked result is not a rejection, but it is no independent signal
     either: gates.independent_ok holds an unchecked draft for a person's
@@ -137,14 +176,19 @@ def grade_draft_externally(draft_text: str, thread_context: str) -> dict:
         return {"grade": 0.0, "checked": False, "skipped": True, "model": model,
                 "reason": f"grader_call_failed: {e}"}
 
-    grade = float(data.get("grade") or 0.0)
+    answers = {name: _rubric_bit(data.get(name)) for name in RUBRIC_QUESTIONS}
+    if None in answers.values():
+        logger.warning("external grader reply unparsed: %.300r", data)
+        return {"grade": 0.0, "checked": False, "skipped": True, "model": model,
+                "reason": "grader_reply_unparsed"}
+
+    concise = _is_concise(draft_text)
     return {
-        "grade": max(0.0, min(1.0, grade)),
-        "engages": int(data.get("engages") or 0),
-        "on_topic": int(data.get("on_topic") or 0),
-        "appropriate_tone": int(data.get("appropriate_tone") or 0),
-        "concise": int(data.get("concise") or 0),
-        "reason": (data.get("reason") or "")[:300],
+        "grade": (sum(answers.values()) + concise) / 4,
+        "passed": all(answers.values()),
+        **answers,
+        "concise": concise,
+        "reason": str(data.get("reason") or "")[:300],
         "checked": True,
         "skipped": False,
         "model": model,
@@ -173,8 +217,10 @@ def score_thread_relevance(
     that pure regex matching can't see.
 
     Same skip-on-infra-failure semantics as grade_draft_externally — if the
-    model isn't loaded or the call fails, we return skipped=True and the
-    caller treats that as "trust the keyword match" rather than a hard reject.
+    model isn't loaded or the call fails, we return skipped=True. That is not
+    a reject: recon queues the candidate on its keyword match and the
+    scheduled Reddit loop drafts it, both marked unchecked, which holds an
+    unsupervised draft for approval (gates.independent_ok).
     """
     model = _resolve_grader_model()
     if model is None:

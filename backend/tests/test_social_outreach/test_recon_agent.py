@@ -714,3 +714,168 @@ def test_content_agent_drafts_youtube_candidate_without_crashing(app):
         if payload:
             ctx = _build_thread_context(payload)
             assert "walkthrough of installing Ollama" in ctx
+
+
+# ---- the scheduled Reddit loop asks the same thread-fit judge ----------------------------
+
+def _run_loop(app, judge):
+    """One RedditOutreachLoop pass over one keyword-matched thread, with the
+    thread-fit judge answering ``judge``. Returns the report and the draft mock."""
+    from backend.services.social_outreach.reddit_outreach import RedditOutreachLoop
+
+    thread = _thread("loop1", "Why I hate local LLMs", score=400)
+    with app.app_context(), \
+            patch("backend.services.social_outreach.reddit_outreach.kill_switch.is_enabled", return_value=True), \
+            patch("backend.services.social_outreach.reddit_outreach.fetch_subreddit_rules", return_value=[]), \
+            patch("backend.services.social_outreach.reddit_outreach.fetch_hot_threads", return_value=[thread]), \
+            patch("backend.services.social_outreach.reddit_outreach.fetch_thread_comments",
+                  return_value=["awful experience"]), \
+            patch("backend.services.social_outreach.reddit_outreach.thread_is_relevant", return_value="local_llm"), \
+            patch("backend.services.social_outreach.reddit_outreach.external_grader.score_thread_relevance",
+                  return_value=judge) as asked, \
+            patch("backend.services.social_outreach.reddit_outreach.draft_via_backend",
+                  return_value={"audit_id": 1, "would_post": False, "draft": "d"}) as draft:
+        report = RedditOutreachLoop().run_one_pass("LocalLLaMA")
+    asked.assert_called_once_with(
+        title=thread.title, selftext=thread.selftext, top_comments=["awful experience"],
+        feature_hint="local_llm", subreddit="LocalLLaMA",
+    )
+    return report, draft
+
+
+def test_loop_drafts_nothing_for_a_thread_the_judge_grades_low(app):
+    report, draft = _run_loop(app, {"grade": 0.2, "skipped": False, "verdict": "skip", "reason": "OP is venting"})
+
+    draft.assert_not_called()
+    assert report["skipped_by_llm"] == 1
+    assert report["drafted"] == 0
+
+
+def test_loop_marks_the_draft_unchecked_when_the_judge_could_not_run(app):
+    report, draft = _run_loop(app, {"grade": 0.0, "skipped": True, "model": None, "reason": "no_grader_model_loaded"})
+
+    draft.assert_called_once()
+    assert draft.call_args.kwargs["relevance_unchecked"] is True
+    assert report["drafted"] == 1
+    assert report["skipped_by_llm"] == 0
+
+
+def test_loop_drafts_a_thread_the_judge_passes(app):
+    report, draft = _run_loop(app, {"grade": 0.85, "skipped": False, "verdict": "good_fit", "reason": "asks for advice"})
+
+    draft.assert_called_once()
+    assert draft.call_args.kwargs["relevance_unchecked"] is False
+    assert report["drafted"] == 1
+
+
+# ---- a "skip" verdict skips the thread whatever grade came with it ------------------------
+
+SKIP_AT_HIGH_GRADE = {"grade": 0.7, "skipped": False, "verdict": "skip", "reason": "OP already solved it"}
+
+
+@pytest.mark.parametrize("relevance, unfit", [
+    (SKIP_AT_HIGH_GRADE, True),
+    ({"grade": 0.9, "skipped": False, "verdict": " Skip ", "reason": "r"}, True),
+    ({"grade": 0.4, "skipped": False, "verdict": "good_fit", "reason": "r"}, True),
+    ({"grade": 0.7, "skipped": False, "verdict": "good_fit", "reason": "r"}, False),
+    ({"grade": 0.7, "skipped": False, "reason": "no verdict given"}, False),
+    ({"grade": 0.0, "skipped": True, "verdict": "skip", "reason": "no_grader_model_loaded"}, False),
+])
+def test_judged_unfit(relevance, unfit):
+    from backend.services.social_outreach.recon import judged_unfit
+
+    assert judged_unfit(relevance) is unfit
+
+
+def test_loop_drafts_nothing_on_a_skip_verdict_with_a_passing_grade(app):
+    report, draft = _run_loop(app, SKIP_AT_HIGH_GRADE)
+
+    draft.assert_not_called()
+    assert report["skipped_by_llm"] == 1
+
+
+def test_scout_reddit_skips_on_a_skip_verdict_with_a_passing_grade(app):
+    thread = _thread("solved1", "Ollama on a 12GB card (solved)", score=300)
+    with app.app_context(), \
+            patch("backend.services.social_outreach.recon.kill_switch.is_enabled", return_value=True), \
+            patch("backend.services.social_outreach.recon.fetch_subreddit_rules", return_value=[]), \
+            patch("backend.services.social_outreach.recon.fetch_hot_threads", return_value=[thread]), \
+            patch("backend.services.social_outreach.recon.fetch_thread_comments", return_value=[]), \
+            patch("backend.services.social_outreach.recon.thread_is_relevant", return_value="local_llm"), \
+            patch("backend.services.social_outreach.recon.external_grader.score_thread_relevance",
+                  return_value=SKIP_AT_HIGH_GRADE):
+        report = RecondAgent().scout_reddit("LocalLLaMA")
+
+        assert report["candidates"] == 0
+        assert report["skipped_by_llm"] == 1
+        assert SocialOutreachLog.query.count() == 0
+
+
+def test_scout_youtube_skips_on_a_skip_verdict_with_a_passing_grade(app):
+    response = _ddg_response(
+        _ddg_result(
+            title="Ollama local LLM setup, solved",
+            url="https://www.youtube.com/watch?v=SKIPVERDICT",
+            snippet="local LLM walkthrough",
+        ),
+    )
+    with app.app_context(), \
+            patch("backend.services.social_outreach.recon.kill_switch.is_enabled", return_value=True), \
+            patch("backend.api.web_search_api.enhanced_web_search", return_value=response), \
+            patch("backend.services.social_outreach.recon.external_grader.score_thread_relevance",
+                  return_value=SKIP_AT_HIGH_GRADE):
+        report = RecondAgent().scout_youtube("Ollama local LLM")
+
+        assert report["candidates"] == 0
+        assert report["skipped_by_llm"] == 1
+        assert SocialOutreachLog.query.count() == 0
+
+
+# ---- rules that could not be read are not "no rules" -------------------------------------
+
+@pytest.mark.parametrize("reply, rules", [
+    (None, None),                                     # 403 / 429 / timeout
+    ({}, None),                                       # a reply without a rules list
+    ({"rules": "blocked"}, None),
+    ({"rules": []}, []),                              # a community with no rules
+    ({"rules": [{"short_name": "No spam", "description": "No ads."}]}, ["No spam: No ads."]),
+])
+def test_fetch_subreddit_rules_tells_unreadable_from_none(reply, rules):
+    from backend.services.social_outreach import reddit_outreach
+
+    with patch.object(reddit_outreach, "_http_get_json", return_value=reply):
+        assert reddit_outreach.fetch_subreddit_rules("LocalLLaMA") == rules
+
+
+def test_scout_reddit_skips_a_community_whose_rules_could_not_be_read(app):
+    with app.app_context(), \
+            patch("backend.services.social_outreach.recon.kill_switch.is_enabled", return_value=True), \
+            patch("backend.services.social_outreach.recon.fetch_subreddit_rules", return_value=None), \
+            patch("backend.services.social_outreach.recon.fetch_hot_threads") as fetch_hot:
+        report = RecondAgent().scout_reddit("LocalLLaMA")
+
+        assert report["reason"] == "rules_unreadable"
+        assert report["candidates"] == 0
+        fetch_hot.assert_not_called()
+        assert SocialOutreachLog.query.count() == 0
+
+
+def test_loop_skips_a_community_whose_rules_could_not_be_read(app, monkeypatch, tmp_path):
+    from backend.services.social_outreach import audit
+    from backend.services.social_outreach.reddit_outreach import RedditOutreachLoop
+
+    monkeypatch.setattr(audit, "AUDIT_DIR", tmp_path)
+    monkeypatch.setattr(audit, "AUDIT_FILE", tmp_path / "audit.jsonl")
+    with app.app_context(), \
+            patch("backend.services.social_outreach.reddit_outreach.kill_switch.is_enabled", return_value=True), \
+            patch("backend.services.social_outreach.reddit_outreach.fetch_subreddit_rules", return_value=None), \
+            patch("backend.services.social_outreach.reddit_outreach.fetch_hot_threads") as fetch_hot, \
+            patch("backend.services.social_outreach.reddit_outreach.draft_via_backend") as draft:
+        report = RedditOutreachLoop().run_one_pass("LocalLLaMA")
+
+        assert report["reason"] == "rules_unreadable"
+        assert report["drafted"] == 0
+        fetch_hot.assert_not_called()
+        draft.assert_not_called()
+        abort, = SocialOutreachLog.query.all()
+        assert (abort.action, abort.status, abort.abort_reason) == ("abort", "aborted", "rules_unreadable")

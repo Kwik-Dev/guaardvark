@@ -13,8 +13,8 @@ import pytest
 from backend.models import Setting, db
 from backend.services.social_outreach import gates, kill_switch
 
-PASSED = {"grade": 0.75, "checked": True, "skipped": False}
-FAILED = {"grade": 0.25, "checked": True, "skipped": False}
+PASSED = {"grade": 0.75, "passed": True, "checked": True, "skipped": False}
+FAILED = {"grade": 0.25, "passed": False, "checked": True, "skipped": False}
 UNCHECKED = {"grade": 0.0, "checked": False, "skipped": True, "reason": "no_grader_model_loaded"}
 
 
@@ -29,10 +29,18 @@ def test_a_check_that_ran_decides_on_its_grade(app, supervised):
     assert gates.independent_ok(FAILED, supervised=supervised) == (False, "failed")
 
 
-def test_the_threshold_is_inclusive_and_unchanged(app):
-    assert gates.MIN_EXTERNAL_GRADE == 0.5
-    at_threshold = {"grade": 0.5, "checked": True}
-    assert gates.independent_ok(at_threshold, supervised=False) == (True, "passed")
+@pytest.mark.parametrize("ext", [
+    {"grade": 0.75, "passed": False, "checked": True},   # the grade does not pass a draft
+    {"grade": 1.0, "checked": True},                      # no passed answer is not a pass
+    {"grade": 1.0, "passed": "yes", "checked": True},
+])
+def test_only_passed_true_passes(app, ext):
+    assert gates.independent_check_label(ext) == "failed"
+    assert gates.independent_ok(ext, supervised=False) == (False, "failed")
+
+
+def test_passed_decides_whatever_the_grade(app):
+    assert gates.independent_check_label({"grade": 0.0, "passed": True, "checked": True}) == "passed"
 
 
 def test_unchecked_and_unsupervised_is_held(app):
@@ -69,6 +77,43 @@ def test_anything_short_of_checked_true_is_unchecked(app, ext):
 @pytest.mark.parametrize("ext, label", [(PASSED, "passed"), (FAILED, "failed"), (UNCHECKED, "unavailable")])
 def test_label(ext, label):
     assert gates.independent_check_label(ext) == label
+
+
+# ---- the thread-fit judge did not run --------------------------------------------------
+
+def test_a_passed_draft_on_an_unjudged_thread_is_held(app):
+    assert gates.independent_ok(PASSED, supervised=False, relevance_unchecked=True) == (False, "relevance_unchecked")
+
+
+def test_an_unjudged_thread_goes_to_a_person_when_supervised(app):
+    assert gates.independent_ok(PASSED, supervised=True, relevance_unchecked=True) == (True, "human_review")
+
+
+def test_an_unjudged_thread_does_not_rescue_a_failed_draft(app):
+    assert gates.independent_ok(FAILED, supervised=False, relevance_unchecked=True) == (False, "failed")
+
+
+def test_an_unjudged_thread_posts_when_the_check_is_switched_off(app):
+    _set("outreach_require_independent_check", "false")
+
+    assert gates.independent_ok(PASSED, supervised=False, relevance_unchecked=True) == (True, "check_not_required")
+
+
+# ---- self-shares ---------------------------------------------------------------------
+
+@pytest.mark.parametrize("ext", [PASSED, FAILED, UNCHECKED])
+def test_an_unsupervised_share_always_waits_for_a_person(app, ext):
+    assert gates.independent_ok(ext, supervised=False, action="share") == (False, "share_needs_person")
+
+
+def test_a_share_waits_even_when_the_check_is_switched_off(app):
+    _set("outreach_require_independent_check", "false")
+
+    assert gates.independent_ok(UNCHECKED, supervised=False, action="share") == (False, "share_needs_person")
+
+
+def test_a_supervised_share_goes_to_a_person(app):
+    assert gates.independent_ok(UNCHECKED, supervised=True, action="share") == (True, "human_review")
 
 
 # ---- the setting ---------------------------------------------------------------------

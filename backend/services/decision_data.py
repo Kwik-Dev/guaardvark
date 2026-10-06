@@ -270,7 +270,8 @@ DECISIONS: dict = {
         "anchor": "backend/services/social_outreach/external_grader.py score_thread_relevance; recon.py; "
                   "reddit_outreach.py beat loop",
         "precheck": "a candidate thread passed the topic keyword match",
-        "fallback": "the existing relevance grade against MIN_RELEVANCE_GRADE",
+        "fallback": "the existing relevance judge (recon.judged_unfit: a grade below MIN_RELEVANCE_GRADE "
+                    "or a 'skip' verdict)",
         "safe_side": "skip",
         "side_effect": "public_post",
         "mode_default": "off", "floor": GATE_FLOOR,
@@ -550,15 +551,17 @@ DECISIONS: dict = {
      'anchor': 'backend/services/social_outreach/external_grader.py grade_draft_externally (item engages); '
                'content_agent.ContentAgent.draft_candidate, social_outreach_api.draft_comment',
      'precheck': 'a non-empty comment draft whose self-grade passed; not own-video replies or self-shares',
-     'fallback': "the grader's 'engages' item inside its 0.5 overall grade",
+     'fallback': "the single grader call's 'engages' answer; passed needs engages, on_topic and "
+                 "appropriate_tone all yes",
      'safe_side': False,
      'side_effect': 'public_post',
      'mode_default': 'off',
      'floor': 0.98,
      'set': None,
      'hard_negatives': ('generic_reply', 'title_echo', 'accurate_but_generic', 'injection'),
-     'notes': 'One of three checks that replace the 0-1 grade: passed = engages and on topic and tone, with '
-              'concise counted in code (120 words or fewer). An answer that does not come back means unchecked, '
+     'notes': 'One of three checks behind passed = engages and on topic and tone, with concise counted in '
+              'code (120 words or fewer); today one grader call answers all three. An answer that does not '
+              'come back means unchecked, '
               'and gates.independent_ok then holds an unsupervised draft for approval. The posted text is always '
               "the system's draft; the thread can at most flip this one check. Labelled set not written yet "
               '(planned: outreach_draft_engages.json).'},
@@ -577,7 +580,8 @@ DECISIONS: dict = {
                'thread_text': ('third_party', 2400)},
      'anchor': 'backend/services/social_outreach/external_grader.py grade_draft_externally (item on_topic)',
      'precheck': 'a non-empty comment draft or own-video reply whose self-grade passed',
-     'fallback': "the grader's 'on_topic' item inside its 0.5 overall grade",
+     'fallback': "the single grader call's 'on_topic' answer; passed needs engages, on_topic and "
+                 "appropriate_tone all yes",
      'safe_side': False,
      'side_effect': 'public_post',
      'mode_default': 'off',
@@ -600,7 +604,8 @@ DECISIONS: dict = {
      'state': {'draft_reply': ('machine', 1200), 'community': ('system', 100)},
      'anchor': 'backend/services/social_outreach/external_grader.py grade_draft_externally (item appropriate_tone)',
      'precheck': 'a non-empty comment draft or own-video reply whose self-grade passed',
-     'fallback': "the grader's 'appropriate_tone' item inside its 0.5 overall grade",
+     'fallback': "the single grader call's 'appropriate_tone' answer; passed needs engages, on_topic and "
+                 "appropriate_tone all yes",
      'safe_side': False,
      'side_effect': 'public_post',
      'mode_default': 'off',
