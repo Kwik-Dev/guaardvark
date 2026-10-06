@@ -1592,12 +1592,14 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
 
     # Words and phrases that signal a need for current information. Matched on
     # word boundaries: "now" must not fire on "know", nor "time" on "sometimes".
+    # Words that ask for live information or for a search by name. Generic words
+    # ("what is", "find", "check", "website", "time") are not here: "find my notes",
+    # "check my code" and "is my website config right?" would go out as queries.
     _CURRENT_INFO_INDICATORS = (
         'current', 'today', "today's", 'todays', 'now', 'latest', 'recent',
-        'what is', 'what are', 'check', 'find', 'search',
-        'website', 'site',
-        'temperature', 'weather', 'forecast', 'time', 'date',
-        'duckduckgo', 'ddg', 'google', 'search for', 'look up',
+        'temperature', 'weather', 'forecast',
+        'duckduckgo', 'ddg', 'google', 'search for', 'search the web', 'web search',
+        'search online', 'look up',
         'stock price', 'sports score', 'lottery', 'news about',
     )
     _CURRENT_INFO_RE = re.compile(
