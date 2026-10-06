@@ -587,15 +587,17 @@ def run_analyzer(mv_id: int):
         for c in plan:
             idx = c["index"]
             sp = shot_plans.get(idx, {})
-            # Prefer the unique visual prompt from the detailed shot plan (produced by the Director from the treatment)
-            # over the flat prompts list. This ensures we get the per-cut variation the model was instructed to create.
-            # The Director is told the caller appends the global style, so do it here; the flat
-            # `prompts` list already carries it from _ensure_distinct_and_energy_aware.
-            shot_prompt = sp.get("prompt") or (prompts[idx] if idx < len(prompts) else mv.style_prompt)
-            if sp.get("prompt") and mv.style_prompt:
-                style_suffix = f", {mv.style_prompt}" if not mv.style_prompt.startswith(",") else mv.style_prompt
-                if not shot_prompt.rstrip().endswith(style_suffix.strip()):
-                    shot_prompt = f"{shot_prompt.rstrip().rstrip(',')}{style_suffix}"
+            # The flat `prompts` list is what the Director settled on per cut: the shot
+            # plan's text with the global style appended, made distinct by
+            # _ensure_distinct_and_energy_aware and carrying the arc context. The shot
+            # plan's raw LLM prompt is only a fallback for a cut that list does not cover.
+            shot_prompt = prompts[idx] if idx < len(prompts) and prompts[idx] else ""
+            if not shot_prompt:
+                shot_prompt = sp.get("prompt") or mv.style_prompt
+                if sp.get("prompt") and mv.style_prompt:
+                    style_suffix = f", {mv.style_prompt}" if not mv.style_prompt.startswith(",") else mv.style_prompt
+                    if not shot_prompt.rstrip().endswith(style_suffix.strip()):
+                        shot_prompt = f"{shot_prompt.rstrip().rstrip(',')}{style_suffix}"
             clip = {
                 "index": idx,
                 "start": c["start_s"],

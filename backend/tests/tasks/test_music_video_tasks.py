@@ -119,6 +119,52 @@ def test_analyzer_seeds_cut_plan_and_gates(app, sent, monkeypatch, tmp_path):
     assert sent.calls == []
 
 
+def test_analyzer_stores_the_guarded_prompts_not_the_raw_shot_text(app, sent, monkeypatch, tmp_path):
+    svc = MusicVideoService(db.session)
+    song = tmp_path / "song.wav"
+    song.write_bytes(b"x")
+    mv = _mk(svc, song_path=str(song))
+    svc.advance_if_predecessor(mv.id, expected_predecessor="draft")  # → analyzing
+    style = mv.style_prompt
+
+    monkeypatch.setattr(mvt, "ensure_plugin_running", lambda *a, **k: None)
+    structure = {
+        "tempo_bpm": 120.0, "duration_seconds": 6.0,
+        "beat_times": [1.0, 2.0, 3.0, 4.0, 5.0],
+        "sections": [{"label": "drop", "start": 0.0, "end": 6.0, "mean_energy": 1.0}],
+    }
+    monkeypatch.setattr(mvt.requests, "post", lambda *a, **k: _Resp(structure), raising=False)
+    cut_plan = [
+        {"index": i, "start_s": 2.0 * i, "end_s": 2.0 * (i + 1), "energy": 0.9, "section_label": "drop"}
+        for i in range(3)
+    ]
+    monkeypatch.setattr(mvt, "compute_cut_plan", lambda *a, **k: [dict(c) for c in cut_plan])
+
+    # An LLM that answers every cut with the same shot.
+    import backend.services.music_video_director as director
+    def _same_shot_director(style_prompt, plan, **kw):
+        return {
+            "prompts": [f"a lone crow on a wire, {style_prompt}" for _ in plan],
+            "treatment": None,
+            "shots": [{"index": c["index"], "prompt": "a lone crow on a wire"} for c in plan],
+        }
+    monkeypatch.setattr(director, "_generate_storyline_and_prompts", _same_shot_director)
+    import backend.services.director_service as director_service
+    monkeypatch.setattr(director_service, "_generate_storyline_and_prompts", _same_shot_director)
+    monkeypatch.setattr(director_service, "_resolve_model", lambda m: m)  # no Ollama lookup
+
+    mvt.run_analyzer(mv.id)
+    db.session.refresh(mv)
+
+    expected = director._ensure_distinct_and_energy_aware(
+        [f"a lone crow on a wire, {style}"] * 3, cut_plan, style,
+    )
+    stored = [c["prompt"] for c in mv.clips]
+    assert stored == expected
+    assert len(set(stored)) == 3
+    assert all(p.endswith(style) for p in stored)
+
+
 # --- clip generator (per-clip cursor) ----------------------------------------
 
 def test_clip_generator_generates_one_then_tailcalls(app, sent, monkeypatch):
