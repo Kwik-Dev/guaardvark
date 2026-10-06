@@ -561,6 +561,8 @@ class SelfImprovementService:
             return
 
         self._running = True
+        run_id = None
+        error = None
         try:
             from backend.models import db, SelfImprovementRun
             run_record = SelfImprovementRun(
@@ -570,8 +572,9 @@ class SelfImprovementService:
             )
             db.session.add(run_record)
             db.session.commit()
+            run_id = run_record.id
             # _attempt_fix hands this to edit_code, which stages PendingFix rows under it.
-            self._current_run_id = run_record.id
+            self._current_run_id = run_id
 
             failure = {
                 "file": file,
@@ -594,10 +597,40 @@ class SelfImprovementService:
             db.session.commit()
 
         except Exception as e:
+            error = e
             logger.error(f"Self-healing failed: {e}", exc_info=True)
         finally:
+            if run_id is not None:
+                self._fail_if_still_running(run_id, error)
             self._running = False
             self._current_run_id = None
+
+    def _fail_if_still_running(self, run_id: int, error: Optional[BaseException]) -> None:
+        """Close a run row its runner left 'running' as failed, with the error.
+
+        Otherwise /scans, /runs and the scan progress view report the run as
+        live forever. A row already closed (success, failed, cancelled) is
+        left as it is.
+        """
+        from backend.models import db, SelfImprovementRun
+        try:
+            # The error may have left the session mid-transaction.
+            db.session.rollback()
+            run = db.session.get(SelfImprovementRun, run_id)
+            if run is None or run.status != "running":
+                return
+            run.status = "failed"
+            run.error_message = (
+                f"{type(error).__name__}: {error}" if error is not None
+                else "Stopped before it finished"
+            )
+            db.session.commit()
+        except Exception as e:
+            logger.error(f"Could not close self-improvement run {run_id}: {e}")
+            try:
+                db.session.rollback()
+            except Exception:
+                pass
 
     def submit_directed_task(
         self, description: str, target_files: List[str] = None, priority: str = "medium",
