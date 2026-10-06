@@ -521,7 +521,9 @@ class EnhancedChatManager:
         elif any(w in msg_lower for w in ['bulk', 'batch', 'many']) and \
              any(w in msg_lower for w in ['csv', 'generate']):
             return "bulk_csv_generation"
-        elif any(w in msg_lower for w in ['website', 'url', 'http']):
+        elif self._URL_RE.search(message):
+            # Only a link the person typed. The words "website" or "url" are not
+            # a link, and a bare name like settings.py reads as a domain.
             return "website_analysis"
         elif any(w in msg_lower for w in ['generate', 'create', 'make']) and \
              any(w in msg_lower for w in ['file', 'csv']):
@@ -1536,8 +1538,32 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
         self._save_message(session_id, 'assistant', response, project_id=project_id)
         return {'response': response, 'session_id': session_id, 'enhanced': True}
 
+    # A greeting or acknowledgement that is the whole message, alone or a few
+    # in a row ("ok, thanks!"). Anchored and length-capped like
+    # unified_chat_engine.is_conversational: a greeting that opens a question
+    # ("hi, what does the handbook say about leave?") is not a simple message.
+    _SIMPLE_MESSAGE_MAX_CHARS = 80
+    _SIMPLE_PHRASES = (
+        r"(?:hello|hi|hey)(?: there)?", r"good (?:morning|afternoon|evening)",
+        r"how are you(?: doing)?(?: today)?", r"how do you do", r"what['’]?s up",
+        r"how(?: is|['’]?s) it going", r"(?:nice|pleased) to meet you", r"good to see you",
+        r"(?:thanks|thank you)(?: (?:so|very) much| a lot)?(?: for (?:your|the|all the) (?:help|time))?",
+        r"that['’]?s great", r"awesome", r"cool", r"nice",
+        r"ok", r"okay", r"yes", r"no", r"sure", r"fine", r"good", r"great", r"please",
+        r"(?:bye|goodbye)(?: for now)?", r"see you(?: later)?", r"(?:catch|talk to) you later",
+        r"have a (?:good|nice|great) (?:day|one|night|evening|weekend)",
+    )
+    _SIMPLE_MESSAGE_RE = re.compile(
+        r"^(?:{p})(?:[\s,.!?]+(?:{p}))*[\s,.!?]*$".format(
+            p="|".join(phrase.replace(" ", r"\s+") for phrase in _SIMPLE_PHRASES))
+    )
+
     def _is_simple_message(self, message: str) -> bool:
-        """Detect if a message is simple and doesn't need RAG processing"""
+        """Detect if a message is simple and doesn't need RAG processing.
+
+        Simple mode skips documents, web search and the intent classifier, so
+        only a message that is nothing but a greeting or acknowledgement
+        qualifies, or a few characters of punctuation."""
         message_lower = message.lower().strip()
 
         # Complex keywords that indicate RAG/analysis is needed
@@ -1554,21 +1580,9 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
         if any(keyword in message_lower for keyword in complex_keywords):
             return False
 
-        # Simple greeting patterns - use word boundaries to prevent substring matches
-        import re
-        simple_patterns = [
-            r'\bhello\b', r'\bhi\b(?!\w)', r'\bhey\b', r'\bgood morning\b', r'\bgood afternoon\b', r'\bgood evening\b',
-            r'\bhow are you\b', r'\bhow do you do\b', r'\bwhats up\b', r'\bhow is it going\b',
-            r'\bnice to meet you\b', r'\bpleased to meet you\b', r'\bgood to see you\b',
-            r'\bthanks\b', r'\bthank you\b', r'\bthats great\b', r'\bawesome\b', r'\bcool\b', r'\bnice\b',
-            r'\bok\b', r'\bokay\b', r'\byes\b', r'\bno\b', r'\bsure\b', r'\bfine\b', r'\bgood\b', r'\bgreat\b',
-            r'\bbye\b', r'\bgoodbye\b', r'\bsee you\b', r'\bcatch you later\b', r'\btalk to you later\b'
-        ]
-
-        # Check for WHOLE WORD matches, not substrings
-        for pattern in simple_patterns:
-            if re.search(pattern, message_lower):
-                return True
+        # The whole message, not a greeting word anywhere in it
+        if len(message_lower) < self._SIMPLE_MESSAGE_MAX_CHARS and self._SIMPLE_MESSAGE_RE.match(message_lower):
+            return True
 
         # Check if message is just punctuation or very short
         if len(message.strip()) <= 10 and not any(char.isalpha() for char in message):
@@ -1649,8 +1663,8 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
                     "fallback_available": True
                 }
 
-            # Also covers callers that skip _should_use_web_search, such as the
-            # intent classifier's force_web_search.
+            # Checked here as well, so a caller that skips _should_use_web_search
+            # still never sends a long message.
             if len(query) > self._WEB_SEARCH_MAX_CHARS:
                 logger.info(f"Web search skipped, query too long (query_len={len(query)})")
                 return {
@@ -1864,7 +1878,9 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
                     return self._handle_file_generation_request(session_id, enhanced_message, project_id=project_id)
                 elif detected_intent == "website_analysis":
                     logger.debug("Routing to website analysis handler")
-                    return self._handle_website_analysis_request(session_id, enhanced_message, project_id=project_id)
+                    website_result = self._handle_website_analysis_request(session_id, message, project_id=project_id)
+                    if website_result is not None:
+                        return website_result
                 elif detected_intent == "file_generation":
                     logger.debug("Routing to file generation handler")
                     return self._handle_file_generation_request(session_id, enhanced_message, project_id=project_id)
@@ -2118,14 +2134,20 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
                 "response_time": (datetime.now() - start_time).total_seconds()
             }
 
-    def _handle_website_analysis_request(self, session_id: str, message: str, project_id: int = None) -> Dict[str, Any]:
+    def _handle_website_analysis_request(self, session_id: str, message: str, project_id: int = None) -> Optional[Dict[str, Any]]:
         """Handle website analysis requests using web search API.
 
         The page is fetched only with web access on in Settings (off by
         default), the check the web tools make, and only from a public address
-        (see enhanced_web_search).
+        (see enhanced_web_search). ``message`` is the person's own text, and
+        only a link typed in it (scheme or www.) is read. A message longer than
+        _WEB_SEARCH_MAX_CHARS is a paste rather than a request to read a page:
+        returns None and the turn goes on as ordinary chat.
         """
         start_time = datetime.now()
+        if len(message) > self._WEB_SEARCH_MAX_CHARS:
+            logger.info(f"Website analysis skipped, message too long (message_len={len(message)})")
+            return None
         try:
             # Import web search functionality
             try:
@@ -2138,19 +2160,9 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
                     "response_time": (datetime.now() - start_time).total_seconds()
                 }
 
-            # Extract URL from message
-            import re
-            url_pattern = r'(?:https?://|www\.)[^\s]+'
-            urls = re.findall(url_pattern, message)
-
-            # If no URL found, try to extract domain names
-            if not urls:
-                # Look for domain patterns like "example.com" or "datacenterknowledge.com"
-                domain_pattern = r'\b[a-zA-Z0-9][a-zA-Z0-9\-]*[a-zA-Z0-9]\.[a-zA-Z]{2,}\b'
-                domains = re.findall(domain_pattern, message)
-                if domains:
-                    # Take the first domain found
-                    urls = [domains[0]]
+            # Only a typed link. A bare name is not one: settings.py and
+            # notes.md end in real country-code domains.
+            urls = self._URL_RE.findall(message)
 
             if not urls:
                 return {
@@ -2857,12 +2869,6 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
                         intent_metadata['command_fallback'] = True
                         intent_metadata['enhanced_command_processing'] = True
 
-                # Route WEB_SEARCH intent to trigger web search
-                if intent_type == IntentType.WEB_SEARCH:
-                    logger.info(f"Smart Router: WEB_SEARCH intent detected (confidence: {confidence:.2f}) - will trigger web search")
-                    intent_metadata['force_web_search'] = True
-                    intent_metadata['web_search_keywords'] = intent_metadata.get('keywords_found', [])
-
                 # Apply smart context limits based on intent
                 if intent_type and get_intent_context_limit:
                     context_limit = get_intent_context_limit(intent_type)
@@ -2900,9 +2906,10 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
             web_search_used = False
             web_search_context = ""  # Initialize web_search_context
 
-            # Check if web search is needed (from intent classifier OR pattern detection)
-            force_web_search = intent_metadata.get('force_web_search', False) if 'intent_metadata' in locals() else False
-            should_web_search = force_web_search or self._should_use_web_search(message)
+            # The search query is the user's message, so only _should_use_web_search
+            # decides. A WEB_SEARCH classification sizes the context and nothing more:
+            # its keywords also fire on ordinary questions, which would send them out.
+            should_web_search = self._should_use_web_search(message)
 
             if not simple_mode and should_web_search:
                 logger.info(f"Web search triggered (message_len={len(message)})")

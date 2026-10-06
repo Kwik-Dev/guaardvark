@@ -121,3 +121,60 @@ class TestShouldUseWebSearch:
         assert result["success"] is False
         assert result["strategy_used"] == "skipped_length"
         assert result["user_message"]
+
+
+class _StopAfterSearchDecision(Exception):
+    pass
+
+
+class _StopOnLookup:
+    """Stands in for session_messages, the first thing the turn reads after
+    the web search decision, so the test ends before any model call."""
+
+    def __contains__(self, _key):
+        raise _StopAfterSearchDecision
+
+
+class TestWebSearchClassificationDoesNotForceSearch:
+    """The intent classifier's WEB_SEARCH label has fired on ordinary
+    questions ("now" inside "know"), so it never sends a search on its own:
+    enhanced chat searches only when _should_use_web_search accepts the
+    message."""
+
+    @pytest.fixture
+    def run_turn(self, monkeypatch):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from backend.api import enhanced_chat_api as eca
+
+        monkeypatch.setattr(
+            eca, "classify_user_intent",
+            lambda message: (eca.IntentType.WEB_SEARCH, 0.9, {"keywords_found": ["now"]}),
+        )
+
+        def run(message):
+            manager = eca.EnhancedChatManager.__new__(eca.EnhancedChatManager)
+            manager._get_or_create_session = MagicMock(return_value=SimpleNamespace(id=1))
+            manager._save_message = MagicMock()
+            manager._get_active_model = MagicMock(return_value="test-model")
+            manager._get_model_config = MagicMock(return_value={})
+            manager._perform_web_search_safe = MagicMock(
+                return_value={"success": False, "error": "stub", "user_message": "stub"})
+            manager.session_messages = _StopOnLookup()
+            with pytest.raises(_StopAfterSearchDecision):
+                manager._process_regular_chat(
+                    "s1", message, use_rag=False, debug_mode=False, simple_mode=False)
+            return manager, manager._perform_web_search_safe
+
+        return run
+
+    def test_classified_question_the_rule_rejects_is_not_searched(self, run_turn):
+        message = "do you know what a closure is?"
+        manager, search = run_turn(message)
+        assert manager._should_use_web_search(message) is False
+        search.assert_not_called()
+
+    def test_current_info_question_is_still_searched(self, run_turn):
+        _manager, search = run_turn("what is the weather in Boston now")
+        search.assert_called_once_with("what is the weather in Boston now")

@@ -13,6 +13,8 @@ import re
 from typing import Dict, List, Tuple, Optional
 from enum import Enum
 
+from backend.services.intent_service import find_keywords, whole_word_pattern
+
 logger = logging.getLogger(__name__)
 
 # Try to import semantic classifier
@@ -34,7 +36,7 @@ class IntentType(Enum):
     COMMAND = "COMMAND"              # /codegen, /analyze commands
     DATABASE_QUERY = "DATABASE_QUERY"  # Count/list requests
     RAG_SEARCH = "RAG_SEARCH"        # Document content search
-    WEB_SEARCH = "WEB_SEARCH"        # Current info requests
+    WEB_SEARCH = "WEB_SEARCH"        # Current info requests; sizes the context, never sends a search by itself
     GENERAL_CHAT = "GENERAL_CHAT"    # Default conversational
 
 class IntentClassifier:
@@ -54,7 +56,11 @@ class IntentClassifier:
             'all clients', 'all projects', 'all documents',
             'tell me how many', 'how many clients', 'how many projects', 'how many documents'
         ]
-        
+        # A record query needs both: a count/list phrase and an app record noun.
+        # Either alone is ordinary chat ("show me a joke", "my project files").
+        self.database_count_phrases = ['how many', 'count', 'list', 'show me', 'number of', 'total']
+        self.database_record_nouns = ['clients', 'projects', 'documents', 'files', 'tasks']
+
         # Document search patterns  
         self.document_keywords = [
             'document', 'contract', 'agreement', 'uploaded', 'file content',
@@ -78,6 +84,9 @@ class IntentClassifier:
             'how are you today', 'today?', 'doing today', 'feel today'
         ]
         
+        # One whole-word pattern per keyword list, compiled on first use
+        self._keyword_patterns: Dict[Tuple[str, ...], "re.Pattern[str]"] = {}
+
         # Context length thresholds
         self.max_context_lengths = {
             IntentType.COMMAND: 5000,        # Minimal context for commands
@@ -113,7 +122,12 @@ class IntentClassifier:
             return IntentType.COMMAND, 0.95, metadata
 
         # 2. Database Query Detection (keyword-based - specific to this app)
-        db_confidence, db_keywords = self._check_keywords(message_lower, self.database_keywords)
+        _, count_phrases = self._check_keywords(message_lower, self.database_count_phrases)
+        _, record_nouns = self._check_keywords(message_lower, self.database_record_nouns)
+        if count_phrases and record_nouns:
+            db_confidence, db_keywords = self._check_keywords(message_lower, self.database_keywords)
+        else:
+            db_confidence, db_keywords = 0.0, []
         if db_confidence > 0.6:
             metadata['keywords_found'] = db_keywords
             logger.info(f"Intent: DATABASE_QUERY detected - keywords: {db_keywords}")
@@ -191,25 +205,28 @@ class IntentClassifier:
     def _check_keywords(self, message: str, keywords: List[str]) -> Tuple[float, List[str]]:
         """
         Check for keyword matches and return confidence score
-        
+
+        Keywords match as whole words, never inside another word: "now" is
+        not found in "know", "count" not in "account", "list" not in "listen".
+
         Args:
             message: Lowercase message text
             keywords: List of keywords to check
-            
+
         Returns:
             Tuple of (confidence_score, matched_keywords)
         """
-        matched_keywords = []
-        total_matches = 0
-        
-        for keyword in keywords:
-            if keyword in message:
-                matched_keywords.append(keyword)
-                # Weight longer keywords more heavily
-                total_matches += len(keyword.split())
-        
+        key = tuple(keywords)
+        pattern = self._keyword_patterns.get(key)
+        if pattern is None:
+            pattern = self._keyword_patterns[key] = whole_word_pattern(keywords)
+
+        matched_keywords = find_keywords(pattern, message)
         if not matched_keywords:
             return 0.0, []
+
+        # Weight longer keywords more heavily
+        total_matches = sum(len(keyword.split()) for keyword in matched_keywords)
         
         # Calculate confidence based on matches and message length
         confidence = min(0.95, (total_matches / max(1, len(message.split()))) + 0.3)
