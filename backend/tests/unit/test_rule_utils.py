@@ -27,6 +27,7 @@ def app():
         # inside the same second would share a key, so start each test cold.
         rule_utils._cached_active_system_prompt.cache_clear()
         rule_utils._cached_active_qa_template.cache_clear()
+        rule_utils._cached_formatted_rules.cache_clear()
         yield app
         db.session.remove()
         db.drop_all()
@@ -93,6 +94,87 @@ def test_get_formatted_rules_order_and_filter(app):
             "- Learned rule 3",
         ]
         assert lines == expected_order
+
+
+def test_applicable_rules_block_lists_only_rule_rows(app):
+    """The persona, the retrieval wrapper, system prompts and slash commands
+    have their own channels; the block holds the rules alone."""
+    with app.app_context():
+        db.session.add_all([
+            Rule(name="global_default_chat_system_prompt", level="SYSTEM", type="PROMPT_TEMPLATE",
+                 rule_text="You are the persona.", is_active=True, target_models_json='["__ALL__"]'),
+            Rule(name="enhanced_chat", level="SYSTEM", type="PROMPT_TEMPLATE",
+                 rule_text="Enhanced chat prompt.", is_active=True, target_models_json='["__ALL__"]'),
+            Rule(name="qa_default", level="SYSTEM", type="QA_TEMPLATE",
+                 rule_text="{context_str}\n\n{query_str}", is_active=True, target_models_json='["__ALL__"]'),
+            Rule(name="some_prompt", level="SYSTEM", type="SYSTEM_PROMPT",
+                 rule_text="A system prompt.", is_active=True, target_models_json='["__ALL__"]'),
+            Rule(name="a_command", command_label="/cmd", level="SYSTEM", type="COMMAND_RULE",
+                 rule_text="Command body.", is_active=True, target_models_json='["__ALL__"]'),
+            Rule(name="no_invented_specifics", level="SYSTEM", type="PROMPT_TEMPLATE",
+                 rule_text="Never state a path you have not verified.", is_active=True,
+                 target_models_json='["__ALL__"]'),
+            Rule(name="tidy_lists", level="LEARNED", type="FORMATTING_RULE",
+                 rule_text="Keep lists short.", is_active=True, target_models_json='["__ALL__"]'),
+        ])
+        db.session.commit()
+
+        result = rule_utils.get_formatted_rules(levels=["SYSTEM", "LEARNED"], model_name="gemma4:12b")
+        lines = [l.strip() for l in result.splitlines() if l.strip()]
+        assert lines == [
+            "--- Applicable Rules & Guidelines ---",
+            "## System Rules:",
+            "- Never state a path you have not verified.",
+            "## Learned Rules:",
+            "- Keep lists short.",
+        ]
+
+
+def test_rules_match_the_model_exactly_or_by_declared_prefix(app):
+    with app.app_context():
+        base_time = datetime.now(timezone.utc)
+        targets = [
+            ("everyone", "For every model.", '["__ALL__"]'),
+            ("small_llama", "For llama3.2:1b.", '["llama3.2:1b"]'),
+            ("plain_llama", "For llama3.2.", '["llama3.2"]'),
+            ("qwen_family", "For every qwen3.", '["qwen3*"]'),
+        ]
+        db.session.add_all([
+            Rule(name=name, level="SYSTEM", rule_text=text, is_active=True,
+                 target_models_json=models, created_at=base_time + timedelta(minutes=i))
+            for i, (name, text, models) in enumerate(targets)
+        ])
+        db.session.commit()
+
+        def bullets(model):
+            out = rule_utils.get_formatted_rules(levels=["SYSTEM"], model_name=model)
+            return [l.strip() for l in out.splitlines() if l.strip().startswith("- ")]
+
+        assert bullets("llama3.2:1b") == ["- For every model.", "- For llama3.2:1b."]
+        # "llama3.2" is Ollama's llama3.2:latest, a different model from llama3.2:1b.
+        assert bullets("llama3.2") == ["- For every model.", "- For llama3.2."]
+        assert bullets("llama3.2:latest") == ["- For every model.", "- For llama3.2."]
+        assert bullets("qwen3:8b") == ["- For every model.", "- For every qwen3."]
+        assert bullets("qwen2.5:7b") == ["- For every model."]
+        # An unknown model gets the rules meant for every model, no others.
+        assert bullets(None) == ["- For every model."]
+
+
+def test_formatted_rules_are_empty_when_the_database_is_down(app, monkeypatch):
+    from sqlalchemy.exc import OperationalError
+
+    with app.app_context():
+        db.session.add(Rule(level="SYSTEM", rule_text="A rule.", is_active=True,
+                            target_models_json='["__ALL__"]'))
+        db.session.commit()
+
+        def down(*args, **kwargs):
+            raise OperationalError("SELECT rules", {}, Exception("could not connect to server"))
+
+        monkeypatch.setattr(rule_utils.db.session, "query", down)
+        result = rule_utils.get_formatted_rules(levels=["SYSTEM", "LEARNED"], model_name="modelX")
+        assert result == ""
+        assert "Error" not in result
 
 
 def test_get_active_system_prompt_filters_and_ignores_inactive(app):
