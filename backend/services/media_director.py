@@ -81,6 +81,48 @@ Rules: objective and physical, no metaphors, no emotional language, no quality t
 STYLE (if given) describes the medium or look to honour; weave it in as a short clause, do not repeat it wholesale.
 Return STRICT JSON: {"prompts": ["description1", "description2", ...]} exactly one per input, same order."""
 
+# Per-attempt time limits for the director's Ollama calls. The module-level
+# ``ollama.chat`` client has no timeout, so without one a hung model would hold
+# the stage, and the GPU work queued behind it, indefinitely. A non-streaming chat sends nothing
+# until the reply is complete, so the read limit bounds the whole generation:
+# an allowance for loading the model plus one per prompt. The per-prompt figure
+# is about four times the 1-8 s per prompt measured for the prose contract
+# above, to leave room for slower GPUs; the load allowance is a ceiling for a
+# cold load from disk, not a measurement. These bound a stall; they are not
+# expected waits.
+DIRECTOR_CONNECT_TIMEOUT_S = 10.0
+DIRECTOR_LOAD_ALLOWANCE_S = 120.0
+DIRECTOR_PER_PROMPT_S = 30.0
+DIRECTOR_MAX_TIMEOUT_S = 900.0
+
+
+def _director_timeout_s(n: int) -> float:
+    """Seconds one director attempt may take for ``n`` prompts."""
+    return min(DIRECTOR_MAX_TIMEOUT_S,
+               DIRECTOR_LOAD_ALLOWANCE_S + DIRECTOR_PER_PROMPT_S * max(1, int(n)))
+
+
+def _director_chat(timeout_s: float, **kwargs) -> Any:
+    """One ``ollama`` chat call that gives up after ``timeout_s`` seconds.
+
+    Uses its own client (same host resolution as ``ollama.chat``) so the limit
+    applies to this call only; raises the httpx timeout error when it fires.
+    """
+    import httpx
+    import ollama
+    timeout = httpx.Timeout(timeout_s, connect=min(timeout_s, DIRECTOR_CONNECT_TIMEOUT_S))
+    with ollama.Client(timeout=timeout) as client:
+        return client.chat(**kwargs)
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    try:
+        import httpx
+        return isinstance(exc, httpx.TimeoutException)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _options(n: int, sampling: Optional[dict] = None) -> dict:
     n = max(1, n)
     opts = {"temperature": 0.68, "num_ctx": 4096, "num_predict": min(3072, 180 * n + 512)}
@@ -241,11 +283,14 @@ def enhance_prompts(
         system = _SYSTEM_ENHANCE_IMAGE
     # The active chat model goes first; a model that errors or hands back the wrong
     # number of prompts is skipped for the next family on the ladder (gemma, qwen, ...).
+    # A timeout ends the ladder: Ollama queues requests behind the stalled one, so
+    # the next model would only wait out the same stall.
+    timeout_s = _director_timeout_s(n)
     for resolved in _director_candidates(model or DEFAULT_DIRECTOR_MODEL)[:3]:
         try:
-            import ollama
             from backend.utils.ollama_resource_manager import think_payload
-            resp = ollama.chat(
+            resp = _director_chat(
+                timeout_s,
                 model=resolved,
                 format="json",
                 messages=[
@@ -264,6 +309,12 @@ def enhance_prompts(
                 resolved, len(out), n,
             )
         except Exception as e:  # noqa: BLE001
+            if _is_timeout(e):
+                log.warning(
+                    "media_director.enhance_prompts: %s timed out after %.0fs; keeping the original prompts",
+                    resolved, timeout_s,
+                )
+                break
             log.warning("media_director.enhance_prompts: %s failed (%s); trying the next model", resolved, e)
     # Fallback: return originals (caller may still do keyword enhance)
     return list(prompts)
@@ -292,11 +343,12 @@ def refine_edit_instruction(instruction: str, *, model: Optional[str] = None,
         log.info("media_director: verbatim prompts ON — using edit instruction as-is (no Kontext rewrite)")
         return instruction
     resolved = _resolve_model(model or DEFAULT_DIRECTOR_MODEL)
+    timeout_s = _director_timeout_s(1)
     try:
-        import ollama
         from backend.utils.ollama_resource_manager import think_payload
         import json as _json
-        resp = ollama.chat(
+        resp = _director_chat(
+            timeout_s,
             model=resolved,
             format="json",
             messages=[
@@ -312,7 +364,13 @@ def refine_edit_instruction(instruction: str, *, model: Optional[str] = None,
             return refined
         log.warning("media_director.refine_edit_instruction returned empty; using original")
     except Exception as e:  # noqa: BLE001
-        log.warning("media_director.refine_edit_instruction failed (%s); using original", e)
+        if _is_timeout(e):
+            log.warning(
+                "media_director.refine_edit_instruction: %s timed out after %.0fs; using original",
+                resolved, timeout_s,
+            )
+        else:
+            log.warning("media_director.refine_edit_instruction failed (%s); using original", e)
     return instruction
 
 
@@ -339,12 +397,13 @@ def storyboard_from_concept(
         f"CONCEPT: {concept}\nN={n}\nSTYLE: {style or '(none)'}{style_c}{guidance}\n\n"
         "TASK: Return ONLY the JSON with optional 'treatment' and exactly N 'prompts'."
     )
+    timeout_s = _director_timeout_s(n)
     try:
         # Use a direct chat wrapper for storyboard (rich)
-        import ollama
         from backend.utils.ollama_resource_manager import think_payload
         opts = _options(n, sampling)
-        resp = ollama.chat(
+        resp = _director_chat(
+            timeout_s,
             model=resolved,
             format="json",
             messages=[
@@ -361,7 +420,13 @@ def storyboard_from_concept(
             prompts = _ensure_image_distinct(prompts or [], concept, n, style)
         return {"treatment": data.get("treatment"), "prompts": prompts[:n]}
     except Exception as e:  # noqa: BLE001
-        log.warning("media_director.storyboard_from_concept failed (%s); simple fallback", e)
+        if _is_timeout(e):
+            log.warning(
+                "media_director.storyboard_from_concept: %s timed out after %.0fs; simple fallback",
+                resolved, timeout_s,
+            )
+        else:
+            log.warning("media_director.storyboard_from_concept failed (%s); simple fallback", e)
         base = concept.strip()
         return {"treatment": None, "prompts": [base] * n}
 
