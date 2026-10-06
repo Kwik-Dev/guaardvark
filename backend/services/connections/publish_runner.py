@@ -12,7 +12,13 @@ import logging
 from datetime import datetime
 from typing import Any, Callable, Dict
 
-from backend.services.connections import gates, media as media_util, registry, service
+from backend.services.connections import (
+    gates,
+    media as media_util,
+    publish_service,
+    registry,
+    service,
+)
 from backend.services.connections.base import PublishRequest
 
 logger = logging.getLogger(__name__)
@@ -40,8 +46,15 @@ def run(task: Dict[str, Any], update_progress: Callable[[int, str], None]) -> Di
     if record.remote_id:
         logger.info("Publish record %s already posted; skipping.", record_id)
         return {"skipped": True, "remote_url": record.remote_url}
-    if record.status in ("cancelled", "rejected"):
+    # awaiting_approval: a job left over from before a hold must not send a
+    # publish that now waits on a person.
+    if record.status in ("cancelled", "rejected", "awaiting_approval"):
         return {"skipped": True, "status": record.status}
+
+    stopped = gates.posting_stop_reason()
+    if stopped:
+        publish_service.hold(record)
+        return {"skipped": True, "held": True, "reason": stopped}
 
     connection = Connection.query.get(record.connection_id)
     if connection is None:

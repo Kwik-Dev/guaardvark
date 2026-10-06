@@ -13,6 +13,10 @@ Every change of status goes through ``move``, a compare-and-set in one UPDATE,
 so a reject and a poster racing for the same row cannot both win: either the
 reject lands and ``begin_submit`` refuses, or the submit has begun and the
 reject is refused.
+
+While public posting is stopped (``kill_switch.posting_stop_reason``),
+``claim`` and ``begin_submit`` refuse and an approved draft stays approved, so
+it waits for the stop to lift rather than being abandoned.
 """
 
 from __future__ import annotations
@@ -147,15 +151,29 @@ def approve(audit_id: int, draft_text: Optional[str] = None) -> bool:
     return move(audit_id, "approved", APPROVE_FROM, **fields)
 
 
+def _posting_stopped() -> bool:
+    from backend.services.social_outreach import kill_switch
+
+    return kill_switch.posting_stopped()
+
+
 def claim(audit_id: int) -> bool:
-    """approved -> processing. False when the row is no longer approved."""
+    """approved -> processing. False when the row is no longer approved, or
+    while public posting is stopped (the row then stays approved)."""
+    if _posting_stopped():
+        return False
     return move(audit_id, "processing", CLAIM_FROM, abort_reason=_stamp("processing_since:"))
 
 
 def begin_submit(audit_id: int) -> bool:
     """processing -> submitting. A poster calls this immediately before the
     step that publishes and must not publish when it returns False: the row was
-    rejected (or reaped) while the poster was working."""
+    rejected (or reaped) while the poster was working, or public posting was
+    stopped. A stop hands the claim back (processing -> approved), so the
+    poster's give-up finds nothing in flight and the draft waits."""
+    if _posting_stopped():
+        move(audit_id, "approved", SUBMIT_FROM, abort_reason=None)
+        return False
     return move(audit_id, "submitting", SUBMIT_FROM, abort_reason=_stamp("submitting_since:"))
 
 

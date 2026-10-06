@@ -6,6 +6,8 @@ Endpoints
 GET  /api/social-outreach/status              — enabled/supervised/cadence snapshot
 POST /api/social-outreach/enable              — flip global on
 POST /api/social-outreach/kill                — flip global off (hard stop)
+POST /api/social-outreach/stop-posting        — stop ALL public posting (outreach + Connections), hold what is queued
+POST /api/social-outreach/resume-posting      — lift that stop; held items still need their usual approval
 POST /api/social-outreach/supervised          — body {"on": bool}
 GET  /api/social-outreach/audit?limit=200     — recent log rows
 GET  /api/social-outreach/queue               — drafted-but-not-posted entries (supervised mode)
@@ -56,6 +58,23 @@ def enable():
 @social_outreach_bp.post("/kill")
 def kill():
     return jsonify(kill_switch.apply_kill_switch())
+
+
+@social_outreach_bp.post("/stop-posting")
+def stop_posting():
+    """Stop all public posting: outreach and Connections publishing alike."""
+    result = kill_switch.stop_all_posting()
+    if not result.get("posting_stopped"):
+        return jsonify({**result, "error": "the stop could not be saved; posting is not stopped"}), 500
+    return jsonify(result)
+
+
+@social_outreach_bp.post("/resume-posting")
+def resume_posting():
+    result = kill_switch.resume_posting()
+    if result.get("posting_stopped"):
+        return jsonify({**result, "error": "the stop could not be lifted; posting is still stopped"}), 500
+    return jsonify(result)
 
 
 @social_outreach_bp.post("/supervised")
@@ -238,6 +257,9 @@ def _poster_step(event_id: int, step, verb: str, needs: str):
         status = transitions.current_status(event_id)
         if status is None:
             return jsonify({"error": "not found"}), 404
+        stopped = kill_switch.posting_stop_reason()
+        if stopped:
+            return jsonify({"error": stopped, "status": status}), 409
         return jsonify({
             "error": f"cannot {verb} from status '{status}' (only from {needs})",
             "status": status,

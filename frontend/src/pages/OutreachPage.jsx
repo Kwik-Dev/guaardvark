@@ -36,6 +36,7 @@ import ErrorOutlineIcon from "@mui/icons-material/ErrorOutline";
 import RadioButtonUncheckedIcon from "@mui/icons-material/RadioButtonUnchecked";
 import OpenInNewIcon from "@mui/icons-material/OpenInNew";
 import PowerSettingsNewIcon from "@mui/icons-material/PowerSettingsNew";
+import StopCircleIcon from "@mui/icons-material/StopCircle";
 import VisibilityIcon from "@mui/icons-material/Visibility";
 import AddCommentIcon from "@mui/icons-material/AddComment";
 import AddIcon from "@mui/icons-material/Add";
@@ -123,6 +124,7 @@ const OutreachPage = () => {
   const [passTopics, setPassTopics] = useState("");
   const [lastTaskId, setLastTaskId] = useState(null);
   const [killConfirmOpen, setKillConfirmOpen] = useState(false);
+  const [postingStopConfirmOpen, setPostingStopConfirmOpen] = useState(false);
 
   // Citation tool
   const [citationUrl, setCitationUrl] = useState("");
@@ -496,6 +498,32 @@ const OutreachPage = () => {
     }
   };
 
+  const confirmPostingStopToggle = async () => {
+    if (!status) return;
+    const stopping = !status.posting_stopped;
+    setPostingStopConfirmOpen(false);
+    setBusy(true);
+    try {
+      if (stopping) {
+        const result = await outreachApi.stopAllPosting();
+        const held = result.held_publishes || 0;
+        const inFlight = result.in_flight_publishes || 0;
+        setInfo(
+          `All public posting stopped. ${held} queued Connections publish(es) held on the Approvals page.` +
+            (inFlight ? ` ${inFlight} already being sent could not be recalled.` : ""),
+        );
+      } else {
+        await outreachApi.resumePosting();
+        setInfo("Public posting resumed. Held Connections publishes still wait on the Approvals page.");
+      }
+      await fetchStatus();
+    } catch (e) {
+      setError(`${stopping ? "stop" : "resume"} failed: ${e.message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleSupervisedToggle = async () => {
     if (!status) return;
     setBusy(true);
@@ -602,6 +630,18 @@ const OutreachPage = () => {
             <CircularProgress size={16} />
           )}
           <Box sx={{ flex: 1 }} />
+          {status && (
+            <Button
+              size="small"
+              color={status.posting_stopped ? "success" : "error"}
+              variant="outlined"
+              startIcon={status.posting_stopped ? <PlayArrowIcon /> : <StopCircleIcon />}
+              onClick={() => setPostingStopConfirmOpen(true)}
+              disabled={busy}
+            >
+              {status.posting_stopped ? "Resume public posting" : "Stop all public posting"}
+            </Button>
+          )}
           {lastTaskId != null && (
             <Typography variant="caption" color="text.secondary">
               Last pass:{" "}
@@ -619,6 +659,12 @@ const OutreachPage = () => {
             </IconButton>
           </Tooltip>
         </Box>
+        {status?.posting_stopped && (
+          <Alert severity="error" icon={<StopCircleIcon />} sx={{ mt: 1 }}>
+            All public posting is stopped: outreach and Connections publish nothing until you resume.
+            Approved outreach drafts stay approved; queued Connections publishes wait on the Approvals page.
+          </Alert>
+        )}
         {status && (
           <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1, fontSize: "0.7rem" }}>
             {status.supervised
@@ -670,7 +716,7 @@ const OutreachPage = () => {
                     size="small"
                     variant="text"
                     startIcon={<PlayArrowIcon />}
-                    disabled={busy || !status?.enabled}
+                    disabled={busy || !status?.enabled || status?.posting_stopped}
                     onClick={() => handleRunPass("reddit")}
                     sx={{ textTransform: "none", justifyContent: "flex-start", fontSize: "0.75rem" }}
                   >
@@ -685,7 +731,7 @@ const OutreachPage = () => {
                     size="small"
                     variant="text"
                     startIcon={<PlayArrowIcon />}
-                    disabled={busy || !status?.enabled}
+                    disabled={busy || !status?.enabled || status?.posting_stopped}
                     onClick={() => handleRunPass("youtube")}
                     sx={{ textTransform: "none", justifyContent: "flex-start", fontSize: "0.75rem" }}
                   >
@@ -700,7 +746,7 @@ const OutreachPage = () => {
                     size="small"
                     variant="text"
                     startIcon={<PlayArrowIcon />}
-                    disabled={busy || !status?.enabled}
+                    disabled={busy || !status?.enabled || status?.posting_stopped}
                     onClick={() => handleRunPass("self_share")}
                     sx={{ textTransform: "none", justifyContent: "flex-start", fontSize: "0.75rem" }}
                   >
@@ -1319,6 +1365,30 @@ const OutreachPage = () => {
             disabled={ndBusy || !ndBody.trim()}
           >
             {ndSeededId ? "Save (update seeded row)" : "Save draft"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={postingStopConfirmOpen} onClose={() => setPostingStopConfirmOpen(false)}>
+        <DialogTitle>
+          {status?.posting_stopped ? "Resume public posting?" : "Stop all public posting?"}
+        </DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            {status?.posting_stopped
+              ? "Posts can go out again. Held Connections publishes stay on the Approvals page until someone approves them; approved outreach drafts post on the usual schedule while outreach is enabled."
+              : "Nothing is posted publicly from this install until you resume: no outreach replies or shares, and no Connections publishes, including scheduled, chat and MCP requests. Queued Connections publishes are held on the Approvals page and need approving again; approved outreach drafts stay approved. A post already being sent may still go out. This is separate from the outreach Enabled switch."}
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPostingStopConfirmOpen(false)}>Cancel</Button>
+          <Button
+            variant="contained"
+            color={status?.posting_stopped ? "success" : "error"}
+            onClick={confirmPostingStopToggle}
+            autoFocus
+          >
+            {status?.posting_stopped ? "Resume posting" : "Stop posting"}
           </Button>
         </DialogActions>
       </Dialog>
