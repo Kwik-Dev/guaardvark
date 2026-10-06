@@ -706,9 +706,20 @@ def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
                     output_dir=output_dir,
                 )
 
+                voice_records = list(getattr(res, "voice_records", None) or [])
                 for i, shot in enumerate(shots):
                     if i < len(res.clip_paths):
                         shot.video_clip_path = res.clip_paths[i]
+                    # Which voice spoke the line, so a fallback shows in the
+                    # production view instead of only in a log.
+                    record = voice_records[i] if i < len(voice_records) else None
+                    shot.voice_record = record if isinstance(record, dict) else None
+                    if shot.voice_record and shot.voice_record.get("fallbacks"):
+                        import logging
+                        logging.getLogger(__name__).warning(
+                            "production %s shot %s/%s voice fallback: %s", prod_id,
+                            shot.scene_number, shot.shot_number,
+                            "; ".join(f["message"] for f in shot.voice_record["fallbacks"]))
 
                 final_doc = register_production_output(
                     production=ctx.production, file_path=res.final_mp4_path, category="final",

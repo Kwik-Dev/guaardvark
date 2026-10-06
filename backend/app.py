@@ -1343,6 +1343,8 @@ try:
                 # Storyboard curator advice per shot, and who ticked the approval.
                 ("production_shots", "approved_by", "ALTER TABLE production_shots ADD COLUMN IF NOT EXISTS approved_by VARCHAR(16)"),
                 ("production_shots", "curator_advice", "ALTER TABLE production_shots ADD COLUMN IF NOT EXISTS curator_advice JSON"),
+                # Which voice spoke each shot's line, and any fallback.
+                ("production_shots", "voice_record", "ALTER TABLE production_shots ADD COLUMN IF NOT EXISTS voice_record JSON"),
                 # The screenwriter's per-production text and cast pin for a linked subject.
                 ("production_subjects", "script_description", "ALTER TABLE production_subjects ADD COLUMN IF NOT EXISTS script_description TEXT"),
                 ("production_subjects", "cast_required", "ALTER TABLE production_subjects ADD COLUMN IF NOT EXISTS cast_required BOOLEAN"),

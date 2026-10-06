@@ -3483,6 +3483,10 @@ class ProductionShot(db.Model):
     # The curator's advice on the current frame: {"verdict": "approve"|"flag",
     # "reason": str, "confidence": int}. NULL until it has judged this frame.
     curator_advice = db.Column(db.JSON, nullable=True)
+    # Which voice spoke this shot's line in the last render, and every way it
+    # differs from the one asked for (swarm.clients.build_voice_record). NULL
+    # for a shot with no voiced line or not rendered yet.
+    voice_record = db.Column(db.JSON, nullable=True)
     regen_count = db.Column(db.Integer, nullable=False, default=0)
 
     production = db.relationship(

@@ -542,6 +542,42 @@ def test_run_editor_renders_and_advances_to_complete(app, production):
     assert doc.path == "/tmp/final.mp4"
 
 
+def test_run_editor_keeps_each_line_s_voice_record_on_the_shot(app, production):
+    """A Chatterbox failure that Kokoro covered is stored on the shot and read
+    back by the production view, not left in a log."""
+    from backend.api.production_api import _shot_to_dict
+    from backend.services.swarm.agents.editor import RenderResult
+
+    production.current_stage = "rendering"
+    spoken = ProductionShot(production_id=production.id, scene_number=1, shot_number=1,
+                            description="Close up", storyboard_image_path="/tmp/a.png",
+                            dialogue_text="Hello there", approved=True)
+    silent = ProductionShot(production_id=production.id, scene_number=1, shot_number=2,
+                            description="Wide", storyboard_image_path="/tmp/b.png", approved=True)
+    db.session.add_all([spoken, silent])
+    db.session.commit()
+    record = {
+        "requested_voice": None, "voice_id_sent": None, "backend": "kokoro", "voice": "af_heart",
+        "fallbacks": [{"kind": "engine_fallback",
+                       "message": "Chatterbox failed (CUDA out of memory); Kokoro (af_heart) spoke this line."}],
+    }
+
+    with patch("backend.tasks.production_swarm_tasks.Editor") as MockEditor:
+        MockEditor.return_value.render.return_value = RenderResult(
+            final_mp4_path="/tmp/final.mp4", mlt_path=None,
+            clip_paths=["/tmp/shot_1.mp4", "/tmp/shot_2.mp4"],
+            voiceover_paths=["/tmp/vo_1.wav", None], music_path=None,
+            voice_records=[record, None],
+        )
+        run_editor(production.id, i2v=MagicMock(), audio_foundry=MagicMock(), ffmpeg=MagicMock())
+
+    db.session.refresh(spoken)
+    db.session.refresh(silent)
+    assert spoken.voice_record == record
+    assert silent.voice_record is None
+    assert _shot_to_dict(spoken)["voice_record"]["fallbacks"][0]["kind"] == "engine_fallback"
+
+
 def test_run_editor_resolves_voice_and_lora_from_cast(app, production):
     """Seam C: the speaking Subject's voice_id and LoRA both come from the
     shot's cast (shot_subjects), and voice_subject_id is stamped."""

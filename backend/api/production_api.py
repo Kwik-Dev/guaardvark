@@ -81,6 +81,7 @@ def _shot_to_dict(shot):
         "description": shot.description, "approved": shot.approved,
         "approved_by": shot.approved_by,
         "curator_advice": shot.curator_advice,
+        "voice_record": shot.voice_record,
         "storyboard_image_path": shot.storyboard_image_path,
         "storyboard_image_url": image_url,
         "video_clip_path": shot.video_clip_path,

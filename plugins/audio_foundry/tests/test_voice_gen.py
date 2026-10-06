@@ -137,6 +137,23 @@ def test_auto_falls_back_to_kokoro_when_chatterbox_generate_fails(tmp_path):
     assert result.meta["backend"] == "kokoro"
 
 
+def test_auto_fallback_is_recorded_with_its_reason(tmp_path):
+    """The fallback voice is not hidden: the result names it and why."""
+    vg = VoiceGenBackend(output_root=tmp_path)
+    vg._chatterbox = _StubInner("chatterbox", 2000, fail_on_generate=True)
+    vg._kokoro = _StubInner("kokoro", 600)
+
+    result = vg.generate(text="hi", backend="auto")
+    assert result.meta["fallback"] == {
+        "from": "chatterbox", "to": "kokoro", "reason": "chatterbox synthetic generate failure",
+    }
+
+
+def test_a_healthy_auto_call_records_no_fallback(voice_gen_with_stubs):
+    vg, _, _ = voice_gen_with_stubs
+    assert "fallback" not in vg.generate(text="hi", backend="auto").meta
+
+
 def test_explicit_chatterbox_failure_does_not_silently_fall_back(tmp_path):
     """If the user pinned Chatterbox, a failure must surface — not silent fallback."""
     vg = VoiceGenBackend(output_root=tmp_path)
