@@ -419,13 +419,18 @@ def route_message():
                 # plain file request to the screen-agent loop (2026-09-05).
                 asks_for_agent = bool(re.search(r"\b(?:agent|screen)\b", message, re.I))
                 if screen_active or is_vision or asks_for_agent:
+                    # execute_via "unified": this preview is a hint for unified
+                    # chat (AgentBrain), not a decision /route-and-execute can
+                    # act on. That endpoint routes again through the legacy
+                    # router, which treats "what is an agent?" as plain chat.
                     route = type('obj', (object,), {
                         'route_type': type('rt', (object,), {'value': 'agent_loop'})(),
                         'tool_name': 'agent_task_execute' if 'execute' in message.lower() or 'do' in message.lower() else None,
                         'tool_params': {},
                         'confidence': 0.75,
                         'reasoning': 'Routed via AgentBrain (screen_active or vision/STA path; lean on memory/lessons/budget)',
-                        'suggested_mode': 'agent'
+                        'suggested_mode': 'agent',
+                        'execute_via': 'unified',
                     })()
         except Exception:
             pass  # fallthrough to legacy bridge
@@ -439,7 +444,8 @@ def route_message():
                 'tool_params': decision.tool_params,
                 'confidence': decision.confidence,
                 'reasoning': decision.reasoning + ' (legacy bridge; migrate to AgentBrain)',
-                'suggested_mode': getattr(decision, 'suggested_mode', None)
+                'suggested_mode': getattr(decision, 'suggested_mode', None),
+                'execute_via': None,
             })()
 
         return jsonify({
@@ -450,7 +456,8 @@ def route_message():
                 "tool_params": route.tool_params,
                 "confidence": route.confidence,
                 "reasoning": route.reasoning,
-                "suggested_mode": route.suggested_mode
+                "suggested_mode": route.suggested_mode,
+                "execute_via": route.execute_via,
             }
         })
 

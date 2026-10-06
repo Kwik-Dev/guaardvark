@@ -538,30 +538,9 @@ class AgentBrain:
                 budget=budget,
             )
 
-            # Check for escalation signals in the response
-            if result.get("needs_escalation"):
-                escalated_from = 2
-                escalation_reason = result.get(
-                    "escalation_reason", "model signaled multi-step needed"
-                )
-                tier_used = 3
-                budget.on_escalation(2, cost=2, reason="tier2 escalation signal")
-                try:
-                    from backend.api.memory_api import get_memories_for_context
-                    get_memories_for_context(
-                        limit=5, max_tokens=300, query=message, session_id=session_id
-                    )
-                    budget.charge(1, 2, "context query on escalation")
-                except Exception:
-                    pass
-                result = self._deliberate(
-                    session_id, message, options, emit_fn, app,
-                    project_id=project_id, image_data=image_data,
-                    image_url=image_url, is_voice_message=is_voice_message,
-                    initial_context=result,
-                    budget=budget, request_id=request_id,
-                )
-
+            # Tier 2 cannot escalate from here: the engine has already emitted
+            # and saved its reply, so a Tier 3 run now would answer twice.
+            # Escalation has to be decided inside the engine before it replies.
             return result
 
         except Exception as e:
