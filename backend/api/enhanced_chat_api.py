@@ -1649,8 +1649,8 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
                     "fallback_available": True
                 }
 
-            # Also covers callers that skip _should_use_web_search, such as the
-            # intent classifier's force_web_search.
+            # Checked here as well, so a caller that skips _should_use_web_search
+            # still never sends a long message.
             if len(query) > self._WEB_SEARCH_MAX_CHARS:
                 logger.info(f"Web search skipped, query too long (query_len={len(query)})")
                 return {
@@ -2857,12 +2857,6 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
                         intent_metadata['command_fallback'] = True
                         intent_metadata['enhanced_command_processing'] = True
 
-                # Route WEB_SEARCH intent to trigger web search
-                if intent_type == IntentType.WEB_SEARCH:
-                    logger.info(f"Smart Router: WEB_SEARCH intent detected (confidence: {confidence:.2f}) - will trigger web search")
-                    intent_metadata['force_web_search'] = True
-                    intent_metadata['web_search_keywords'] = intent_metadata.get('keywords_found', [])
-
                 # Apply smart context limits based on intent
                 if intent_type and get_intent_context_limit:
                     context_limit = get_intent_context_limit(intent_type)
@@ -2900,9 +2894,10 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
             web_search_used = False
             web_search_context = ""  # Initialize web_search_context
 
-            # Check if web search is needed (from intent classifier OR pattern detection)
-            force_web_search = intent_metadata.get('force_web_search', False) if 'intent_metadata' in locals() else False
-            should_web_search = force_web_search or self._should_use_web_search(message)
+            # The search query is the user's message, so only _should_use_web_search
+            # decides. A WEB_SEARCH classification sizes the context and nothing more:
+            # its keywords also fire on ordinary questions, which would send them out.
+            should_web_search = self._should_use_web_search(message)
 
             if not simple_mode and should_web_search:
                 logger.info(f"Web search triggered (message_len={len(message)})")

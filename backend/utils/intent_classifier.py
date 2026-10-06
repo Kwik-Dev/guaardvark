@@ -34,7 +34,7 @@ class IntentType(Enum):
     COMMAND = "COMMAND"              # /codegen, /analyze commands
     DATABASE_QUERY = "DATABASE_QUERY"  # Count/list requests
     RAG_SEARCH = "RAG_SEARCH"        # Document content search
-    WEB_SEARCH = "WEB_SEARCH"        # Current info requests
+    WEB_SEARCH = "WEB_SEARCH"        # Current info requests; sizes the context, never sends a search by itself
     GENERAL_CHAT = "GENERAL_CHAT"    # Default conversational
 
 class IntentClassifier:
