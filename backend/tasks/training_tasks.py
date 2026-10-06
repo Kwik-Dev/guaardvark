@@ -15,12 +15,12 @@ from celery.exceptions import Retry
 from backend.utils.clock import utcnow
 
 try:
-    from backend.models import db, TrainingJob, DeviceProfile
+    from backend.models import db, TrainingJob, DeviceProfile, TrainingDataset
     from backend.utils.unified_progress_system import get_unified_progress, ProcessType, ProcessStatus
     from backend.utils.progress_emitter import emit_progress_event
 except ImportError as e:
     logging.error(f"Failed to import dependencies: {e}")
-    db = TrainingJob = DeviceProfile = None
+    db = TrainingJob = DeviceProfile = TrainingDataset = None
     get_unified_progress = None
     ProcessType = None
     ProcessStatus = None
@@ -144,14 +144,46 @@ def _emit_progress(job_id: str, progress: int, message: str, status: str = "proc
         logger.warning(f"Could not emit progress: {e}")
 
 
+# Shares of the full pipeline's progress bar the parse and training steps fill.
+PIPELINE_PARSE_PROGRESS = (5, 20)
+PIPELINE_TRAIN_PROGRESS = (30, 80)
+
+
+def _pipeline_emitter(job_id: str, in_pipeline: bool, band: tuple):
+    """Progress reporter for a step that also runs inside the full pipeline.
+
+    Inside the pipeline the step's 0-100 is mapped into its band of the
+    pipeline's bar and only an error is passed on as a status; the pipeline
+    reports its own start and completion."""
+    def emit(pct, message, status="processing", metrics=None):
+        if in_pipeline:
+            low, high = band
+            pct = min(100, max(0, int(pct)))
+            _emit_progress(job_id, low + (high - low) * pct // 100, message,
+                           "error" if status == "error" else "processing", metrics)
+        else:
+            _emit_progress(job_id, pct, message, status, metrics)
+    return emit
+
+
 @shared_task(bind=True, name='training.parse_transcripts')
-def parse_transcripts_task(self, job_id: str, input_path: str, recursive: bool = True):
+def parse_transcripts_task(self, job_id: str, input_path: str, recursive: bool = True,
+                           in_pipeline: bool = False):
+    """Parse transcripts into instruction/output pairs in one JSONL file.
+
+    in_pipeline: called by full_training_pipeline_task, which owns the job's
+    status, timestamps, Celery task id and config. The parser then reports its
+    stage and progress only, and the pipeline records the returned report."""
     logger.info(f"Starting parse_transcripts_task for job {job_id}")
-    
+    emit = _pipeline_emitter(job_id, in_pipeline, PIPELINE_PARSE_PROGRESS)
+
     try:
-        _update_job_status(job_id, status="running", pipeline_stage="parsing", started_at=utcnow(), celery_task_id=self.request.id)
-        _emit_progress(job_id, 0, "Starting transcript parsing...", "start")
-        
+        if in_pipeline:
+            _update_job_status(job_id, pipeline_stage="parsing")
+        else:
+            _update_job_status(job_id, status="running", pipeline_stage="parsing", started_at=utcnow(), celery_task_id=self.request.id)
+        emit(0, "Starting transcript parsing...", "start")
+
         sys.path.insert(0, str(TRAINING_DIR / "scripts"))
         from transcript_parser import TranscriptParser
         
@@ -161,8 +193,8 @@ def parse_transcripts_task(self, job_id: str, input_path: str, recursive: bool =
         if not input_path_obj.exists():
             raise FileNotFoundError(f"Input path not found: {input_path}")
         
-        _emit_progress(job_id, 10, f"Parsing transcripts from {input_path}...", "processing")
-        
+        emit(10, f"Parsing transcripts from {input_path}...")
+
         if input_path_obj.is_file():
             pairs = parser.parse_file(str(input_path_obj))
         elif input_path_obj.is_dir():
@@ -172,40 +204,45 @@ def parse_transcripts_task(self, job_id: str, input_path: str, recursive: bool =
                 if file_path.is_file() and file_path.suffix in ['.jsonl', '.json', '.md', '.txt', '.html', '.docx']:
                     file_pairs = parser.parse_file(str(file_path))
                     pairs.extend(file_pairs)
-                    _emit_progress(job_id, 10 + int(80 * len(pairs) / max(1, len(list(input_path_obj.glob(pattern))))), 
-                                 f"Parsed {len(pairs)} pairs from {file_path.name}...", "processing")
+                    emit(10 + int(80 * len(pairs) / max(1, len(list(input_path_obj.glob(pattern))))),
+                         f"Parsed {len(pairs)} pairs from {file_path.name}...")
         else:
             raise ValueError(f"Invalid input path: {input_path}")
-        
+
         output_filename = f"training_corpus_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
         output_path = PROCESSED_DIR / output_filename
-        
-        _emit_progress(job_id, 90, f"Saving {len(pairs)} training pairs...", "processing")
-        
+
+        emit(90, f"Saving {len(pairs)} training pairs...")
+
         with open(output_path, 'w', encoding='utf-8') as f:
             for pair in pairs:
                 f.write(json.dumps(pair) + '\n')
-        
-        _update_job_status(job_id, 
-                          status="completed",
-                          pipeline_stage="parsing",
-                          completed_at=utcnow(),
-                          progress=100,
-                          config_json=json.dumps({
-                              "input_path": input_path,
-                              "output_path": str(output_path),
-                              "pairs_count": len(pairs)
-                          }))
-        
-        _emit_progress(job_id, 100, f"Completed: {len(pairs)} training pairs saved to {output_filename}", "complete")
-        
+
+        report = {
+            "input_path": input_path,
+            "output_path": str(output_path),
+            "pairs_count": len(pairs)
+        }
+        if in_pipeline:
+            _update_job_status(job_id, pipeline_stage="parsing", progress=PIPELINE_PARSE_PROGRESS[1])
+        else:
+            _update_job_status(job_id,
+                              status="completed",
+                              pipeline_stage="parsing",
+                              completed_at=utcnow(),
+                              progress=100,
+                              config_json=json.dumps(report))
+
+        emit(100, f"Completed: {len(pairs)} training pairs saved to {output_filename}", "complete")
+
         logger.info(f"Parse task completed for job {job_id}: {len(pairs)} pairs")
-        return {"output_path": str(output_path), "pairs_count": len(pairs)}
-        
+        return report
+
     except Exception as e:
         logger.error(f"Error in parse_transcripts_task: {e}", exc_info=True)
-        _update_job_status(job_id, status="failed", error_message=str(e))
-        _emit_progress(job_id, 0, f"Error: {str(e)}", "error")
+        if not in_pipeline:
+            _update_job_status(job_id, status="failed", error_message=str(e))
+            _emit_progress(job_id, 0, f"Error: {str(e)}", "error")
         raise
 
 
@@ -383,8 +420,9 @@ EVAL_SPLIT = {
 # than this share is neither exported to GGUF nor registered in Ollama; it ends
 # as WORSE_THAN_BASE with both losses in error_message and its adapter left on
 # disk. A job's config overrides the margin with "eval_gate_margin", and
-# "export_if_worse": true lets such a run through. A run with no measured loss
-# (too small to split, vision, measurement failed) is not gated.
+# "export_if_worse": true lets such a run through; a run already held is
+# released by POST /api/training/jobs/<id>/export-anyway. A run with no measured
+# loss (too small to split, vision, measurement failed) is not gated.
 EVAL_GATE = {
     # Room for measurement noise on a held-out set of tens of rows, so a run
     # that only matched its base is not refused; a run that diverged lands far
@@ -490,49 +528,142 @@ def _export_verdict(report: dict, margin: float, export_if_worse: bool, lora_pat
     if export_if_worse:
         return True, f"Export gate overridden by export_if_worse: {detail}"
     return False, (f"Not exported: {detail}. The adapter is kept at {lora_path}; "
-                   f"set export_if_worse in the job config to export a run like this anyway")
+                   f"choose Export anyway on the job to export it")
+
+
+# File types both trainers read (finetune_model.load_training_data, _hold_out_split).
+TRAINING_DATA_SUFFIXES = (".jsonl", ".json")
+
+
+def dataset_training_files(path):
+    """The training files a dataset's path names, or why it names none.
+
+    A .jsonl or .json file is used as it is. A folder contributes the .jsonl
+    and .json files directly inside it, in name order. Returns (files, reason):
+    files is empty exactly when reason is set."""
+    raw = (path or "").strip()
+    if not raw:
+        return [], "the dataset has no path"
+    if "://" in raw:
+        return [], f"its path is a URL ({raw}); training reads .jsonl or .json files on this machine"
+    target = Path(raw).expanduser()
+    if target.is_file():
+        if target.suffix in TRAINING_DATA_SUFFIXES:
+            return [str(target)], None
+        return [], f"{target.name} is not a .jsonl or .json file"
+    if target.is_dir():
+        files = sorted(str(f) for f in target.iterdir()
+                       if f.is_file() and f.suffix in TRAINING_DATA_SUFFIXES)
+        if files:
+            return files, None
+        return [], f"the folder {target} holds no .jsonl or .json file (parse its transcripts first)"
+    return [], f"{target} does not exist"
+
+
+def _combine_training_files(files, out_path: Path) -> str:
+    """Write the rows of several training files to one JSONL file.
+
+    JSONL rows are copied byte for byte in file and line order; a .json file
+    must hold a list of rows."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "wb") as out:
+        for name in files:
+            if name.endswith(".jsonl"):
+                with open(name, "rb") as f:
+                    for line in f:
+                        if line.strip():
+                            out.write(line.rstrip(b"\r\n") + b"\n")
+            else:
+                with open(name, encoding="utf-8") as f:
+                    records = json.load(f)
+                if not isinstance(records, list):
+                    raise ValueError(f"{name} is not a list of rows")
+                for record in records:
+                    out.write(json.dumps(record).encode("utf-8") + b"\n")
+    return str(out_path)
+
+
+def _dataset_data_path(dataset_name: str, dataset_path: str, combined_path: Path, job_config: dict) -> str:
+    """Resolve a job's dataset to the one file its trainer reads.
+
+    Several files are combined into ``combined_path``; the files used are
+    recorded in ``job_config["dataset_files"]``."""
+    files, reason = dataset_training_files(dataset_path)
+    if reason:
+        raise ValueError(f"Dataset '{dataset_name}' cannot be trained on: {reason}")
+    job_config["dataset_files"] = files
+    if len(files) == 1:
+        return files[0]
+    return _combine_training_files(files, combined_path)
 
 
 @shared_task(bind=True, name='training.finetune_model',
              soft_time_limit=86400, time_limit=172800)
-def finetune_model_task(self, job_id: str, config: dict, resume: bool = False):
+def finetune_model_task(self, job_id: str, config: dict, resume: bool = False,
+                        in_pipeline: bool = False):
+    """Fine-tune the job's base model on its dataset and record the result.
+
+    A job without data_path in its config trains on its dataset (dataset_id),
+    resolved by dataset_training_files.
+
+    in_pipeline: called by full_training_pipeline_task, which owns the job's
+    status, timestamps and Celery task id and goes on to export. Training then
+    reports its stage and progress inside the pipeline's band and leaves the
+    job running; a run the export gate holds still ends the job."""
     logger.info(f"Starting finetune_model_task for job {job_id} (resume={resume})")
 
     current_pid = os.getpid()
+    emit = _pipeline_emitter(job_id, in_pipeline, PIPELINE_TRAIN_PROGRESS)
+    trained_name = None
 
     try:
-        _update_job_status(
-            job_id,
-            status="running",
-            pipeline_stage="training",
-            started_at=utcnow(),
-            celery_task_id=self.request.id,
-            pid=current_pid
-        )
-        _emit_progress(job_id, 0, "Starting model fine-tuning...", "start")
-        
+        if in_pipeline:
+            _update_job_status(job_id, pipeline_stage="training", pid=current_pid)
+        else:
+            _update_job_status(
+                job_id,
+                status="running",
+                pipeline_stage="training",
+                started_at=utcnow(),
+                celery_task_id=self.request.id,
+                pid=current_pid
+            )
+        emit(0, "Starting model fine-tuning...", "start")
+
         from flask import current_app
         with current_app.app_context():
             job = db.session.query(TrainingJob).filter(
                 TrainingJob.job_id == job_id
             ).first()
-            
+
             if not job:
                 raise ValueError(f"Job not found: {job_id}")
-            
+
             job_config = json.loads(job.config_json) if job.config_json else {}
             device_profile = None
             if job.device_profile_id:
                 device_profile = db.session.get(DeviceProfile, job.device_profile_id)
-        
+            dataset = None
+            if job.dataset_id:
+                row = db.session.get(TrainingDataset, job.dataset_id)
+                if row:
+                    dataset = (row.name, row.path)
+
         base_model = job.base_model
+        output_name = job.output_model_name or f"guaardvark-{base_model.replace('/', '-').replace(':', '-')}"
+        trained_name = output_name
         data_path = job_config.get("data_path") or job_config.get("dataset_path")
         images_path = job_config.get("images_path")
 
+        if not data_path and dataset:
+            data_path = _dataset_data_path(*dataset, MODELS_DIR / output_name / "dataset.jsonl", job_config)
+            job_config["data_path"] = data_path
+            _update_job_status(job_id, config_json=json.dumps(job_config))
+            emit(2, f"Training on dataset '{dataset[0]}': {data_path}")
+
         if not data_path:
             raise ValueError("data_path not found in job config")
-        
-        output_name = job.output_model_name or f"guaardvark-{base_model.replace('/', '-').replace(':', '-')}"
+
         max_steps = job_config.get("steps", 500)
         learning_rate = job_config.get("lr", 2e-4)
         batch_size = job_config.get("batch_size", device_profile.max_batch_size if device_profile else 2)
@@ -558,24 +689,25 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False):
                 data_path, MODELS_DIR / output_name / "heldout", fraction)
             eval_report.update(split)
         if eval_path:
-            _emit_progress(job_id, 3,
-                           f"Held out {eval_report['eval_rows']} of {eval_report['total_rows']} rows "
-                           f"to measure the trained model on", "processing")
+            emit(3, f"Held out {eval_report['eval_rows']} of {eval_report['total_rows']} rows "
+                    f"to measure the trained model on")
         else:
-            _emit_progress(job_id, 3, _heldout_summary(eval_report), "processing")
+            emit(3, _heldout_summary(eval_report))
 
         def progress_callback(step, total_steps, loss, metrics):
             progress = int((step / total_steps) * 100) if total_steps > 0 else 0
-            _update_job_status(job_id, 
+            if in_pipeline:
+                low, high = PIPELINE_TRAIN_PROGRESS
+                job_progress = low + (high - low) * min(100, progress) // 100
+            else:
+                job_progress = progress
+            _update_job_status(job_id,
                              current_step=step,
-                             progress=progress,
+                             progress=job_progress,
                              metrics_json=json.dumps(metrics))
-            _emit_progress(job_id, progress, 
-                         f"Training step {step}/{total_steps} (loss: {loss:.4f})", 
-                         "processing",
-                         metrics)
-        
-        _emit_progress(job_id, 5, f"Loading model {base_model}...", "processing")
+            emit(progress, f"Training step {step}/{total_steps} (loss: {loss:.4f})", "processing", metrics)
+
+        emit(5, f"Loading model {base_model}...")
         
         sys.path.insert(0, str(Path(os.environ.get('GUAARDVARK_ROOT', '.')) / "backend" / "services" / "training" / "scripts"))
 
@@ -591,11 +723,11 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False):
         with gpu_session(JobKind.TRAINING, str(job_id), cross_process=True,
                          lease_seconds=4 * 3600):
             if images_path:
-                 _emit_progress(job_id, 8, f"Detected vision task. Using vision trainer with images from {images_path}", "processing")
+                 emit(8, f"Detected vision task. Using vision trainer with images from {images_path}")
                  from finetune_vision import finetune
 
                  resume_msg = " (resuming from checkpoint)" if resume else ""
-                 _emit_progress(job_id, 10, f"Starting vision training loop{resume_msg}...", "processing")
+                 emit(10, f"Starting vision training loop{resume_msg}...")
                  model_dir = finetune(
                     base_model=base_model,
                     data_path=data_path,
@@ -614,7 +746,7 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False):
                  from finetune_model import finetune
 
                  resume_msg = " (resuming from checkpoint)" if resume else ""
-                 _emit_progress(job_id, 10, f"Starting text training loop{resume_msg}...", "processing")
+                 emit(10, f"Starting text training loop{resume_msg}...")
                  model_dir = finetune(
                     base_model=base_model,
                     data_path=train_path,
@@ -647,24 +779,28 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False):
                 checkpoints.sort(key=lambda x: int(x.name.split("-")[1]) if "-" in x.name else 0)
                 checkpoint_path = str(checkpoints[-1])
 
-        # A refused run keeps lora_path, so the adapter can be inspected; the
-        # export routes and the Training page offer export only to "completed".
-        _update_job_status(job_id,
-                          status="completed" if export_allowed else WORSE_THAN_BASE,
-                          pipeline_stage="training",
-                          completed_at=utcnow(),
-                          progress=100,
-                          lora_path=lora_path,
-                          checkpoint_path=checkpoint_path,
-                          is_resumable=bool(checkpoint_path),
-                          pid=None,
-                          error_message=None if export_allowed else gate_note,
-                          config_json=json.dumps(job_config))
+        trained = {"lora_path": lora_path, "checkpoint_path": checkpoint_path,
+                   "is_resumable": bool(checkpoint_path), "pid": None,
+                   "config_json": json.dumps(job_config)}
+        if in_pipeline and export_allowed:
+            # The pipeline goes on to export; the job stays running.
+            _update_job_status(job_id, pipeline_stage="training",
+                               progress=PIPELINE_TRAIN_PROGRESS[1], **trained)
+        else:
+            # A refused run keeps lora_path, so the adapter can be inspected; the
+            # export routes and the Training page offer export only to "completed".
+            _update_job_status(job_id,
+                              status="completed" if export_allowed else WORSE_THAN_BASE,
+                              pipeline_stage="training",
+                              completed_at=utcnow(),
+                              progress=100,
+                              error_message=None if export_allowed else gate_note,
+                              **trained)
 
         if export_allowed:
-            _emit_progress(job_id, 100, f"Training complete! {heldout}. {gate_note}. Model saved to {model_dir}", "complete")
+            emit(100, f"Training complete! {heldout}. {gate_note}. Model saved to {model_dir}", "complete")
         else:
-            _emit_progress(job_id, 100, f"Training finished. {gate_note}", "error")
+            emit(100, f"Training finished. {gate_note}", "error")
 
         logger.info(f"Training task completed for job {job_id}: {model_dir}")
         return {"model_dir": model_dir, "lora_path": lora_path, "eval": eval_report,
@@ -676,7 +812,9 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False):
         checkpoint_path = None
         is_resumable = False
         try:
-            output_name = config.get("output_name") or f"guaardvark-{config.get('base_model', 'model').replace('/', '-')}"
+            # The name the run trained under when it got that far; the task
+            # arguments carry it only for some callers.
+            output_name = trained_name or config.get("output_name") or f"guaardvark-{config.get('base_model', 'model').replace('/', '-')}"
             checkpoint_dir = MODELS_DIR / output_name / "checkpoints"
             if checkpoint_dir.exists():
                 checkpoints = list(checkpoint_dir.glob("checkpoint-*"))
@@ -889,11 +1027,13 @@ def full_training_pipeline_task(self, job_id: str, config: dict):
             _update_job_status(job_id, pipeline_stage="parsing")
             _emit_progress(job_id, 5, "Step 1/5: Parsing transcripts...", "processing")
             
-            parse_result = parse_transcripts_task(job_id, 
-                                                  job_config["input_path"], 
-                                                  job_config.get("recursive", True))
+            parse_result = parse_transcripts_task(job_id,
+                                                  job_config["input_path"],
+                                                  job_config.get("recursive", True),
+                                                  in_pipeline=True)
             parse_output_path = parse_result.get("output_path")
             job_config["parse_output"] = parse_output_path
+            job_config["parse_report"] = parse_result
         
         filter_output_path = parse_output_path or job_config.get("dataset_path")
         if job_config.get("min_score") is not None and filter_output_path:
@@ -921,7 +1061,7 @@ def full_training_pipeline_task(self, job_id: str, config: dict):
         # through a fresh one so finetune_model_task reads this config.
         _update_job_status(job_id, config_json=json.dumps(job_config))
         
-        train_result = finetune_model_task(job_id, job_config)
+        train_result = finetune_model_task(job_id, job_config, in_pipeline=True)
         model_dir = train_result.get("model_dir")
 
         # Refused by the export gate: finetune_model_task has already set the

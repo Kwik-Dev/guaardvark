@@ -8,7 +8,17 @@ checks model NAME, not per-vector dims, so it missed this.
 """
 from types import SimpleNamespace
 
+import pytest
+
 from backend.services.indexing_service import _sanitize_vector_store_dimensions
+
+
+@pytest.fixture(autouse=True)
+def simple_vector_store(monkeypatch):
+    """The sanitizer only acts on the SimpleVectorStore backend; the default is
+    pgvector, whose fixed-width column cannot hold mixed dimensions. The backend
+    is read from the environment at call time."""
+    monkeypatch.setenv("GUAARDVARK_VECTOR_STORE", "simple")
 
 
 def _ctx(embedding_dict):
@@ -40,6 +50,13 @@ def test_noop_on_homogeneous_store():
     ctx, data = _ctx({"a": [0.1] * 2560, "b": [0.2] * 2560})
     assert _sanitize_vector_store_dimensions(ctx, persist_dir=None) == 0
     assert len(data.embedding_dict) == 2
+
+
+def test_pgvector_backend_is_left_alone(monkeypatch):
+    monkeypatch.setenv("GUAARDVARK_VECTOR_STORE", "pgvector")
+    ctx, data = _ctx({"a": [0.1] * 2560, "bad": [0.3] * 1024})
+    assert _sanitize_vector_store_dimensions(ctx, persist_dir=None) == 0
+    assert set(data.embedding_dict) == {"a", "bad"}
 
 
 def test_sanitizer_never_raises_on_garbage_input():

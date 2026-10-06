@@ -97,6 +97,19 @@ class TestContentKeywordsMatchWholeWords(unittest.TestCase):
         self.assertFalse(detection["has_face"])
         self.assertFalse(detection["has_hands"])
 
+    def test_action_keywords_do_not_match_inside_words(self):
+        spreading = self.gen.detect_content_type("a knife spreading butter on toast")
+        self.assertNotIn("reading", spreading["detected_actions"])
+        self.assertFalse(spreading["has_action"])
+        focusing = self.gen.detect_content_type("a photographer focusing a lens")
+        self.assertNotIn("working", focusing["detected_actions"])
+        self.assertFalse(focusing["has_action"])
+
+    def test_action_keywords_still_match_as_words(self):
+        self.assertIn("reading", self.gen.detect_content_type("a woman reading a book")["detected_actions"])
+        self.assertIn("working", self.gen.detect_content_type("a man using a drill")["detected_actions"])
+        self.assertIn("cooking", self.gen.detect_content_type("two chefs plating dessert")["detected_actions"])
+
 
 class TestModelOwnsSampling(unittest.TestCase):
     """Per-model recipes are the single source of truth for steps/guidance."""

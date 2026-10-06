@@ -162,18 +162,32 @@ def run_stills_pipeline(
         model=family_model,
     )
 
-    # Director rewrite (batch-level director already applied: pass enhance=none)
+    # Director rewrite (batch-level director already applied: pass enhance=none).
+    # Each entry is (prompt, enhance_mode, auto_enhance) for one still.
     if enhance_mode == "director":
-        cleaned = apply_enhance_to_prompts(
+        directed = apply_enhance_to_prompts(
             cleaned, enhance_mode="director", style=style, extra_guidance=extra_guidance,
             model=family_model,
         )
-        # After director, offline stuffing would double-rewrite — use none for auto_enhance
-        req_auto_enhance = False
-        effective_mode = "director"
+        # A rewritten prompt is already a full visual prompt, so the offline
+        # enhancer stays off for it. One the director handed back unchanged keeps
+        # the enhancer, unless the caller turned it off.
+        fallback_auto = auto_enhance is not False
+        fallback_mode = "offline" if fallback_auto else "none"
+        plan: list[tuple[str, str, bool]] = []
+        for original, new in zip(cleaned, directed):
+            new = (new or "").strip()
+            if new and new != original.strip():
+                plan.append((new, "director", False))
+            else:
+                plan.append((original, fallback_mode, fallback_auto))
+        if not any(mode == "director" for _, mode, _ in plan):
+            logger.warning(
+                "stills_pipeline: the director rewrote none of %d prompt(s); "
+                "they render with enhance=%s", len(plan), fallback_mode,
+            )
     else:
-        req_auto_enhance = auto_enhance_flag(enhance_mode)
-        effective_mode = enhance_mode
+        plan = [(p, enhance_mode, auto_enhance_flag(enhance_mode)) for p in cleaned]
 
     defaults = resolve_stills_defaults(
         family_model,
@@ -190,18 +204,14 @@ def run_stills_pipeline(
     g = float(defaults["guidance"])
     model_id = (model or "auto").strip() or "auto"
 
+    # A director request still attaches the base quality negatives (not empty).
     neg = resolve_stills_negative(
-        negative_prompt, enhance_mode=effective_mode if effective_mode != "director" else "none",
+        negative_prompt, enhance_mode="offline" if enhance_mode == "director" else enhance_mode,
         style=style,
     )
-    # After director, still attach base quality negatives (not empty)
-    if effective_mode == "director":
-        neg = resolve_stills_negative(
-            negative_prompt, enhance_mode="offline", style=style,
-        )
 
     results: list[StillResult] = []
-    for prompt_text in cleaned:
+    for prompt_text, prompt_mode, prompt_auto_enhance in plan:
         results.append(
             _generate_one(
                 prompt=prompt_text,
@@ -216,8 +226,8 @@ def run_stills_pipeline(
                 style=style,
                 seed=seed,
                 source=source,
-                enhance_mode=effective_mode,
-                auto_enhance=req_auto_enhance,
+                enhance_mode=prompt_mode,
+                auto_enhance=prompt_auto_enhance,
                 loras=loras,
                 lora_scale=lora_scale,
                 keep_pipeline=keep_pipeline,

@@ -41,8 +41,11 @@ def finetune(
     max_seq_length: int = 2048,
     gradient_accumulation_steps: int = 4,
     offload_to_cpu: bool = False,
-    progress_callback: callable = None
+    progress_callback: callable = None,
+    resume: bool = False
 ):
+    """Fine-tune a vision model with LoRA; with ``resume``, continue from the
+    newest checkpoint under the output directory when there is one."""
 
     from unsloth import FastVisionModel, is_bf16_supported
     from trl import SFTTrainer
@@ -51,6 +54,13 @@ def finetune(
     output_name = output_name or f"guaardvark-vision-{base_model.replace('/', '-')}"
     output_dir = MODELS_DIR / output_name
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    resume_checkpoint = None
+    if resume:
+        from finetune_model import find_last_checkpoint
+        resume_checkpoint = find_last_checkpoint(output_dir)
+        if not resume_checkpoint:
+            print("\nNo checkpoint found, starting fresh training.")
 
     print(f"\n=== GUAARDVARK Vision Fine-Tuning ===")
     print(f"Base model: {base_model}")
@@ -152,7 +162,11 @@ def finetune(
     torch.cuda.empty_cache()
 
     print("\nStarting training...")
-    trainer.train()
+    if resume_checkpoint:
+        print(f"Resuming from: {resume_checkpoint}")
+        trainer.train(resume_from_checkpoint=resume_checkpoint)
+    else:
+        trainer.train()
 
     print("\nSaving model...")
     model.save_pretrained(str(output_dir / "lora"))

@@ -37,6 +37,33 @@ class _SendRecorder:
 
 
 @pytest.fixture(autouse=True)
+def stage_plugins(monkeypatch):
+    """Records the plugins each stage asks for and starts none.
+
+    The stage tasks import plugin_bridge.ensure_plugins_for_stage at call time.
+    The real one builds the PluginManager, whose boot restores and kills plugin
+    processes on this machine, then starts the stage's plugins (Ollama, the
+    video editor, ComfyUI)."""
+    calls = []
+    monkeypatch.setattr("backend.services.plugin_bridge.ensure_plugins_for_stage",
+                        lambda context, stage, **kw: calls.append((context, stage)))
+    return calls
+
+
+@pytest.fixture
+def no_plugin_manager(monkeypatch):
+    """Records, and refuses, any reach for the PluginManager itself."""
+    reached = []
+
+    def refuse(*args, **kwargs):
+        reached.append(True)
+        raise AssertionError("the PluginManager was reached from a unit test")
+
+    monkeypatch.setattr("backend.plugins.plugin_manager.get_plugin_manager", refuse)
+    return reached
+
+
+@pytest.fixture(autouse=True)
 def _resolve_i2v(monkeypatch):
     monkeypatch.setattr(
         "backend.services.video_model_registry.resolve_active_video_model",
@@ -73,14 +100,13 @@ class _Resp:
 
 # --- analyzer ----------------------------------------------------------------
 
-def test_analyzer_seeds_cut_plan_and_gates(app, sent, monkeypatch, tmp_path):
+def test_analyzer_seeds_cut_plan_and_gates(app, sent, monkeypatch, tmp_path, stage_plugins, no_plugin_manager):
     svc = MusicVideoService(db.session)
     song = tmp_path / "song.wav"
     song.write_bytes(b"x")
     mv = _mk(svc, song_path=str(song))
     svc.advance_if_predecessor(mv.id, expected_predecessor="draft")  # → analyzing
 
-    monkeypatch.setattr(mvt, "ensure_plugin_running", lambda *a, **k: None)
     structure = {
         "tempo_bpm": 120.0, "duration_seconds": 10.0,
         "beat_times": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
@@ -103,9 +129,13 @@ def test_analyzer_seeds_cut_plan_and_gates(app, sent, monkeypatch, tmp_path):
     # the mock silently misses whenever another test imported the engine first.
     import backend.services.director_service as director_service
     monkeypatch.setattr(director_service, "_generate_storyline_and_prompts", _fake_director)
+    monkeypatch.setattr(director_service, "_resolve_model", lambda m: m)  # no Ollama lookup
 
     mvt.run_analyzer(mv.id)
     db.session.refresh(mv)
+    assert mv.status != "failed_analyzing", mv.error_blob
+    assert stage_plugins == [("music-video", "analyzing")]
+    assert no_plugin_manager == []
     assert mv.cut_plan and len(mv.cut_plan) >= 1
     assert mv.clips and all(c["status"] == "pending" for c in mv.clips)
     # Director prompts are seeded per cut (distinct, not the global style).
@@ -119,7 +149,8 @@ def test_analyzer_seeds_cut_plan_and_gates(app, sent, monkeypatch, tmp_path):
     assert sent.calls == []
 
 
-def test_analyzer_stores_the_guarded_prompts_not_the_raw_shot_text(app, sent, monkeypatch, tmp_path):
+def test_analyzer_stores_the_guarded_prompts_not_the_raw_shot_text(
+        app, sent, monkeypatch, tmp_path, stage_plugins, no_plugin_manager):
     svc = MusicVideoService(db.session)
     song = tmp_path / "song.wav"
     song.write_bytes(b"x")
@@ -127,7 +158,6 @@ def test_analyzer_stores_the_guarded_prompts_not_the_raw_shot_text(app, sent, mo
     svc.advance_if_predecessor(mv.id, expected_predecessor="draft")  # → analyzing
     style = mv.style_prompt
 
-    monkeypatch.setattr(mvt, "ensure_plugin_running", lambda *a, **k: None)
     structure = {
         "tempo_bpm": 120.0, "duration_seconds": 6.0,
         "beat_times": [1.0, 2.0, 3.0, 4.0, 5.0],
@@ -155,6 +185,10 @@ def test_analyzer_stores_the_guarded_prompts_not_the_raw_shot_text(app, sent, mo
 
     mvt.run_analyzer(mv.id)
     db.session.refresh(mv)
+    assert mv.status != "failed_analyzing", mv.error_blob
+    assert mv.current_stage == "awaiting_approval"
+    assert stage_plugins == [("music-video", "analyzing")]
+    assert no_plugin_manager == []
 
     expected = director._ensure_distinct_and_energy_aware(
         [f"a lone crow on a wire, {style}"] * 3, cut_plan, style,

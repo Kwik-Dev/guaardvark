@@ -1218,15 +1218,30 @@ class BatchImageGenerator:
                         extra_guidance=getattr(request, "director_guidance", None),
                     )
                     shots = res.get("prompts") or []
+                    # The storyboard's fallback is "the concept, n times": a row
+                    # that gets only the concept, or its own text back, keeps the
+                    # per-prompt enhancer (the batch-video rule).
+                    changed = 0
                     for i, p in enumerate(request.prompts):
-                        if i < len(shots) and shots[i]:
-                            p.prompt = shots[i]
+                        shot = (shots[i] or "").strip() if i < len(shots) else ""
+                        if not shot:
+                            continue
+                        if shot != concept and shot != (p.prompt or "").strip():
                             p.auto_enhance = False
-                    request.auto_enhance = False
-                    logger.info(
-                        "Media Director storyboard expanded %s prompts for batch %s",
-                        len(shots), request.batch_id,
-                    )
+                            changed += 1
+                        p.prompt = shot
+                    if changed:
+                        request.auto_enhance = False
+                        logger.info(
+                            "Media Director storyboard expanded %s/%s prompts for batch %s",
+                            changed, n, request.batch_id,
+                        )
+                    else:
+                        logger.warning(
+                            "Media Director storyboard returned only the concept for batch %s; "
+                            "the per-prompt enhancer stays as it was",
+                            request.batch_id,
+                        )
                     return
 
             # Model is chosen per prompt; the first explicit one stands for the

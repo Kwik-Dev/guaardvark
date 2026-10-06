@@ -200,7 +200,7 @@ def pipeline_seams(monkeypatch, tmp_path):
     training step sees it, and for the Ollama unload the pipeline does first."""
     seen = {}
 
-    def finetune(job_id, config, resume=False):
+    def finetune(job_id, config, resume=False, in_pipeline=False):
         row = _row(job_id)
         seen["at_training"] = (row.status, row.pipeline_stage, json.loads(row.config_json))
         return {"model_dir": str(tmp_path / "model"), "lora_path": str(tmp_path / "model" / "lora")}
