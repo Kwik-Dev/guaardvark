@@ -80,6 +80,82 @@ def test_rerank_orders_by_cross_encoder_score(monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# reranking_enabled reaches the cross-encoder
+# --------------------------------------------------------------------------
+@pytest.fixture
+def _stub_retrieval(monkeypatch):
+    """search_with_llamaindex over a stub index returning two passages, with the
+    embedding, dedup, profile and dependency seams stubbed. Yields the stubbed
+    cross-encoder."""
+    from unittest.mock import MagicMock
+    from llama_index.core.schema import NodeWithScore, TextNode
+    from backend.services import indexing_service as ix
+    from backend.utils import reranker, experiment_context as ec
+
+    monkeypatch.setenv("GUAARDVARK_RERANK_CROSS_ENCODER", "true")
+    nodes = [NodeWithScore(node=TextNode(text=t, metadata={"source_filename": "a.md"}), score=s)
+             for t, s in (("first passage", 0.9), ("second passage", 0.5))]
+    retriever = MagicMock()
+    retriever.retrieve.return_value = nodes
+    stub_index = MagicMock()
+    stub_index.as_retriever.return_value = retriever
+    monkeypatch.setattr(ix, "index", stub_index)
+    monkeypatch.setattr(ix, "storage_context", None)
+    monkeypatch.setattr(ix, "vector_store_fallback_reason", lambda: None)
+    monkeypatch.setattr(ix, "_check_index_embedding_model", lambda project_id=None: True)
+    monkeypatch.setattr(ix, "_get_cached_query_embedding", lambda q: None)
+    monkeypatch.setattr(ix, "deduplicate_chunks", lambda results: results)
+    monkeypatch.setattr("backend.config.get_active_embedding_model", lambda: "test-model")
+    monkeypatch.setattr("backend.services.index_profiles.resolve_retrieval_params",
+                        lambda profile=None: {"profile": "default", "top_k": 5,
+                                              "context_window_chunks": 3, "rerank": True})
+    monkeypatch.setattr("backend.utils.context_expander.expand_with_dependencies",
+                        lambda results, project_id=None: results)
+    ce = MagicMock(side_effect=lambda q, results: (
+        results, {"applied": True, "reason": None, "model": "stub", "device": "cpu"}))
+    monkeypatch.setattr(reranker, "rerank", ce)
+    ec.clear_experiment_config()
+    ec.invalidate_active_params_cache()
+    yield ce
+    ec.clear_experiment_config()
+    ec.invalidate_active_params_cache()
+
+
+def test_experiment_reranking_off_skips_the_cross_encoder(_stub_retrieval):
+    from backend.services.indexing_service import search_with_llamaindex
+    from backend.utils.experiment_context import set_experiment_config
+
+    set_experiment_config({"reranking_enabled": False})
+    out = search_with_llamaindex("which passage", with_trace=True)
+    trace = out["trace"]
+    assert trace["rerank"] == {"applied": False, "reason": "disabled by experiment"}
+    assert trace["mmr_applied"] is False
+    assert trace["degraded"] is False
+    # No reranker, so no widened pool either.
+    assert trace["candidate_top_k"] == trace["top_k"]
+    _stub_retrieval.assert_not_called()
+
+
+def test_promoted_reranking_off_skips_the_cross_encoder(_stub_retrieval, monkeypatch):
+    from backend.services.indexing_service import search_with_llamaindex
+    from backend.utils import experiment_context as ec
+
+    monkeypatch.setattr(ec, "_load_promoted_params", lambda: {"reranking_enabled": False})
+    out = search_with_llamaindex("which passage", with_trace=True)
+    assert out["trace"]["rerank"]["reason"] == "disabled by experiment"
+    _stub_retrieval.assert_not_called()
+
+
+def test_cross_encoder_runs_without_an_overlay(_stub_retrieval):
+    from backend.services.indexing_service import search_with_llamaindex
+
+    out = search_with_llamaindex("which passage", with_trace=True)
+    assert out["trace"]["rerank"]["applied"] is True
+    assert out["trace"]["candidate_top_k"] > out["trace"]["top_k"]
+    _stub_retrieval.assert_called_once()
+
+
+# --------------------------------------------------------------------------
 # The cross-encoder's order is final
 # --------------------------------------------------------------------------
 def test_cross_encoder_order_is_kept_on_skewed_scores():

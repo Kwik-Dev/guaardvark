@@ -1987,6 +1987,11 @@ def search_with_llamaindex(
             effective_top_k = overlay["top_k"]
         else:
             effective_top_k = 5
+        # Reranking (the cross-encoder, else MMR) defaults on; an experiment or
+        # a promoted config may turn it off. The env switches stay the
+        # operator's master allow: an overlay True cannot force on a reranker
+        # the operator disabled.
+        rerank_on = bool(overlay.get("reranking_enabled", True))
 
         prof_params: Dict[str, Any] = {}
         try:
@@ -2025,7 +2030,7 @@ def search_with_llamaindex(
         # entirely non-matching and the caller gets nothing for no good reason.
         try:
             from backend.utils.reranker import is_enabled as _rerank_enabled
-            _widen_for_rerank = _rerank_enabled()
+            _widen_for_rerank = _rerank_enabled() and rerank_on
         except Exception:
             _widen_for_rerank = False
         # A reranker handed exactly top_k candidates cannot improve anything, and a
@@ -2227,6 +2232,8 @@ def search_with_llamaindex(
             from backend.utils.reranker import rerank as _ce_rerank
             if prof_params.get("rerank") is False:
                 _ce_info = {"applied": False, "reason": f"disabled by profile '{prof_params.get('profile')}'"}
+            elif not rerank_on:
+                _ce_info = {"applied": False, "reason": "disabled by experiment"}
             else:
                 results, _ce_info = _ce_rerank(query if isinstance(query, str) else "", results)
             trace["rerank"] = _ce_info
@@ -2241,11 +2248,11 @@ def search_with_llamaindex(
 
         # CPU-only MMR (relevance x diversity), only when the cross-encoder did not order
         # the candidates; see _mmr_rerank. Env var is the operator's master allow; the
-        # tunable param decides per query (defaults on).
+        # tunable param decides per query (rerank_on).
         _ce_ordered = bool((trace.get("rerank") or {}).get("applied"))
         if (not _ce_ordered
                 and os.environ.get("GUAARDVARK_RERANK_ENABLED", "true").lower() == "true"
-                and overlay.get("reranking_enabled", True)):
+                and rerank_on):
             results = _mmr_rerank(results)
             trace["mmr_applied"] = True
 
