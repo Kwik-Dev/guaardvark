@@ -1,7 +1,9 @@
 
 import json
 import logging
+import math
 import os
+import random
 import subprocess
 import sys
 from datetime import datetime
@@ -39,6 +41,27 @@ MODEL_TEMPLATES = {
     'gemma-2': 'gemma-3-text.modelfile',
     'gemma2': 'gemma-3-text.modelfile',
 }
+
+# Fields the filter reads a pair's quality score from, first match wins.
+# plugins/training/scripts/quality_filter.py writes _quality_score; a plain
+# "score" covers datasets scored by other tools.
+PAIR_SCORE_FIELDS = ("_quality_score", "score")
+MIN_SCORE_NOT_APPLIED = "min_score not applied: pairs have no score"
+
+
+def _pair_score(pair: dict):
+    """The pair's numeric quality score, or None when it carries none."""
+    for field in PAIR_SCORE_FIELDS:
+        value = pair.get(field)
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            score = float(value)
+        except (TypeError, ValueError):
+            continue
+        if score == score:  # NaN is no score
+            return score
+    return None
 
 
 def _update_job_status(job_id: str, **kwargs):
@@ -186,80 +209,288 @@ def parse_transcripts_task(self, job_id: str, input_path: str, recursive: bool =
         raise
 
 
+# Share of the full pipeline's progress bar the filter step fills.
+PIPELINE_FILTER_PROGRESS = (20, 30)
+
+
 @shared_task(bind=True, name='training.filter_dataset')
-def filter_dataset_task(self, job_id: str, input_path: str, min_score: float = 0.5):
+def filter_dataset_task(self, job_id: str, input_path: str, min_score: float = 0.5,
+                        in_pipeline: bool = False):
+    """Drop pairs that are empty, too short, too long, or scored below
+    min_score. Pairs without a score are kept; when no pair has one, the job
+    says min_score was not applied rather than implying it filtered.
+
+    in_pipeline: called by full_training_pipeline_task, which owns the job's
+    status, timestamps and config. The filter then reports its stage and
+    progress only, and the pipeline records the returned report."""
     logger.info(f"Starting filter_dataset_task for job {job_id}")
-    
+
+    def emit(pct, message, status="processing"):
+        if in_pipeline:
+            low, high = PIPELINE_FILTER_PROGRESS
+            _emit_progress(job_id, low + (high - low) * pct // 100, message, "processing")
+        else:
+            _emit_progress(job_id, pct, message, status)
+
     try:
-        _update_job_status(job_id, status="running", pipeline_stage="filtering", started_at=utcnow(), celery_task_id=self.request.id)
-        _emit_progress(job_id, 0, "Starting dataset filtering...", "start")
+        min_score = float(min_score)
+        if in_pipeline:
+            _update_job_status(job_id, pipeline_stage="filtering")
+        else:
+            _update_job_status(job_id, status="running", pipeline_stage="filtering", started_at=utcnow(), celery_task_id=self.request.id)
+        emit(0, "Starting dataset filtering...", "start")
         
         input_path_obj = Path(input_path)
         if not input_path_obj.exists():
             raise FileNotFoundError(f"Input path not found: {input_path}")
         
-        _emit_progress(job_id, 10, f"Loading dataset from {input_path}...", "processing")
+        emit(10, f"Loading dataset from {input_path}...")
         
+        # Read in binary and decode per line, so a line that is not UTF-8 or
+        # not a JSON object is skipped and counted instead of failing the job.
         pairs = []
-        with open(input_path_obj, 'r', encoding='utf-8') as f:
-            for line in f:
-                if line.strip():
-                    pairs.append(json.loads(line))
-        
-        _emit_progress(job_id, 30, f"Filtering {len(pairs)} pairs (min_score={min_score})...", "processing")
+        skipped_lines = []
+        with open(input_path_obj, 'rb') as f:
+            for line_number, raw in enumerate(f, 1):
+                if not raw.strip():
+                    continue
+                try:
+                    pair = json.loads(raw.decode('utf-8'))
+                except ValueError:
+                    pair = None
+                if isinstance(pair, dict):
+                    pairs.append(pair)
+                else:
+                    skipped_lines.append(line_number)
+        skipped_note = ""
+        if skipped_lines:
+            plural = "" if len(skipped_lines) == 1 else "s"
+            skipped_note = f"{len(skipped_lines)} malformed line{plural} skipped"
+        if skipped_lines:
+            logger.warning(f"Filter job {job_id}: {skipped_note} in {input_path} "
+                           f"(first: lines {skipped_lines[:10]})")
+
+        scores = [_pair_score(pair) for pair in pairs]
+        scored_count = sum(1 for score in scores if score is not None)
+        min_score_applied = scored_count > 0
+        score_rule = f"min_score={min_score}" if min_score_applied else MIN_SCORE_NOT_APPLIED
+        if skipped_note:
+            score_rule += f"; {skipped_note}"
+        emit(30, f"Filtering {len(pairs)} pairs ({score_rule})...")
         
         filtered_pairs = []
-        for i, pair in enumerate(pairs):
+        below_min_score = 0
+        for i, (pair, score) in enumerate(zip(pairs, scores)):
             if not pair.get("instruction") or not pair.get("output"):
                 continue
-            
+
             inst_len = len(pair.get("instruction", ""))
             out_len = len(pair.get("output", ""))
             if inst_len < 10 or out_len < 10:
                 continue
             if inst_len > 10000 or out_len > 10000:
                 continue
-            
+
+            if score is not None and score < min_score:
+                below_min_score += 1
+                continue
+
             filtered_pairs.append(pair)
-            
+
             if (i + 1) % 100 == 0:
-                _emit_progress(job_id, 30 + int(50 * (i + 1) / len(pairs)), 
-                             f"Filtered {len(filtered_pairs)}/{i+1} pairs...", "processing")
-        
+                emit(30 + int(50 * (i + 1) / len(pairs)),
+                     f"Filtered {len(filtered_pairs)}/{i+1} pairs...")
+
+        if min_score_applied:
+            score_summary = f"{below_min_score} below min_score {min_score}"
+            if scored_count < len(pairs):
+                score_summary += f"; {len(pairs) - scored_count} pairs without a score kept"
+        else:
+            score_summary = MIN_SCORE_NOT_APPLIED
+        if skipped_note:
+            score_summary += f"; {skipped_note}"
+
         output_filename = f"filtered_dataset_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
         output_path = PROCESSED_DIR / output_filename
-        
-        _emit_progress(job_id, 90, f"Saving {len(filtered_pairs)} filtered pairs...", "processing")
-        
+
+        emit(90, f"Saving {len(filtered_pairs)} filtered pairs...")
+
         with open(output_path, 'w', encoding='utf-8') as f:
             for pair in filtered_pairs:
                 f.write(json.dumps(pair) + '\n')
-        
-        _update_job_status(job_id,
-                          status="completed",
-                          pipeline_stage="filtering",
-                          completed_at=utcnow(),
-                          progress=100,
-                          config_json=json.dumps({
-                              "input_path": input_path,
-                              "output_path": str(output_path),
-                              "min_score": min_score,
-                              "original_count": len(pairs),
-                              "filtered_count": len(filtered_pairs)
-                          }))
-        
-        _emit_progress(job_id, 100, 
-                     f"Completed: {len(filtered_pairs)}/{len(pairs)} pairs passed filtering", 
-                     "complete")
-        
-        logger.info(f"Filter task completed for job {job_id}: {len(filtered_pairs)}/{len(pairs)} pairs")
-        return {"output_path": str(output_path), "filtered_count": len(filtered_pairs), "original_count": len(pairs)}
+
+        report = {
+            "input_path": input_path,
+            "output_path": str(output_path),
+            "min_score": min_score,
+            "min_score_applied": min_score_applied,
+            "scored_count": scored_count,
+            "below_min_score": below_min_score,
+            "skipped_lines": len(skipped_lines),
+            "original_count": len(pairs),
+            "filtered_count": len(filtered_pairs),
+        }
+        if not min_score_applied:
+            report["min_score_note"] = MIN_SCORE_NOT_APPLIED
+
+        if in_pipeline:
+            _update_job_status(job_id, pipeline_stage="filtering", progress=PIPELINE_FILTER_PROGRESS[1])
+        else:
+            _update_job_status(job_id,
+                              status="completed",
+                              pipeline_stage="filtering",
+                              completed_at=utcnow(),
+                              progress=100,
+                              config_json=json.dumps(report))
+
+        emit(100,
+             f"Completed: {len(filtered_pairs)}/{len(pairs)} pairs passed filtering ({score_summary})",
+             "complete")
+
+        logger.info(f"Filter task completed for job {job_id}: {len(filtered_pairs)}/{len(pairs)} pairs ({score_summary})")
+        return report
         
     except Exception as e:
         logger.error(f"Error in filter_dataset_task: {e}", exc_info=True)
-        _update_job_status(job_id, status="failed", error_message=str(e))
-        _emit_progress(job_id, 0, f"Error: {str(e)}", "error")
+        if not in_pipeline:
+            _update_job_status(job_id, status="failed", error_message=str(e))
+            _emit_progress(job_id, 0, f"Error: {str(e)}", "error")
         raise
+
+
+# Held-out evaluation for text fine-tunes. A slice of the dataset is kept out
+# of training; afterwards the mean loss on it is measured for the trained
+# adapter and for the base model, so a run that diverged can be told from one
+# that learned. A job's config overrides the share with "eval_fraction"
+# (0 turns the split off). None of these numbers has been measured against
+# training runs yet.
+EVAL_SPLIT = {
+    # The usual 90/10 train/held-out split.
+    "fraction": 0.1,
+    # Fewer held-out rows than this and the mean loss rests on a handful of
+    # examples, too few for a comparison with the base model to mean much, so
+    # the split is skipped and the job says so. At 10% that is datasets under
+    # 100 rows.
+    "min_rows": 10,
+    # Caps what a large dataset gives up and the time the two measuring passes
+    # add: 200 rows of chat text is already tens of thousands of tokens.
+    "max_rows": 200,
+    # Fixed, so a resumed run holds out the same rows as its first attempt.
+    "seed": 42,
+}
+
+# Export gate. A run whose held-out loss is worse than the base model's by more
+# than this share is neither exported to GGUF nor registered in Ollama; it ends
+# as WORSE_THAN_BASE with both losses in error_message and its adapter left on
+# disk. A job's config overrides the margin with "eval_gate_margin", and
+# "export_if_worse": true lets such a run through. A run with no measured loss
+# (too small to split, vision, measurement failed) is not gated.
+EVAL_GATE = {
+    # Room for measurement noise on a held-out set of tens of rows, so a run
+    # that only matched its base is not refused; a run that diverged lands far
+    # above it. Not yet measured against training runs.
+    "margin": 0.05,
+}
+WORSE_THAN_BASE = "failed: worse than base"
+
+
+def _hold_out_split(data_path: str, out_dir: Path, fraction: float):
+    """Split a text dataset into training rows and held-out rows.
+
+    Returns (train_path, eval_path, report). When nothing is held out,
+    train_path is data_path unchanged, eval_path is None and report["reason"]
+    says why. JSONL rows are copied byte for byte in their original order."""
+    path = Path(data_path)
+    report = {"fraction": fraction}
+    if fraction <= 0:
+        report["reason"] = "held-out split turned off (eval_fraction 0)"
+        return data_path, None, report
+
+    if path.suffix == ".jsonl":
+        with open(path, "rb") as f:
+            rows = [line.rstrip(b"\r\n") for line in f if line.strip()]
+    elif path.suffix == ".json":
+        with open(path, encoding="utf-8") as f:
+            records = json.load(f)
+        if not isinstance(records, list):
+            report["reason"] = "dataset is not a list of rows"
+            return data_path, None, report
+        rows = [json.dumps(record).encode("utf-8") for record in records]
+    else:
+        report["reason"] = f"no held-out split for '{path.suffix}' datasets"
+        return data_path, None, report
+
+    held = min(int(len(rows) * fraction), EVAL_SPLIT["max_rows"])
+    report["total_rows"] = len(rows)
+    if held < EVAL_SPLIT["min_rows"]:
+        report["reason"] = (
+            f"dataset too small for a held-out split: {len(rows)} rows give {held} "
+            f"at {fraction:.0%}, fewer than the {EVAL_SPLIT['min_rows']} needed"
+        )
+        return data_path, None, report
+
+    held_out = set(random.Random(EVAL_SPLIT["seed"]).sample(range(len(rows)), held))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    train_path = out_dir / "train.jsonl"
+    eval_path = out_dir / "heldout.jsonl"
+    with open(train_path, "wb") as train_file, open(eval_path, "wb") as eval_file:
+        for i, row in enumerate(rows):
+            (eval_file if i in held_out else train_file).write(row + b"\n")
+    report.update(train_rows=len(rows) - held, eval_rows=held, eval_path=str(eval_path))
+    return str(train_path), str(eval_path), report
+
+
+def _finite(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _record_heldout_losses(report: dict, result: dict):
+    """Fold the trainer's held-out result into the job's eval report.
+
+    A loss that is not a finite number is stored as None, since the job config
+    is read as JSON in the browser and JSON has no NaN. For the adapter that is
+    flagged: it is what a run that diverged looks like."""
+    if "reason" in result:
+        report["reason"] = result["reason"]
+        return
+    report["rows"] = result.get("rows")
+    base, adapter = result.get("base_loss"), result.get("adapter_loss")
+    if not _finite(base):
+        report["reason"] = "the base model's held-out loss is not a finite number"
+        return
+    report["base_loss"] = float(base)
+    report["adapter_loss"] = float(adapter) if _finite(adapter) else None
+    if not _finite(adapter):
+        report["adapter_loss_not_finite"] = True
+    report["measured"] = True
+
+
+def _heldout_summary(report: dict) -> str:
+    if not report.get("measured"):
+        return f"Held-out loss not measured: {report.get('reason', 'no result from the trainer')}"
+    adapter = report["adapter_loss"]
+    adapter_text = f"{adapter:.4f}" if adapter is not None else "not a finite number"
+    return (f"Held-out loss {adapter_text} (base model {report['base_loss']:.4f}) "
+            f"on {report['rows']} rows")
+
+
+def _export_verdict(report: dict, margin: float, export_if_worse: bool, lora_path: str):
+    """Whether the trained adapter may be exported, and the sentence saying why."""
+    if not report.get("measured"):
+        return True, "Export gate skipped: nothing was measured"
+    adapter, base = report["adapter_loss"], report["base_loss"]
+    if adapter is None:
+        detail = f"the held-out loss is not a finite number (base model {base:.4f}), so the run diverged"
+    elif adapter > base * (1 + margin):
+        worse = (adapter - base) / base if base else math.inf
+        detail = (f"held-out loss {adapter:.4f} is {worse:.1%} worse than the base model's "
+                  f"{base:.4f} (allowed margin {margin:.0%})")
+    else:
+        return True, f"Export gate passed (allowed margin {margin:.0%})"
+    if export_if_worse:
+        return True, f"Export gate overridden by export_if_worse: {detail}"
+    return False, (f"Not exported: {detail}. The adapter is kept at {lora_path}; "
+                   f"set export_if_worse in the job config to export a run like this anyway")
 
 
 @shared_task(bind=True, name='training.finetune_model',
@@ -310,7 +541,29 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False):
         offload_to_cpu = job_config.get("cpu_offload", device_profile.requires_cpu_offload if device_profile else False)
         
         _update_job_status(job_id, total_steps=max_steps)
-        
+
+        gate_margin = float(job_config.get("eval_gate_margin", EVAL_GATE["margin"]))
+        if gate_margin < 0:
+            raise ValueError(f"eval_gate_margin must not be negative (got {gate_margin})")
+
+        eval_report = {"measured": False}
+        if images_path:
+            train_path, eval_path = data_path, None
+            eval_report["reason"] = "vision runs have no held-out evaluation yet"
+        else:
+            fraction = float(job_config.get("eval_fraction", EVAL_SPLIT["fraction"]))
+            if not 0 <= fraction < 1:
+                raise ValueError(f"eval_fraction must be at least 0 and below 1 (got {fraction})")
+            train_path, eval_path, split = _hold_out_split(
+                data_path, MODELS_DIR / output_name / "heldout", fraction)
+            eval_report.update(split)
+        if eval_path:
+            _emit_progress(job_id, 3,
+                           f"Held out {eval_report['eval_rows']} of {eval_report['total_rows']} rows "
+                           f"to measure the trained model on", "processing")
+        else:
+            _emit_progress(job_id, 3, _heldout_summary(eval_report), "processing")
+
         def progress_callback(step, total_steps, loss, metrics):
             progress = int((step / total_steps) * 100) if total_steps > 0 else 0
             _update_job_status(job_id, 
@@ -364,7 +617,7 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False):
                  _emit_progress(job_id, 10, f"Starting text training loop{resume_msg}...", "processing")
                  model_dir = finetune(
                     base_model=base_model,
-                    data_path=data_path,
+                    data_path=train_path,
                     output_name=output_name,
                     max_steps=max_steps,
                     learning_rate=learning_rate,
@@ -373,8 +626,18 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False):
                     max_seq_length=max_seq_length,
                     offload_to_cpu=offload_to_cpu,
                     progress_callback=progress_callback,
-                    resume=resume
+                    resume=resume,
+                    eval_data_path=eval_path,
+                    eval_callback=lambda result: _record_heldout_losses(eval_report, result)
                 )
+
+        lora_path = str(Path(model_dir) / "lora")
+        heldout = _heldout_summary(eval_report)
+        export_allowed, gate_note = _export_verdict(
+            eval_report, gate_margin, job_config.get("export_if_worse") is True, lora_path)
+        eval_report["gate"] = {"margin": gate_margin, "export_allowed": export_allowed, "note": gate_note}
+        job_config["eval"] = eval_report
+        logger.info(f"Job {job_id}: {heldout}. {gate_note}")
 
         checkpoint_dir = Path(model_dir) / "checkpoints"
         checkpoint_path = None
@@ -384,20 +647,28 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False):
                 checkpoints.sort(key=lambda x: int(x.name.split("-")[1]) if "-" in x.name else 0)
                 checkpoint_path = str(checkpoints[-1])
 
+        # A refused run keeps lora_path, so the adapter can be inspected; the
+        # export routes and the Training page offer export only to "completed".
         _update_job_status(job_id,
-                          status="completed",
+                          status="completed" if export_allowed else WORSE_THAN_BASE,
                           pipeline_stage="training",
                           completed_at=utcnow(),
                           progress=100,
-                          lora_path=str(Path(model_dir) / "lora"),
+                          lora_path=lora_path,
                           checkpoint_path=checkpoint_path,
                           is_resumable=bool(checkpoint_path),
-                          pid=None)
+                          pid=None,
+                          error_message=None if export_allowed else gate_note,
+                          config_json=json.dumps(job_config))
 
-        _emit_progress(job_id, 100, f"Training complete! Model saved to {model_dir}", "complete")
+        if export_allowed:
+            _emit_progress(job_id, 100, f"Training complete! {heldout}. {gate_note}. Model saved to {model_dir}", "complete")
+        else:
+            _emit_progress(job_id, 100, f"Training finished. {gate_note}", "error")
 
         logger.info(f"Training task completed for job {job_id}: {model_dir}")
-        return {"model_dir": model_dir, "lora_path": str(Path(model_dir) / "lora")}
+        return {"model_dir": model_dir, "lora_path": lora_path, "eval": eval_report,
+                "export_allowed": export_allowed}
 
     except Exception as e:
         logger.error(f"Error in finetune_model_task: {e}", exc_info=True)
@@ -627,29 +898,46 @@ def full_training_pipeline_task(self, job_id: str, config: dict):
         filter_output_path = parse_output_path or job_config.get("dataset_path")
         if job_config.get("min_score") is not None and filter_output_path:
             _update_job_status(job_id, pipeline_stage="filtering")
-            _emit_progress(job_id, 20, "Step 2/5: Filtering dataset...", "processing")
+            _emit_progress(job_id, PIPELINE_FILTER_PROGRESS[0], "Step 2/5: Filtering dataset...", "processing")
             
             filter_result = filter_dataset_task(job_id,
                                                filter_output_path,
-                                               job_config.get("min_score", 0.5))
+                                               job_config.get("min_score", 0.5),
+                                               in_pipeline=True)
             filter_output_path = filter_result.get("output_path")
             job_config["data_path"] = filter_output_path
+            job_config["filter_report"] = filter_result
         elif filter_output_path:
             job_config["data_path"] = filter_output_path
         
         _update_job_status(job_id, pipeline_stage="training")
-        _emit_progress(job_id, 30, "Step 3/5: Training model...", "processing")
+        _emit_progress(job_id, PIPELINE_FILTER_PROGRESS[1], "Step 3/5: Training model...", "processing")
         
         if not job_config.get("data_path"):
             raise ValueError("No dataset path available for training")
         
-        with current_app.app_context():
-            job.config_json = json.dumps(job_config)
-            db.session.commit()
+        # The job row read above belongs to a session that closed with its
+        # app context, so setting attributes on it saves nothing; write
+        # through a fresh one so finetune_model_task reads this config.
+        _update_job_status(job_id, config_json=json.dumps(job_config))
         
         train_result = finetune_model_task(job_id, job_config)
         model_dir = train_result.get("model_dir")
-        
+
+        # Refused by the export gate: finetune_model_task has already set the
+        # job's status and error_message with the losses, and kept the adapter.
+        if not train_result.get("export_allowed", True):
+            logger.warning(f"Pipeline job {job_id} stopped before export: "
+                           f"{train_result['eval']['gate']['note']}")
+            return {
+                "parse_output": parse_output_path,
+                "filter_output": filter_output_path if job_config.get("min_score") is not None else None,
+                "model_dir": model_dir,
+                "gguf_path": None,
+                "ollama_model_name": None,
+                "eval": train_result.get("eval")
+            }
+
         _update_job_status(job_id, pipeline_stage="exporting")
         _emit_progress(job_id, 80, "Step 4/5: Exporting to GGUF...", "processing")
         
@@ -672,15 +960,17 @@ def full_training_pipeline_task(self, job_id: str, config: dict):
                           completed_at=utcnow(),
                           progress=100)
         
-        _emit_progress(job_id, 100, "Full pipeline complete!", "complete")
-        
+        heldout = _heldout_summary(train_result.get("eval") or {})
+        _emit_progress(job_id, 100, f"Full pipeline complete! {heldout}", "complete")
+
         logger.info(f"Full pipeline completed for job {job_id}")
         return {
             "parse_output": parse_output_path,
             "filter_output": filter_output_path if job_config.get("min_score") is not None else None,
             "model_dir": model_dir,
             "gguf_path": export_result.get("gguf_path"),
-            "ollama_model_name": import_result.get("ollama_model_name")
+            "ollama_model_name": import_result.get("ollama_model_name"),
+            "eval": train_result.get("eval")
         }
         
     except Exception as e:

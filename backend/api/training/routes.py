@@ -609,6 +609,11 @@ def start_filter_job():
         if not data.get("input_path"):
             return error_response("input_path is required", 400)
 
+        # Compared against each pair's score, so it has to be a number.
+        min_score = data.get("min_score", 0.5)
+        if isinstance(min_score, bool) or not isinstance(min_score, (int, float)):
+            return error_response("min_score must be a number", 400)
+
         job_id = str(uuid.uuid4())
         job = TrainingJob(
             job_id=job_id,
@@ -617,7 +622,7 @@ def start_filter_job():
             status="pending",
             config_json=json.dumps({
                 "input_path": data["input_path"],
-                "min_score": data.get("min_score", 0.5)
+                "min_score": min_score
             })
         )
 
@@ -627,7 +632,7 @@ def start_filter_job():
         try:
             from backend.tasks.training_tasks import filter_dataset_task
             task = filter_dataset_task.apply_async(
-                args=[job_id, data["input_path"], data.get("min_score", 0.5)],
+                args=[job_id, data["input_path"], min_score],
                 queue="training"
             )
             job.celery_task_id = task.id

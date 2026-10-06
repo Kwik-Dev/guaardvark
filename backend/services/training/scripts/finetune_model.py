@@ -138,6 +138,45 @@ def format_prompt(example):
     return {"text": text}
 
 
+def heldout_losses(model, tokenizer, texts, max_seq_length):
+    """Mean per-token loss on held-out texts for the trained adapter and for
+    the base model (the same weights with the adapter switched off).
+
+    Rows go through one at a time, so the measurement needs no more memory
+    than a single training row."""
+    import torch
+
+    device = model.get_input_embeddings().weight.device
+
+    def mean_loss():
+        total, tokens = 0.0, 0
+        for text in texts:
+            enc = tokenizer(text=text, return_tensors="pt", truncation=True,
+                            max_length=max_seq_length, add_special_tokens=True)
+            input_ids = enc["input_ids"].to(device)
+            predicted = int(input_ids.shape[1]) - 1
+            if predicted < 1:
+                continue
+            attention_mask = enc.get("attention_mask")
+            if attention_mask is not None:
+                attention_mask = attention_mask.to(device)
+            out = model(input_ids=input_ids, attention_mask=attention_mask, labels=input_ids)
+            total += float(out.loss) * predicted
+            tokens += predicted
+        return total / tokens if tokens else float("nan")
+
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            adapter_loss = mean_loss()
+            with model.disable_adapter():
+                base_loss = mean_loss()
+    finally:
+        model.train(was_training)
+    return {"adapter_loss": adapter_loss, "base_loss": base_loss, "rows": len(texts)}
+
+
 def finetune(
     base_model: str,
     data_path: str,
@@ -151,7 +190,9 @@ def finetune(
     offload_to_cpu: bool = True,
     freeze_vision: bool = True,
     progress_callback: callable = None,
-    resume: bool = False
+    resume: bool = False,
+    eval_data_path: str = None,
+    eval_callback: callable = None
 ):
     """
     Fine-tune a model with LoRA.
@@ -170,6 +211,9 @@ def finetune(
         freeze_vision: Freeze vision tower (for multimodal models)
         progress_callback: Callback for progress updates
         resume: If True, resume from last checkpoint if available
+        eval_data_path: Held-out rows (same format as data_path), never trained on
+        eval_callback: Called after training with heldout_losses() output, or
+            with {"reason": ...} when the held-out loss could not be measured
     """
 
     from unsloth import FastLanguageModel
@@ -269,6 +313,13 @@ def finetune(
         raise ValueError("All training examples were filtered out! Increase max_seq_length or check your data.")
 
     print(f"Training examples: {len(dataset)}")
+
+    eval_texts = None
+    if eval_data_path:
+        eval_dataset = load_training_data(eval_data_path).map(format_prompt)
+        eval_dataset = eval_dataset.filter(filter_long_examples)
+        eval_texts = list(eval_dataset["text"])
+        print(f"Held-out examples: {len(eval_texts)}")
 
     training_args = {
         "per_device_train_batch_size": batch_size,
@@ -384,6 +435,20 @@ def finetune(
     tokenizer.save_pretrained(str(output_dir / "lora"))
 
     print(f"\nTraining complete! Model saved to: {output_dir}")
+
+    # Measured after the adapter is on disk, so a failed measurement never
+    # costs the trained adapter.
+    if eval_texts is not None and eval_callback:
+        if not eval_texts:
+            eval_callback({"reason": f"every held-out row is longer than max_seq_length {max_seq_length}"})
+        else:
+            print("\nMeasuring held-out loss (adapter, then base model)...")
+            try:
+                losses = heldout_losses(model, tokenizer, eval_texts, max_seq_length)
+            except Exception as e:
+                losses = {"reason": f"held-out evaluation failed: {type(e).__name__}: {e}"}
+            print(f"Held-out: {losses}")
+            eval_callback(losses)
 
     return str(output_dir)
 
