@@ -123,6 +123,49 @@ def model_tier(ram_gb: float, gpu: dict[str, Any], arch: str) -> dict[str, str]:
     return {"chat": "gemma4:e2b", "embed": "nomic-embed-text"}
 
 
+# Training below this is "not practical" (Settings > Training libraries). It is the
+# floor of hardware_service's 8 GB tier (8 GB cards report 7600-8192 MB), under which
+# that table drops to 512-token sequences with CPU offload; taken from it, not measured.
+TRAINING_MIN_VRAM_MB = 7000
+# The same small-machine line as model_tier: 8 GB of RAM or less.
+TRAINING_MAX_SMALL_RAM_GB = 8
+
+_VENDOR_LABELS = {"amd": "an AMD", "apple": "an Apple", "intel": "an Intel"}
+
+
+def training_fit(ram_gb: float, gpu: dict[str, Any], arch: str) -> dict[str, Any]:
+    """Whether LoRA fine-tuning with the training libraries is practical here.
+
+    Returns {"practical": bool, "reason": str}; the reason is shown to the
+    person as written. Guaardvark's trainer loads the base model in 4-bit
+    through Unsloth and bitsandbytes on an NVIDIA GPU, so any other machine is
+    not practical whatever its size. `arch` is accepted for the same call shape
+    as model_tier; an ARM board without an NVIDIA GPU already fails the GPU test.
+    """
+    gpu = gpu or {}
+    vendor = gpu.get("vendor") or "none"
+    vram = gpu.get("vram_mb") or 0
+    if vendor != "nvidia":
+        if vendor == "none":
+            reason = "No GPU was found. Guaardvark's trainer needs an NVIDIA GPU."
+        else:
+            label = _VENDOR_LABELS.get(vendor, f"a {vendor}")
+            reason = f"Guaardvark's trainer is set up for NVIDIA GPUs; this machine has {label} GPU."
+        return {"practical": False, "reason": reason}
+    if vram < TRAINING_MIN_VRAM_MB:
+        if vram <= 0:
+            reason = "The GPU's memory could not be read. Fine-tuning here needs an NVIDIA card with 8 GB or more."
+        else:
+            reason = (f"The GPU has {vram / 1024:.1f} GB of memory. Fine-tuning here needs "
+                      f"an NVIDIA card with 8 GB or more.")
+        return {"practical": False, "reason": reason}
+    if 0 < (ram_gb or 0) <= TRAINING_MAX_SMALL_RAM_GB:
+        return {"practical": False,
+                "reason": (f"This machine has {ram_gb:g} GB of memory. Loading a base model "
+                           f"for training needs more than {TRAINING_MAX_SMALL_RAM_GB} GB.")}
+    return {"practical": True, "reason": f"NVIDIA GPU with {vram / 1024:.0f} GB of memory."}
+
+
 def policy_fingerprint(hardware: dict[str, Any]) -> str:
     """Stable short hash of the *decisions* (not raw hardware) so an env only
     rebuilds when a decision actually changes. Folded into reconciler hashes.
@@ -176,7 +219,7 @@ def _load_hardware() -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     """CLI: `python -m backend.services.hardware_policy <key>`
 
-    Keys: torch_channel | ollama_env | model_tier | fingerprint
+    Keys: torch_channel | ollama_env | model_tier | fingerprint | training_fit
     Prints a shell-consumable value to stdout.
     """
     import sys
@@ -188,6 +231,10 @@ def main(argv: list[str] | None = None) -> int:
         print(torch_channel(gpu))
     elif key == "fingerprint":
         print(policy_fingerprint(hw))
+    elif key == "training_fit":
+        ram_gb = (hw.get("ram", {}) or {}).get("total_gb", 0)
+        fit = training_fit(ram_gb, gpu, hw.get("arch", ""))
+        print(f"{'practical' if fit['practical'] else 'not-practical'}\t{fit['reason']}")
     elif key == "ollama_env":
         for k, v in ollama_tuning(gpu).items():
             print(f'Environment="OLLAMA_{k}={v}"')

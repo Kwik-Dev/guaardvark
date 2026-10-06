@@ -174,6 +174,9 @@ MUTATION_PROTECTED_PREFIXES = (
     # GPU control (stop Ollama, force-release leases, evict) and upscaling jobs.
     '/api/gpu',
     '/api/upscaling',
+    # Installing or removing the training libraries runs pip in the backend's
+    # Python environment; their status stays readable.
+    '/api/training/libraries/',
 )
 
 # Mutation-only protection for routes whose id sits mid-path: (prefix, suffix).

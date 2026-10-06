@@ -33,6 +33,7 @@ import InfographicModelsModal from "../components/modals/InfographicModelsModal"
 import VideoModelsModal from "../components/modals/VideoModelsModal";
 import VoiceModelsModal from "../components/modals/VoiceModelsModal";
 import AudioFoundryModelsModal from "../components/modals/AudioFoundryModelsModal";
+import TrainingLibrariesModal from "../components/modals/TrainingLibrariesModal";
 import InterconnectorSettingsModal from "../components/modals/InterconnectorSettingsModal";
 import VoiceSettingsModal from "../components/modals/VoiceSettingsModal";
 import ExportChatsButton from "../components/settings/ExportChatsButton";
@@ -330,6 +331,7 @@ const SettingsPage = () => {
   const [videoModelsModalOpen, setVideoModelsModalOpen] = useState(false);
   const [voiceModelsModalOpen, setVoiceModelsModalOpen] = useState(false);
   const [audioModelsModalOpen, setAudioModelsModalOpen] = useState(false);
+  const [trainingLibrariesModalOpen, setTrainingLibrariesModalOpen] = useState(false);
   const [imageGenStatus, setImageGenStatus] = useState(null);
   // /api/batch-image/status reports service_available (the batch image service
   // loaded) and image_generator_available (its image pipeline loaded); usable
@@ -3121,6 +3123,12 @@ const SettingsPage = () => {
           <ActionButton onClick={() => setAudioModelsModalOpen(true)}>
             Audio
           </ActionButton>
+          <ActionButton
+            onClick={() => setTrainingLibrariesModalOpen(true)}
+            tooltip="Optional Python libraries the Training page needs for fine-tuning; installed only when you click Install"
+          >
+            Training libraries
+          </ActionButton>
         </Line>
       </Cluster>
     </SettingsPanel>
@@ -3983,6 +3991,11 @@ const SettingsPage = () => {
       <AudioFoundryModelsModal
         open={audioModelsModalOpen}
         onClose={() => setAudioModelsModalOpen(false)}
+        showMessage={showMessage}
+      />
+      <TrainingLibrariesModal
+        open={trainingLibrariesModalOpen}
+        onClose={() => setTrainingLibrariesModalOpen(false)}
         showMessage={showMessage}
       />
     </PageLayout>
