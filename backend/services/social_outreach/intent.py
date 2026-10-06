@@ -104,17 +104,20 @@ _WHOLE_NUMBER_RX = re.compile(r"(?<![\d.])\d+(?!\d|\.\d)")
 def _typed_draft_id(model_id: Optional[int], raw_text: str) -> Optional[int]:
     """The draft id the user typed, or None.
 
-    Approve and reject act on this id, so the classifier's draft_id counts only
-    when that number appears in the text as a whole number; an id it inferred
-    ("the newest draft") is dropped. Otherwise the id comes from the text
-    ("draft 42", "id 42", "#42").
+    Approve and reject act on this id. A draft the text names explicitly
+    ("draft 42", "id 42", "#42") wins over any other number in it and over the
+    classifier's draft_id. Without one, the classifier's draft_id counts only
+    when that number appears in the text as a whole number, so an id it
+    inferred ("the newest draft") is dropped.
     """
+    m = _DRAFT_ID_RX.search(raw_text or "")
+    if m:
+        return int(m.group(1))
     if model_id is not None and any(
         int(n) == model_id for n in _WHOLE_NUMBER_RX.findall(raw_text or "")
     ):
         return model_id
-    m = _DRAFT_ID_RX.search(raw_text or "")
-    return int(m.group(1)) if m else None
+    return None
 
 
 def _normalize_classification(raw: dict[str, Any], *, raw_text: str) -> dict[str, Any]:

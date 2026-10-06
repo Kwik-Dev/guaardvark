@@ -343,6 +343,12 @@ def _approve_classifier(draft_id):
     ("approve id 42", None, 42),
     ("approve 42", 42, 42),
     ("approve the one from 2.5 hours ago", 5, None),
+    # An explicit "draft N" / "#N" beats the model's id and any other number.
+    ("approve draft 42 from 3 days ago", 3, 42),
+    ("approve draft 42 from 3 days ago", None, 42),
+    ("approve #7", 17, 7),
+    ("approve #7", None, 7),
+    ("approve #7, the one from 3 days ago", 3, 7),
 ])
 def test_the_draft_id_is_one_the_user_typed(text, model_id, expected):
     from backend.services.social_outreach.intent import classify_outreach_utterance
