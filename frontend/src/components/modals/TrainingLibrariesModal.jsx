@@ -384,6 +384,24 @@ const TrainingLibrariesModal = ({ open, onClose, showMessage, onChanged, onBaseM
             {run.state === "completed" && (
               <Alert severity="success" sx={{ mb: 1 }}>
                 {run.action === "remove" ? "Removed." : "Installed."} {RESTART_HINT}
+                {run.check?.ok && (
+                  <Typography variant="caption" sx={{ display: "block" }}>
+                    Trainer check: {run.check.cuda_device || "GPU"}, bf16 {run.check.bf16 ? "yes" : "no"}, TRL{" "}
+                    {run.check.libraries?.trl}, Unsloth {run.check.libraries?.unsloth}.
+                  </Typography>
+                )}
+              </Alert>
+            )}
+            {run.pip_check_new?.length > 0 && (
+              <Alert severity="warning" sx={{ mb: 1 }}>
+                pip check reports problems this install introduced:
+                <Box component="ul" sx={{ m: 0, pl: 2 }}>
+                  {run.pip_check_new.map((line) => (
+                    <li key={line}>
+                      <Typography variant="caption">{line}</Typography>
+                    </li>
+                  ))}
+                </Box>
               </Alert>
             )}
             {run.state === "failed" && (

@@ -4,9 +4,11 @@ package where it is, leave out what the project removes or must not import,
 come out again on Remove, and training jobs refuse while they are missing.
 
 Seams: subprocess.Popen (pip), read by _pip at call time; _spawn (the
-background thread), installed_versions, _requires, hardware_fit and
-_record_path on the service module; importlib.metadata.version for the job
-refusal. Nothing runs pip, reads this machine's hardware or touches the network.
+background thread), installed_versions, _requires, hardware_fit,
+_record_path, _pip_check and _trainer_check on the service module;
+subprocess.run for the two checks' own tests; importlib.metadata.version
+for the job refusal. Nothing runs pip, reads this machine's hardware or
+touches the network.
 """
 import json
 import os
@@ -85,6 +87,8 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(tl, "_spawn", lambda target, *args, name: None)
     monkeypatch.setattr(tl, "_tokens", {})
     monkeypatch.setattr(tl, "_run", tl._idle_run())
+    monkeypatch.setattr(tl, "_pip_check", lambda: set())
+    monkeypatch.setattr(tl, "_trainer_check", lambda: {"ok": True, "problems": [], "cuda_device": "test card"})
     return versions
 
 
@@ -277,6 +281,85 @@ def test_an_install_that_leaves_requirements_unmet_is_failed(env, pip, monkeypat
 
     assert tl._run["state"] == "failed"
     assert "trl 1.13.0 needs accelerate>=9" in tl._run["error"]
+
+
+def test_install_ends_with_the_trainer_check(env, pip):
+    tl._claim("install", 130)
+    tl._install(False)
+
+    assert tl._run["state"] == "completed", tl._run["error"]
+    assert tl._run["check"]["ok"] is True
+    assert tl.status()["run"]["check"]["cuda_device"] == "test card"
+
+
+def test_a_trainer_that_cannot_load_the_libraries_fails_the_install(env, pip, monkeypatch):
+    monkeypatch.setattr(tl, "_trainer_check", lambda: {
+        "ok": False, "problems": ["unsloth: ImportError: libcuda.so.1 not found"]})
+    tl._claim("install", 130)
+    tl._install(False)
+
+    assert tl._run["state"] == "failed"
+    assert "the trainer cannot load them: unsloth: ImportError" in tl._run["error"]
+
+
+def test_only_pip_check_complaints_new_since_the_install_are_shown(env, pip, monkeypatch):
+    old = "legacy-thing 1.0 requires missing-dep, which is not installed."
+    answers = iter([
+        {old},
+        {old, "unsloth 2026.10.1 requires xformers, which is not installed.",
+         "trl 1.13.0 has requirement accelerate>=1.4.0, but you have accelerate 1.2.1."},
+    ])
+    monkeypatch.setattr(tl, "_pip_check", lambda: next(answers))
+    tl._claim("install", 130)
+    tl._install(False)
+
+    assert tl._run["pip_check_new"] == [
+        "trl 1.13.0 has requirement accelerate>=1.4.0, but you have accelerate 1.2.1."]
+    assert any(line.startswith("pip check (new since the install): trl") for line in tl._run["log"])
+
+
+def test_the_trainer_check_runs_offline_without_a_token_from_a_scratch_folder(monkeypatch):
+    import subprocess
+
+    monkeypatch.setenv("HF_TOKEN", "hf_secret")
+    seen = {}
+
+    def run(cmd, **kwargs):
+        seen.update(cmd=cmd, **kwargs)
+        report = {"ok": True, "problems": [], "libraries": {"trl": "1.13.0"}}
+        return subprocess.CompletedProcess(cmd, 0, stdout="Unsloth banner\n" + json.dumps(report) + "\n", stderr="")
+
+    monkeypatch.setattr(tl.subprocess, "run", run)
+
+    report = tl._trainer_check()
+
+    assert report["libraries"]["trl"] == "1.13.0"
+    assert seen["cmd"][0] == sys.executable and seen["cmd"][-2:] == ["check", "--json"]
+    assert seen["cmd"][1].endswith("finetune_model.py")
+    assert "HF_TOKEN" not in seen["env"] and seen["env"]["HF_HUB_OFFLINE"] == "1"
+    assert "guaardvark-trainer-check-" in seen["cwd"]
+    assert not Path(seen["cwd"]).exists()
+
+
+def test_a_trainer_check_without_a_report_says_so(monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr(tl.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(
+        cmd, 1, stdout="", stderr="Traceback\nModuleNotFoundError: No module named 'unsloth'"))
+    report = tl._trainer_check()
+    assert report["ok"] is False
+    assert "exit 1): ModuleNotFoundError: No module named 'unsloth'" in report["problems"][0]
+
+
+def test_pip_check_reads_its_complaints(monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr(tl.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(
+        cmd, 0, stdout="No broken requirements found.\n", stderr=""))
+    assert tl._pip_check() == set()
+    monkeypatch.setattr(tl.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(
+        cmd, 1, stdout="a 1.0 requires b, which is not installed.\n", stderr=""))
+    assert tl._pip_check() == {"a 1.0 requires b, which is not installed."}
 
 
 def test_progress_follows_the_megabytes_pip_fetches(env):
