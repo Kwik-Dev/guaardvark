@@ -38,7 +38,19 @@ const LEVEL_SCALE = 300;
  * Status and quick settings for the global mic: what it is doing, the last
  * thing it heard, start/stop, mode, wake phrase and reply voice.
  */
-const VoiceSessionPopover = ({ anchorEl, open, onClose }) => {
+const PLACEMENTS = {
+  below: {
+    anchorOrigin: { vertical: "bottom", horizontal: "right" },
+    transformOrigin: { vertical: "top", horizontal: "right" },
+  },
+  // Beside a sidebar button, opening into the page.
+  right: {
+    anchorOrigin: { vertical: "bottom", horizontal: "right" },
+    transformOrigin: { vertical: "bottom", horizontal: "left" },
+  },
+};
+
+const VoiceSessionPopover = ({ anchorEl, open, onClose, placement = "below" }) => {
   const voice = useVoiceSession();
   const state = useVoiceSessionState(
     useShallow((s) => ({
@@ -69,8 +81,9 @@ const VoiceSessionPopover = ({ anchorEl, open, onClose }) => {
       open={open}
       anchorEl={anchorEl}
       onClose={onClose}
-      anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
-      transformOrigin={{ vertical: "top", horizontal: "right" }}
+      {...(PLACEMENTS[placement] || PLACEMENTS.below)}
+      // Above the floating chat card (zIndex 1400), which it often overlaps.
+      sx={{ zIndex: 1500 }}
       slotProps={{ paper: { sx: { width: 320, p: 2 } } }}
     >
       <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
@@ -228,6 +241,7 @@ VoiceSessionPopover.propTypes = {
   anchorEl: PropTypes.object,
   open: PropTypes.bool.isRequired,
   onClose: PropTypes.func.isRequired,
+  placement: PropTypes.oneOf(["below", "right"]),
 };
 
 export default VoiceSessionPopover;

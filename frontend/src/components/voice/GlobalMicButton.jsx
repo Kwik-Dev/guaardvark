@@ -255,7 +255,12 @@ const GlobalMicButton = ({
           </Tooltip>
         )}
       </Box>
-      <VoiceSessionPopover anchorEl={anchorEl} open={Boolean(anchorEl)} onClose={() => setAnchorEl(null)} />
+      <VoiceSessionPopover
+        anchorEl={anchorEl}
+        open={Boolean(anchorEl)}
+        onClose={() => setAnchorEl(null)}
+        placement={variant === "rail" ? "right" : "below"}
+      />
     </>
   );
 };
