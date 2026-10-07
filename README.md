@@ -504,6 +504,8 @@ guaardvark completion zsh               # Shell completion script
 
 Config: `~/.guaardvark/cli.json` (legacy `~/.llx/config.json` is still read). Themes: `default`, `teal`, `musk`, `hacker`, `vader`, `guaardvark`, `day`, `auto`. Short terminals get a compact aardvark banner.
 
+While a reply is on its way, a status line says what is happening and for how long (`⠋ Searching the web… · 14s · esc to stop`). Piped and `--json` output never show it; `GUAARDVARK_NO_SPINNER=1` turns it off in a terminal too.
+
 ### REPL Slash Commands (examples)
 
 ```
