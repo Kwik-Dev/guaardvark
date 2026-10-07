@@ -19,6 +19,8 @@ import { generateFileFromChat } from "../api/filegenService";
 import FileGenPopup from "../components/FileGenPopup";
 import ChatInput from "../components/chat/ChatInput";
 import MessageList from "../components/chat/MessageList";
+import FileDropOverlay from "../components/chat/FileDropOverlay";
+import useFileDropZone from "../hooks/useFileDropZone";
 import UnifiedUploadModal from "../components/modals/UnifiedUploadModal";
 import PageLayout from "../components/layout/PageLayout";
 import BackgroundWaveform from "../components/voice/BackgroundWaveform";
@@ -207,6 +209,11 @@ const ChatPage = () => {
     if (!isSending) setAgentWorking(false);
   }, [isSending]);
   const chatInputRef = useRef(null);
+  // The whole chat (messages and composer) takes dropped files; the composer
+  // treats them exactly like the paperclip.
+  const chatDrop = useFileDropZone({
+    onFiles: (files) => chatInputRef.current?.addFiles(files),
+  });
   const historyLoadedRef = useRef(false); // Track if we've already loaded history
   const historyLoadingRef = useRef(false); // Prevent concurrent history fetches
   const lastMessageRef = useRef(null);
@@ -2214,6 +2221,8 @@ const ChatPage = () => {
   return (
     <PageLayout variant="fullscreen" noPadding>
     <Paper
+      {...chatDrop.dropProps}
+      data-testid="chat-drop-zone"
       sx={{
         display: "flex",
         flexDirection: "column",
@@ -2222,7 +2231,7 @@ const ChatPage = () => {
         position: "relative",
       }}
     >
-      {}
+      <FileDropOverlay active={chatDrop.isDragActive} />
       <BackgroundWaveform
         isVoiceChatActive={voiceState.isListening}
         isUserSpeaking={voiceState.isUserSpeaking}

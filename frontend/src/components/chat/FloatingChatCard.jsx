@@ -8,6 +8,7 @@ import {
   Chip,
   List,
   Grow,
+  LinearProgress,
   useTheme,
 } from "@mui/material";
 import CloseIcon from "@mui/icons-material/Close";
@@ -30,6 +31,8 @@ import { useVoiceSession, useVoiceSessionState } from "../../contexts/VoiceSessi
 import extractSpeakableText from "../../utils/extractSpeakableText";
 import useSlashCommands from "../../hooks/useSlashCommands";
 import SlashCommandPopup from "./SlashCommandPopup";
+import FileDropOverlay from "./FileDropOverlay";
+import useFileDropZone from "../../hooks/useFileDropZone";
 import { debugLog } from "../../utils/debugLog";
 import { contextChipLabel } from "../../utils/contextChipLabel";
 import { StatusPill } from "../settings/ui";
@@ -41,6 +44,12 @@ import {
   formatAttachmentSize,
   refuseAttachmentMessage,
 } from "../../utils/chatAttachment";
+import {
+  CHAT_ATTACH_ACCEPT,
+  chatDocumentRefusal,
+  splitChatFiles,
+  uploadChatDocument,
+} from "../../utils/chatDocumentUpload";
 
 const MIN_WIDTH = 280;
 const MIN_HEIGHT = 300;
@@ -193,6 +202,11 @@ const FloatingChatCard = () => {
   const [resizeStart, setResizeStart] = useState({ x: 0, y: 0, w: 0, h: 0 });
   const [inputText, setInputText] = useState("");
   const [attachment, setAttachment] = useState(null);
+  // Set when more images were offered than the one this chat can send.
+  const [attachmentNote, setAttachmentNote] = useState(null);
+  const [docUpload, setDocUpload] = useState(null); // { fileName, progress } while uploading
+  // Document notices wait here until the chat is free to send them.
+  const [pendingNotices, setPendingNotices] = useState([]);
   // True while this chat's request is a live screen-agent run; the input
   // then takes notes for the running task instead of new messages.
   const [agentWorking, setAgentWorking] = useState(false);
@@ -334,10 +348,13 @@ const FloatingChatCard = () => {
 
   // Send message handler — uses UnifiedChatService (Socket.IO streaming).
   // Arguments follow ChatPage's (text, file, options) so slash commands can call either.
+  // A document notice (sendOptions.documentNotice) leaves the attached image and
+  // the typed-message history alone.
   const handleSendMessage = useCallback(async (overrideText, _file, sendOptions) => {
     const isVoice = Boolean(sendOptions?.isVoiceMessage);
+    const isNotice = Boolean(sendOptions?.documentNotice);
     const text = overrideText || inputText;
-    const pending = isVoice ? null : attachment;
+    const pending = isVoice || isNotice ? null : attachment;
     if ((!text.trim() && !pending) || isSending) return;
 
     if (pending && attachmentExceedsLimit(pending.byteLength, attachmentMaxBytes)) {
@@ -345,7 +362,7 @@ const FloatingChatCard = () => {
       return;
     }
 
-    if (!isVoice) pushHistory(text);
+    if (!isVoice && !isNotice) pushHistory(text);
 
     const content = text.trim() || (pending ? `Describe this image: ${pending.file.name}` : "");
     const userMessage = {
@@ -359,7 +376,10 @@ const FloatingChatCard = () => {
     };
     addMessage(userMessage);
     if (!overrideText) setInputText("");
-    if (!isVoice) setAttachment(null);
+    if (pending) {
+      setAttachment(null);
+      setAttachmentNote(null);
+    }
     voiceReplyPendingRef.current = isVoice;
 
     setIsSending(true);
@@ -408,6 +428,49 @@ const FloatingChatCard = () => {
       setError(errorText);
     }
   }, [inputText, attachment, attachmentMaxBytes, isSending, sessionId, pageContext, addMessage, setIsSending, clearError, setError, unifiedChatService, pushHistory, finishVoiceReply]);
+
+  useEffect(() => {
+    if (pendingNotices.length === 0 || isSending || !unifiedChatService || voiceTurns.length > 0) return;
+    const text = pendingNotices.join("\n\n");
+    setPendingNotices([]);
+    handleSendMessage(text, null, { documentNotice: true });
+  }, [pendingNotices, isSending, unifiedChatService, voiceTurns.length, handleSendMessage]);
+
+  // Documents go through the same upload as the Chat page's paperclip; the
+  // notices are sent once all of them are in.
+  const handleDocumentFiles = useCallback(async (files) => {
+    const notices = [];
+    for (const file of files) {
+      const refusal = chatDocumentRefusal(file);
+      if (refusal) {
+        notices.push(refusal);
+        continue;
+      }
+      setDocUpload({ fileName: file.name, progress: 0 });
+      const result = await uploadChatDocument(file, {
+        sessionId,
+        onStage: ({ progress, indexing }) =>
+          setDocUpload({ fileName: indexing ? `${file.name} (indexing...)` : file.name, progress }),
+      });
+      if (!result.ok) setError(`Upload failed: ${result.error}`);
+      notices.push(result.message);
+    }
+    setDocUpload(null);
+    if (notices.length) setPendingNotices((prev) => [...prev, ...notices]);
+  }, [sessionId, setError]);
+
+  // Everything the paperclip, a paste or a drop hands this chat. It sends one
+  // image per message, so only the first offered image is kept.
+  const addFiles = useCallback((files) => {
+    const { images, documents } = splitChatFiles(files);
+    if (images.length) {
+      handleAttachImage(images[0]);
+      setAttachmentNote(images.length > 1 ? "Only the first image is sent to the model" : null);
+    }
+    if (documents.length) handleDocumentFiles(documents);
+  }, [handleAttachImage, handleDocumentFiles]);
+
+  const chatDrop = useFileDropZone({ onFiles: addFiles });
 
   // Send queued voice turns one at a time, each with the session current at
   // that moment, once the card is connected and not waiting on a reply.
@@ -674,6 +737,8 @@ const FloatingChatCard = () => {
       <Paper
         ref={cardRef}
         elevation={8}
+        {...chatDrop.dropProps}
+        data-testid="floating-chat-card"
         sx={{
           position: "fixed",
           top: position.y === -1 ? undefined : position.y,
@@ -692,6 +757,8 @@ const FloatingChatCard = () => {
           boxShadow: `0 8px 32px rgba(0, 0, 0, 0.35)`,
         }}
       >
+        <FileDropOverlay active={chatDrop.isDragActive} compact label="Drop files to attach" />
+
         {/* Header */}
         <Box
           onMouseDown={handleHeaderMouseDown}
@@ -860,12 +927,33 @@ const FloatingChatCard = () => {
                 <IconButton
                   size="small"
                   className="floating-chat-btn"
-                  onClick={() => setAttachment(null)}
+                  onClick={() => {
+                    setAttachment(null);
+                    setAttachmentNote(null);
+                  }}
                   aria-label="Remove image"
                   sx={{ p: 0.25 }}
                 >
                   <CloseIcon sx={{ fontSize: 14 }} />
                 </IconButton>
+                {attachmentNote && (
+                  <Typography variant="caption" sx={{ color: "text.secondary", fontSize: "0.72rem" }}>
+                    {attachmentNote}
+                  </Typography>
+                )}
+              </Box>
+            )}
+
+            {docUpload && (
+              <Box sx={{ px: 1.5, pb: 0.5 }} data-testid="floating-upload-progress">
+                <Typography variant="caption" sx={{ color: "text.secondary", fontSize: "0.72rem" }} noWrap>
+                  Uploading {docUpload.fileName}
+                </Typography>
+                <LinearProgress
+                  variant="determinate"
+                  value={Math.min(100, Math.max(0, docUpload.progress || 0))}
+                  sx={{ height: 3, borderRadius: 2 }}
+                />
               </Box>
             )}
 
@@ -898,20 +986,21 @@ const FloatingChatCard = () => {
                 type="file"
                 hidden
                 ref={fileRef}
-                accept="image/*"
+                accept={CHAT_ATTACH_ACCEPT}
+                data-testid="floating-chat-file"
                 onChange={(e) => {
                   const file = e.target.files?.[0];
-                  if (file) handleAttachImage(file);
                   e.target.value = "";
+                  if (file) addFiles([file]);
                 }}
               />
-              <Tooltip title="Attach an image">
+              <Tooltip title="Attach file or image">
                 <IconButton
                   className="floating-chat-btn"
                   onClick={() => fileRef.current?.click()}
                   disabled={isSending}
                   size="small"
-                  aria-label="Attach an image"
+                  aria-label="Attach file or image"
                   sx={{ p: 0.25, color: "text.secondary" }}
                 >
                   <AttachFileIcon sx={{ fontSize: 16 }} />
@@ -937,7 +1026,7 @@ const FloatingChatCard = () => {
                     if (items[i].type.startsWith("image/")) {
                       const file = items[i].getAsFile();
                       if (file) {
-                        handleAttachImage(file);
+                        addFiles([file]);
                         e.preventDefault();
                       }
                       break;
