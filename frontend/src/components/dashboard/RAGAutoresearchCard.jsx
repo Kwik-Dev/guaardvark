@@ -8,15 +8,12 @@ import {
   Pause as PauseIcon,
   Science as ScienceIcon,
   Refresh as RefreshIcon,
-  OpenInNew as OpenIcon,
 } from '@mui/icons-material';
 import { useNavigate } from 'react-router-dom';
 import { io } from 'socket.io-client';
 import { SOCKET_URL } from '../../api/apiClient';
 import { ragAutoresearchService } from '../../api/ragAutoresearchService';
 import DashboardCardWrapper from './DashboardCardWrapper';
-import EntityContextMenu from '../common/EntityContextMenu';
-import useContextMenu from '../../hooks/useContextMenu';
 import {
   baselineText,
   experimentLabel,
@@ -31,7 +28,6 @@ const RAGAutoresearchCard = React.forwardRef(
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(false);
   const socketRef = useRef(null);
-  const menu = useContextMenu();
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -106,12 +102,6 @@ const RAGAutoresearchCard = React.forwardRef(
           disabled: loading || !status,
         },
     { label: 'Refresh', icon: <RefreshIcon fontSize="small" />, onClick: refresh },
-    {
-      label: 'Open Autoresearch',
-      icon: <OpenIcon fontSize="small" />,
-      onClick: openPage,
-      dividerBefore: true,
-    },
   ];
 
   const lastRun = status?.last_run || null;
@@ -130,8 +120,9 @@ const RAGAutoresearchCard = React.forwardRef(
         <ScienceIcon fontSize="small" sx={{ color: status?.running ? 'success.main' : 'text.secondary', opacity: 0.8 }} />
       }
       {...props}
+      contextMenuActions={menuActions}
     >
-      <Box sx={{ height: '100%' }} onContextMenu={(e) => menu.open(e)}>
+      <Box sx={{ height: '100%' }}>
       {!status ? (
         <Box sx={{ p: 1, textAlign: 'center' }}>
           <Typography variant="caption" color="text.secondary">Autoresearch unavailable</Typography>
@@ -253,11 +244,6 @@ const RAGAutoresearchCard = React.forwardRef(
         </Box>
       )}
       </Box>
-      <EntityContextMenu
-        anchorPosition={menu.anchorPosition}
-        onClose={menu.close}
-        actions={menuActions}
-      />
     </DashboardCardWrapper>
   );
 });
