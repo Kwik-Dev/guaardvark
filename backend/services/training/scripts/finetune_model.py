@@ -2,22 +2,65 @@
 """
 GUAARDVARK Model Fine-Tuner
 Uses unsloth for efficient LoRA fine-tuning on consumer GPUs.
-Exports to GGUF for Ollama import.
+
+The backend runs this file as its own process (backend/services/training_runner.py):
+
+    python finetune_model.py run --spec <spec.json>    train, reporting on stdout
+    python finetune_model.py merge --spec <spec.json>  fold an adapter into its base
+    python finetune_model.py check --json              what the trainer can load
+
+Lines starting with EVENT_PREFIX on stdout are JSON events for the backend;
+everything else is the training log.
 """
 
-import os
-import json
 import argparse
+import contextlib
+import json
+import os
+import sys
+import time
 from pathlib import Path
-from datetime import datetime
 
 TRAINING_DIR = Path(os.environ.get('GUAARDVARK_ROOT', '.')) / "training"
 DATASETS_DIR = TRAINING_DIR / "datasets"
 MODELS_DIR = TRAINING_DIR / "models"
 
-# Set CUDA allocator config to reduce fragmentation
-if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
-    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+EVENT_PREFIX = "@@guaardvark-train "
+
+# What `run --spec` reads; training_tasks builds the spec from these names only.
+SPEC_KEYS = (
+    "base_model",            # local snapshot folder of the base model
+    "base_model_id",         # its declared id, for the log
+    "data_path",
+    "eval_data_path",
+    "output_dir",
+    "max_steps",
+    "learning_rate",
+    "batch_size",
+    "gradient_accumulation_steps",
+    "lora_rank",
+    "max_seq_length",
+    "resume",
+    "load_in_4bit",
+    "response_markers",      # {"instruction": ..., "response": ...} or None
+    "parent_pid",
+)
+
+# What `merge --spec` reads.
+MERGE_SPEC_KEYS = ("base_model", "lora_dir", "out_dir", "parent_pid")
+
+try:
+    from . import dataset_formats
+except ImportError:  # run as a script, or loaded outside the backend package
+    _HERE = str(Path(__file__).resolve().parent)
+    if _HERE not in sys.path:
+        sys.path.insert(0, _HERE)
+    import dataset_formats
+
+
+def emit(event: str, **fields):
+    """One JSON event line for the backend."""
+    print(EVENT_PREFIX + json.dumps({"event": event, **fields}, default=str), flush=True)
 
 
 def check_dependencies():
@@ -31,51 +74,146 @@ def check_dependencies():
         missing.append("torch")
 
     try:
-        import unsloth
-        print(f"Unsloth: installed")
+        import unsloth  # noqa: F401
+        print("Unsloth: installed")
     except ImportError:
         missing.append("unsloth")
 
     try:
-        from datasets import load_dataset
-        print(f"Datasets: installed")
+        from datasets import load_dataset  # noqa: F401
+        print("Datasets: installed")
     except ImportError:
         missing.append("datasets")
 
     try:
-        from trl import SFTTrainer
-        print(f"TRL: installed")
+        from trl import SFTTrainer  # noqa: F401
+        print("TRL: installed")
     except ImportError:
         missing.append("trl")
 
     if missing:
         print(f"\nMissing packages: {missing}")
-        print("Install with: pip install unsloth datasets trl")
+        print("Install them in Settings > Training libraries.")
         return False
 
     return True
 
 
-def load_training_data(data_path: str):
-    """Load training data from JSONL or Alpaca JSON."""
+def _fields(cls) -> set:
+    """Field names a config class or callable accepts."""
+    import dataclasses
+    import inspect
+
+    if dataclasses.is_dataclass(cls):
+        return {f.name for f in dataclasses.fields(cls)}
+    try:
+        return set(inspect.signature(cls).parameters)
+    except (TypeError, ValueError):
+        return set()
+
+
+def check_report() -> dict:
+    """Library versions, CUDA, bf16 and the TRL interface this trainer uses.
+
+    ``ok`` is False with ``problems`` when the trainer could not run here."""
+    import importlib.metadata as metadata
+
+    report = {"ok": False, "python": sys.version.split()[0], "libraries": {}, "problems": []}
+    for dist in ("torch", "transformers", "peft", "accelerate", "trl", "datasets",
+                 "unsloth", "unsloth-zoo", "bitsandbytes"):
+        try:
+            report["libraries"][dist] = metadata.version(dist)
+        except metadata.PackageNotFoundError:
+            report["libraries"][dist] = None
+
+    # Library banners go to stderr so stdout carries only the report.
+    with contextlib.redirect_stdout(sys.stderr):
+        try:
+            import torch
+            report["cuda"] = bool(torch.cuda.is_available())
+            report["cuda_device"] = torch.cuda.get_device_name(0) if report["cuda"] else None
+            report["bf16"] = bool(report["cuda"] and torch.cuda.is_bf16_supported())
+        except Exception as e:
+            report["problems"].append(f"torch: {type(e).__name__}: {e}")
+        try:
+            import unsloth  # noqa: F401  (patches transformers and TRL on import)
+            from unsloth import FastLanguageModel  # noqa: F401
+        except Exception as e:
+            report["problems"].append(f"unsloth: {type(e).__name__}: {e}")
+        try:
+            from trl import SFTConfig, SFTTrainer
+            fields = _fields(SFTConfig)
+            report["sft_config_fields"] = sorted(
+                f for f in fields if f in ("max_length", "max_seq_length", "dataset_text_field",
+                                           "completion_only_loss", "assistant_only_loss", "packing",
+                                           "report_to", "bf16", "fp16"))
+            report["sft_trainer_params"] = sorted(
+                p for p in _fields(SFTTrainer.__init__) if p in ("processing_class", "tokenizer"))
+            if not ({"max_length", "max_seq_length"} & fields):
+                report["problems"].append("trl: SFTConfig has neither max_length nor max_seq_length")
+        except Exception as e:
+            report["problems"].append(f"trl: {type(e).__name__}: {e}")
+        try:
+            from unsloth.chat_templates import train_on_responses_only  # noqa: F401
+            report["train_on_responses_only"] = True
+        except Exception:
+            report["train_on_responses_only"] = False
+        try:
+            from datasets import Dataset  # noqa: F401
+        except Exception as e:
+            report["problems"].append(f"datasets: {type(e).__name__}: {e}")
+    if not report.get("cuda"):
+        report["problems"].append("CUDA is not available to the trainer")
+    report["ok"] = not report["problems"]
+    return report
+
+
+def load_training_data(data_path: str, tokenizer):
+    """Training rows rendered to text, as a datasets.Dataset with one "text" column.
+
+    Returns (dataset, report); report counts rows read, rows used and rows
+    skipped, and says whether every row is a conversation."""
     from datasets import Dataset
 
-    data_path = Path(data_path)
+    errors = []
+    rows = list(dataset_formats.iter_rows(str(data_path), errors))
+    texts, report = render_rows(rows, tokenizer)
+    report["unreadable"] = len(errors)
+    return Dataset.from_list([{"text": t} for t in texts]), report
 
-    if data_path.suffix == '.jsonl':
-        records = []
-        with open(data_path) as f:
-            for line in f:
-                records.append(json.loads(line))
-        return Dataset.from_list(records)
 
-    elif data_path.suffix == '.json':
-        with open(data_path) as f:
-            records = json.load(f)
-        return Dataset.from_list(records)
+def render_rows(rows, tokenizer):
+    """Render dataset rows to training text with the base model's chat template.
 
-    else:
-        raise ValueError(f"Unsupported format: {data_path.suffix}")
+    Conversation rows go through tokenizer.apply_chat_template, so the model
+    learns the turn markers it is prompted with at inference; plain ``text``
+    rows are used as written. Returns (texts, report)."""
+    texts = []
+    report = {"rows": len(rows), "used": 0, "skipped": 0, "text_rows": 0, "chat_rows": 0}
+    template = getattr(tokenizer, "chat_template", None)
+    for row in rows:
+        fmt = dataset_formats.detect_format(row)
+        if fmt == "text":
+            if row["text"].strip():
+                texts.append(row["text"])
+                report["text_rows"] += 1
+            else:
+                report["skipped"] += 1
+            continue
+        messages, reason = dataset_formats.to_messages(row)
+        if reason:
+            report["skipped"] += 1
+            continue
+        if not template:
+            raise ValueError("The base model's tokenizer has no chat template, so conversation "
+                             "rows cannot be rendered. Choose a base model with a chat template.")
+        text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+        if not isinstance(text, str):
+            raise ValueError("The base model's chat template did not return text")
+        texts.append(text)
+        report["chat_rows"] += 1
+    report["used"] = len(texts)
+    return texts, report
 
 
 def find_last_checkpoint(output_dir: Path) -> str:
@@ -111,31 +249,6 @@ def find_last_checkpoint(output_dir: Path) -> str:
 
     print(f"Found checkpoint at step {checkpoints[0][0]}: {last_checkpoint}")
     return str(last_checkpoint)
-
-
-def format_prompt(example):
-    """Format training example into prompt."""
-    instruction = example.get('instruction', '')
-    inp = example.get('input', '')
-    output = example.get('output', '')
-
-    if inp:
-        text = f"""### Instruction:
-{instruction}
-
-### Input:
-{inp}
-
-### Response:
-{output}"""
-    else:
-        text = f"""### Instruction:
-{instruction}
-
-### Response:
-{output}"""
-
-    return {"text": text}
 
 
 def heldout_losses(model, tokenizer, texts, max_seq_length):
@@ -177,6 +290,31 @@ def heldout_losses(model, tokenizer, texts, max_seq_length):
     return {"adapter_loss": adapter_loss, "base_loss": base_loss, "rows": len(texts)}
 
 
+def sft_config_kwargs(config_fields: set, *, output_dir: Path, max_steps: int, learning_rate: float,
+                      batch_size: int, gradient_accumulation_steps: int, max_seq_length: int,
+                      bf16: bool) -> dict:
+    """SFTConfig arguments for the installed TRL, named the way it names them."""
+    values = {
+        "per_device_train_batch_size": batch_size,
+        "gradient_accumulation_steps": gradient_accumulation_steps,
+        "warmup_steps": min(10, max(1, max_steps // 10)),
+        "max_steps": max_steps,
+        "learning_rate": learning_rate,
+        "bf16": bf16,
+        "fp16": not bf16,
+        "logging_steps": max(1, min(10, max_steps // 10)),
+        "output_dir": str(output_dir / "checkpoints"),
+        "optim": "paged_adamw_8bit",
+        "save_steps": 100,
+        "save_total_limit": 3,
+        "report_to": "none",
+        "seed": 42,
+        "dataset_text_field": "text",
+    }
+    values["max_length" if "max_length" in config_fields else "max_seq_length"] = max_seq_length
+    return {k: v for k, v in values.items() if k in config_fields}
+
+
 def finetune(
     base_model: str,
     data_path: str,
@@ -187,41 +325,48 @@ def finetune(
     lora_rank: int = 16,
     max_seq_length: int = 2048,
     gradient_accumulation_steps: int = 4,
-    offload_to_cpu: bool = True,
     freeze_vision: bool = True,
     progress_callback: callable = None,
     resume: bool = False,
     eval_data_path: str = None,
-    eval_callback: callable = None
+    eval_callback: callable = None,
+    output_dir: str = None,
+    load_in_4bit: bool = True,
+    response_markers: dict = None,
+    dataset_callback: callable = None,
 ):
     """
     Fine-tune a model with LoRA.
 
     Args:
-        base_model: Base model to fine-tune (HuggingFace ID or local path)
-        data_path: Path to training data (JSONL or JSON)
-        output_name: Name for output model
+        base_model: Base model to fine-tune (local folder, or a Hugging Face id already cached)
+        data_path: Path to training data (JSONL or JSON, any dataset_formats shape)
+        output_name: Name for output model (under MODELS_DIR) when output_dir is not given
         max_steps: Maximum training steps
         learning_rate: Learning rate
         batch_size: Per-device batch size
         lora_rank: LoRA adapter rank
-        max_seq_length: Maximum sequence length
+        max_seq_length: Maximum sequence length; longer rows are left out
         gradient_accumulation_steps: Gradient accumulation steps
-        offload_to_cpu: Offload optimizer states to CPU
         freeze_vision: Freeze vision tower (for multimodal models)
-        progress_callback: Callback for progress updates
+        progress_callback: Called as (step, total_steps, loss, metrics)
         resume: If True, resume from last checkpoint if available
         eval_data_path: Held-out rows (same format as data_path), never trained on
         eval_callback: Called after training with heldout_losses() output, or
             with {"reason": ...} when the held-out loss could not be measured
+        output_dir: Folder for checkpoints and the adapter
+        load_in_4bit: Load the base model quantised to 4-bit
+        response_markers: {"instruction": ..., "response": ...} text that opens a
+            user and an assistant turn in the chat template; when given and
+            every row is a conversation, loss is taken on the replies only
+        dataset_callback: Called with the dataset report before training
     """
 
     from unsloth import FastLanguageModel
-    from trl import SFTTrainer
-    from transformers import TrainingArguments
+    from trl import SFTConfig, SFTTrainer
 
     output_name = output_name or f"guaardvark-{base_model.replace('/', '-').replace(':', '-')}"
-    output_dir = MODELS_DIR / output_name
+    output_dir = Path(output_dir) if output_dir else MODELS_DIR / output_name
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Check for existing checkpoint if resuming
@@ -229,12 +374,12 @@ def finetune(
     if resume:
         resume_checkpoint = find_last_checkpoint(output_dir)
         if resume_checkpoint:
-            print(f"\n=== RESUMING FROM CHECKPOINT ===")
+            print("\n=== RESUMING FROM CHECKPOINT ===")
             print(f"Checkpoint: {resume_checkpoint}")
         else:
             print("\nNo checkpoint found, starting fresh training.")
 
-    print(f"\n=== GUAARDVARK Fine-Tuning ===")
+    print("\n=== GUAARDVARK Fine-Tuning ===")
     print(f"Base model: {base_model}")
     print(f"Training data: {data_path}")
     print(f"Output: {output_dir}")
@@ -243,21 +388,21 @@ def finetune(
     print(f"Batch size: {batch_size}")
     print(f"Gradient accumulation steps: {gradient_accumulation_steps}")
     print(f"LoRA rank: {lora_rank}")
-    print(f"CPU offload: {offload_to_cpu}")
+    print(f"4-bit: {load_in_4bit}")
     print(f"Freeze Vision Tower: {freeze_vision}")
 
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=base_model,
         max_seq_length=max_seq_length,
         dtype=None,
-        load_in_4bit=True,
+        load_in_4bit=load_in_4bit,
     )
 
     model = FastLanguageModel.get_peft_model(
         model,
         r=lora_rank,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                       "gate_proj", "up_proj", "down_proj"],
+                        "gate_proj", "up_proj", "down_proj"],
         lora_alpha=lora_rank,
         lora_dropout=0,
         bias="none",
@@ -265,7 +410,6 @@ def finetune(
         random_state=42,
     )
 
-    # Check memory after model load
     import torch
     import gc
     if torch.cuda.is_available():
@@ -273,154 +417,121 @@ def finetune(
 
     # Freeze vision tower if requested
     if freeze_vision:
-        # Try different paths to find vision tower
         vision_tower = None
         if hasattr(model, "model") and hasattr(model.model, "vision_tower"):
-             vision_tower = model.model.vision_tower
+            vision_tower = model.model.vision_tower
         elif hasattr(model, "base_model") and hasattr(model.base_model, "model") and hasattr(model.base_model.model, "vision_tower"):
-             vision_tower = model.base_model.model.vision_tower
-        
+            vision_tower = model.base_model.model.vision_tower
+
         if vision_tower:
             print("Freezing vision tower to save memory...")
             vision_tower.requires_grad_(False)
-            # Ensure it is in eval mode too (disable dropout etc)
             vision_tower.eval()
             for param in vision_tower.parameters():
                 param.requires_grad = False
-        else:
-            print("No vision tower found to freeze (or path incorrect).")
 
-    dataset = load_training_data(data_path)
-    dataset = dataset.map(format_prompt)
+    dataset, data_report = load_training_data(data_path, tokenizer)
 
-    # Filter out examples that are too long to prevent OOM/CUDA errors
-    original_len = len(dataset)
-    
-    def filter_long_examples(example):
-        # Use the tokenizer to get the exact token count
-        # We process single example, so we get a list of IDs
+    def fits(example):
         ids = tokenizer(example["text"], truncation=False, add_special_tokens=True)["input_ids"]
         return len(ids) <= max_seq_length
 
     print("Filtering dataset based on token length...")
-    dataset = dataset.filter(filter_long_examples)
-    filtered_len = len(dataset)
-    
-    if filtered_len < original_len:
-        print(f"Filtered out {original_len - filtered_len} examples exceeding max sequence length of {max_seq_length}.")
-    
-    if filtered_len == 0:
-        raise ValueError("All training examples were filtered out! Increase max_seq_length or check your data.")
+    before = len(dataset)
+    dataset = dataset.filter(fits)
+    data_report["too_long"] = before - len(dataset)
+    data_report["trained"] = len(dataset)
+    if data_report["too_long"]:
+        print(f"Left out {data_report['too_long']} rows longer than max_seq_length {max_seq_length}.")
+    if len(dataset) == 0:
+        raise ValueError(f"No row can be trained on: {data_report['rows']} read, "
+                         f"{data_report['skipped']} not usable, {data_report['too_long']} longer than "
+                         f"max_seq_length {max_seq_length}.")
 
-    print(f"Training examples: {len(dataset)}")
+    responses_only = bool(response_markers) and data_report["text_rows"] == 0
+    train_on_responses_only = None
+    if responses_only:
+        try:
+            from unsloth.chat_templates import train_on_responses_only
+        except ImportError:
+            responses_only = False
+    data_report["loss_on"] = "assistant replies" if responses_only else "whole text"
+    print(f"Training examples: {len(dataset)} (loss on {data_report['loss_on']})")
+    if dataset_callback:
+        dataset_callback(dict(data_report))
 
     eval_texts = None
     if eval_data_path:
-        eval_dataset = load_training_data(eval_data_path).map(format_prompt)
-        eval_dataset = eval_dataset.filter(filter_long_examples)
+        eval_dataset, _ = load_training_data(eval_data_path, tokenizer)
+        eval_dataset = eval_dataset.filter(fits)
         eval_texts = list(eval_dataset["text"])
         print(f"Held-out examples: {len(eval_texts)}")
 
-    training_args = {
-        "per_device_train_batch_size": batch_size,
-        "gradient_accumulation_steps": gradient_accumulation_steps,
-        "warmup_steps": 10,
-        "max_steps": max_steps,
-        "learning_rate": learning_rate,
-        "bf16": True,
-        "logging_steps": 10,
-        "output_dir": str(output_dir / "checkpoints"),
-        "optim": "paged_adamw_8bit",
-        "save_steps": 100,
-    }
+    try:
+        from unsloth import is_bf16_supported
+        bf16 = bool(is_bf16_supported())
+    except ImportError:
+        bf16 = bool(torch.cuda.is_available() and torch.cuda.is_bf16_supported())
 
-    if offload_to_cpu:
-        print("Enabling CPU offload for optimizer states...")
-        # Ensure process group is initialized for DeepSpeed
-        import torch
-        import torch.distributed as dist
-        
-        # Set default env vars for single-GPU DeepSpeed if not set
-        if "MASTER_ADDR" not in os.environ:
-            os.environ["MASTER_ADDR"] = "127.0.0.1"
-        if "MASTER_PORT" not in os.environ:
-            os.environ["MASTER_PORT"] = "29500"
-        if "WORLD_SIZE" not in os.environ:
-            os.environ["WORLD_SIZE"] = "1"
-        if "RANK" not in os.environ:
-            os.environ["RANK"] = "0"
-        
-        try:
-            if not dist.is_initialized():
-                print("Initializing process group for DeepSpeed...")
-                dist.init_process_group(backend="nccl")
-                print("Process group initialized.")
-            else:
-                print("Process group already initialized.")
-        except Exception as e:
-            print(f"Warning: Failed to init process group: {e}")
+    config = SFTConfig(**sft_config_kwargs(
+        _fields(SFTConfig), output_dir=output_dir, max_steps=max_steps, learning_rate=learning_rate,
+        batch_size=batch_size, gradient_accumulation_steps=gradient_accumulation_steps,
+        max_seq_length=max_seq_length, bf16=bf16))
 
-        deepspeed_config = {
-            "zero_optimization": {
-                "stage": 2,
-                "offload_optimizer": {
-                    "device": "cpu",
-                    "pin_memory": True
-                },
-                "allgather_partitions": True,
-                "allgather_bucket_size": 2e8,
-                "reduce_scatter": True,
-                "reduce_bucket_size": 2e8,
-                "overlap_comm": True,
-            },
-            "bf16": {"enabled": True},
-            "train_batch_size": "auto",
-            "train_micro_batch_size_per_gpu": "auto",
-            "gradient_accumulation_steps": "auto",
-        }
-        ds_config_path = output_dir / "ds_config.json"
-        with open(ds_config_path, 'w') as f:
-            json.dump(deepspeed_config, f, indent=2)
-        training_args["deepspeed"] = str(ds_config_path)
-        training_args["optim"] = "adamw_torch"
-
-    # Add progress callback if provided
     callbacks = []
     if progress_callback:
         from transformers import TrainerCallback
-        
+
         class ProgressCallback(TrainerCallback):
+            """Reports every log line, and between logs at most every two seconds."""
+
             def __init__(self, callback_func, total_steps):
                 self.callback_func = callback_func
                 self.total_steps = total_steps
-            
-            def on_log(self, args, state, control, logs=None, **kwargs):
-                if state.global_step and self.callback_func:
-                    progress = int((state.global_step / self.total_steps) * 100)
-                    metrics = {
-                        "loss": logs.get("loss", 0),
-                        "learning_rate": logs.get("learning_rate", 0),
-                        "epoch": state.epoch if hasattr(state, "epoch") else 0
-                    }
-                    self.callback_func(state.global_step, self.total_steps, metrics.get("loss", 0), metrics)
-        
-        callbacks.append(ProgressCallback(progress_callback, max_steps))
-    
-    trainer = SFTTrainer(
-        model=model,
-        tokenizer=tokenizer,
-        train_dataset=dataset,
-        dataset_text_field="text",
-        max_seq_length=max_seq_length,
-        args=TrainingArguments(**training_args),
-        callbacks=callbacks if callbacks else None,
-    )
+                self.last_loss = None
+                self.last_sent = 0.0
 
-    # Clear cache before training
+            def _send(self, state, logs=None):
+                metrics = {
+                    "loss": (logs or {}).get("loss", self.last_loss),
+                    "learning_rate": (logs or {}).get("learning_rate"),
+                    "epoch": getattr(state, "epoch", None),
+                }
+                self.last_sent = time.monotonic()
+                self.callback_func(state.global_step, self.total_steps, metrics["loss"], metrics)
+
+            def on_log(self, args, state, control, logs=None, **kwargs):
+                if logs and "loss" in logs:
+                    self.last_loss = logs["loss"]
+                if state.global_step:
+                    self._send(state, logs)
+
+            def on_step_end(self, args, state, control, **kwargs):
+                if time.monotonic() - self.last_sent >= 2.0:
+                    self._send(state)
+
+        callbacks.append(ProgressCallback(progress_callback, max_steps))
+
+    trainer_kwargs = {"model": model, "train_dataset": dataset, "args": config,
+                      "callbacks": callbacks or None}
+    trainer_params = _fields(SFTTrainer.__init__)
+    if "processing_class" in trainer_params:
+        trainer_kwargs["processing_class"] = tokenizer
+    else:
+        trainer_kwargs["tokenizer"] = tokenizer
+    trainer = SFTTrainer(**trainer_kwargs)
+
+    if responses_only:
+        trainer = train_on_responses_only(
+            trainer,
+            instruction_part=response_markers["instruction"],
+            response_part=response_markers["response"],
+        )
+
     print("\nClearing GPU cache before training...")
     gc.collect()
-    torch.cuda.empty_cache()
     if torch.cuda.is_available():
+        torch.cuda.empty_cache()
         print(f"GPU Memory before train: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
 
     print("\nStarting training...")
@@ -433,6 +544,8 @@ def finetune(
     print("\nSaving model...")
     model.save_pretrained(str(output_dir / "lora"))
     tokenizer.save_pretrained(str(output_dir / "lora"))
+    if torch.cuda.is_available():
+        print(f"Peak GPU memory: {torch.cuda.max_memory_allocated() / 1024**2:.0f} MB")
 
     print(f"\nTraining complete! Model saved to: {output_dir}")
 
@@ -453,6 +566,24 @@ def finetune(
     return str(output_dir)
 
 
+def merge_adapter(base_model: str, lora_dir: str, out_dir: str) -> str:
+    """Fold a LoRA adapter into its bf16 base model and save the merged
+    safetensors with the tokenizer, on the CPU (no GPU claim, no network)."""
+    import torch
+    from peft import PeftModel
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    print(f"Merging {lora_dir} into {base_model}")
+    base = AutoModelForCausalLM.from_pretrained(base_model, dtype=torch.bfloat16, local_files_only=True)
+    merged = PeftModel.from_pretrained(base, lora_dir).merge_and_unload()
+    merged.save_pretrained(str(out), safe_serialization=True)
+    AutoTokenizer.from_pretrained(lora_dir, local_files_only=True).save_pretrained(str(out))
+    print(f"Merged model saved to {out}")
+    return str(out)
+
+
 def export_to_gguf(model_dir: str, quantization: str = "q4_k_m"):
     """Export fine-tuned model to GGUF for Ollama."""
     from unsloth import FastLanguageModel
@@ -464,7 +595,7 @@ def export_to_gguf(model_dir: str, quantization: str = "q4_k_m"):
         print(f"LoRA model not found: {lora_dir}")
         return None
 
-    print(f"\n=== Exporting to GGUF ===")
+    print("\n=== Exporting to GGUF ===")
     print(f"Model: {lora_dir}")
     print(f"Quantization: {quantization}")
 
@@ -529,11 +660,64 @@ SYSTEM \"\"\"You are a helpful, accurate, and concise assistant. You are honest 
     modelfile_path.write_text(modelfile_content)
 
     print(f"\nModelfile created: {modelfile_path}")
-    print(f"\nTo import to Ollama:")
+    print("\nTo import to Ollama:")
     print(f"  cd {model_dir}")
     print(f"  ollama create {model_name} -f Modelfile")
 
     return str(modelfile_path)
+
+
+def _die_with_parent(parent_pid):
+    """Linux: have the kernel kill this process when the backend task that
+    started it dies, so a killed worker never leaves a trainer on the GPU."""
+    if not parent_pid or not sys.platform.startswith("linux"):
+        return
+    try:
+        import ctypes
+        import signal
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.prctl(1, signal.SIGKILL)  # PR_SET_PDEATHSIG
+    except Exception:
+        return
+    if os.getppid() != int(parent_pid):
+        os._exit(1)
+
+
+def _read_spec(path: str, keys: tuple) -> dict:
+    with open(path, encoding="utf-8") as f:
+        spec = json.load(f)
+    unknown = set(spec) - set(keys)
+    if unknown:
+        raise ValueError(f"Unknown spec keys: {sorted(unknown)}")
+    return spec
+
+
+def run_spec(spec: dict) -> str:
+    """Train as `run --spec` asks, reporting progress, dataset and held-out
+    loss as events; the last event is "done" with the output folder."""
+    def progress(step, total, loss, metrics):
+        emit("progress", step=step, total=total, loss=loss, metrics=metrics)
+
+    model_dir = finetune(
+        base_model=spec["base_model"],
+        data_path=spec["data_path"],
+        output_dir=spec["output_dir"],
+        max_steps=int(spec["max_steps"]),
+        learning_rate=float(spec["learning_rate"]),
+        batch_size=int(spec["batch_size"]),
+        lora_rank=int(spec["lora_rank"]),
+        max_seq_length=int(spec["max_seq_length"]),
+        gradient_accumulation_steps=int(spec.get("gradient_accumulation_steps") or 4),
+        resume=bool(spec.get("resume")),
+        eval_data_path=spec.get("eval_data_path"),
+        eval_callback=lambda result: emit("eval", **result),
+        progress_callback=progress,
+        load_in_4bit=bool(spec.get("load_in_4bit")),
+        response_markers=spec.get("response_markers"),
+        dataset_callback=lambda report: emit("dataset", **report),
+    )
+    emit("done", model_dir=model_dir)
+    return model_dir
 
 
 def main():
@@ -541,7 +725,7 @@ def main():
     subparsers = parser.add_subparsers(dest='command', help='Commands')
 
     train_parser = subparsers.add_parser('train', help='Fine-tune a model')
-    train_parser.add_argument('--base', required=True, help='Base model (e.g., unsloth/gemma-2-2b)')
+    train_parser.add_argument('--base', required=True, help='Base model (local folder or cached Hugging Face id)')
     train_parser.add_argument('--data', required=True, help='Training data (JSONL or JSON)')
     train_parser.add_argument('--name', help='Output model name')
     train_parser.add_argument('--steps', type=int, default=500, help='Training steps')
@@ -550,9 +734,14 @@ def main():
     train_parser.add_argument('--grad-acc', type=int, default=4, help='Gradient accumulation steps')
     train_parser.add_argument('--rank', type=int, default=16, help='LoRA rank')
     train_parser.add_argument('--seq', type=int, default=2048, help='Max sequence length (use 1024 for large models)')
-    train_parser.add_argument('--offload', action='store_true', help='Offload optimizer to CPU (uses system RAM)')
     train_parser.add_argument('--no-freeze-vision', action='store_true', help='Do not freeze vision tower')
     train_parser.add_argument('--resume', action='store_true', help='Resume from last checkpoint if available')
+
+    run_parser = subparsers.add_parser('run', help='Train from a JSON spec (the backend uses this)')
+    run_parser.add_argument('--spec', required=True, help='Spec file (keys: SPEC_KEYS)')
+
+    merge_parser = subparsers.add_parser('merge', help='Merge an adapter into its base model')
+    merge_parser.add_argument('--spec', required=True, help='Spec file (keys: MERGE_SPEC_KEYS)')
 
     export_parser = subparsers.add_parser('export', help='Export to GGUF')
     export_parser.add_argument('--model', required=True, help='Model directory')
@@ -563,11 +752,31 @@ def main():
     ollama_parser.add_argument('--name', required=True, help='Ollama model name')
 
     check_parser = subparsers.add_parser('check', help='Check dependencies')
+    check_parser.add_argument('--json', action='store_true', help='Print one JSON report')
 
     args = parser.parse_args()
 
+    if args.command in ('train', 'run'):
+        # Before torch is imported, so the allocator reads it.
+        os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
     if args.command == 'check':
+        if args.json:
+            report = check_report()
+            print(json.dumps(report))
+            sys.exit(0 if report["ok"] else 1)
         check_dependencies()
+
+    elif args.command == 'run':
+        spec = _read_spec(args.spec, SPEC_KEYS)
+        _die_with_parent(spec.get("parent_pid"))
+        run_spec(spec)
+
+    elif args.command == 'merge':
+        spec = _read_spec(args.spec, MERGE_SPEC_KEYS)
+        _die_with_parent(spec.get("parent_pid"))
+        out = merge_adapter(spec["base_model"], spec["lora_dir"], spec["out_dir"])
+        emit("done", model_dir=out)
 
     elif args.command == 'train':
         if not check_dependencies():
@@ -582,7 +791,6 @@ def main():
             lora_rank=args.rank,
             max_seq_length=args.seq,
             gradient_accumulation_steps=args.grad_acc,
-            offload_to_cpu=args.offload,
             freeze_vision=not args.no_freeze_vision,
             resume=args.resume
         )

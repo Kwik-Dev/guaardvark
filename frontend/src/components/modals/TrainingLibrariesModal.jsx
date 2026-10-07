@@ -4,6 +4,8 @@
 // download sizes, installs them only on the Install click, shows pip's
 // progress and result, and removes them again. On a machine the hardware
 // policy calls not practical, the only install button is "Install anyway".
+// Below them, the declared base models a fine-tune starts from, each
+// downloaded or removed only on its own button.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
@@ -22,14 +24,19 @@ import {
   Chip,
   LinearProgress,
   Alert,
+  Divider,
+  Stack,
 } from "@mui/material";
 import ModelTrainingIcon from "@mui/icons-material/ModelTraining";
 import CloudDownloadIcon from "@mui/icons-material/CloudDownload";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import { ActionButton, ConfirmActionDialog } from "../settings/ui";
 import {
+  getBaseModels,
   getTrainingLibraries,
+  installTrainingBaseModel,
   installTrainingLibraries,
+  removeTrainingBaseModel,
   removeTrainingLibraries,
 } from "../../api/trainingService";
 
@@ -68,8 +75,9 @@ const stateChip = (lib) => {
  * @param {function} onClose
  * @param {function} [showMessage]  snackbar: (message, severity)
  * @param {function} [onChanged]    called with the new status when an install or remove ends
+ * @param {function} [onBaseModelsChanged]  called with the base-model status after a download or remove
  */
-const TrainingLibrariesModal = ({ open, onClose, showMessage, onChanged }) => {
+const TrainingLibrariesModal = ({ open, onClose, showMessage, onChanged, onBaseModelsChanged }) => {
   const [info, setInfo] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -79,14 +87,42 @@ const TrainingLibrariesModal = ({ open, onClose, showMessage, onChanged }) => {
   const [confirmRemove, setConfirmRemove] = useState(false);
   const lastRunState = useRef(null);
 
+  const [baseInfo, setBaseInfo] = useState(null);
+  const [baseError, setBaseError] = useState(null);
+  const [baseBusy, setBaseBusy] = useState(false);
+  const [confirmRemoveModel, setConfirmRemoveModel] = useState(null);
+  const lastDownloadState = useRef(null);
+
   // The parent passes a fresh showMessage/onChanged on every render; keep them
   // in refs so the fetch callbacks stay stable and polling does not restart.
   const showMessageRef = useRef(showMessage);
   const onChangedRef = useRef(onChanged);
+  const onBaseModelsChangedRef = useRef(onBaseModelsChanged);
   useEffect(() => {
     showMessageRef.current = showMessage;
     onChangedRef.current = onChanged;
-  }, [showMessage, onChanged]);
+    onBaseModelsChangedRef.current = onBaseModelsChanged;
+  }, [showMessage, onChanged, onBaseModelsChanged]);
+
+  const fetchBaseModels = useCallback(async () => {
+    try {
+      const data = await getBaseModels();
+      setBaseInfo(data);
+      setBaseError(null);
+      const download = data?.download || {};
+      if (lastDownloadState.current === "running" && download.state !== "running") {
+        if (download.state === "completed") {
+          showMessageRef.current?.(`${download.model} downloaded.`, "success");
+        } else if (download.state === "failed") {
+          showMessageRef.current?.(`${download.model} download failed: ${download.error}`, "error");
+        }
+        onBaseModelsChangedRef.current?.(data);
+      }
+      lastDownloadState.current = download.state;
+    } catch (err) {
+      setBaseError(err.message || "Could not read the base models.");
+    }
+  }, []);
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -121,22 +157,61 @@ const TrainingLibrariesModal = ({ open, onClose, showMessage, onChanged }) => {
     if (open) {
       setLoading(true);
       lastRunState.current = null;
+      lastDownloadState.current = null;
       fetchStatus();
+      fetchBaseModels();
     } else {
       setInfo(null);
       setError(null);
       setActionError(null);
       setConfirmRemove(false);
+      setBaseInfo(null);
+      setBaseError(null);
+      setConfirmRemoveModel(null);
     }
-  }, [open, fetchStatus]);
+  }, [open, fetchStatus, fetchBaseModels]);
 
   const running = info?.run?.state === "running";
+  const downloading = baseInfo?.download?.state === "running";
 
   useEffect(() => {
     if (!open || !running) return undefined;
     const interval = setInterval(fetchStatus, 1000);
     return () => clearInterval(interval);
   }, [open, running, fetchStatus]);
+
+  useEffect(() => {
+    if (!open || !downloading) return undefined;
+    const interval = setInterval(fetchBaseModels, 1000);
+    return () => clearInterval(interval);
+  }, [open, downloading, fetchBaseModels]);
+
+  // Like the library buttons: each click asks for its own plan token first.
+  const runBaseAction = async (action, model) => {
+    setBaseBusy(true);
+    setBaseError(null);
+    try {
+      const plan = await getBaseModels({ plan: true });
+      const data =
+        action === "download"
+          ? await installTrainingBaseModel(plan.plan_token, model.id)
+          : await removeTrainingBaseModel(plan.plan_token, model.id);
+      lastDownloadState.current = data?.download?.state || null;
+      setBaseInfo(data);
+      if (action === "remove") {
+        showMessageRef.current?.(`${model.name} removed.`, "success");
+        onBaseModelsChangedRef.current?.(data);
+      }
+    } catch (err) {
+      const message = err.message || `Could not ${action} ${model.name}.`;
+      showMessageRef.current?.(message, "error");
+      setBaseError(message);
+      fetchBaseModels();
+    } finally {
+      setBaseBusy(false);
+      setConfirmRemoveModel(null);
+    }
+  };
 
   // Each click asks for its own plan token, then sends it with the request;
   // the backend runs pip only for a request that carries one.
@@ -309,6 +384,24 @@ const TrainingLibrariesModal = ({ open, onClose, showMessage, onChanged }) => {
             {run.state === "completed" && (
               <Alert severity="success" sx={{ mb: 1 }}>
                 {run.action === "remove" ? "Removed." : "Installed."} {RESTART_HINT}
+                {run.check?.ok && (
+                  <Typography variant="caption" sx={{ display: "block" }}>
+                    Trainer check: {run.check.cuda_device || "GPU"}, bf16 {run.check.bf16 ? "yes" : "no"}, TRL{" "}
+                    {run.check.libraries?.trl}, Unsloth {run.check.libraries?.unsloth}.
+                  </Typography>
+                )}
+              </Alert>
+            )}
+            {run.pip_check_new?.length > 0 && (
+              <Alert severity="warning" sx={{ mb: 1 }}>
+                pip check reports problems this install introduced:
+                <Box component="ul" sx={{ m: 0, pl: 2 }}>
+                  {run.pip_check_new.map((line) => (
+                    <li key={line}>
+                      <Typography variant="caption">{line}</Typography>
+                    </li>
+                  ))}
+                </Box>
               </Alert>
             )}
             {run.state === "failed" && (
@@ -339,6 +432,99 @@ const TrainingLibrariesModal = ({ open, onClose, showMessage, onChanged }) => {
           <Alert severity="info" sx={{ mt: 2 }}>
             {RESTART_HINT}
           </Alert>
+        )}
+
+        <Divider sx={{ my: 2 }} />
+        <Typography variant="subtitle1" fontWeight={500}>
+          Base models
+        </Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+          The models a fine-tune starts from. Download fetches one from huggingface.co when you
+          click it, without your Hugging Face token; training itself never downloads.
+        </Typography>
+        {baseError && (
+          <Alert severity="error" sx={{ mb: 1 }}>
+            {baseError}
+          </Alert>
+        )}
+        {baseInfo?.download?.state === "failed" && (
+          <Alert severity="error" sx={{ mb: 1 }}>
+            {baseInfo.download.model} did not download: {baseInfo.download.error}
+          </Alert>
+        )}
+        {!baseInfo && !baseError ? (
+          <Box display="flex" justifyContent="center" p={2}>
+            <CircularProgress size={24} />
+          </Box>
+        ) : (
+          <List disablePadding>
+            {(baseInfo?.models || []).map((model) => {
+              const active = downloading && baseInfo.download.model === model.id;
+              return (
+                <ListItem key={model.id} divider sx={{ py: 1.5, alignItems: "flex-start" }}>
+                  <ListItemText
+                    primary={
+                      <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap" }}>
+                        <Typography variant="body1" fontWeight={500}>
+                          {model.name}
+                        </Typography>
+                        <Chip label={sizeLabel(model.size_gb * 1000)} size="small" variant="outlined" />
+                        <Chip label={model.license} size="small" variant="outlined" />
+                      </Box>
+                    }
+                    secondaryTypographyProps={{ component: "div" }}
+                    secondary={
+                      <>
+                        {model.description}
+                        {!model.fits && (
+                          <Typography variant="caption" color="warning.main" sx={{ display: "block" }}>
+                            Does not fit: {model.fit_reason}
+                          </Typography>
+                        )}
+                        {active && (
+                          <Box sx={{ mt: 1 }}>
+                            <LinearProgress
+                              variant={baseInfo.download.progress > 0 ? "determinate" : "indeterminate"}
+                              value={baseInfo.download.progress || 0}
+                            />
+                            <Typography variant="caption">
+                              {baseInfo.download.downloaded_gb || 0} of {model.size_gb} GB
+                            </Typography>
+                          </Box>
+                        )}
+                      </>
+                    }
+                  />
+                  <Box sx={{ ml: 2, minWidth: 130, textAlign: "right" }}>
+                    {model.installed ? (
+                      <Stack spacing={1} alignItems="flex-end">
+                        <Chip icon={<CheckCircleIcon />} label="Downloaded" color="success" size="small" variant="outlined" />
+                        <ActionButton
+                          kind="destructive"
+                          onClick={() => setConfirmRemoveModel(model)}
+                          disabled={baseBusy || downloading}
+                        >
+                          Remove
+                        </ActionButton>
+                      </Stack>
+                    ) : model.fits ? (
+                      <Button
+                        variant="outlined"
+                        size="small"
+                        startIcon={<CloudDownloadIcon />}
+                        onClick={() => runBaseAction("download", model)}
+                        disabled={baseBusy || downloading}
+                      >
+                        {active ? "Downloading..." : "Download"}
+                      </Button>
+                    ) : (
+                      <Chip label="Does not fit" size="small" variant="outlined" />
+                    )}
+                  </Box>
+                </ListItem>
+              );
+            })}
+          </List>
         )}
       </DialogContent>
       <DialogActions>
@@ -384,6 +570,17 @@ const TrainingLibrariesModal = ({ open, onClose, showMessage, onChanged }) => {
         busy={busy}
         onConfirm={() => runAction("remove")}
         onClose={() => !busy && setConfirmRemove(false)}
+      />
+      <ConfirmActionDialog
+        open={Boolean(confirmRemoveModel)}
+        title={`Remove ${confirmRemoveModel?.name || "this base model"}?`}
+        description="Deletes its weights from this machine. Jobs on it refuse to start until it is downloaded again."
+        facts={[{ label: "Frees about", value: sizeLabel((confirmRemoveModel?.size_gb || 0) * 1000) || "-" }]}
+        keeps="trained adapters, exported models and training datasets"
+        confirmLabel="Remove"
+        busy={baseBusy}
+        onConfirm={() => runBaseAction("remove", confirmRemoveModel)}
+        onClose={() => !baseBusy && setConfirmRemoveModel(null)}
       />
     </Dialog>
   );

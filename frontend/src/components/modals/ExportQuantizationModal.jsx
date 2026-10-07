@@ -21,21 +21,9 @@ import MemoryIcon from "@mui/icons-material/Memory";
 import SpeedIcon from "@mui/icons-material/Speed";
 import StorageIcon from "@mui/icons-material/Storage";
 
+// The levels `ollama create --quantize` takes for a merged model
+// (backend/tasks/training_tasks.py OLLAMA_QUANTIZE); the backend refuses others.
 const QUANTIZATION_OPTIONS = [
-  {
-    value: "q2_k",
-    label: "Q2_K",
-    description: "Smallest, lower quality",
-    sizeMultiplier: 0.25,
-    quality: 1,
-  },
-  {
-    value: "q3_k_m",
-    label: "Q3_K_M",
-    description: "Very small",
-    sizeMultiplier: 0.35,
-    quality: 2,
-  },
   {
     value: "q4_k_m",
     label: "Q4_K_M",
@@ -43,20 +31,6 @@ const QUANTIZATION_OPTIONS = [
     sizeMultiplier: 0.5,
     quality: 3,
     recommended: true,
-  },
-  {
-    value: "q5_k_m",
-    label: "Q5_K_M",
-    description: "Good quality",
-    sizeMultiplier: 0.6,
-    quality: 4,
-  },
-  {
-    value: "q6_k",
-    label: "Q6_K",
-    description: "High quality",
-    sizeMultiplier: 0.75,
-    quality: 5,
   },
   {
     value: "q8_0",

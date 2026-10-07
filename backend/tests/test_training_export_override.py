@@ -1,9 +1,16 @@
 """A run the export gate held can be exported on a person's explicit choice,
-the choice is recorded on the job, and the export routes hand the export and
-import tasks the training output folder.
+the choice is recorded on the job, the export routes hand the export and
+import tasks the training output folder, and no export starts for a base
+model whose export to Ollama has not been verified.
+
+Export itself folds the adapter into its base model in an offline subprocess
+and registers the folder with `ollama create --quantize`, using the chat
+template the base model's entry declares; no llama.cpp is fetched or built.
 
 Seams: celery.chain and each task's apply_async, read by the routes at call
-time; nothing is sent to a worker."""
+time; training_base_models.export_verified and resolve_for_training,
+training_runner.run and subprocess.run (the ollama CLI), read at call time;
+nothing is sent to a worker and nothing runs."""
 import json
 import os
 import sys
@@ -38,6 +45,25 @@ def client(tmp_path):
         yield app.test_client()
         db.session.remove()
         db.drop_all()
+
+
+@pytest.fixture(autouse=True)
+def progress(monkeypatch):
+    """The tasks' progress events are recorded here; the real emitter reaches
+    the unified progress system, which builds the whole backend app."""
+    sent = []
+    monkeypatch.setattr(tt, "_emit_progress",
+                        lambda job_id, pct, message, status="processing", metrics=None: sent.append((pct, message, status)))
+    return sent
+
+
+@pytest.fixture(autouse=True)
+def verified(monkeypatch):
+    """Export counts as verified for the job's base model unless a test says not."""
+    state = {"verified": True}
+    monkeypatch.setattr("backend.services.training_base_models.export_verified",
+                        lambda model_id: state["verified"])
+    return state
 
 
 @pytest.fixture
@@ -193,3 +219,129 @@ def test_the_import_routes_hand_over_the_folder_holding_the_gguf(client, dispatc
     assert client.post(f"/api/training/jobs/{pk}/export-to-ollama", json={"model_name": "mine"}).status_code == 202
 
     assert [args for _, args, _ in dispatched.tasks] == [["held-job", str(model_dir), "mine"]] * 2
+
+
+def test_no_export_starts_for_a_base_model_not_verified(client, dispatched, tmp_path, verified):
+    verified["verified"] = False
+    pk, _ = _held_job(tmp_path, status="completed")
+
+    for path in (f"/api/training/jobs/{pk}/export", f"/api/training/jobs/{pk}/export-to-ollama"):
+        response = client.post(path, json={"model_name": "mine"})
+        assert response.status_code == 409, path
+        assert response.get_json()["error"]["code"] == "EXPORT_NOT_VERIFIED"
+        assert "not verified for org/base-model" in response.get_json()["error"]["message"]
+    assert dispatched.chains == [] and dispatched.tasks == []
+    assert _row(pk).status == "completed"
+
+
+def test_the_export_task_refuses_before_touching_the_job(client, tmp_path, verified):
+    verified["verified"] = False
+    pk, model_dir = _held_job(tmp_path, status="completed")
+
+    with pytest.raises(tt.ExportNotVerified):
+        tt.export_gguf_task.run("held-job", str(model_dir), "q4_k_m")
+
+    row = _row(pk)
+    assert row.status == "completed" and row.pipeline_stage == "training"
+
+
+# ---- export: merge, then ollama create --quantize --------------------------------
+
+QWEN = "Qwen/Qwen2.5-1.5B-Instruct"
+
+
+def _trained_job(tmp_path, quantization="q4_k_m"):
+    model_dir = tmp_path / "models" / "test-out"
+    (model_dir / "lora").mkdir(parents=True)
+    job = TrainingJob(job_id="trained", name="trained", base_model=QWEN, output_model_name="test-out",
+                      status="completed", pipeline_stage="training", lora_path=str(model_dir / "lora"),
+                      quantization_level=quantization, config_json="{}")
+    db.session.add(job)
+    db.session.commit()
+    return job.id, model_dir
+
+
+@pytest.fixture
+def merge(monkeypatch, tmp_path):
+    from backend.services import training_base_models
+
+    calls = []
+    snapshot = str(tmp_path / "snapshot")
+    monkeypatch.setattr("backend.services.training_base_models.resolve_for_training",
+                        lambda model_id: (training_base_models.get(model_id), snapshot))
+
+    def run(command, spec, **kwargs):
+        calls.append((command, spec, kwargs))
+        merged = Path(spec["out_dir"])
+        merged.mkdir(parents=True)
+        (merged / "config.json").write_text("{}")
+        return {"event": "done", "model_dir": str(merged)}
+
+    monkeypatch.setattr("backend.services.training_runner.run", run)
+    return SimpleNamespace(calls=calls, snapshot=snapshot)
+
+
+@pytest.fixture
+def ollama_cli(monkeypatch):
+    import subprocess
+
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append({"cmd": cmd, **kwargs})
+        return subprocess.CompletedProcess(cmd, 0, stdout="success", stderr="")
+
+    monkeypatch.setattr(tt.subprocess, "run", run)
+    return calls
+
+
+def test_export_merges_the_adapter_into_its_base_offline(client, tmp_path, merge):
+    pk, model_dir = _trained_job(tmp_path)
+
+    result = tt.export_gguf_task.run("trained", str(model_dir), "q4_k_m")
+
+    (command, spec, kwargs), = merge.calls
+    assert command == "merge"
+    assert spec["base_model"] == merge.snapshot
+    assert spec["lora_dir"] == str(model_dir / "lora") and spec["out_dir"] == str(model_dir / "merged")
+    assert kwargs["workdir"] == model_dir
+    assert result == {"merged_path": str(model_dir / "merged")}
+    assert _row(pk).status == "running" and _row(pk).pipeline_stage == "exporting"
+
+
+def test_import_registers_the_merged_model_with_the_declared_template(client, tmp_path, merge, ollama_cli):
+    from backend.services import training_base_models
+
+    pk, model_dir = _trained_job(tmp_path)
+    tt.export_gguf_task.run("trained", str(model_dir), "q4_k_m")
+
+    tt.import_ollama_task.run("trained", str(model_dir), "my-model")
+
+    (call,) = ollama_cli
+    assert call["cmd"] == ["ollama", "create", "my-model", "-f", str(model_dir / "Modelfile"),
+                           "--quantize", "q4_K_M"]
+    modelfile = (model_dir / "Modelfile").read_text()
+    assert modelfile.startswith(f"FROM {model_dir / 'merged'}\n")
+    assert f'TEMPLATE """{training_base_models.get(QWEN)["ollama_template"]}"""' in modelfile
+    assert 'PARAMETER stop "<|im_end|>"' in modelfile
+    row = _row(pk)
+    assert row.status == "completed" and row.ollama_model_name == "my-model"
+
+
+def test_f16_registers_the_merged_model_unquantised(client, tmp_path, merge, ollama_cli):
+    _, model_dir = _trained_job(tmp_path, quantization="f16")
+    tt.export_gguf_task.run("trained", str(model_dir), "f16")
+    tt.import_ollama_task.run("trained", str(model_dir), "my-model")
+    assert "--quantize" not in ollama_cli[0]["cmd"]
+
+
+def test_a_level_ollama_cannot_quantize_to_is_refused_with_the_choices(client, tmp_path, merge, ollama_cli):
+    pk, model_dir = _trained_job(tmp_path, quantization="q5_k_m")
+    tt.export_gguf_task.run("trained", str(model_dir), "q5_k_m")
+
+    with pytest.raises(ValueError, match="cannot quantize a merged model to q5_k_m"):
+        tt.import_ollama_task.run("trained", str(model_dir), "my-model")
+
+    assert ollama_cli == []
+    assert _row(pk).status == "failed"
+

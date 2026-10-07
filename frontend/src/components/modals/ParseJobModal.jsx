@@ -157,7 +157,7 @@ const ParseJobModal = ({ open, onClose, onSuccess, isSaving: externalSaving }) =
           setFormData((prev) => ({ ...prev, input_path: selectedPath }));
           setDirectoryPickerOpen(false);
         }}
-        initialPath={formData.input_path || "training/raw_transcripts"}
+        initialPath={formData.input_path || "~"}
         title="Select Transcript Directory"
       />
     </>

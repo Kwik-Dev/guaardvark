@@ -186,6 +186,8 @@ frontend/public/*.onnx
 
 # Training model weights (too large for git)
 training/models/
+# Filtered datasets written by the training pipeline
+training/processed/
 unsloth_compiled_cache/
 plugins/upscaling/models/*.pth
 # Root training snapshot archive — a multi-GB tarball of the whole training/ dir.

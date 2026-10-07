@@ -34,6 +34,57 @@ def _not_started(job, what: str, exc: Exception):
     return error_response(f"Failed to start {what}: {exc}", 500)
 
 
+# Fine-tunes run on the training worker: its Celery process waits for the GPU
+# and supervises the trainer subprocess, which claims the card through the
+# cross-process lease, so the main worker stays free.
+TRAINING_QUEUE = "training"
+
+
+def _dispatch_finetune(job, *, resume: bool = False):
+    """Queue the job's fine-tune on the training worker and mark it running.
+    Raises TaskNotStarted when the queue does not take it."""
+    from backend.tasks.training_tasks import finetune_model_task
+    config = json.loads(job.config_json) if job.config_json else {}
+    task = finetune_model_task.apply_async(
+        args=[job.job_id, config], kwargs={"resume": resume}, queue=TRAINING_QUEUE)
+    job.celery_task_id = task.id
+    job.status = "running"
+    job.pipeline_stage = "training"
+    job.error_message = None
+    db.session.commit()
+    return task
+
+
+def _cancel(job) -> bool:
+    """Mark the job cancelled first (so its task, reading the status, ends it
+    as cancelled), then stop its trainer and drop its queued task. Returns
+    whether a trainer process was signalled."""
+    job.status = "cancelled"
+    job.error_message = "Cancelled by user"
+    pid, job.pid = job.pid, None
+    db.session.commit()
+    pid_terminated = False
+    if pid:
+        from backend.services.training_runner import stop_trainer
+        pid_terminated = stop_trainer(pid)
+    if job.celery_task_id:
+        try:
+            from celery import current_app as celery_app
+            # No terminate: a running task notices the cancel itself and
+            # releases the GPU; killing the pool process would strand its lease.
+            celery_app.control.revoke(job.celery_task_id)
+        except Exception as e:
+            logger.warning(f"Could not revoke Celery task: {e}")
+    return pid_terminated
+
+
+def _job_dict(job) -> dict:
+    """The job as the Training page reads it, with whether its base model's
+    export to Ollama has been verified (the page offers Export only then)."""
+    from backend.services import training_base_models
+    return {**job.to_dict(), "export_verified": training_base_models.export_verified(job.base_model)}
+
+
 def _put_back(job, before, what: str, exc: Exception):
     """Answer for a step started on an existing job (export, import, resume)
     whose task was not queued: nothing ran, so the job returns to the status
@@ -58,8 +109,8 @@ def list_jobs():
             query = query.filter(TrainingJob.dataset_id == dataset_id)
         
         jobs = query.order_by(TrainingJob.created_at.desc()).all()
-        
-        return success_response([job.to_dict() for job in jobs])
+
+        return success_response([_job_dict(job) for job in jobs])
     except Exception as e:
         logger.error(f"Error listing training jobs: {e}", exc_info=True)
         return error_response(str(e), 500)
@@ -87,6 +138,41 @@ def list_image_folders():
     except Exception as e:
         logger.error(f"Error listing image folders: {e}", exc_info=True)
         return error_response(str(e), 500)
+
+
+@training_bp.route("/datasets/inspect", methods=["GET"])
+def inspect_dataset():
+    """What a dataset path holds: files, rows, usable rows, formats, a few
+    clipped sample rows and the first problems (file and line, never text).
+    ?path= a .jsonl or .json file or a folder on this machine; ~ is followed."""
+    from backend.services.training.scripts import dataset_formats
+    try:
+        return success_response(dataset_formats.inspect(request.args.get("path", "")))
+    except Exception as e:
+        logger.error(f"Error inspecting dataset path: {e}", exc_info=True)
+        return error_response(f"Could not read the dataset: {type(e).__name__}", 500)
+
+
+def training_datasets_dir() -> Path:
+    """Where parsed transcripts are written and the dataset picker opens."""
+    from backend.config import STORAGE_DIR
+    return Path(STORAGE_DIR) / "training" / "datasets"
+
+
+@training_bp.route("/datasets/locations", methods=["GET"])
+def dataset_locations():
+    """Starting folders for the dataset picker: Guaardvark's training datasets
+    folder and the home folder, each with whether it exists, and the one the
+    picker opens in."""
+    datasets_dir = training_datasets_dir()
+    home = Path(os.path.expanduser("~"))
+    locations = [
+        {"id": "datasets", "label": "Training datasets", "path": str(datasets_dir),
+         "exists": datasets_dir.is_dir()},
+        {"id": "home", "label": "Home", "path": str(home), "exists": home.is_dir()},
+    ]
+    default = next((loc["path"] for loc in locations if loc["exists"]), "~")
+    return success_response({"locations": locations, "default": default})
 
 
 @training_bp.route("/hardware", methods=["GET"])
@@ -183,11 +269,95 @@ def _libraries_missing_response():
     return None
 
 
+def _job_refusal(base_model, job_config: dict):
+    """The refusal for a job its base model cannot run here, or for settings
+    past the limits the model declares; None when it may be created."""
+    from backend.services import training_base_models
+    reason = training_base_models.refusal_for_job(base_model, vision=bool(job_config.get("images_path")))
+    if reason:
+        return error_response(reason, 400, "BASE_MODEL_UNAVAILABLE")
+    entry = training_base_models.get(base_model)
+    if entry:
+        for key, limit_key, label in (("batch_size", "max_batch_size", "Batch size"),
+                                      ("seq_length", "max_seq_length", "Sequence length")):
+            value = job_config.get(key)
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                return error_response(f"{label} must be a whole number of 1 or more", 400)
+            if value > entry[limit_key]:
+                return error_response(f"{label} {value} is above the {entry[limit_key]} "
+                                      f"{entry['name']} is set up for", 400)
+    steps = job_config.get("steps")
+    if steps is not None and (isinstance(steps, bool) or not isinstance(steps, int) or steps < 1):
+        return error_response("steps must be a whole number of 1 or more, or left out", 400)
+    return None
+
+
+def _start_refusal(base_model, dataset_id, job_config, device_profile_id):
+    """Why a fine-tune with these settings may not be created or started, as
+    an error response, or None. Creating a job and starting a pending one
+    apply the same checks."""
+    missing_libraries = _libraries_missing_response()
+    if missing_libraries:
+        return missing_libraries
+
+    if not isinstance(job_config, dict):
+        return error_response("config must be an object", 400)
+    refusal = _job_refusal(base_model, job_config)
+    if refusal:
+        return refusal
+
+    # The trainer reads the dataset's file when the config names none, so a
+    # dataset it cannot read is refused here rather than failing the run.
+    dataset = db.session.get(TrainingDataset, dataset_id)
+    if not dataset:
+        return error_response("Dataset not found", 400)
+    if not (job_config.get("data_path") or job_config.get("dataset_path")):
+        from backend.tasks.training_tasks import dataset_training_files
+        _, reason = dataset_training_files(dataset.path)
+        if reason:
+            return error_response(f"Dataset '{dataset.name}' cannot be trained on: {reason}", 400)
+
+    if device_profile_id:
+        device_profile = db.session.get(DeviceProfile, device_profile_id)
+        if not device_profile:
+            return error_response("Device profile not found", 400)
+        if not device_profile.is_active:
+            return error_response("Device profile is not active", 400)
+
+        batch_size = job_config.get("batch_size", device_profile.max_batch_size)
+        seq_length = job_config.get("seq_length", device_profile.max_seq_length)
+
+        if batch_size > device_profile.max_batch_size:
+            return error_response(
+                f"Batch size {batch_size} exceeds device profile maximum {device_profile.max_batch_size}",
+                400
+            )
+
+        if seq_length > device_profile.max_seq_length:
+            return error_response(
+                f"Sequence length {seq_length} exceeds device profile maximum {device_profile.max_seq_length}",
+                400
+            )
+
+        from backend.services import training_base_models
+        entry = training_base_models.get(base_model)
+        if entry and device_profile.device_type == "gpu" and device_profile.gpu_vram_mb:
+            if entry["vram_mb"] > device_profile.gpu_vram_mb:
+                return error_response(
+                    f"{entry['name']} is budgeted {entry['vram_mb']} MB of GPU memory "
+                    f"({entry['vram_measured']}); this device profile has {device_profile.gpu_vram_mb} MB",
+                    400
+                )
+    return None
+
+
 @training_bp.route("/jobs", methods=["POST"])
 @ensure_db_session_cleanup
 def create_job():
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
 
         if not data.get("name"):
             return error_response("Job name is required", 400)
@@ -196,71 +366,21 @@ def create_job():
         if not data.get("dataset_id"):
             return error_response("Dataset ID is required", 400)
 
-        missing_libraries = _libraries_missing_response()
-        if missing_libraries:
-            return missing_libraries
-
-        # The trainer reads the dataset's file when the config names none, so a
-        # dataset it cannot read is refused here rather than failing the run.
-        dataset = db.session.get(TrainingDataset, data["dataset_id"])
-        if not dataset:
-            return error_response("Dataset not found", 400)
-        job_config = data.get("config") or {}
-        if not (job_config.get("data_path") or job_config.get("dataset_path")):
-            from backend.tasks.training_tasks import dataset_training_files
-            _, reason = dataset_training_files(dataset.path)
-            if reason:
-                return error_response(f"Dataset '{dataset.name}' cannot be trained on: {reason}", 400)
-
         device_profile_id = data.get("device_profile_id")
-        device_profile = None
-        if device_profile_id:
-            device_profile = db.session.get(DeviceProfile, device_profile_id)
-            if not device_profile:
-                return error_response("Device profile not found", 400)
-            if not device_profile.is_active:
-                return error_response("Device profile is not active", 400)
-            
-            config = data.get("config", {})
-            batch_size = config.get("batch_size", device_profile.max_batch_size)
-            seq_length = config.get("seq_length", device_profile.max_seq_length)
-            
-            if batch_size > device_profile.max_batch_size:
-                return error_response(
-                    f"Batch size {batch_size} exceeds device profile maximum {device_profile.max_batch_size}",
-                    400
-                )
-            
-            if seq_length > device_profile.max_seq_length:
-                return error_response(
-                    f"Sequence length {seq_length} exceeds device profile maximum {device_profile.max_seq_length}",
-                    400
-                )
-            
-            if device_profile.device_type == "gpu" and device_profile.gpu_vram_mb:
-                estimated_vram = batch_size * 2048
-                if estimated_vram > device_profile.gpu_vram_mb * 0.9:
-                    return error_response(
-                        f"Estimated VRAM usage ({estimated_vram}MB) exceeds available VRAM ({device_profile.gpu_vram_mb}MB)",
-                        400
-                    )
-        
+        refusal = _start_refusal(data["base_model"], data["dataset_id"], data.get("config") or {},
+                                 device_profile_id)
+        if refusal:
+            return refusal
+
         job_id = str(uuid.uuid4())
-        
-        queue = "training"
-        if device_profile:
-            if device_profile.device_type == "gpu":
-                queue = "training_gpu"
-            else:
-                queue = "training"
-        
+
         job = TrainingJob(
             job_id=job_id,
             name=data["name"],
             base_model=data["base_model"],
             output_model_name=data.get("output_model_name"),
             dataset_id=data["dataset_id"],
-            config_json=json.dumps(data.get("config", {})),
+            config_json=json.dumps(data.get("config") or {}),
             device_profile_id=device_profile_id,
             status="pending",
             pipeline_stage="pending"
@@ -271,20 +391,13 @@ def create_job():
         
         if data.get("start_immediately", False):
             from backend.celery_dispatch import TaskNotStarted
-            from backend.tasks.training_tasks import finetune_model_task
             try:
-                task = finetune_model_task.apply_async(
-                    args=[job_id, json.loads(job.config_json)],
-                    queue=queue
-                )
+                _dispatch_finetune(job)
             except TaskNotStarted as e:
                 return _not_started(job, "training", e)
-            job.celery_task_id = task.id
-            job.status = "running"
-            db.session.commit()
-        
-        logger.info(f"Created training job: {job_id} - {job.name} (queue: {queue})")
-        return success_response(job.to_dict(), status_code=201)
+
+        logger.info(f"Created training job: {job_id} - {job.name}")
+        return success_response(_job_dict(job), status_code=201)
     except SQLAlchemyError as e:
         db.session.rollback()
         logger.error(f"Database error creating training job: {e}", exc_info=True)
@@ -301,8 +414,8 @@ def get_job(job_id):
         job = db.session.get(TrainingJob, job_id)
         if not job:
             return error_response("Job not found", 404)
-        
-        return success_response(job.to_dict())
+
+        return success_response(_job_dict(job))
     except Exception as e:
         logger.error(f"Error getting training job {job_id}: {e}", exc_info=True)
         return error_response(str(e), 500)
@@ -316,14 +429,9 @@ def delete_job(job_id):
         if not job:
             return error_response("Job not found", 404)
         
-        if job.status == "running":
-            try:
-                from celery import current_app as celery_app
-                if job.celery_task_id:
-                    celery_app.control.revoke(job.celery_task_id, terminate=True)
-            except Exception as e:
-                logger.warning(f"Could not cancel Celery task: {e}")
-        
+        if job.status in ("pending", "running"):
+            _cancel(job)
+
         db.session.delete(job)
         db.session.commit()
         
@@ -341,10 +449,9 @@ def delete_job(job_id):
 @training_bp.route("/jobs/<int:job_id>/cancel", methods=["POST"])
 @ensure_db_session_cleanup
 def cancel_job(job_id):
-    import os
-    import signal
-    import time
-
+    """Cancel a pending or running job: it is marked cancelled, its trainer
+    process (the job's pid) is stopped, and its task ends as cancelled,
+    releasing the GPU."""
     try:
         job = db.session.get(TrainingJob, job_id)
         if not job:
@@ -353,51 +460,11 @@ def cancel_job(job_id):
         if job.status not in ["pending", "running"]:
             return error_response(f"Job cannot be cancelled (status: {job.status})", 400)
 
-        pid_terminated = False
-
-        if job.pid:
-            try:
-                logger.info(f"Sending SIGTERM to PID {job.pid}")
-                os.kill(job.pid, signal.SIGTERM)
-                pid_terminated = True
-
-                time.sleep(2)
-
-                try:
-                    os.kill(job.pid, 0)
-                    logger.info(f"Process {job.pid} still running, sending SIGKILL")
-                    time.sleep(3)
-                    try:
-                        os.kill(job.pid, 0)
-                        os.kill(job.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                except ProcessLookupError:
-                    logger.info(f"Process {job.pid} terminated gracefully")
-
-            except ProcessLookupError:
-                logger.info(f"Process {job.pid} already terminated")
-            except PermissionError:
-                logger.warning(f"Permission denied to terminate PID {job.pid}")
-            except Exception as e:
-                logger.warning(f"Error terminating process: {e}")
-
-        if job.celery_task_id:
-            try:
-                from celery import current_app as celery_app
-                celery_app.control.revoke(job.celery_task_id, terminate=True)
-                logger.info(f"Revoked Celery task: {job.celery_task_id}")
-            except Exception as e:
-                logger.warning(f"Could not revoke Celery task: {e}")
-
-        job.status = "cancelled"
-        job.error_message = "Cancelled by user"
-        job.pid = None
-        db.session.commit()
+        pid_terminated = _cancel(job)
 
         logger.info(f"Cancelled training job: {job_id} (pid_terminated={pid_terminated})")
         return success_response({
-            **job.to_dict(),
+            **_job_dict(job),
             "pid_terminated": pid_terminated
         })
     except SQLAlchemyError as e:
@@ -406,6 +473,45 @@ def cancel_job(job_id):
         return error_response(f"Database error: {str(e)}", 500)
     except Exception as e:
         logger.error(f"Error cancelling training job: {e}", exc_info=True)
+        return error_response(str(e), 500)
+
+
+@training_bp.route("/jobs/<int:job_id>/start", methods=["POST"])
+@ensure_db_session_cleanup
+def start_job(job_id):
+    """Start a fine-tune that was created without starting (pending, never
+    queued), after the same checks as creating it."""
+    try:
+        job = db.session.get(TrainingJob, job_id)
+        if not job:
+            return error_response("Job not found", 404)
+        if job.status != "pending" or job.celery_task_id or job.pipeline_stage not in (None, "pending"):
+            return error_response(
+                f"Only a training job that has not started can be started (status: {job.status}, "
+                f"stage: {job.pipeline_stage}). Use Resume for a failed or cancelled run.", 400)
+        if not job.base_model or not job.dataset_id:
+            return error_response("This job has no base model or dataset to train on.", 400)
+
+        config = json.loads(job.config_json) if job.config_json else {}
+        refusal = _start_refusal(job.base_model, job.dataset_id, config, job.device_profile_id)
+        if refusal:
+            return refusal
+
+        from backend.celery_dispatch import TaskNotStarted
+        before = (job.status, job.pipeline_stage)
+        try:
+            _dispatch_finetune(job)
+        except TaskNotStarted as e:
+            return _put_back(job, before, "training", e)
+
+        logger.info(f"Started training job: {job_id} with task {job.celery_task_id}")
+        return success_response(_job_dict(job))
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        logger.error(f"Database error starting training job: {e}", exc_info=True)
+        return error_response(f"Database error: {str(e)}", 500)
+    except Exception as e:
+        logger.error(f"Error starting training job {job_id}: {e}", exc_info=True)
         return error_response(str(e), 500)
 
 
@@ -434,34 +540,18 @@ def resume_job(job_id):
         job.pid = None
         db.session.commit()
 
-        job_config = {}
-        if job.config_json:
-            import json
-            job_config = json.loads(job.config_json)
-
         from backend.celery_dispatch import TaskNotStarted
         try:
-            from backend.tasks.training_tasks import finetune_model_task
-
             try:
-                task = finetune_model_task.apply_async(
-                    args=[job.job_id, job_config],
-                    kwargs={"resume": True},
-                    queue="training_gpu"
-                )
+                task = _dispatch_finetune(job, resume=True)
             except TaskNotStarted as e:
                 # Back to failed or cancelled, so Resume stays available.
                 job.error_message = str(e)
                 return _put_back(job, before, "resume", e)
 
-            job.celery_task_id = task.id
-            job.status = "running"
-            job.pipeline_stage = "training"
-            db.session.commit()
-
             logger.info(f"Resumed training job: {job_id} with task {task.id}")
             return success_response({
-                **job.to_dict(),
+                **_job_dict(job),
                 "celery_task_id": task.id,
                 "resumed_from_checkpoint": job.checkpoint_path
             })
@@ -626,16 +716,61 @@ def delete_device_profile(profile_id):
 @training_bp.route("/base-models", methods=["GET"])
 @ensure_db_session_cleanup
 def list_base_models():
+    """The declared base models (training_base_models.BASE_MODELS) with
+    whether each is downloaded and fits this GPU, plus the download in
+    progress. ?plan=1 also hands out the one-use token Download and Remove send."""
     try:
-        from backend.api.model_api import get_available_ollama_models
-        
-        models = get_available_ollama_models()
-        
-        base_models = [m for m in models if ":" in m.get("name", "")]
-        
-        return success_response(base_models)
+        from backend.services import training_base_models
+        return success_response(
+            training_base_models.status(with_plan_token=request.args.get("plan") == "1"))
     except Exception as e:
         logger.error(f"Error listing base models: {e}", exc_info=True)
+        return error_response(str(e), 500)
+
+
+@training_bp.route("/base-models/install", methods=["POST"])
+@ensure_db_session_cleanup
+def install_base_model():
+    """Download one declared base model from Hugging Face, without a token.
+
+    Only the Download click sends what this needs:
+    {"confirm": "download", "model": <id>, "plan_token": <from GET /base-models?plan=1>}."""
+    from backend.services import training_base_models
+    data = request.get_json(silent=True) or {}
+    if data.get("confirm") != "download":
+        return error_response(training_base_models.NEEDS_CLICK, 403, "NEEDS_CLICK")
+    try:
+        result = training_base_models.start_install(data.get("plan_token"), data.get("model"))
+        logger.info("Training base model download started: %s", data.get("model"))
+        return success_response(result, "Download started", status_code=202)
+    except training_base_models.Refused as e:
+        return error_response(str(e), e.status, e.code)
+    except Exception as e:
+        logger.error(f"Error starting a base model download: {e}", exc_info=True)
+        return error_response(str(e), 500)
+
+
+@training_bp.route("/base-models/remove", methods=["POST"])
+@ensure_db_session_cleanup
+def remove_base_model():
+    """Delete one base model's weights.
+    Body: {"confirm": "remove", "model": <id>, "plan_token": <from GET /base-models?plan=1>}."""
+    from backend.services import training_base_models
+    data = request.get_json(silent=True) or {}
+    if data.get("confirm") != "remove":
+        return error_response(training_base_models.NEEDS_CLICK, 403, "NEEDS_CLICK")
+    running = db.session.query(TrainingJob).filter(
+        TrainingJob.status == "running", TrainingJob.base_model == data.get("model")).count()
+    if running:
+        return error_response(f"{running} training job(s) on this model are running; wait for them "
+                              f"to finish or cancel them.", 409, "TRAINING_RUNNING")
+    try:
+        return success_response(training_base_models.start_remove(data.get("plan_token"), data.get("model")),
+                                "Removed")
+    except training_base_models.Refused as e:
+        return error_response(str(e), e.status, e.code)
+    except Exception as e:
+        logger.error(f"Error removing a base model: {e}", exc_info=True)
         return error_response(str(e), 500)
 
 
@@ -661,15 +796,20 @@ def base_model_status():
 @ensure_db_session_cleanup
 def start_parse_job():
     try:
-        data = request.get_json()
-        
-        if not data.get("input_path"):
+        data = request.get_json(silent=True) or {}
+
+        input_path = data.get("input_path")
+        if not isinstance(input_path, str) or not input_path.strip():
             return error_response("input_path is required", 400)
-        
+        name = data.get("name")
+        name = name.strip() if isinstance(name, str) else ""
+        if not name:
+            name = f"Parse: {os.path.basename(input_path.rstrip('/')) or input_path}"
+
         job_id = str(uuid.uuid4())
         job = TrainingJob(
             job_id=job_id,
-            name=data.get("name", f"Parse: {data['input_path']}"),
+            name=name,
             pipeline_stage="parsing",
             status="pending",
             config_json=json.dumps({
@@ -824,6 +964,11 @@ def export_job_to_gguf(job_id):
         if not lora_path.exists():
             return error_response(f"LoRA adapter path not found: {job.lora_path}", 400)
 
+        from backend.tasks.training_tasks import export_refusal
+        refusal = export_refusal(job.base_model, job.lora_path)
+        if refusal:
+            return error_response(refusal, 409, "EXPORT_NOT_VERIFIED")
+
         data = request.get_json() or {}
         quantization = data.get("quantization", "q4_k_m")
 
@@ -967,6 +1112,11 @@ def export_to_ollama(job_id):
         lora_path = Path(job.lora_path)
         if not lora_path.exists():
             return error_response(f"LoRA adapter path not found: {job.lora_path}", 400)
+
+        from backend.tasks.training_tasks import export_refusal
+        refusal = export_refusal(job.base_model, job.lora_path)
+        if refusal:
+            return error_response(refusal, 409, "EXPORT_NOT_VERIFIED")
 
         before = (job.status, job.pipeline_stage)
         job.pipeline_stage = "exporting"

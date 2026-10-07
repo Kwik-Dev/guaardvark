@@ -47,6 +47,7 @@ import {
   createTrainingJob,
   cancelTrainingJob,
   resumeTrainingJob,
+  startTrainingJob,
   deleteTrainingJob,
   getDeviceProfiles,
   createDeviceProfile,
@@ -68,6 +69,8 @@ import DeviceProfileModal from "../components/modals/DeviceProfileModal";
 import ParseJobModal from "../components/modals/ParseJobModal";
 import ExportQuantizationModal from "../components/modals/ExportQuantizationModal";
 import { useSnackbar } from "../components/common/SnackbarProvider";
+import EntityContextMenu from "../components/common/EntityContextMenu";
+import useContextMenu from "../hooks/useContextMenu";
 import { useUnifiedProgress } from "../contexts/UnifiedProgressContext";
 import { useStatus } from "../contexts/StatusContext";
 import PageLayout from "../components/layout/PageLayout";
@@ -84,6 +87,9 @@ const AlertSnackbar = React.forwardRef(function Alert(props, ref) {
 });
 
 const LEARN_API = "/api/agent-control/learn";
+
+// ?tab= values the page opens on (TrainingFloater and other links use them).
+const TAB_INDEX = { demonstrations: 0, datasets: 1, jobs: 2, devices: 3 };
 
 /** The steps editor's text for a demonstration as the server holds it. */
 const stepsJson = (steps) =>
@@ -230,9 +236,7 @@ const TrainingPage = () => {
   const { activeModel, isLoadingModel, modelError } = useStatus();
   const theme = useTheme();
   const [searchParams, setSearchParams] = useSearchParams();
-  const [activeTab, setActiveTab] = useState(() => {
-    return searchParams.get("tab") === "demonstrations" ? 0 : 0;
-  });
+  const [activeTab, setActiveTab] = useState(() => TAB_INDEX[searchParams.get("tab")] ?? 0);
 
   // Demonstrations state
   const [demonstrations, setDemonstrations] = useState([]);
@@ -293,6 +297,9 @@ const TrainingPage = () => {
   const [deviceModalOpen, setDeviceModalOpen] = useState(false);
   const [parseModalOpen, setParseModalOpen] = useState(false);
   const [currentItem, setCurrentItem] = useState(null);
+  // Starting values for a new dataset (a finished parse's output); kept in
+  // state so the jobs list refreshing does not reset the open form.
+  const [datasetPrefill, setDatasetPrefill] = useState(null);
   const [isSaving, setIsSaving] = useState(false);
   const [feedback, setFeedback] = useState({
     open: false,
@@ -348,8 +355,7 @@ const TrainingPage = () => {
   const fetchBaseModels = useCallback(async () => {
     try {
       const data = await getBaseModels();
-      if (data?.error) throw new Error(data.error.message || data.error);
-      setBaseModels(Array.isArray(data) ? data : []);
+      setBaseModels(Array.isArray(data?.models) ? data.models : []);
     } catch (err) {
       console.error("Error fetching base models:", err);
     }
@@ -401,10 +407,11 @@ const TrainingPage = () => {
 
   // Handle URL params for deep-linking from TrainingFloater
   useEffect(() => {
-    if (searchParams.get("tab") === "demonstrations") {
-      setActiveTab(0);
+    const tab = searchParams.get("tab");
+    if (tab in TAB_INDEX) {
+      setActiveTab(TAB_INDEX[tab]);
       const demoId = searchParams.get("demo");
-      if (demoId) setExpandedDemoId(parseInt(demoId, 10));
+      if (tab === "demonstrations" && demoId) setExpandedDemoId(parseInt(demoId, 10));
       // Clear params after applying
       setSearchParams({}, { replace: true });
     }
@@ -420,15 +427,24 @@ const TrainingPage = () => {
     }
   }, [activeTab, fetchJobs]);
 
-  const handleOpenEditModal = (item = null) => {
+  const handleOpenEditModal = (item = null, prefill = null) => {
     setCurrentItem(item);
+    setDatasetPrefill(prefill);
     setEditModalOpen(true);
   };
 
   const handleCloseEditModal = () => {
     if (isSaving) return;
     setCurrentItem(null);
+    setDatasetPrefill(null);
     setEditModalOpen(false);
+  };
+
+  const handleAddParsedDataset = (job) => {
+    handleOpenEditModal(null, {
+      name: (job.name || "").replace(/^Parse:\s*/, "") || "Parsed transcripts",
+      path: job.config?.output_path || "",
+    });
   };
 
   const handleSave = async (formData) => {
@@ -478,6 +494,16 @@ const TrainingPage = () => {
       fetchJobs();
     } catch (err) {
       showMessage(`Failed to cancel job: ${err.message}`, "error");
+    }
+  };
+
+  const handleStartJob = async (jobId) => {
+    try {
+      await startTrainingJob(jobId);
+      showMessage("Training started", "success");
+      fetchJobs();
+    } catch (err) {
+      showMessage(`Failed to start job: ${err.message}`, "error");
     }
   };
 
@@ -609,6 +635,54 @@ const TrainingPage = () => {
     } catch (err) {
       showMessage(`Failed to delete profile: ${err.message}`, "error");
     }
+  };
+
+  const rowMenu = useContextMenu();
+
+  // A fine-tune created without starting: pending and never queued.
+  const canStart = (job) =>
+    job.status === "pending" && !job.celery_task_id && Boolean(job.base_model) &&
+    (!job.pipeline_stage || job.pipeline_stage === "pending");
+  const canResume = (job) => job.is_resumable && (job.status === "failed" || job.status === "cancelled");
+
+  const menuActions = (payload) => {
+    if (!payload) return [];
+    const { kind, item } = payload;
+    if (kind === "dataset") {
+      return [
+        { label: "Edit", icon: <EditIcon fontSize="small" />, onClick: () => handleOpenEditModal(item) },
+        { label: "Delete", icon: <CloseIcon fontSize="small" />, onClick: () => handleDeleteDataset(item), color: "error.main", dividerBefore: true },
+      ];
+    }
+    if (kind === "profile") {
+      return [
+        { label: "Edit", icon: <EditIcon fontSize="small" />, onClick: () => handleOpenDeviceModal(item) },
+        { label: "Delete", icon: <CloseIcon fontSize="small" />, onClick: () => handleDeleteDeviceProfile(item.id), color: "error.main", dividerBefore: true },
+      ];
+    }
+    if (kind === "job") {
+      const job = item;
+      const exporting = exportingJobs.has(job.id);
+      return [
+        canStart(job) && { label: "Start", icon: <PlayArrowIcon fontSize="small" />, onClick: () => handleStartJob(job.id) },
+        job.status === "running" && { label: "Cancel", icon: <CancelIcon fontSize="small" />, onClick: () => handleCancelJob(job.id) },
+        canResume(job) && { label: "Resume from checkpoint", icon: <PlayArrowIcon fontSize="small" />, onClick: () => handleResumeJob(job.id) },
+        job.export_verified && job.status === "completed" && job.lora_path && !job.ollama_model_name && {
+          label: "Export to Ollama", icon: <CloudUploadIcon fontSize="small" />, onClick: () => handleExportToOllama(job, false), disabled: exporting,
+        },
+        job.export_verified && job.status === "completed" && job.lora_path && job.ollama_model_name && {
+          label: "Re-quantize", icon: <RefreshIcon fontSize="small" />, onClick: () => handleExportToOllama(job, true), disabled: exporting,
+        },
+        job.export_verified && job.status === "failed: worse than base" && job.lora_path && {
+          label: "Export anyway", icon: <CloudUploadIcon fontSize="small" />, onClick: () => handleExportAnyway(job), disabled: exporting,
+        },
+        job.pipeline_stage === "parsing" && job.status === "completed" && job.config?.pairs_count > 0 && {
+          label: "Add as dataset", icon: <AddIcon fontSize="small" />, onClick: () => handleAddParsedDataset(job),
+        },
+        { label: "Delete", icon: <CloseIcon fontSize="small" />, onClick: () => handleDeleteJob(job.id), color: "error.main", dividerBefore: true },
+      ];
+    }
+    return [];
   };
 
   const getJobProgress = (job) => {
@@ -777,7 +851,7 @@ const TrainingPage = () => {
                       </TableRow>
                     ) : (
                       datasets.map((ds) => (
-                        <TableRow key={ds.id} hover>
+                        <TableRow key={ds.id} hover onContextMenu={(e) => rowMenu.open(e, { kind: "dataset", item: ds })}>
                           <TableCell>
                             <Typography variant="body2" fontWeight="medium">
                               {ds.name}
@@ -854,13 +928,15 @@ const TrainingPage = () => {
                 {jobs.map((job) => {
                   const progress = getJobProgress(job);
                   return (
-                    <Card key={job.id} sx={{ mb: 2 }}>
+                    <Card key={job.id} sx={{ mb: 2 }} onContextMenu={(e) => rowMenu.open(e, { kind: "job", item: job })}>
                       <CardContent>
                         <Box display="flex" justifyContent="space-between" alignItems="start" mb={1}>
                           <Box>
                             <Typography variant="h6">{job.name || job.job_id}</Typography>
                             <Typography variant="caption" color="text.secondary">
-                              {job.base_model} → {job.output_model_name || "N/A"}
+                              {job.base_model
+                                ? `${job.base_model} → ${job.output_model_name || "N/A"}`
+                                : job.config?.input_path || ""}
                             </Typography>
                           </Box>
                           <Box display="flex" gap={1} alignItems="center">
@@ -876,8 +952,8 @@ const TrainingPage = () => {
                                 size="small"
                               />
                             )}
-                            {/* Export to Ollama button - show when completed with lora_path */}
-                            {job.status === "completed" && job.lora_path && !job.ollama_model_name && (
+                            {/* Export is offered only once it has been verified for the job's base model. */}
+                            {job.export_verified && job.status === "completed" && job.lora_path && !job.ollama_model_name && (
                               <Tooltip title="Export to Ollama">
                                 <IconButton
                                   size="small"
@@ -894,7 +970,7 @@ const TrainingPage = () => {
                               </Tooltip>
                             )}
                             {/* Re-quantize button - show for completed exports */}
-                            {job.status === "completed" && job.lora_path && job.ollama_model_name && (
+                            {job.export_verified && job.status === "completed" && job.lora_path && job.ollama_model_name && (
                               <Tooltip title="Re-quantize (change quantization level)">
                                 <IconButton
                                   size="small"
@@ -910,7 +986,7 @@ const TrainingPage = () => {
                                 </IconButton>
                               </Tooltip>
                             )}
-                            {job.status === "failed: worse than base" && job.lora_path && (
+                            {job.export_verified && job.status === "failed: worse than base" && job.lora_path && (
                               <Tooltip title="Export anyway (the run measured worse than its base model)">
                                 <IconButton
                                   size="small"
@@ -922,6 +998,13 @@ const TrainingPage = () => {
                                 </IconButton>
                               </Tooltip>
                             )}
+                            {canStart(job) && (
+                              <Tooltip title="Start training">
+                                <IconButton size="small" color="primary" onClick={() => handleStartJob(job.id)}>
+                                  <PlayArrowIcon fontSize="small" />
+                                </IconButton>
+                              </Tooltip>
+                            )}
                             {job.status === "running" && (
                               <Tooltip title="Cancel">
                                 <IconButton size="small" onClick={() => handleCancelJob(job.id)}>
@@ -929,7 +1012,7 @@ const TrainingPage = () => {
                                 </IconButton>
                               </Tooltip>
                             )}
-                            {job.is_resumable && (job.status === "failed" || job.status === "cancelled") && (
+                            {canResume(job) && (
                               <Tooltip title="Resume from checkpoint">
                                 <IconButton size="small" color="success" onClick={() => handleResumeJob(job.id)}>
                                   <PlayArrowIcon fontSize="small" />
@@ -949,6 +1032,18 @@ const TrainingPage = () => {
                             <Typography variant="caption" color="text.secondary">
                               {progress}% - {job.pipeline_stage || "processing"}
                             </Typography>
+                          </Box>
+                        )}
+                        {job.pipeline_stage === "parsing" && job.status === "completed" && job.config?.output_path && (
+                          <Box sx={{ mt: 1, display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap" }}>
+                            <Typography variant="body2">
+                              Parsed {job.config.pairs_count ?? 0} pair{job.config.pairs_count === 1 ? "" : "s"}
+                            </Typography>
+                            {job.config.pairs_count > 0 && (
+                              <Button size="small" variant="outlined" startIcon={<AddIcon />} onClick={() => handleAddParsedDataset(job)}>
+                                Add as dataset
+                              </Button>
+                            )}
                           </Box>
                         )}
                         {job.error_message && (
@@ -1034,7 +1129,7 @@ const TrainingPage = () => {
                   </TableHead>
                   <TableBody>
                     {deviceProfiles.map((profile) => (
-                      <TableRow key={profile.id} hover>
+                      <TableRow key={profile.id} hover onContextMenu={(e) => rowMenu.open(e, { kind: "profile", item: profile })}>
                         <TableCell>{profile.name}</TableCell>
                         <TableCell>{profile.device_type || "-"}</TableCell>
                         <TableCell>{profile.gpu_vram_mb ? `${profile.gpu_vram_mb / 1024}GB` : "N/A"}</TableCell>
@@ -1079,6 +1174,7 @@ const TrainingPage = () => {
           open={editModalOpen}
           onClose={handleCloseEditModal}
           datasetData={currentItem}
+          prefill={datasetPrefill}
           onSave={handleSave}
           isSaving={isSaving}
         />
@@ -1125,6 +1221,12 @@ const TrainingPage = () => {
           currentQuantization={selectedJobForExport?.quantization_level}
         />
       )}
+
+      <EntityContextMenu
+        anchorPosition={rowMenu.anchorPosition}
+        onClose={rowMenu.close}
+        actions={menuActions(rowMenu.payload)}
+      />
 
       <Snackbar
         open={feedback.open}

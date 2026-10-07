@@ -48,10 +48,22 @@ def task_bodies_run_in_this_app(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def base_model_on_disk(monkeypatch, tmp_path):
+    """The job's base model counts as declared and downloaded; the trainer
+    stand-ins receive its snapshot folder."""
+    snapshot = tmp_path / "snapshot"
+    monkeypatch.setattr("backend.services.training_base_models.resolve_for_training",
+                        lambda model_id: ({"id": model_id}, str(snapshot)))
+    monkeypatch.setattr("backend.services.training_base_models.refusal_for_job",
+                        lambda model_id, vision=False: None)
+    return str(snapshot)
+
+
+@pytest.fixture(autouse=True)
 def no_gpu_claim(monkeypatch):
-    """finetune_model_task claims the GPU through gpu_session (a real VRAM
-    check, Ollama eviction, a cross-process lease); none of that belongs in
-    a unit test."""
+    """finetune_model_task claims the GPU through gpu_session_when_free, which
+    calls gpu_session (a real VRAM check, Ollama eviction, a cross-process
+    lease); none of that belongs in a unit test."""
     @contextmanager
     def no_gpu_session(*args, **kwargs):
         yield True
@@ -70,29 +82,43 @@ def progress(monkeypatch):
     return sent
 
 
+@pytest.fixture(autouse=True)
+def export_verified(monkeypatch):
+    """The pipeline exports only for a base model whose export is verified;
+    these tests are about the gate in front of that, so it counts as verified."""
+    monkeypatch.setattr("backend.services.training_base_models.export_verified", lambda model_id: True)
+
+
 @pytest.fixture
 def trainer(monkeypatch, tmp_path):
-    """Stands in for the finetune_model and finetune_vision scripts: records
-    the rows each call trained on and was asked to measure, and reports the
-    losses a test sets through the eval callback, as the real trainer does."""
-    state = SimpleNamespace(calls=[], losses={"adapter_loss": 1.2, "base_loss": 1.5})
+    """Stands in for the text trainer process (tt._run_text_trainer) and the
+    vision script: records the rows each call trained on and was asked to
+    measure, and reports the losses a test sets (or `report`) as the
+    trainer's eval event, as the real trainer does."""
+    state = SimpleNamespace(calls=[], losses={"adapter_loss": 1.2, "base_loss": 1.5}, report=None)
 
-    def finetune(**kwargs):
-        eval_path = kwargs.get("eval_data_path")
-        call = dict(kwargs)
-        call["train_rows"] = Path(kwargs["data_path"]).read_text().splitlines()
+    def record(call, data_path, eval_path, model_dir):
+        call["train_rows"] = Path(data_path).read_text().splitlines()
         call["eval_rows"] = Path(eval_path).read_text().splitlines() if eval_path else []
         state.calls.append(call)
+        (Path(model_dir) / "lora").mkdir(parents=True, exist_ok=True)
+
+    def run_text_trainer(spec, *, workdir, on_event, on_start, should_stop):
+        call = dict(spec)
+        record(call, spec["data_path"], spec["eval_data_path"], spec["output_dir"])
+        if call["eval_rows"]:
+            on_event({"event": "eval", **(state.report or {**state.losses, "rows": len(call["eval_rows"])})})
+        return spec["output_dir"]
+
+    def vision_finetune(**kwargs):
         model_dir = tmp_path / "models" / kwargs["output_name"]
-        (model_dir / "lora").mkdir(parents=True, exist_ok=True)
-        if call["eval_rows"] and kwargs.get("eval_callback"):
-            kwargs["eval_callback"]({**state.losses, "rows": len(call["eval_rows"])})
+        record(dict(kwargs), kwargs["data_path"], None, model_dir)
         return str(model_dir)
 
-    for name in ("finetune_model", "finetune_vision"):
-        module = types.ModuleType(name)
-        module.finetune = finetune
-        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setattr(tt, "_run_text_trainer", run_text_trainer)
+    module = types.ModuleType("finetune_vision")
+    module.finetune = vision_finetune
+    monkeypatch.setitem(sys.modules, "finetune_vision", module)
     return state
 
 
@@ -217,17 +243,10 @@ def test_a_loss_that_is_not_a_number_is_stored_as_json_the_browser_can_read(app,
     assert saved["base_loss"] == 1.5
 
 
-def test_the_trainer_reporting_no_measurement_is_recorded_with_its_reason(app, progress, trainer, tmp_path, monkeypatch):
+def test_the_trainer_reporting_no_measurement_is_recorded_with_its_reason(app, progress, trainer, tmp_path):
     data, _ = _dataset(tmp_path / "data.jsonl", 120)
     job_id = _job(data)
-
-    def finetune(**kwargs):
-        kwargs["eval_callback"]({"reason": "held-out evaluation failed: RuntimeError: out of memory"})
-        model_dir = tmp_path / "models" / kwargs["output_name"]
-        (model_dir / "lora").mkdir(parents=True, exist_ok=True)
-        return str(model_dir)
-
-    monkeypatch.setattr(sys.modules["finetune_model"], "finetune", finetune)
+    trainer.report = {"reason": "held-out evaluation failed: RuntimeError: out of memory"}
 
     tt.finetune_model_task(job_id, {})
 
@@ -244,6 +263,7 @@ def test_a_vision_run_says_its_loss_was_not_measured(app, progress, trainer, tmp
     tt.finetune_model_task(job_id, {})
 
     assert "eval_data_path" not in trainer.calls[0]
+    assert "image_folder" in trainer.calls[0]
     saved = _saved_config(job_id)["eval"]
     assert saved["measured"] is False
     assert "vision" in saved["reason"]

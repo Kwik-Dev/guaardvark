@@ -3,7 +3,9 @@
 Fine-tuning on the Training page needs them and a stock install does not carry
 them. Settings > Training libraries lists them at the versions pinned here,
 installs them into this backend's Python environment when a person clicks
-Install, and takes them out again on Remove.
+Install, and takes them out again on Remove. An install ends by running the
+trainer's own `check --json` offline, and reports only the `pip check`
+complaints it introduced.
 
 Nothing else starts either run. The routes refuse a request without a one-use
 plan token that only the modal's status read hands out (issue_plan_token), and
@@ -159,7 +161,8 @@ _fit: dict[str, Any] | None = None
 def _idle_run() -> dict[str, Any]:
     return {"state": "idle", "action": None, "phase": "", "progress": 0, "error": None,
             "started_at": None, "finished_at": None, "log": deque(maxlen=200),
-            "expected_mb": 0.0, "fetched_mb": 0.0, "restart_needed": False}
+            "expected_mb": 0.0, "fetched_mb": 0.0, "restart_needed": False,
+            "check": None, "pip_check_new": []}
 
 
 _run.update(_idle_run())
@@ -286,6 +289,12 @@ def _take_token(token: Any) -> bool:
     with _lock:
         expires = _tokens.pop(token, None)
     return expires is not None and expires >= time.monotonic()
+
+
+def take_plan_token(token: Any) -> bool:
+    """Use up a plan token; True when it was issued and has not expired. The
+    base-model Download and Remove (training_base_models) spend these too."""
+    return _take_token(token)
 
 
 # ---- the record of what an install changed ---------------------------------------
@@ -508,6 +517,54 @@ def _pip(args: list[str], *, fetching: bool = False) -> int:
         stopped.set()
 
 
+_PIP_CHECK_CLEAN = "No broken requirements found."
+_CHECK_TIMEOUT_SECONDS = 600
+
+
+def _pip_check() -> set[str]:
+    """What `pip check` complains about in this environment, one line each."""
+    env = dict(os.environ)
+    env.pop("PIP_CONSTRAINT", None)
+    try:
+        proc = subprocess.run([sys.executable, "-m", "pip", "check", "--disable-pip-version-check"],
+                              capture_output=True, text=True, timeout=_CHECK_TIMEOUT_SECONDS, env=env)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {f"pip check could not run: {e}"}
+    lines = {line.strip() for line in (proc.stdout + proc.stderr).splitlines() if line.strip()}
+    lines.discard(_PIP_CHECK_CLEAN)
+    return lines
+
+
+def new_pip_complaints(before: set[str], after: set[str]) -> list[str]:
+    """pip check lines an install introduced, less those about LEFT_OUT
+    packages (declared by Unsloth, deliberately not installed)."""
+    return sorted(line for line in after - before
+                  if not any(name in line.lower() for name in LEFT_OUT))
+
+
+def _trainer_check() -> dict[str, Any]:
+    """`finetune_model.py check --json`, run as the trainer runs (no Hub
+    token, offline) from a scratch folder, so Unsloth's compile cache is not
+    left in the checkout. Returns its report, or {"ok": False, "problems"}."""
+    from backend.services import training_runner
+
+    with tempfile.TemporaryDirectory(prefix="guaardvark-trainer-check-") as scratch:
+        try:
+            proc = subprocess.run([sys.executable, str(training_runner.SCRIPT), "check", "--json"],
+                                  capture_output=True, text=True, timeout=_CHECK_TIMEOUT_SECONDS,
+                                  env=training_runner.trainer_env(), cwd=scratch)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return {"ok": False, "problems": [f"the trainer check could not run: {e}"]}
+    for line in reversed(proc.stdout.splitlines()):
+        if line.startswith("{"):
+            try:
+                return json.loads(line)
+            except ValueError:
+                break
+    tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-1:] or ["no output"]
+    return {"ok": False, "problems": [f"the trainer check printed no report (exit {proc.returncode}): {tail[0]}"]}
+
+
 def _hold_lines(versions: dict[str, str]) -> list[str]:
     """name==version for every installed package the install may not move."""
     free = set(_dist_names()) | set(MAY_CHANGE)
@@ -544,6 +601,8 @@ def _install(anyway: bool) -> None:
     before = installed_versions()
     hold_path = None
     try:
+        _phase("Reading what pip check already reports", 2)
+        complaints_before = _pip_check()
         with tempfile.NamedTemporaryFile("w", prefix="guaardvark-training-hold-", suffix=".txt",
                                          delete=False, encoding="utf-8") as hold:
             hold.write("# Installed packages a training libraries install may not move.\n")
@@ -569,6 +628,18 @@ def _install(anyway: bool) -> None:
         unmet = unmet_requirements(after)
         if unmet:
             raise _Failed("Installed, but some requirements are not met: " + "; ".join(unmet))
+
+        _phase("Checking the trainer loads them (offline)", 98)
+        report = _trainer_check()
+        new_complaints = new_pip_complaints(complaints_before, _pip_check())
+        with _lock:
+            _run["check"] = report
+            _run["pip_check_new"] = new_complaints
+        for line in new_complaints:
+            _log(f"pip check (new since the install): {line}")
+        if not report.get("ok"):
+            raise _Failed("Installed, but the trainer cannot load them: "
+                          + "; ".join(report.get("problems") or ["no report"]))
         _finish("completed")
     except _Failed as e:
         _log(str(e))
