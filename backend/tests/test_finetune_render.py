@@ -270,3 +270,41 @@ def test_check_report_is_not_ok_without_the_libraries(script, monkeypatch):
     assert any(p.startswith("unsloth:") for p in report["problems"])
     assert any(p.startswith("trl:") for p in report["problems"])
     assert "CUDA is not available to the trainer" in report["problems"]
+
+
+def test_merge_folds_the_adapter_into_a_bf16_base_offline(script, tmp_path, monkeypatch):
+    import torch
+
+    seen = {}
+
+    class Merged:
+        def save_pretrained(self, path, safe_serialization=False):
+            seen["saved"] = (path, safe_serialization)
+
+    class Peft:
+        def merge_and_unload(self):
+            return Merged()
+
+    class Tokenizer:
+        def save_pretrained(self, path):
+            seen["tokenizer_saved"] = path
+
+    transformers = types.ModuleType("transformers")
+    transformers.AutoModelForCausalLM = SimpleNamespace(
+        from_pretrained=lambda path, **kw: seen.update(base=(path, kw)) or "base")
+    transformers.AutoTokenizer = SimpleNamespace(
+        from_pretrained=lambda path, **kw: seen.update(tokenizer=(path, kw)) or Tokenizer())
+    peft = types.ModuleType("peft")
+    peft.PeftModel = SimpleNamespace(from_pretrained=lambda base, path: seen.update(adapter=(base, path)) or Peft())
+    monkeypatch.setitem(sys.modules, "transformers", transformers)
+    monkeypatch.setitem(sys.modules, "peft", peft)
+
+    out = script.merge_adapter("/models/qwen", "/run/lora", str(tmp_path / "merged"))
+
+    assert out == str(tmp_path / "merged")
+    assert seen["base"] == ("/models/qwen", {"dtype": torch.bfloat16, "local_files_only": True})
+    assert seen["adapter"] == ("base", "/run/lora")
+    assert seen["saved"] == (out, True)
+    assert seen["tokenizer"] == ("/run/lora", {"local_files_only": True})
+    assert seen["tokenizer_saved"] == out
+

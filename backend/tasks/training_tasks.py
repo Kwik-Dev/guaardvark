@@ -960,8 +960,23 @@ def export_refusal(base_model: str, lora_path: str = None):
     return f"Export to Ollama is not verified for {base_model} yet.{where}"
 
 
+# Ollama's spelling of each quantization the export form offers, for
+# `ollama create --quantize` on a safetensors folder; None means unquantised.
+# The levels are the ones Ollama documents for importing safetensors; the
+# others in the form have no safetensors path and are refused.
+OLLAMA_QUANTIZE = {"q4_k_m": "q4_K_M", "q4_k_s": "q4_K_S", "q8_0": "q8_0", "f16": None}
+# Folding a 1-3 GB adapter into its base on the CPU takes minutes; this
+# bounds a merge that hangs.
+MERGE_TIME_LIMIT_SECONDS = 3600
+
+
 @shared_task(bind=True, name='training.export_gguf')
 def export_gguf_task(self, job_id: str, model_dir: str, quantization: str = 'q4_k_m'):
+    """First export step: fold the job's LoRA adapter into its bf16 base model
+    (model_dir/merged, safetensors) in an offline subprocess on the CPU.
+    import_ollama_task then registers that folder with `ollama create
+    --quantize`. Refused, before the job is touched, until export is verified
+    for the job's base model."""
     logger.info(f"Starting export_gguf_task for job {job_id}")
 
     from flask import current_app
@@ -975,35 +990,76 @@ def export_gguf_task(self, job_id: str, model_dir: str, quantization: str = 'q4_
 
     try:
         _update_job_status(job_id, status="running", pipeline_stage="exporting", started_at=utcnow(), celery_task_id=self.request.id)
-        _emit_progress(job_id, 0, "Starting GGUF export...", "start")
-        
-        _emit_progress(job_id, 10, "Loading model for export...", "processing")
-        
-        sys.path.insert(0, str(Path(os.environ.get('GUAARDVARK_ROOT', '.')) / "backend" / "services" / "training" / "scripts"))
-        from finetune_model import export_to_gguf
-        
-        _emit_progress(job_id, 20, f"Exporting to GGUF ({quantization})...", "processing")
-        
-        gguf_path = export_to_gguf(model_dir, quantization)
-        
-        if not gguf_path:
-            raise ValueError("GGUF export failed")
-        
-        _update_job_status(job_id,
-                          pipeline_stage="exporting",
-                          progress=100,
-                          gguf_path=str(gguf_path))
-        
-        _emit_progress(job_id, 100, f"GGUF export complete: {gguf_path}", "complete")
-        
-        logger.info(f"Export task completed for job {job_id}: {gguf_path}")
-        return {"gguf_path": str(gguf_path)}
-        
+        _emit_progress(job_id, 0, "Starting export...", "start")
+
+        from backend.services import training_base_models, training_runner
+        _, base_path = training_base_models.resolve_for_training(base_model)
+        model_dir_path = Path(model_dir)
+        lora_dir = model_dir_path / "lora"
+        if not lora_dir.is_dir():
+            raise FileNotFoundError(f"No trained adapter at {lora_dir}")
+        merged = model_dir_path / "merged"
+
+        _emit_progress(job_id, 10, "Merging the adapter into the base model...", "processing")
+        training_runner.run(
+            "merge",
+            {"base_model": base_path, "lora_dir": str(lora_dir), "out_dir": str(merged),
+             "parent_pid": os.getpid()},
+            workdir=model_dir_path, time_limit_s=MERGE_TIME_LIMIT_SECONDS)
+
+        _update_job_status(job_id, pipeline_stage="exporting", progress=100)
+        _emit_progress(job_id, 100, f"Merged model saved to {merged}", "complete")
+        logger.info(f"Export task completed for job {job_id}: {merged}")
+        return {"merged_path": str(merged)}
+
     except Exception as e:
         logger.error(f"Error in export_gguf_task: {e}", exc_info=True)
         _update_job_status(job_id, status="failed", error_message=str(e))
         _emit_progress(job_id, 0, f"Error: {str(e)}", "error")
         raise
+
+
+def ollama_modelfile(entry: dict, merged_dir: Path) -> str:
+    """The Modelfile registering a merged model with Ollama: the folder, the
+    chat template and stop words its base model entry declares, and the
+    app's default sampling."""
+    from backend.services import sampling_profiles
+    template = entry["ollama_template"]
+    stops = "\n".join(f'PARAMETER stop "{stop}"' for stop in entry.get("ollama_stop", ()))
+    params = sampling_profiles.profile_modelfile_params(sampling_profiles.DEFAULT_PROFILE)
+    return f'FROM {merged_dir}\n\nTEMPLATE """{template}"""\n\n{stops}\n{params}\n'
+
+
+def _create_from_merged(job_id: str, model_dir: Path, merged: Path, model_name: str) -> dict:
+    """`ollama create <name> --quantize <level> -f Modelfile` for a merged folder."""
+    from backend.services import training_base_models
+    from flask import current_app
+    with current_app.app_context():
+        job = db.session.query(TrainingJob).filter(TrainingJob.job_id == job_id).first()
+        base_model = job.base_model if job else None
+        quantization = ((job.quantization_level if job else None) or "q4_k_m").lower()
+    entry = training_base_models.get(base_model)
+    if entry is None:
+        raise ValueError(f"{base_model} is not a declared base model; its chat template is unknown.")
+    if quantization not in OLLAMA_QUANTIZE:
+        offered = ", ".join(sorted(OLLAMA_QUANTIZE))
+        raise ValueError(f"Ollama cannot quantize a merged model to {quantization}; choose one of {offered}.")
+
+    _emit_progress(job_id, 20, f"Writing the Modelfile for {model_name}...", "processing")
+    modelfile = model_dir / "Modelfile"
+    modelfile.write_text(ollama_modelfile(entry, merged), encoding="utf-8")
+
+    level = OLLAMA_QUANTIZE[quantization]
+    command = ["ollama", "create", model_name, "-f", str(modelfile)]
+    if level:
+        command += ["--quantize", level]
+    _emit_progress(job_id, 50, f"Registering {model_name} with Ollama ({level or 'f16'})...", "processing")
+    result = subprocess.run(command, capture_output=True, text=True, cwd=str(model_dir),
+                            timeout=MERGE_TIME_LIMIT_SECONDS)
+    if result.returncode != 0:
+        tail = (result.stderr or result.stdout or "").strip()[-500:]
+        raise RuntimeError(f"ollama create failed: {tail}")
+    return {"ollama_model_name": model_name, "quantization": level or "f16"}
 
 
 def _detect_model_architecture(model_name: str, gguf_filename: str) -> str:
@@ -1049,6 +1105,15 @@ def import_ollama_task(self, job_id: str, model_dir: str, model_name: str):
         _emit_progress(job_id, 0, "Starting Ollama import...", "start")
 
         model_dir_obj = Path(model_dir)
+
+        merged = model_dir_obj / "merged"
+        if (merged / "config.json").is_file():
+            created = _create_from_merged(job_id, model_dir_obj, merged, model_name)
+            _update_job_status(job_id, status="completed", pipeline_stage="importing",
+                               completed_at=utcnow(), progress=100, ollama_model_name=model_name)
+            _emit_progress(job_id, 100, f"Ollama import complete: {model_name}", "complete")
+            logger.info(f"Import task completed for job {job_id}: {model_name}")
+            return created
 
         gguf_files = list(model_dir_obj.glob("*.gguf"))
         if not gguf_files:

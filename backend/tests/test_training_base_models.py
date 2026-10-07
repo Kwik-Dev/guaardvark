@@ -88,6 +88,7 @@ def test_every_entry_declares_what_the_product_enforces():
         assert entry["export"] in ("verified", "unverified")
         assert entry["ollama_tags"] and all(":" in tag for tag in entry["ollama_tags"])
         assert "<|im_start|>" in entry["ollama_template"] and entry["ollama_stop"]
+        assert '"""' not in entry["ollama_template"]  # it sits in a Modelfile's triple quotes
         assert set(entry["response_markers"]) == {"instruction", "response"}
 
 
