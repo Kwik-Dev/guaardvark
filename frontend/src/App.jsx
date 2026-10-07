@@ -1,6 +1,6 @@
 
 import React, { Suspense } from "react";
-import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-dom";
+import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import useNavigationCancel from "./hooks/useNavigationCancel";
 import useGpuIntent from "./hooks/useGpuIntent";
 import useKeyboardForwarding from "./hooks/useKeyboardForwarding";
@@ -79,7 +79,7 @@ import BackendOfflineBanner from "./components/common/BackendOfflineBanner";
 import ApiKeyRefusalNotice from "./components/common/ApiKeyRefusalNotice";
 import { SnackbarProvider } from "./components/common/SnackbarProvider";
 import { ErrorProvider } from "./components/common/ErrorProvider";
-import ErrorBoundary from "./components/common/ErrorBoundary";
+import ErrorBoundary, { ErrorResetContext } from "./components/common/ErrorBoundary";
 import { LayoutProvider } from "./contexts/LayoutContext";
 import { UnifiedProgressProvider } from './contexts/UnifiedProgressContext';
 import { VoiceProvider } from "./contexts/VoiceContext";
@@ -97,6 +97,7 @@ const AppLayout = ({ children }) => {
   useNavigationCancel();
   // Signal GPU orchestrator on page navigation for predictive model loading
   useGpuIntent();
+  const { pathname } = useLocation();
 
   const sidebarExpanded = useAppStore((state) => state.sidebarExpanded);
   const navChrome = useAppStore((state) => state.navChrome) || NAV_CHROME.SIDEBAR;
@@ -146,7 +147,11 @@ const AppLayout = ({ children }) => {
           {headers.map((Header, i) => (
             <Header key={i} />
           ))}
-          {children}
+          {/* A page that crashes keeps the shell around it. Every boundary
+              below clears on a route change without remounting the page. */}
+          <ErrorResetContext.Provider value={pathname}>
+            <ErrorBoundary>{children}</ErrorBoundary>
+          </ErrorResetContext.Provider>
         </Box>
         <ProgressFooterBar />
       </Box>
@@ -743,7 +748,7 @@ const AppContainer = () => {
 
 function App() {
   return (
-    <ErrorBoundary>
+    <ErrorBoundary fullPage>
       <AppContainer />
     </ErrorBoundary>
   );
