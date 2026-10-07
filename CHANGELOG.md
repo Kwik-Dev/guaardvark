@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 3.0.1 — Video renders run to the end
+
+- **Video renders are no longer marked lost mid-render.** The check for whether ComfyUI is
+  running imported a name that does not exist, so it always failed: every video render in
+  progress was recorded as "ComfyUI connection lost — job orphaned", and an active render did
+  not stop ComfyUI from being shut down. A ComfyUI that is busy loading a model is also no
+  longer taken for one that has stopped.
+- **An update no longer leaves a white error page.** The web UI holds its live reloads while an
+  Interconnector sync is writing files, reloads once when it finishes, and says when the backend
+  needs a restart.
+- **Image and video generation:** the gallery refreshes on its own, a renamed video keeps
+  playing, LoRAs are offered only for the models they fit, and the progress bar shows image and
+  video jobs side by side.
+- **One microphone for the whole app** sits in the top bar; Voice becomes a status and settings
+  page.
+- **The CLI shows what it is doing** while a reply is prepared. `GUAARDVARK_NO_SPINNER=1` turns
+  it off.
+- **`scripts/video_box_fingerprint.py`** records a machine's video models and render graph so two
+  installs can be compared when one renders differently.
+
 ## 3.0.0 — An inbound guard, agents that act on what they see, and Docker on a fresh Ubuntu
 
 Guaardvark 3.0 reads code before it lands, keeps every outbound path behind your say-so, and
