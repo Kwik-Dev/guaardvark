@@ -73,7 +73,8 @@ def scan(
     def loader(change: Change, which: str = "new") -> Optional[str]:
         return blob_text(repo, change, which)
 
-    findings, notes = rules.evaluate(changes, blob_loader=loader, ignored=ignored, deadline=deadline)
+    findings, notes = rules.evaluate(changes, blob_loader=loader, ignored=ignored, deadline=deadline,
+                                     source=source)
 
     errors: List[str] = list(notes)
     providers: List[str] = []

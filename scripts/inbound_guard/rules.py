@@ -147,8 +147,12 @@ class RuleSet:
         blob_loader: Optional[Loader] = None,
         ignored: Optional[Set[str]] = None,
         deadline: Optional[float] = None,
+        source: Optional[str] = None,
     ) -> Tuple[List[Finding], List[str]]:
-        """Return (findings, notes). Notes say what was not read and why."""
+        """Return (findings, notes). Notes say what was not read and why.
+
+        A rule with a "sources" list applies only when the scan's source is in it.
+        """
         collector = _Collector(int(self.caps.get("findings_per_rule_per_file", 5)))
         notes: List[str] = []
         for index, change in enumerate(changes):
@@ -158,12 +162,12 @@ class RuleSet:
                 collector.add(Finding("scan.incomplete", "scan", "medium", changes[index].path, None, "",
                                       f"scan stopped at its time budget with {rest} file(s) unread"))
                 break
-            self._path_rules(change, collector)
+            self._path_rules(change, collector, source)
             self._shape(change, ignored or set(), collector)
             self._protected_lists(change, collector, blob_loader)
             if change.binary:
                 continue
-            self._line_rules(change, collector)
+            self._line_rules(change, collector, source)
             self._urls(change, collector, blob_loader)
             self._trojan(change, collector, blob_loader)
             self._new_dependencies(change, collector)
@@ -175,8 +179,10 @@ class RuleSet:
                                   "read; scan a smaller range"))
         return collector.findings(), notes
 
-    def _path_rules(self, change: Change, out: "_Collector") -> None:
+    def _path_rules(self, change: Change, out: "_Collector", source: Optional[str] = None) -> None:
         for rule in self.path_rules:
+            if rule.get("sources") and source not in rule["sources"]:
+                continue
             if rule.get("status") and change.status not in rule["status"]:
                 continue
             paths = [change.path] + ([change.old_path] if change.old_path else [])
@@ -184,9 +190,11 @@ class RuleSet:
                 out.add(Finding(rule["id"], rule["pack"], rule["severity"], change.path, None,
                                 f"{_STATUS.get(change.status, change.status)} file", rule["why"]))
 
-    def _line_rules(self, change: Change, out: "_Collector") -> None:
+    def _line_rules(self, change: Change, out: "_Collector", source: Optional[str] = None) -> None:
         prefixes = _comment_prefixes(change.path)
         for rule in self.line_rules:
+            if rule.get("sources") and source not in rule["sources"]:
+                continue
             if not self.matches(change.path, rule["paths"]):
                 continue
             if rule.get("skip") and self.matches(change.path, rule["skip"]):
