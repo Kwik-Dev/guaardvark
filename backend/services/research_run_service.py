@@ -27,6 +27,7 @@ from backend.config import (
     AUTORESEARCH_MIN_EXPERIMENT_INTERVAL,
     AUTORESEARCH_PHASE_PLATEAU_THRESHOLD,
 )
+from backend.services.rag_eval_harness import same_model
 from backend.utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
@@ -647,6 +648,12 @@ class ResearchRunService:
         run.baseline_score = baseline
         meta = self._meta(run)
         meta["baseline"] = measured
+        try:
+            judge = svc.eval_harness.judge_status()
+            if isinstance(judge, dict):
+                meta["judge"] = judge
+        except Exception:
+            pass
         self._save_meta(run, meta)
 
         while True:
@@ -1058,29 +1065,44 @@ class ResearchRunService:
         except Exception:
             pass
 
-        keeps = [r for r in ledger if r.get("status") == "keep"]
-        discards = [r for r in ledger if r.get("status") == "discard"]
-        crashes = [r for r in ledger if r.get("status") == "crash"]
-        llm_props = [r for r in ledger if r.get("proposal_source") == "llm"]
-        tpe_props = [r for r in ledger if r.get("proposal_source") == "tpe"]
-        code_props = [r for r in ledger if r.get("proposal_source") == "code_arm"]
-        heal_props = [r for r in ledger if r.get("proposal_source") == "heal"]
-        f0 = [r for r in ledger if r.get("fidelity") == 0]
+        param_rows = [r for r in ledger if is_parameter_experiment(r)]
+        code_rows = [r for r in ledger if is_self_reported(r)]
+        heal_rows = [r for r in ledger if is_health_check(r)]
+        keeps = [r for r in param_rows if r.get("status") == "keep"]
+        discards = [r for r in param_rows if r.get("status") == "discard"]
+        crashes = [r for r in param_rows if r.get("status") == "crash"]
+        summary = summarize_ledger(param_rows)
+        meta = self._meta(run)
+        baseline_info = meta.get("baseline") if isinstance(meta.get("baseline"), dict) else {}
 
-        best = run.best_score or 0.0
-        base = run.baseline_score or 0.0
-        lines += [
-            f"**Headline**: baseline {base:.3f} → best {best:.3f} "
-            f"({'+' if best >= base else ''}{best - base:.3f}) over "
-            f"{len(ledger)} experiments ({len(keeps)} keep / {len(discards)} discard / "
-            f"{len(crashes)} crash; {len(code_props)} code-arm / {len(heal_props)} heal). "
-            f"Halt: `{run.halt_reason}`.",
-            "",
-            f"**Promotion**: {promotion_note or 'n/a'}",
-            "",
-        ]
+        base = run.baseline_score
+        latest, best = summary["latest_score"], summary["best_tried_score"]
 
-        meta = self._meta(run) if run is not None else {}
+        def score(x):
+            return "—" if x is None else f"{x:.3f}"
+
+        def change(x):
+            return "" if x is None or base is None else f" ({x - base:+.3f})"
+
+        measured_at = baseline_info.get("measured_at")
+        head = f"**Headline**: baseline {score(base)}" + (
+            f" (measured {measured_at})" if measured_at else " (not measured by this run)")
+        if summary["measured_experiments"]:
+            head += (f" → latest {score(latest)}{change(latest)}; best tried "
+                     f"{score(best)}{change(best)} over {summary['measured_experiments']} "
+                     "measured experiment(s)")
+        else:
+            head += "; no experiment was measured"
+        head += (f" ({len(keeps)} keep / {len(discards)} discard / {len(crashes)} crash "
+                 f"of {len(param_rows)} tried)")
+        if heal_rows:
+            head += f"; {len(heal_rows)} health check(s) not counted"
+        head += f". Halt: `{run.halt_reason}`."
+        lines += [head, "", f"**Promotion**: {promotion_note or 'n/a'}", ""]
+
+        if meta.get("warnings"):
+            lines += ["**Warnings**:", ""] + [f"- {w}" for w in meta["warnings"]] + [""]
+
         diagnose = meta.get("diagnose") or {}
         split = meta.get("split") or {}
         if diagnose or split:
@@ -1101,44 +1123,79 @@ class ResearchRunService:
                 "",
             ]
 
-        if ledger:
-            n = len(ledger)
-            tpe_pct = len(tpe_props) / n * 100.0
-            llm_pct = len(llm_props) / n * 100.0
+        judge = meta.get("judge") if isinstance(meta.get("judge"), dict) else {}
+        single = judge.get("independent") is False
+        for r in param_rows:
+            answer = (r.get("retrieval_metrics") or {}).get("answer_model")
+            if same_model(r.get("judge_model"), answer):
+                single = True
+        if single:
+            judged_by = judge.get("configured") or next(
+                (r.get("judge_model") for r in param_rows if r.get("judge_model")), None)
+            lines += [
+                "**⚠ single-model judging**: the model that answered the eval "
+                f"questions also graded them (judge: {judged_by or 'not set'}) — "
+                "scores carry self-confirmation bias. Set `autoresearch_judge_model` "
+                "to a different model; nightly runs refuse without one.",
+                "",
+            ]
+
+        if param_rows:
+            n = len(param_rows)
+            tpe_pct = sum(1 for r in param_rows if r.get("proposal_source") == "tpe") / n * 100.0
+            llm_pct = sum(1 for r in param_rows if r.get("proposal_source") == "llm") / n * 100.0
             rand_pct = 100.0 - tpe_pct - llm_pct
             lines.append(
-                f"**Proposal quality**: {tpe_pct:.0f}% TPE, {llm_pct:.0f}% LLM, "
-                f"{rand_pct:.0f}% random fallback."
+                f"**Proposal quality** (parameter experiments): {tpe_pct:.0f}% TPE, "
+                f"{llm_pct:.0f}% LLM, {rand_pct:.0f}% random fallback."
             )
+            f0 = [r for r in param_rows
+                  if r.get("fidelity", (r.get("retrieval_metrics") or {}).get("fidelity")) == 0]
             if f0:
                 lines.append(
                     f"**Fidelity**: {len(f0)}/{n} discarded at F0 (retrieval screen, "
-                    "no LLM judge)."
+                    "no LLM judge; not counted as measured)."
                 )
-            judge_models = {r.get("judge_model") for r in ledger if r.get("judge_model")}
-            prop_models = {r.get("proposer_model") for r in ledger if r.get("proposer_model")}
-            if judge_models and judge_models == prop_models:
-                lines.append("**⚠ single-model judging**: proposer and judge ran on the "
-                             "same model — scores carry self-confirmation bias. "
-                             "Configure `autoresearch_judge_model` in Settings.")
             lines.append("")
-            lines.append("| # | parameter | change | delta | status | source |")
-            lines.append("|---|-----------|--------|-------|--------|--------|")
-            for i, r in enumerate(ledger, 1):
+            lines.append("| # | parameter | change | score | delta | status | source |")
+            lines.append("|---|-----------|--------|-------|-------|--------|--------|")
+            for i, r in enumerate(param_rows, 1):
                 lines.append(
                     f"| {i} | {r.get('parameter')} | {r.get('old_value')} → "
-                    f"{r.get('new_value')} | {r.get('delta', 0):+.3f} | "
-                    f"{r.get('status')} | {r.get('proposal_source', '?')} |"
+                    f"{r.get('new_value')} | {score(measured_score(r))} | "
+                    f"{(r.get('delta') or 0):+.3f} | {r.get('status')} | "
+                    f"{r.get('proposal_source', '?')} |"
                 )
             lines.append("")
 
-            retr = [r.get("retrieval_metrics") for r in ledger if r.get("retrieval_metrics")]
+            retr = [m for m in ((r.get("retrieval_metrics") or {}) for r in param_rows)
+                    if m.get("hit_rate_at_k") is not None]
             if retr:
-                first_hit = retr[0].get("hit_rate_at_k", 0)
-                last_hit = retr[-1].get("hit_rate_at_k", 0)
-                lines.append(f"**Retrieval**: hit-rate {first_hit:.2f} → {last_hit:.2f} "
-                             f"across the run (per-experiment values in the ledger).")
+                lines.append(
+                    f"**Retrieval**: hit-rate {retr[0]['hit_rate_at_k']:.2f} → "
+                    f"{retr[-1]['hit_rate_at_k']:.2f} across {len(retr)} experiment(s) that "
+                    "scored retrieval. A pair counts as a hit when any returned chunk is "
+                    "its source chunk, so hit-rate rises with top_k on its own.")
                 lines.append("")
+
+        if code_rows:
+            lines += [
+                "**Self-reported** (code arms; scores were posted by the arm, "
+                "not measured by the eval harness):",
+                "",
+            ]
+            for r in code_rows:
+                lines.append(
+                    f"- {r.get('parameter') or r.get('parameter_changed')}: "
+                    f"{r.get('new_value')} — {r.get('status')}, reported "
+                    f"{score(r.get('composite_score'))} ({(r.get('delta') or 0):+.3f})")
+            lines.append("")
+
+        if heal_rows:
+            lines.append("**Health checks** (pytest snapshot, not experiments): "
+                         + ", ".join(f"{r.get('status')} ({r.get('new_value')})"
+                                     for r in heal_rows) + ".")
+            lines.append("")
 
         if crashes:
             lines.append("**Crash log**:")

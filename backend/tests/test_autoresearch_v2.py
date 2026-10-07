@@ -355,6 +355,7 @@ class TestResearchRunEngine:
             auto_svc.run_single_experiment.assert_not_called()
 
     def test_report_flags_single_model_judging(self, app):
+        """The judge graded answers written by its own model."""
         with app.app_context():
             svc_run = self._mk_service()
             run = ResearchRun(run_tag="t-6", mode="rag_tuning",
@@ -363,12 +364,84 @@ class TestResearchRunEngine:
             ledger = [
                 {"parameter": "top_k", "old_value": "5", "new_value": "8",
                  "delta": 0.1, "status": "keep", "proposal_source": "llm",
-                 "proposer_model": "gemma4", "judge_model": "gemma4",
-                 "composite_score": 3.1},
+                 "proposer_model": "qwen3:14b", "judge_model": "gemma4",
+                 "composite_score": 3.1,
+                 "retrieval_metrics": {"fidelity": 1, "judged_pairs": 11,
+                                       "answer_model": "gemma4:latest"}},
             ]
             report = svc_run._write_report(run, ledger)
             assert "single-model judging" in report
             assert "100% LLM" in report
+
+    def test_report_flags_an_unset_judge(self, app):
+        with app.app_context():
+            run = ResearchRun(run_tag="t-6b", mode="rag_tuning", baseline_score=3.0,
+                              halt_reason="plateaued", promotions={"judge": {
+                                  "configured": None, "answer_model": "gemma4:12b",
+                                  "independent": False, "problem": "judge_unset"}})
+            ledger = [{"parameter": "top_k", "old_value": "5", "new_value": "8",
+                       "delta": -0.2, "status": "discard", "proposal_source": "tpe",
+                       "judge_model": "gemma4:12b", "composite_score": 2.8,
+                       "retrieval_metrics": {"fidelity": 1, "judged_pairs": 11}}]
+            report = self._mk_service()._write_report(run, ledger)
+            assert "single-model judging" in report
+
+    def test_report_is_quiet_with_an_independent_judge(self, app):
+        with app.app_context():
+            run = ResearchRun(run_tag="t-6c", mode="rag_tuning", baseline_score=3.0,
+                              halt_reason="plateaued", promotions={"judge": {
+                                  "configured": "qwen3:14b", "answer_model": "gemma4:12b",
+                                  "independent": True, "problem": None}})
+            ledger = [{"parameter": "top_k", "old_value": "5", "new_value": "8",
+                       "delta": -0.2, "status": "discard", "proposal_source": "tpe",
+                       "judge_model": "qwen3:14b", "composite_score": 2.8,
+                       "retrieval_metrics": {"fidelity": 1, "judged_pairs": 11,
+                                             "answer_model": "gemma4:12b"}}]
+            report = self._mk_service()._write_report(run, ledger)
+            assert "single-model judging" not in report
+
+    def test_report_headline_shows_a_regression(self, app):
+        with app.app_context():
+            run = ResearchRun(run_tag="t-regress", mode="rag_tuning", baseline_score=3.0,
+                              best_score=2.6, halt_reason="plateaued", promotions={
+                                  "baseline": {"score": 3.0,
+                                               "measured_at": "2026-10-07T05:09:00"}})
+            ledger = [
+                {"parameter": "top_k", "old_value": "5", "new_value": "4", "delta": -0.4,
+                 "status": "discard", "proposal_source": "tpe", "composite_score": 2.6,
+                 "retrieval_metrics": {"fidelity": 1, "judged_pairs": 11}},
+                {"parameter": "top_k", "old_value": "5", "new_value": "3", "delta": -0.9,
+                 "status": "discard", "proposal_source": "tpe", "composite_score": 2.1,
+                 "retrieval_metrics": {"fidelity": 1, "judged_pairs": 11}},
+            ]
+            report = self._mk_service()._write_report(run, ledger)
+            headline = next(line for line in report.splitlines()
+                            if line.startswith("**Headline**"))
+            assert "baseline 3.000 (measured 2026-10-07T05:09:00)" in headline
+            assert "latest 2.100 (-0.900)" in headline
+            assert "best tried 2.600 (-0.400)" in headline
+            assert "over 2 measured experiment(s)" in headline
+
+    def test_report_proposal_mix_leaves_out_health_checks_and_code_arms(self, app):
+        with app.app_context():
+            run = ResearchRun(run_tag="t-mix", mode="unified", baseline_score=3.0,
+                              halt_reason="plateaued")
+            ledger = [
+                {"parameter": "pytest_snapshot", "new_value": "failures=0", "status": "pass",
+                 "proposal_source": "heal", "composite_score": 0.0},
+                {"parameter": "chunker", "new_value": "smarter dedup", "status": "keep",
+                 "proposal_source": "code_arm", "composite_score": 3.5, "delta": 0.5,
+                 "retrieval_metrics": {"layer": "code", "self_reported": True}},
+                {"parameter": "top_k", "old_value": "5", "new_value": "6", "delta": -0.1,
+                 "status": "discard", "proposal_source": "tpe", "composite_score": 2.9,
+                 "retrieval_metrics": {"fidelity": 1, "judged_pairs": 11}},
+            ]
+            report = self._mk_service()._write_report(run, ledger)
+            assert "100% TPE, 0% LLM, 0% random fallback" in report
+            assert "1 health check(s) not counted" in report
+            assert "0 keep / 1 discard / 0 crash of 1 tried" in report
+            assert "**Self-reported**" in report and "smarter dedup" in report
+            assert "**Health checks**" in report
 
     def test_confirmation_ignores_foreign_candidates(self, app):
         with app.app_context():
