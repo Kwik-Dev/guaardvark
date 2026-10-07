@@ -28,6 +28,8 @@ done
 
 if ! command -v docker >/dev/null 2>&1; then
     echo "Error: docker not found. Install Docker Engine, then re-run." >&2
+    echo "  Ubuntu:  sudo apt install docker.io docker-compose-v2 docker-buildx" >&2
+    echo "  Others:  https://docs.docker.com/engine/install/" >&2
     exit 1
 fi
 
@@ -37,13 +39,57 @@ if ! docker compose version >/dev/null 2>&1; then
         COMPOSE=(docker-compose)
     else
         echo "Error: docker compose plugin not found." >&2
+        echo "  Ubuntu:  sudo apt install docker-compose-v2" >&2
+        echo "  Others:  https://docs.docker.com/compose/install/linux/" >&2
         exit 1
     fi
+fi
+
+# Can this user reach the Docker daemon? Asked before anything is built, so a
+# missing group does not surface minutes later as a failed image pull.
+if ! DOCKER_INFO_ERR="$(docker info 2>&1 >/dev/null)"; then
+    if printf '%s' "$DOCKER_INFO_ERR" | grep -qi "permission denied"; then
+        echo "Error: $(id -un) may not use Docker yet (permission denied on the Docker socket)." >&2
+        echo "  sudo usermod -aG docker \$USER" >&2
+        echo "  then log out and back in (or reboot), and re-run ./start-docker.sh." >&2
+    else
+        echo "Error: the Docker daemon is not answering:" >&2
+        printf '  %s\n' "$DOCKER_INFO_ERR" | head -n 3 >&2
+        echo "  Start it with: sudo systemctl enable --now docker" >&2
+    fi
+    exit 1
 fi
 
 COMPOSE_FILES=(-f docker-compose.yml)
 if [ "$GPU_PROFILE" -eq 1 ]; then
     COMPOSE_FILES+=(-f docker-compose.gpu.yml)
+
+    # --gpu hands the NVIDIA GPU to containers through the nvidia runtime from
+    # NVIDIA Container Toolkit, which is not in Ubuntu's own archive. Without it
+    # the stack builds for minutes and then stops at "could not select device
+    # driver nvidia", so check first.
+    if ! docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q '"nvidia"'; then
+        echo "Error: --gpu needs NVIDIA Container Toolkit, and Docker has no nvidia runtime." >&2
+        echo "  Install it (https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)," >&2
+        echo "  then: sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker" >&2
+        echo "  INSTALL.md (Docker -> GPU) has the commands. Or run without --gpu (CPU only)." >&2
+        exit 1
+    fi
+
+    # PyTorch for this card, the same table as hardware_policy.torch_channel.
+    # The PyPI default build has no kernels below sm_75 (Pascal, Volta).
+    if [ -z "${GUAARDVARK_TORCH_CHANNEL:-}" ] && command -v nvidia-smi >/dev/null 2>&1; then
+        COMPUTE_MAJOR="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n 1 | cut -d. -f1 | tr -dc '0-9')"
+        if [ -n "$COMPUTE_MAJOR" ]; then
+            if [ "$COMPUTE_MAJOR" -ge 9 ]; then GUAARDVARK_TORCH_CHANNEL=cu128
+            elif [ "$COMPUTE_MAJOR" -ge 8 ]; then GUAARDVARK_TORCH_CHANNEL=cu124
+            elif [ "$COMPUTE_MAJOR" -ge 6 ]; then GUAARDVARK_TORCH_CHANNEL=cu118
+            else GUAARDVARK_TORCH_CHANNEL=cpu
+            fi
+            echo "PyTorch build for this GPU (compute ${COMPUTE_MAJOR}.x): ${GUAARDVARK_TORCH_CHANNEL}"
+        fi
+    fi
+    export GUAARDVARK_TORCH_CHANNEL="${GUAARDVARK_TORCH_CHANNEL:-}"
 fi
 
 # ── API key ────────────────────────────────────────────────────────────────
@@ -78,6 +124,9 @@ if [ -z "${GUAARDVARK_API_KEY:-}" ] && [ -z "$(env_file_key)" ]; then
     # 32 random bytes as URL-safe base64, the same form the backend makes.
     NEW_API_KEY="$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n')"
     write_env_value GUAARDVARK_API_KEY "$NEW_API_KEY"
+    # Shown now as well as at the end: if this first start stops partway, the
+    # key is already saved and would otherwise never be printed.
+    echo "Created this install's API key (saved as GUAARDVARK_API_KEY in .env): $NEW_API_KEY"
 fi
 
 # ── Database and queue passwords ───────────────────────────────────────────

@@ -20,6 +20,7 @@ services:
 
   # ── PostgreSQL ─────────────────────────────────────────────────────────
   postgres:
+    restart: unless-stopped
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: guaardvark
@@ -38,6 +39,7 @@ services:
 
   # ── Redis ──────────────────────────────────────────────────────────────
   redis:
+    restart: unless-stopped
     image: redis:7-alpine
     environment:
       REDIS_PASSWORD: ${GUAARDVARK_REDIS_PASSWORD:-guaardvark}
@@ -54,6 +56,7 @@ services:
 
   # ── Ollama (Local LLM) ────────────────────────────────────────────────
   ollama:
+    restart: unless-stopped
     image: ollama/ollama:latest
     ports:
       - "${GUAARDVARK_OLLAMA_PUBLISH_HOST:-127.0.0.1}:11434:11434"
@@ -62,15 +65,21 @@ services:
 
   # ── Backend (Flask + Celery) ───────────────────────────────────────────
   backend:
+    restart: unless-stopped
     build:
       context: .
       dockerfile: docker/Dockerfile.backend
+      args:
+        # Set by start-docker.sh --gpu from the host GPU; see Dockerfile.backend.
+        TORCH_CHANNEL: ${GUAARDVARK_TORCH_CHANNEL:-}
     environment:
       GUAARDVARK_ROOT: /app
       DATABASE_URL: postgresql://guaardvark:${GUAARDVARK_POSTGRES_PASSWORD:-guaardvark}@postgres:5432/guaardvark
       REDIS_URL: redis://:${GUAARDVARK_REDIS_PASSWORD:-guaardvark}@redis:6379/0
       CELERY_BROKER_URL: redis://:${GUAARDVARK_REDIS_PASSWORD:-guaardvark}@redis:6379/0
       CELERY_RESULT_BACKEND: redis://:${GUAARDVARK_REDIS_PASSWORD:-guaardvark}@redis:6379/0
+      # backend/config.py reads OLLAMA_BASE_URL; the ollama Python client reads OLLAMA_HOST.
+      OLLAMA_BASE_URL: http://ollama:11434
       OLLAMA_HOST: http://ollama:11434
       FLASK_PORT: "5000"
       # The UI reaches the backend through the frontend container, so even a
@@ -106,7 +115,7 @@ services:
     command: >
       sh -c "
         cd /app &&
-        flask db upgrade 2>/dev/null;
+        { flask db upgrade || echo 'flask db upgrade failed; the backend starts anyway' >&2; };
         python -m flask run --host 0.0.0.0 --port 5000 &
         celery -A backend.celery_app.celery worker --loglevel=info --concurrency=2 &
         wait
@@ -114,6 +123,7 @@ services:
 
   # ── Frontend (React/Vite via nginx) ────────────────────────────────────
   frontend:
+    restart: unless-stopped
     build:
       context: .
       dockerfile: docker/Dockerfile.frontend
