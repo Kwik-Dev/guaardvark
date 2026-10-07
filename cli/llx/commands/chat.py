@@ -8,13 +8,12 @@ from pathlib import Path
 
 import typer
 from rich.markdown import Markdown
-from rich.spinner import Spinner
-from rich.live import Live
 
 from llx.client import get_client, LlxError, LlxConnectionError
 from llx.config import save_session, get_last_session_id, load_sessions
 from llx.global_opts import get_global_json, get_global_server
 from llx.theme import make_console
+from llx.working import working
 from llx import output
 
 console = make_console()
@@ -146,11 +145,7 @@ def _chat_sync(session_id: str, message: str, no_rag: bool, server: str | None, 
             except Exception:
                 pass
 
-        # Show spinner in interactive mode
-        if not json_out and not output.is_pipe():
-            with Live(Spinner("dots", text="[llx.dim]Thinking...[/llx.dim]"), console=console, transient=True):
-                data = client.post("/api/enhanced-chat", json=body)
-        else:
+        with working("Thinking…", console=console, enabled=not json_out):
             data = client.post("/api/enhanced-chat", json=body)
 
         elapsed = time.time() - start_time
@@ -241,47 +236,23 @@ def _chat_streaming(session_id: str, message: str, no_rag: bool, server: str | N
     """Send chat via /api/chat/unified with Socket.IO streaming."""
     import signal
 
+    from llx.global_opts import get_global_verbose
+    from llx.streaming import ChatRenderer, LlxStreamer, TurnCollector
+
     try:
         client = get_client(server)
-        from llx.streaming import LlxStreamer
         streamer = LlxStreamer(server_url=client.server_url)
-
-        response_parts = []
         start_time = time.time()
-        live_holder = {"live": None}
 
-        def on_token(content):
-            response_parts.append(content)
-            live = live_holder.get("live")
-            if live is not None:
-                try:
-                    live.update(Markdown("".join(response_parts)))
-                except Exception:
-                    pass
+        # A terminal gets the live status line and the rendered reply; --json
+        # and pipes get only the final text (status lines on stderr with --verbose).
+        interactive = not json_out and not output.is_pipe()
+        if interactive:
+            turn = ChatRenderer(server_url=client.server_url, console=console)
+        else:
+            turn = TurnCollector(echo_status=get_global_verbose())
+        turn.start()
 
-        def on_complete(data):
-            live_holder["complete"] = data
-
-        def on_error(msg):
-            response_parts.append(f"\n[ERROR] {msg}")
-
-        def on_tool_output_chunk(data):
-            chunk = data.get("chunk", "")
-            if not json_out and not output.is_pipe():
-                console.print(chunk, end="")
-
-        # Connect streaming first. Approval requests are pulled from the
-        # streamer in wait_for_completion — never from the socketio receive
-        # thread, which would deadlock the event stream.
-        streamer.stream_chat(
-            session_id=session_id,
-            on_token=on_token,
-            on_tool_output_chunk=on_tool_output_chunk,
-            on_complete=on_complete,
-            on_error=on_error,
-        )
-
-        # Handle Ctrl+C
         original_sigint = signal.getsignal(signal.SIGINT)
 
         def sigint_handler(sig, frame):
@@ -291,121 +262,96 @@ def _chat_streaming(session_id: str, message: str, no_rag: bool, server: str | N
             signal.signal(signal.SIGINT, original_sigint)
             raise typer.Exit(0)
 
-        signal.signal(signal.SIGINT, sigint_handler)
+        try:
+            # Connect streaming first. Approval requests are pulled from the
+            # streamer in wait_for_completion — never from the socketio receive
+            # thread, which would deadlock the event stream.
+            streamer.stream_chat(session_id=session_id, **turn.stream_callbacks())
 
-        # Post the message to unified chat (streaming endpoint).
-        # One-shot `guaardvark chat` has no persistent /agent toggle context,
-        # so agent_screen_active defaults to False — backend routes through
-        # the normal ReACT path with web/tool access, not screen actions.
-        body = {
-            "session_id": session_id,
-            "message": message,
-            "options": {"use_rag": not no_rag, "agent_screen_active": False},
-        }
-        if project_id:
-            body["project_id"] = project_id
-        if project_root:
-            body["project_root"] = project_root
-            try:
-                from llx.utils import populate_project_context, build_cli_context as build_ctx
-                from llx.working_memory import empty_working_memory
-                mem = empty_working_memory()
-                populate_project_context(mem, Path(project_root))
-                body["options"]["context"] = build_ctx("", mem)
-                body["options"]["cli_working_memory"] = mem
-            except Exception:
-                pass
+            signal.signal(signal.SIGINT, sigint_handler)
 
-        for attempt in range(2):
-            try:
-                client.post("/api/chat/unified", json=body)
-                break
-            except LlxError as e:
-                if e.status_code == 409 and attempt == 0:
-                    try:
-                        client.abort_session(session_id)
-                    except Exception:
-                        pass
-                    continue
-                raise
-
-        def _approval_handler(pending):
-            from llx.working_memory import extract_approval_targets
-
-            tools_str = ", ".join(pending.get("tools", [])) or "(unknown tools)"
-            targets = extract_approval_targets(pending)
-            console.print(f"\n[bold yellow]\u26a0 Approval Required[/bold yellow]")
-            console.print(f"  Tool(s): [bold]{tools_str}[/bold]")
-            if targets:
-                console.print(f"  Actual target(s): [bold]{', '.join(targets)}[/bold]")
-            try:
-                approved = typer.confirm("Allow execution?", default=False)
-            except (KeyboardInterrupt, EOFError, typer.Abort):
-                console.print("[red]\u2717 Aborted.[/red]\n")
-                raise KeyboardInterrupt
-            console.print(
-                "[green]\u2713 Approved.[/green]\n" if approved
-                else "[red]\u2717 Rejected.[/red]\n"
-            )
-            return approved
-
-        # Stream output
-        if json_out or output.is_pipe():
-            completed = streamer.wait_for_completion(approval_handler=None)
-            if not completed:
-                streamer.hard_abort(session_id, client)
-            full_response = "".join(response_parts)
-            if json_out:
-                output.print_json(
-                    {
-                        "status": "success" if completed else "timeout",
-                        "data": {
-                            "session_id": session_id,
-                            "response": full_response,
-                            "elapsed": round(time.time() - start_time, 2),
-                        },
-                    }
-                )
-            else:
-                print(full_response)
-        else:
-            completed = False
-            try:
-                with Live("", console=console, refresh_per_second=15, transient=False) as live:
-                    live_holder["live"] = live
-                    completed = streamer.wait_for_completion(
-                        approval_handler=_approval_handler,
-                        esc_stops=True,
-                    )
-                    current = "".join(response_parts)
-                    if current:
-                        live.update(Markdown(current))
-            except KeyboardInterrupt:
-                streamer.hard_abort(session_id, client)
-                console.print("[llx.dim]Chat aborted.[/llx.dim]")
-                completed = True
-            finally:
-                live_holder["live"] = None
-
-            if not completed:
-                streamer.hard_abort(session_id, client)
-                console.print(
-                    "\n[llx.error]No response after 5 minutes of silence — session aborted.[/llx.error]"
-                )
-
-            images = (live_holder.get("complete") or {}).get("generated_images")
-            if images:
+            # Post the message to unified chat (streaming endpoint).
+            # One-shot `guaardvark chat` has no persistent /agent toggle context,
+            # so agent_screen_active defaults to False — backend routes through
+            # the normal ReACT path with web/tool access, not screen actions.
+            body = {
+                "session_id": session_id,
+                "message": message,
+                "options": {"use_rag": not no_rag, "agent_screen_active": False},
+            }
+            if project_id:
+                body["project_id"] = project_id
+            if project_root:
+                body["project_root"] = project_root
                 try:
-                    from llx.media_preview import show_generated
-
-                    show_generated(images, client.server_url, console)
+                    from llx.utils import populate_project_context, build_cli_context as build_ctx
+                    from llx.working_memory import empty_working_memory
+                    mem = empty_working_memory()
+                    populate_project_context(mem, Path(project_root))
+                    body["options"]["context"] = build_ctx("", mem)
+                    body["options"]["cli_working_memory"] = mem
                 except Exception:
                     pass
 
-            elapsed = time.time() - start_time
-            console.print(f"\n[llx.dim]Session: {session_id[:8]}  |  {elapsed:.1f}s[/llx.dim]")
+            for attempt in range(2):
+                try:
+                    client.post("/api/chat/unified", json=body)
+                    break
+                except LlxError as e:
+                    if e.status_code == 409 and attempt == 0:
+                        try:
+                            client.abort_session(session_id)
+                        except Exception:
+                            pass
+                        continue
+                    raise
 
-        signal.signal(signal.SIGINT, original_sigint)
+            if not interactive:
+                completed = streamer.wait_for_completion(approval_handler=None)
+                if not completed:
+                    streamer.hard_abort(session_id, client)
+                full_response = turn.text
+                if turn.error:
+                    full_response += f"\n[ERROR] {turn.error}"
+                if json_out:
+                    output.print_json(
+                        {
+                            "status": "success" if completed else "timeout",
+                            "data": {
+                                "session_id": session_id,
+                                "response": full_response,
+                                "elapsed": round(time.time() - start_time, 2),
+                            },
+                        }
+                    )
+                else:
+                    print(full_response)
+            else:
+                completed = False
+                try:
+                    completed = streamer.wait_for_completion(
+                        approval_handler=turn.prompt_for_approval,
+                        esc_stops=True,
+                    )
+                except KeyboardInterrupt:
+                    streamer.hard_abort(session_id, client)
+                    console.print("[llx.dim]Chat aborted.[/llx.dim]")
+                    completed = True
+                finally:
+                    turn.stop()
+
+                if not completed:
+                    streamer.hard_abort(session_id, client)
+                    console.print(
+                        "\n[llx.error]No response after 5 minutes of silence — session aborted.[/llx.error]"
+                    )
+
+                elapsed = time.time() - start_time
+                console.print(f"[llx.dim]Session: {session_id[:8]}  |  {elapsed:.1f}s[/llx.dim]")
+        finally:
+            turn.stop()
+            signal.signal(signal.SIGINT, original_sigint)
+
         save_session(session_id, message[:80])
         streamer.disconnect()
 

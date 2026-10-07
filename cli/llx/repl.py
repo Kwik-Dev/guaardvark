@@ -24,6 +24,7 @@ from llx.config import (
 from llx.context import ContextSnapshot
 from llx.slash import SlashRouter
 from llx.streaming import ChatRenderer, LlxStreamer
+from llx.working import working
 from llx.theme import (
     ICON_OFFLINE,
     ICON_ONLINE,
@@ -228,16 +229,17 @@ def _handle_chat(state: dict, ctx: ContextSnapshot, message: str, raw_message: s
         assistant_text = ""
         try:
             client = get_client(server)
-            response = client.post("/api/chat/unified", json={
-                "session_id": session_id,
-                "message": message,
-                "options": {
-                    "use_rag": False,
-                    "context": build_cli_context(ctx.format_context_block(), memory),
-                    "agent_screen_active": screen_active,
-                    "cli_working_memory": memory,
-                },
-            })
+            with working("Thinking…", console=console):
+                response = client.post("/api/chat/unified", json={
+                    "session_id": session_id,
+                    "message": message,
+                    "options": {
+                        "use_rag": False,
+                        "context": build_cli_context(ctx.format_context_block(), memory),
+                        "agent_screen_active": screen_active,
+                        "cli_working_memory": memory,
+                    },
+                })
             result = response.get("data", response)
             content = result.get("response", str(result))
             assistant_text = content
@@ -266,72 +268,71 @@ def _handle_chat(state: dict, ctx: ContextSnapshot, message: str, raw_message: s
             },
         }
 
-        streamer.stream_chat(
-            session_id,
-            on_token=renderer.on_token,
-            on_thinking=renderer.on_thinking,
-            on_tool_call=renderer.on_tool_call,
-            on_tool_output_chunk=renderer.on_tool_output_chunk,
-            on_complete=renderer.on_complete,
-            on_error=renderer.on_error,
-        )
+        # The status line is up before the socket connects, so a slow connect
+        # reads "Connecting…" rather than an empty line.
         renderer.start()
-
-        posted = False
-        for attempt in range(2):
-            try:
-                client.post("/api/chat/unified", json=chat_body)
-                posted = True
-                break
-            except LlxError as e:
-                if e.status_code == 409 and attempt == 0:
-                    console.print(
-                        "[llx.dim]Previous request still running — aborting and retrying…[/llx.dim]"
-                    )
-                    try:
-                        client.abort_session(session_id)
-                    except Exception:
-                        pass
-                    continue
-                renderer.stop()
-                console.print(f"[llx.error]Chat error: {e}[/llx.error]")
-                if e.status_code == 409:
-                    console.print(
-                        "[llx.dim]Try /abort, then send again — or /new for a fresh session.[/llx.dim]"
-                    )
-                streamer.disconnect()
-                return
-            except (LlxConnectionError, Exception) as e:
-                renderer.stop()
-                console.print(f"[llx.error]Chat error: {e}[/llx.error]")
-                streamer.disconnect()
-                return
-
-        if not posted:
-            renderer.stop()
-            streamer.disconnect()
-            return
-
-        completed = False
-        aborted_by_user = False
         try:
-            completed = streamer.wait_for_completion(
-                approval_handler=lambda data: renderer.prompt_for_approval(
-                    data,
-                    expected_target=expected_edit_target(memory),
-                ),
-                esc_stops=True,
-            )
-        except KeyboardInterrupt:
-            aborted_by_user = True
-            streamer.hard_abort(session_id, client)
-            console.print("[llx.dim]Chat aborted.[/llx.dim]")
-        finally:
-            state["type_ahead"] = streamer.type_ahead
-            renderer.stop()
-            if not completed and not aborted_by_user:
+            streamer.stream_chat(session_id, **renderer.stream_callbacks())
+
+            posted = False
+            for attempt in range(2):
+                try:
+                    client.post("/api/chat/unified", json=chat_body)
+                    posted = True
+                    break
+                except LlxError as e:
+                    if e.status_code == 409 and attempt == 0:
+                        console.print(
+                            "[llx.dim]Previous request still running — aborting and retrying…[/llx.dim]"
+                        )
+                        try:
+                            client.abort_session(session_id)
+                        except Exception:
+                            pass
+                        continue
+                    renderer.stop()
+                    console.print(f"[llx.error]Chat error: {e}[/llx.error]")
+                    if e.status_code == 409:
+                        console.print(
+                            "[llx.dim]Try /abort, then send again — or /new for a fresh session.[/llx.dim]"
+                        )
+                    streamer.disconnect()
+                    return
+                except (LlxConnectionError, Exception) as e:
+                    renderer.stop()
+                    console.print(f"[llx.error]Chat error: {e}[/llx.error]")
+                    streamer.disconnect()
+                    return
+
+            if not posted:
+                renderer.stop()
+                streamer.disconnect()
+                return
+
+            completed = False
+            aborted_by_user = False
+            try:
+                completed = streamer.wait_for_completion(
+                    approval_handler=lambda data: renderer.prompt_for_approval(
+                        data,
+                        expected_target=expected_edit_target(memory),
+                    ),
+                    esc_stops=True,
+                )
+            except KeyboardInterrupt:
+                aborted_by_user = True
                 streamer.hard_abort(session_id, client)
-            streamer.disconnect()
+                console.print("[llx.dim]Chat aborted.[/llx.dim]")
+            finally:
+                state["type_ahead"] = streamer.type_ahead
+                renderer.stop()
+                if not completed and not aborted_by_user:
+                    streamer.hard_abort(session_id, client)
+                streamer.disconnect()
+        finally:
+            # Leaves the terminal usable if anything above raised past the
+            # handlers; a no-op once the turn has been printed.
+            renderer.stop()
 
         if aborted_by_user:
             pass
@@ -340,7 +341,7 @@ def _handle_chat(state: dict, ctx: ContextSnapshot, message: str, raw_message: s
                 "[llx.error]No response after 5 minutes of silence — session aborted. "
                 "Try again, or /abort / /new if it stays stuck.[/llx.error]"
             )
-        assistant_text = "".join(renderer._tokens)
+        assistant_text = renderer.text
 
     record_recommendation_summary(memory, raw_message, assistant_text)
     # Track session

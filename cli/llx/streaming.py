@@ -10,7 +10,6 @@ from engineio import payload as _engineio_payload
 _engineio_payload.Payload.max_decode_packets = 10000
 
 import socketio
-import json
 import threading
 import time
 from contextlib import nullcontext
@@ -66,6 +65,10 @@ class LlxStreamer:
         on_tool_output_chunk: Callable[[dict], None] | None = None,
         on_complete: Callable[[dict], None] | None = None,
         on_error: Callable[[str], None] | None = None,
+        on_reasoning: Callable[[dict], None] | None = None,
+        on_tool_result: Callable[[dict], None] | None = None,
+        on_token_reset: Callable[[], None] | None = None,
+        on_connected: Callable[[], None] | None = None,
     ):
         """
         Connect to Socket.IO, join session, and listen for chat events.
@@ -75,6 +78,10 @@ class LlxStreamer:
         streamer and the main thread picks them up via pop_pending_approval()
         or wait_for_completion(approval_handler=...). This keeps blocking
         prompts off the socketio receive thread.
+
+        ``on_token_reset`` fires when the backend retracts the text it has
+        streamed so far (it is re-asking the model); ``on_connected`` once the
+        socket has joined the session.
         """
         self._done.clear()
         self._approval_pending.clear()
@@ -87,6 +94,10 @@ class LlxStreamer:
         @self.sio.on("chat:token")
         def handle_token(data):
             self._touch_activity()
+            if data.get("reset"):
+                if on_token_reset:
+                    on_token_reset()
+                return
             content = data.get("content", "")
             if content:
                 on_token(content)
@@ -97,11 +108,25 @@ class LlxStreamer:
             if on_thinking:
                 on_thinking(data)
 
+        # A thinking model can reason for minutes before its first token;
+        # each reasoning chunk counts as activity for the idle timeout.
+        @self.sio.on("chat:reasoning")
+        def handle_reasoning(data):
+            self._touch_activity()
+            if on_reasoning:
+                on_reasoning(data)
+
         @self.sio.on("chat:tool_call")
         def handle_tool_call(data):
             self._touch_activity()
             if on_tool_call:
                 on_tool_call(data)
+
+        @self.sio.on("chat:tool_result")
+        def handle_tool_result(data):
+            self._touch_activity()
+            if on_tool_result:
+                on_tool_result(data)
 
         @self.sio.on("chat:tool_approval_request")
         def handle_tool_approval_request(data):
@@ -159,6 +184,8 @@ class LlxStreamer:
                 on_error(f"Failed to connect for streaming: {e}")
             self._done.set()
             return
+        if on_connected:
+            on_connected()
 
     def wait(self, timeout: float = DEFAULT_IDLE_TIMEOUT) -> bool:
         """Block until streaming is done. Returns True if completed, False on timeout."""
@@ -330,21 +357,34 @@ class LlxStreamer:
 # ── Chat Renderer ─────────────────────────────────────────────
 
 import sys
-import threading
 
+from rich.console import Group
 from rich.live import Live
 from rich.markdown import Markdown
+from rich.spinner import Spinner
 from rich.text import Text
-from rich.console import Group
 
+from llx import turn_status
 from llx.theme import make_console
+from llx.working import (
+    REFRESH_PER_SECOND,
+    SPINNER_NAME,
+    live_status_enabled,
+    status_renderable,
+    verbose_status_enabled,
+    write_status_to_stderr,
+)
 
-_ICON_TOOL  = "\u27e1"   # ⟡
-_ICON_OK    = "\u2713"   # ✓
-_ICON_ASSISTANT = "\u276f"  # ❯  (brand mark — Unicode has no aardvark)
+_ICON_TOOL  = "⟡"   # ⟡
+_ICON_OK    = "✓"   # ✓
+_ICON_FAIL  = "✗"   # ✗
+_ICON_THOUGHT = "∴"  # ∴
+_ICON_ASSISTANT = "❯"  # ❯  (brand mark — Unicode has no aardvark)
 
-# 8-step "shining cursor" spinner — edge sweeps clockwise around a block
-_SPINNER_FRAMES = ["▀", "▜", "▐", "▟", "▄", "▙", "▌", "▛"]
+# Live-region budget for tool calls and tool output; the reply text gets the
+# rest of the screen so the status line stays in view.
+_LIVE_TOOL_LINES = 6
+_LIVE_OUTPUT_LINES = 10
 
 _WEB_ACCESS_HINT = (
     "Web access is disabled. Enable it in Settings (allow_web_search), then retry."
@@ -362,99 +402,228 @@ def _set_title(title: str):
     """Set the terminal tab title via ANSI escape.
 
     Writes to /dev/tty directly to bypass Rich's Live display capture.
-    Falls back to stderr if /dev/tty is unavailable.
+    Falls back to stderr if /dev/tty is unavailable and stderr is a terminal.
     """
     try:
         with open("/dev/tty", "w") as tty:
             tty.write(f"\033]0;{title}\007")
             tty.flush()
     except OSError:
-        sys.stderr.write(f"\033]0;{title}\007")
-        sys.stderr.flush()
+        # While Live runs, sys.stderr is Rich's proxy, which would print the
+        # escape as visible text; write to the terminal underneath it.
+        err = getattr(sys.stderr, "rich_proxied_file", sys.stderr)
+        try:
+            if err.isatty():
+                err.write(f"\033]0;{title}\007")
+                err.flush()
+        except (OSError, ValueError, AttributeError):
+            pass
 
 
-class ChatRenderer:
-    """Renders streaming chat responses with live markdown and tool-call UI."""
+def _tool_text(call: turn_status.ToolCall, now: float) -> Text:
+    if not call.done:
+        icon, icon_style = _ICON_TOOL, "llx.accent"
+    elif call.ok:
+        icon, icon_style = _ICON_OK, "llx.success"
+    else:
+        icon, icon_style = _ICON_FAIL, "llx.error"
+    line = Text()
+    line.append(f"{icon} ", style=icon_style)
+    line.append(f"{call.name}({call.args})", style="llx.dim")
+    duration = call.duration_s if call.done else now - call.started_at
+    if duration is not None and (call.done or duration >= 1.0):
+        line.append(f" · {turn_status.format_elapsed(duration)}", style="llx.dim")
+    return line
 
-    def __init__(self, server_url: str | None = None):
+
+def _output_text(chunks: list[str]) -> str:
+    out_text = "".join(chunks)
+    lines = out_text.splitlines()
+    if len(lines) > _LIVE_OUTPUT_LINES:
+        out_text = "...\n" + "\n".join(lines[-_LIVE_OUTPUT_LINES:])
+    return out_text
+
+
+class TurnCollector:
+    """Follows a chat turn from its Socket.IO events without drawing anything.
+
+    Used as-is for --json and piped output, where only the final text is
+    printed; with --verbose each new status label goes to stderr. The event
+    callbacks may be called from the Socket.IO thread.
+    """
+
+    def __init__(self, echo_status: bool = False):
+        self._lock = threading.Lock()
+        self._state = turn_status.new_turn(time.monotonic())
+        self._verbose = echo_status
+        self._last_label = ""
+
+    def start(self, label: str = turn_status.CONNECTING):
+        with self._lock:
+            self._state = turn_status.new_turn(time.monotonic(), label)
+        self._last_label = label
+        if self._verbose:
+            write_status_to_stderr(label)
+
+    def stop(self):
+        """Nothing to clear; present so callers can treat both kinds alike."""
+
+    def stream_callbacks(self) -> dict:
+        """Keyword arguments for ``LlxStreamer.stream_chat``."""
+        return {
+            "on_token": self.on_token,
+            "on_thinking": self.on_thinking,
+            "on_tool_call": self.on_tool_call,
+            "on_tool_output_chunk": self.on_tool_output_chunk,
+            "on_complete": self.on_complete,
+            "on_error": self.on_error,
+            "on_reasoning": self.on_reasoning,
+            "on_tool_result": self.on_tool_result,
+            "on_token_reset": self.on_token_reset,
+            "on_connected": self.on_connected,
+        }
+
+    def _apply(self, event: str, data: dict):
+        with self._lock:
+            turn_status.reduce(self._state, event, data, time.monotonic())
+            label = self._state.label
+        if self._verbose and label != self._last_label:
+            self._last_label = label
+            write_status_to_stderr(label)
+
+    @property
+    def text(self) -> str:
+        """The reply text so far (tool chatter and retracted text removed)."""
+        with self._lock:
+            return self._state.full_text
+
+    @property
+    def error(self) -> str | None:
+        with self._lock:
+            return self._state.error
+
+    _error = error
+
+    @property
+    def _tool_lines(self) -> list[str]:
+        now = time.monotonic()
+        with self._lock:
+            return [_tool_text(call, now).plain for call in self._state.tools]
+
+    # ── Event Callbacks ───────────────────────────────────────
+
+    def on_connected(self):
+        self._apply("connected", {})
+
+    def on_token(self, content: str):
+        self._apply("chat:token", {"content": content})
+
+    def on_token_reset(self):
+        """The backend took back the text it streamed and is asking again."""
+        self._apply("chat:token", {"content": "", "reset": True})
+
+    def on_thinking(self, data: dict):
+        self._apply("chat:thinking", data)
+
+    def on_reasoning(self, data: dict):
+        self._apply("chat:reasoning", data)
+
+    def on_tool_call(self, data: dict):
+        self._apply("chat:tool_call", data)
+
+    def on_tool_result(self, data: dict):
+        self._apply("chat:tool_result", data)
+
+    def on_tool_output_chunk(self, data: dict):
+        self._apply("chat:tool_output_chunk", data)
+
+    def on_complete(self, data: dict):
+        self._apply("chat:complete", data)
+
+    def on_error(self, message: str):
+        self._apply("chat:error", {"error": message})
+
+
+class ChatRenderer(TurnCollector):
+    """Renders a streaming chat turn: a live status line, tool calls, then the reply.
+
+    Socket.IO callbacks only update the turn state under a lock; one rich
+    ``Live`` redraws from that state on its own thread, so nothing else writes
+    to the terminal while a turn is on screen. When the console cannot animate
+    (piped, dumb terminal, GUAARDVARK_NO_SPINNER=1) nothing is drawn until
+    ``stop()`` prints the final reply.
+    """
+
+    def __init__(self, server_url: str | None = None, console=None):
+        super().__init__()
         self.server_url = server_url
-        self._console = make_console()
-        self._tokens: list[str] = []
-        self._tool_lines: list[str] = []
-        self._tool_outputs: dict[str, list[str]] = {}
-        self._thinking_steps: list[dict] = []
-        self._complete_data: dict | None = None
-        self._error: str | None = None
+        self._console = console or make_console()
         self._live: Live | None = None
-        self._thinking = False
-        self._spinner_thread: threading.Thread | None = None
-        self._spinner_stop = threading.Event()
-        self._last_render_time = 0.0
-        self._render_throttle = 0.05  # 50ms throttle for large documents
-        self._live_status = "thinking"
-        self._stop_hint = False
+        self._live_enabled = False
+        self._hint = ""
+        self._spinner = Spinner(SPINNER_NAME, style="llx.brand")
+        self._title = ""
+        self._stopped = True
 
     # ── Lifecycle ─────────────────────────────────────────────
 
-    def start(self):
-        """Clear state and begin a Live display with thinking spinner."""
-        self._tokens = []
-        self._tool_lines = []
-        self._tool_outputs = {}
-        self._thinking_steps = []
-        self._complete_data = None
-        self._error = None
-        self._thinking = True
-        self._live_status = "thinking"
-        self._spinner_stop.clear()
-        self._last_render_time = 0.0
-        from llx.keywatch import available as esc_available
-        self._stop_hint = esc_available()
-        self._live = Live(
-            Text(""),
-            console=self._console,
-            refresh_per_second=15,
-            transient=True,
-        )
-        self._live.start()
-        self._start_spinner()
+    def start(self, esc_hint: bool | None = None, label: str = turn_status.CONNECTING):
+        """Reset the turn and show the status line (call before connecting)."""
+        self._stopped = False
+        self._live_enabled = live_status_enabled(self._console)
+        self._verbose = not self._live_enabled and verbose_status_enabled()
+        super().start(label)
+        if esc_hint is None:
+            from llx.keywatch import available as esc_available
+            esc_hint = esc_available()
+        self._hint = "esc to stop" if esc_hint and self._live_enabled else ""
+        self._spinner = Spinner(SPINNER_NAME, style="llx.brand")
+        self._title = ""
+        self._start_live()
 
     def stop(self):
-        """Stop the Live display and print final pretty output."""
-        self._stop_spinner()
+        """Clear the live region and print the finished turn. Safe to call twice."""
+        if self._stopped:
+            return
+        self._stopped = True
+        self._stop_live()
+        if self._live_enabled:
+            _set_title("agent")
 
-        if self._live is not None:
-            self._live.stop()
-            self._live = None
+        with self._lock:
+            state = self._state
+            trail = list(state.trail)
+            tools = list(state.tools)
+            outputs = {k: list(v) for k, v in state.tool_outputs.items()}
+            thought_s = state.thought_s
+            full_text = state.full_text
+            complete = state.complete
+            error = state.error
+        now = time.monotonic()
 
-        # Reset terminal title
-        _set_title("agent")
+        self._print_thinking_trail(trail)
+        for call in tools:
+            self._console.print(_tool_text(call, now))
 
-        self._print_thinking_trail()
+        for tool, chunks in outputs.items():
+            if not chunks:
+                continue
+            out_text = _output_text(chunks)
+            # Pretty diff if it looks like one
+            if tool in ("edit", "edit_code", "apply") or out_text.lstrip().startswith("--- ") or "diff --git" in out_text[:200]:
+                try:
+                    from rich.syntax import Syntax
+                    self._console.print(Syntax(out_text, "diff", line_numbers=False))
+                    continue
+                except Exception:
+                    pass
+            self._console.print(Text(f"[{tool} output]\n{out_text}", style="llx.dim"))
 
-        # Print tool call lines
-        for line in self._tool_lines:
-            self._console.print(line)
+        if thought_s > 0:
+            self._console.print(Text(
+                f"{_ICON_THOUGHT} Thought for {turn_status.format_elapsed(thought_s)}", style="llx.dim",
+            ))
 
-        # Print tool outputs
-        for tool, chunks in self._tool_outputs.items():
-            if chunks:
-                out_text = "".join(chunks)
-                lines = out_text.splitlines()
-                if len(lines) > 10:
-                    out_text = "...\n" + "\n".join(lines[-10:])
-                # Pretty diff if it looks like one
-                if tool in ("edit", "edit_code", "apply") or out_text.lstrip().startswith("--- ") or "diff --git" in out_text[:200]:
-                    try:
-                        from rich.syntax import Syntax
-                        self._console.print(Syntax(out_text, "diff", line_numbers=False))
-                        continue
-                    except Exception:
-                        pass
-                self._console.print(f"[dim][{tool} output]\n{out_text}[/dim]")
-
-        # Print final accumulated text as rich Markdown with llama prefix
-        full_text = "".join(self._tokens)
         if full_text.strip():
             self._console.print(Text(f"{_ICON_ASSISTANT} ", style="llx.brand"), end="")
             # The marker takes two columns of the first line; laid out at full
@@ -466,7 +635,7 @@ class ChatRenderer:
 
         # Pictures the turn made are drawn once the live display has stopped,
         # so its redraws cannot overwrite them.
-        images = (self._complete_data or {}).get("generated_images") if isinstance(self._complete_data, dict) else None
+        images = complete.get("generated_images") if isinstance(complete, dict) else None
         if images:
             try:
                 from llx.config import get_server_url
@@ -476,119 +645,56 @@ class ChatRenderer:
             except Exception:
                 pass
 
-        # Print error if any
-        if self._error:
-            self._console.print(f"[llx.error]{self._error}[/llx.error]")
-            hint = _maybe_web_access_hint(self._error)
+        if error:
+            self._console.print(Text(error, style="llx.error"))
+            hint = _maybe_web_access_hint(error)
             if hint:
                 self._console.print(f"[llx.dim]{hint}[/llx.dim]")
 
         self._console.print()
 
-    # ── Event Callbacks ───────────────────────────────────────
-
-    def on_token(self, content: str):
-        """Append a token and refresh the live display."""
-        # Filter out raw tool-call markup leaked by the LLM
-        if content.startswith("<tool") or content.startswith("</tool"):
+    def _start_live(self):
+        if not self._live_enabled or self._live is not None:
             return
-        if self._tokens and self._tokens[-1].startswith("<tool"):
-            # Previous token was a partial tool marker — drop both
-            self._tokens.pop()
-            return
-        if self._thinking:
-            self._thinking = False
-            self._stop_spinner()
-        self._tokens.append(content)
-        self._refresh()
+        # A fresh Live each time: a restarted one would first erase the lines
+        # printed while it was stopped (the approval prompt).
+        self._live = Live(
+            get_renderable=self._view,
+            console=self._console,
+            refresh_per_second=REFRESH_PER_SECOND,
+            transient=True,
+        )
+        self._live.start(refresh=True)
 
-    def on_thinking(self, data: dict):
-        """Record agent thinking steps (single trail, web UI parity)."""
-        if not isinstance(data, dict):
-            return
-        iteration = data.get("iteration")
-        status = (data.get("status") or data.get("label") or "").strip()
-        reasoning = (data.get("reasoning") or "").strip()
-        step = {
-            "iteration": iteration,
-            "status": status,
-            "reasoning": reasoning,
-        }
-        if iteration is not None:
-            for idx, existing in enumerate(self._thinking_steps):
-                if existing.get("iteration") == iteration:
-                    merged = dict(existing)
-                    if status:
-                        merged["status"] = status
-                    if reasoning:
-                        merged["reasoning"] = reasoning
-                    self._thinking_steps[idx] = merged
-                    break
-            else:
-                self._thinking_steps.append(step)
-        else:
-            self._thinking_steps.append(step)
-        if status:
-            self._live_status = status
-        self._refresh()
-
-    def on_tool_call(self, data: dict):
-        """Record a tool call and refresh the live display."""
-        if self._thinking:
-            self._thinking = False
-            self._stop_spinner()
-        # Tokens before a tool call are the model's reasoning, not the
-        # response. Clear them so the final answer comes through clean.
-        self._tokens.clear()
-        name = data.get("name") or data.get("tool", "unknown")
-        args = data.get("params")
-        if args is None:
-            args = data.get("arguments")
-        if args is None:
-            args = data.get("args", "")
-        if isinstance(args, (dict, list)):
-            args = json.dumps(args, sort_keys=True)
-        args_preview = str(args)
-        if len(args_preview) > 120:
-            args_preview = args_preview[:117] + "..."
-        line = f"[dim]{_ICON_TOOL} Calling: {name}({args_preview})[/dim]"
-        self._tool_lines.append(line)
-        self._live_status = f"tool: {name}"
-        self._refresh()
+    def _stop_live(self) -> bool:
+        live, self._live = self._live, None
+        if live is None:
+            return False
+        try:
+            live.stop()
+        except Exception:
+            pass
+        return True
 
     def prompt_for_approval(self, data: dict, expected_target: str | None = None) -> bool:
         """Ask the user whether to allow the listed tools.
 
-        MUST be called from the main thread (not a socketio callback).
-        Pauses the spinner and Live display before prompting so the user
-        actually sees the question, then resumes them so the rest of the
-        response can keep streaming. Raises KeyboardInterrupt if the user
-        aborts at the prompt — caller should treat that as 'cancel chat'.
+        MUST be called from the main thread (not a socketio callback). The
+        live region is taken down for the question and put back afterwards.
+        Raises KeyboardInterrupt if the user aborts at the prompt; the caller
+        treats that as 'cancel chat'.
         """
         tools = data.get("tools", [])
         tools_str = ", ".join(tools) if tools else "(unknown tools)"
 
-        # Snapshot what's running before we tear it down
-        spinner_was_running = (
-            self._spinner_thread is not None
-            and not self._spinner_stop.is_set()
-        )
-        live_was_active = self._live is not None
-
-        # Stop spinner FIRST so it can't race the prompt by writing escapes
-        self._stop_spinner()
-        # Stop Live so the prompt isn't erased by the transient region
-        if live_was_active:
-            try:
-                self._live.stop()
-            except Exception:
-                pass
-
-        _set_title("agent — awaiting approval")
+        live_was_active = self._stop_live()
+        if self._live_enabled:
+            _set_title("agent — awaiting approval")
+            self._title = ""
 
         import typer
         self._console.print()
-        self._console.print("[bold yellow]\u26a0 Approval Required[/bold yellow]")
+        self._console.print("[bold yellow]⚠ Approval Required[/bold yellow]")
         self._console.print(f"  Tool(s): [bold]{tools_str}[/bold]")
         actual_targets = extract_approval_targets(data)
         if expected_target:
@@ -598,16 +704,9 @@ class ChatRenderer:
 
         mismatch, _targets = approval_target_mismatch(data, expected_target)
         if mismatch:
-            self._console.print("[red]\u2717 Rejected: edit target does not match the active file.[/red]\n")
+            self._console.print("[red]✗ Rejected: edit target does not match the active file.[/red]\n")
             if live_was_active:
-                try:
-                    self._live.start()
-                except Exception:
-                    pass
-            if spinner_was_running:
-                self._thinking = True
-                self._spinner_stop.clear()
-                self._start_spinner()
+                self._start_live()
             return False
 
         aborted = False
@@ -618,142 +717,102 @@ class ChatRenderer:
             aborted = True
 
         if aborted:
-            self._console.print("[red]\u2717 Aborted.[/red]\n")
+            self._console.print("[red]✗ Aborted.[/red]\n")
         elif approved:
-            self._console.print("[green]\u2713 Approved.[/green]\n")
+            self._console.print("[green]✓ Approved.[/green]\n")
         else:
-            self._console.print("[red]\u2717 Rejected.[/red]\n")
+            self._console.print("[red]✗ Rejected.[/red]\n")
 
         # Always resume display so further events can render — even on abort
         if live_was_active:
-            try:
-                self._live.start()
-            except Exception:
-                pass
-        if spinner_was_running:
-            self._thinking = True
-            self._spinner_stop.clear()
-            self._start_spinner()
+            self._start_live()
 
         if aborted:
             raise KeyboardInterrupt
         return approved
 
-    def on_tool_output_chunk(self, data: dict):
-        """Record tool output chunk."""
-        tool = data.get("tool", "unknown")
-        chunk = data.get("chunk", "")
-        if tool not in self._tool_outputs:
-            self._tool_outputs[tool] = []
-        self._tool_outputs[tool].append(chunk)
-        self._refresh()
-
-    def on_complete(self, data: dict):
-        """Store completion data. If no tokens were streamed, use the response."""
-        self._complete_data = data
-        # If no tokens arrived via streaming (e.g. tool call consumed the
-        # response), pull the final text from the complete event
-        if not self._tokens and isinstance(data, dict):
-            response = data.get("response", "")
-            if response:
-                self._tokens.append(response)
-
-    def on_error(self, message: str):
-        """Store an error message."""
-        self._error = message
-
-    def _print_thinking_trail(self):
+    def _print_thinking_trail(self, trail: list[dict]):
         """Print one collapsed thinking-trail block (never per-step accordions)."""
-        if not self._thinking_steps:
+        if not trail:
             return
-        n = len(self._thinking_steps)
+        n = len(trail)
         label = "step" if n == 1 else "steps"
         self._console.print(
-            f"\n[bold dim]\u25b8 Agent thinking[/bold dim] [dim]({n} {label})[/dim]"
+            f"\n[bold dim]▸ Agent thinking[/bold dim] [dim]({n} {label})[/dim]"
         )
-        for step in self._thinking_steps:
+        for step in trail:
             iteration = step.get("iteration", "?")
             status = step.get("status") or "thinking"
-            self._console.print(f"[dim]  [{iteration}] {status}[/dim]")
+            self._console.print(Text(f"  [{iteration}] {status}", style="dim"))
             reasoning = (step.get("reasoning") or "").strip()
             if reasoning:
                 preview = reasoning[:240] + ("…" if len(reasoning) > 240 else "")
-                self._console.print(f"[dim]    {preview}[/dim]")
+                self._console.print(Text(f"    {preview}", style="dim"))
 
-    # ── Spinner ───────────────────────────────────────────────
+    # ── Live view ─────────────────────────────────────────────
 
-    def _start_spinner(self):
-        """Start the thinking spinner in a background thread."""
-        def spin():
-            frame_idx = 0
-            while not self._spinner_stop.is_set():
-                f = _SPINNER_FRAMES[frame_idx % len(_SPINNER_FRAMES)]
-                status = self._live_status or "thinking"
-                _set_title(f"{f} agent — {status}...")
-                # Update inline display
-                if self._live is not None and self._thinking:
-                    frame = Text(f" {f} ", style="bold cyan")
-                    if self._stop_hint:
-                        frame.append("esc to stop", style="dim")
-                    self._live.update(frame)
-                frame_idx += 1
-                self._spinner_stop.wait(0.1)
+    def _view(self):
+        """Build the live region from the current turn state (runs on Live's thread)."""
+        now = time.monotonic()
+        width = max(20, self._console.width)
+        height = max(8, self._console.height)
+        with self._lock:
+            state = self._state
+            last_step = dict(state.trail[-1]) if state.trail else None
+            tools = list(state.tools)
+            outputs = [(k, list(v)) for k, v in state.tool_outputs.items() if v]
+            thought_s = state.thought_s
+            text = state.full_text
+            visible = turn_status.status_visible(state, now)
+            label = state.label
+            detail = state.detail
+            elapsed_s = turn_status.elapsed(state, now)
 
-        self._spinner_thread = threading.Thread(target=spin, daemon=True)
-        self._spinner_thread.start()
-
-    def _stop_spinner(self):
-        """Stop the thinking spinner."""
-        self._spinner_stop.set()
-        if self._spinner_thread is not None:
-            self._spinner_thread.join(timeout=1)
-            self._spinner_thread = None
-
-    # ── Internal ──────────────────────────────────────────────
-
-    def _refresh(self):
-        """Update the Live display with tool lines + streaming text + cursor."""
-        if self._live is None:
-            return
-
-        now = time.time()
-        # Throttle rendering if updating too frequently
-        if now - self._last_render_time < self._render_throttle:
-            return
-        self._last_render_time = now
+        title = label if visible else "responding…"
+        if title != self._title:
+            self._title = title
+            _set_title(f"agent — {title}")
 
         parts = []
+        if last_step:
+            iteration = last_step.get("iteration", "?")
+            status = last_step.get("status") or "thinking"
+            parts.append(Text(
+                f"▸ step {iteration} · {status}", style="llx.dim", no_wrap=True, overflow="ellipsis",
+            ))
 
-        if self._thinking_steps:
-            last = self._thinking_steps[-1]
-            iteration = last.get("iteration", "?")
-            status = last.get("status") or "thinking"
-            reasoning = (last.get("reasoning") or "").strip()
-            preview = reasoning[:160] + ("…" if len(reasoning) > 160 else "")
-            trail = f"[dim]▸ step {iteration} · {status}[/dim]"
-            if preview:
-                trail += f"\n[dim]  {preview}[/dim]"
-            parts.append(Text.from_markup(trail))
+        if len(tools) > _LIVE_TOOL_LINES:
+            parts.append(Text(f"  … {len(tools) - _LIVE_TOOL_LINES} earlier", style="llx.dim"))
+            tools = tools[-_LIVE_TOOL_LINES:]
+        parts.extend(_tool_text(call, now) for call in tools)
 
-        # Tool call lines rendered as markup
-        for line in self._tool_lines:
-            parts.append(Text.from_markup(line))
+        output_lines = 0
+        for tool, chunks in outputs[-1:]:
+            out_text = _output_text(chunks)
+            output_lines += out_text.count("\n") + 1
+            parts.append(Text(f"[{tool} output]\n{out_text}", style="llx.dim"))
 
-        # Tool output chunks
-        for tool, chunks in self._tool_outputs.items():
-            if chunks:
-                out_text = "".join(chunks)
-                # Keep only last 10 lines to prevent terminal overload
-                lines = out_text.splitlines()
-                if len(lines) > 10:
-                    out_text = "...\n" + "\n".join(lines[-10:])
-                parts.append(Text(f"[{tool} output]\n{out_text}", style="dim"))
+        if thought_s > 0:
+            parts.append(Text(
+                f"{_ICON_THOUGHT} Thought for {turn_status.format_elapsed(thought_s)}", style="llx.dim",
+            ))
 
-        # Streaming text shown as plain text with block cursor (not Markdown)
-        streaming_text = "".join(self._tokens) + "\u2588"
-        parts.append(Text(streaming_text))
+        status_lines = (2 if detail else 1) if visible else 0
+        used = len(parts) + output_lines + status_lines
+        if text:
+            parts.append(self._tail(text, max(3, height - used - 2), width))
 
-        # Update title bar with progress
-        _set_title(f"{_ICON_ASSISTANT} agent — responding...")
+        if visible:
+            parts.append(status_renderable(
+                self._spinner, label, elapsed_s, hint=self._hint, detail=detail, width=width,
+            ))
+        return Group(*parts)
 
-        self._live.update(Group(*parts))
+    def _tail(self, text: str, max_lines: int, width: int) -> Text:
+        """The last ``max_lines`` wrapped lines of ``text``."""
+        chunk = text[-(max_lines + 1) * width:]
+        lines = Text(chunk).wrap(self._console, width)
+        if len(lines) > max_lines:
+            lines = lines[-max_lines:]
+        return Text("\n").join(lines)
+
