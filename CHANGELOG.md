@@ -2,12 +2,12 @@
 
 ## Unreleased
 
-## 3.0.0 — An inbound guard, agents that act on what they see, and an install that works on a fresh machine
+## 3.0.0 — An inbound guard, agents that act on what they see, and Docker on a fresh Ubuntu
 
 Guaardvark 3.0 reads code before it lands, keeps every outbound path behind your say-so, and
 makes the agents act instead of narrate: they run tools from a request for them, claim done only
-when the screen shows it, and ask before anything public. Docker and native installs were walked
-through on a freshly installed Ubuntu and fixed where a new user would have stopped.
+when the screen shows it, and ask before anything public. The Docker install was walked through
+on a freshly installed Ubuntu and fixed where a new user would have stopped.
 
 ### Upgrading
 
