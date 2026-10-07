@@ -36,6 +36,67 @@ const extensionsNodeModules = () => ({
   },
 });
 
+// Present while the Interconnector writes synced files. Hot updates in that
+// window mix old and new modules, so they are held and the page reloads once after.
+const SYNC_MARKER = path.join(REPO_ROOT, "data", "dep_reconciler", ".sync_in_progress");
+// The sync clears the marker in a finally block; an older one was left by a killed process.
+const SYNC_MARKER_STALE_MS = 10 * 60 * 1000;
+const HELD_PAYLOADS = new Set(["update", "full-reload", "error"]);
+
+const syncInProgress = () => {
+  try {
+    return Date.now() - fs.statSync(SYNC_MARKER).mtimeMs < SYNC_MARKER_STALE_MS;
+  } catch {
+    return false;
+  }
+};
+
+const pauseHmrDuringSync = () => {
+  let holding = false;
+  let hold = () => {};
+  return {
+    name: "pause-hmr-during-sync",
+    apply: "serve",
+    configureServer(server) {
+      if (typeof server.ws?.send !== "function") return;
+      // server.ws is also the client environment's hot channel, so this sees
+      // module updates, the HTML page reload and the dep optimizer's reload.
+      const send = server.ws.send;
+      let poll = null;
+      hold = () => {
+        holding = true;
+        if (poll) return;
+        server.config.logger.info("sync in progress: holding hot updates", { timestamp: true });
+        poll = setInterval(() => {
+          if (syncInProgress()) return;
+          clearInterval(poll);
+          poll = null;
+          holding = false;
+          server.config.logger.info("sync finished: reloading the page", { timestamp: true });
+          send({ type: "full-reload", path: "*" });
+        }, 500);
+        poll.unref?.();
+      };
+      server.ws.send = (...args) => {
+        const payload = args[0];
+        if (HELD_PAYLOADS.has(payload?.type) && (holding || syncInProgress())) {
+          hold();
+          return;
+        }
+        send(...args);
+      };
+      server.httpServer?.once("close", () => poll && clearInterval(poll));
+      // A config change mid-sync restarts this server; keep holding until the end.
+      if (syncInProgress()) hold();
+    },
+    hotUpdate() {
+      if (!holding && !syncInProgress()) return;
+      hold();
+      return [];
+    },
+  };
+};
+
 // Socket.IO disconnects (page refresh, backend restart, transport retry) reset the
 // proxied TCP socket; Vite logs that as "ws proxy error: ECONNRESET" even though
 // the client reconnects fine via polling/websocket. Filter the benign noise only.
@@ -153,7 +214,7 @@ export default defineConfig(({ mode }) => {
 
   return {
   customLogger: viteLogger,
-  plugins: [react(), extensionsNodeModules()],
+  plugins: [react(), extensionsNodeModules(), pauseHmrDuringSync()],
   resolve: {
     // `@` is core: extensions import it as `@/api/apiClient` instead of
     // counting `../` up to wherever core sits.
