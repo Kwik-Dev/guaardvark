@@ -81,6 +81,32 @@ def test_the_environment_carries_no_hub_token_and_is_offline(monkeypatch):
     assert os.environ["HF_TOKEN"] == "hf_secret"
 
 
+def test_a_blank_cuda_mask_from_the_worker_is_dropped(monkeypatch):
+    # Celery workers blank CUDA_VISIBLE_DEVICES for their own CPU work; the
+    # trainer must still see the GPU.
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    assert "CUDA_VISIBLE_DEVICES" not in tr.trainer_env()
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+    assert tr.trainer_env()["CUDA_VISIBLE_DEVICES"] == "1"
+
+
+def test_web_requests_from_the_trainer_go_nowhere():
+    env = tr.trainer_env({})
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        assert env[name] == "http://127.0.0.1:9"
+    assert "127.0.0.1" in env["NO_PROXY"] and "localhost" in env["NO_PROXY"]
+
+
+def test_no_gpu_stops_the_trainer_before_unsloth_loads(monkeypatch):
+    import torch
+    from backend.services.training.scripts import finetune_model
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setitem(sys.modules, "unsloth", None)  # importing it would fail loudly
+    with pytest.raises(RuntimeError, match="No CUDA GPU is visible"):
+        finetune_model.require_cuda()
+
+
 def test_a_run_delivers_events_in_order_and_logs_the_rest(script, tmp_path, monkeypatch):
     monkeypatch.setenv("HF_TOKEN", "hf_secret")
     started = []

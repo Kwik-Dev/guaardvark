@@ -47,6 +47,15 @@ OFFLINE_ENV = {
     "WANDB_MODE": "disabled",
     "WANDB_DISABLED": "true",
     "PYTHONUNBUFFERED": "1",
+    # Anything else that tries the web (Unsloth's error hints fetch
+    # download.pytorch.org with urllib) goes to a closed local port and fails
+    # here instead of leaving the machine. Local addresses stay direct.
+    "HTTP_PROXY": "http://127.0.0.1:9",
+    "HTTPS_PROXY": "http://127.0.0.1:9",
+    "http_proxy": "http://127.0.0.1:9",
+    "https_proxy": "http://127.0.0.1:9",
+    "NO_PROXY": "localhost,127.0.0.1,::1",
+    "no_proxy": "localhost,127.0.0.1,::1",
 }
 
 
@@ -64,10 +73,15 @@ class TrainerStopped(RuntimeError):
 
 def trainer_env(base: dict | None = None) -> dict:
     """The environment the trainer runs with: the backend's, minus Hugging
-    Face tokens, plus OFFLINE_ENV."""
+    Face tokens and a blank CUDA_VISIBLE_DEVICES, plus OFFLINE_ENV."""
     env = dict(os.environ if base is None else base)
     for name in TOKEN_VARS:
         env.pop(name, None)
+    # Celery workers blank CUDA_VISIBLE_DEVICES at import (indexing_service) so
+    # their own work stays on the CPU; the trainer is the GPU job and must not
+    # inherit that. A device number someone chose on purpose is kept.
+    if env.get("CUDA_VISIBLE_DEVICES", None) == "":
+        env.pop("CUDA_VISIBLE_DEVICES")
     env.update(OFFLINE_ENV)
     return env
 

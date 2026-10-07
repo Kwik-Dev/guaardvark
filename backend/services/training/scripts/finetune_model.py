@@ -112,6 +112,23 @@ def _fields(cls) -> set:
         return set()
 
 
+def require_cuda() -> None:
+    """Stop before Unsloth loads when no CUDA GPU is visible.
+
+    Without one, Unsloth's import fails anyway, and on the way its error hint
+    probes download.pytorch.org for a ROCm wheel index. Failing here gives a
+    plain reason and makes no network call.
+    """
+    import torch
+
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "No CUDA GPU is visible to the trainer "
+            f"(CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')!r}); "
+            "Unsloth trains on an NVIDIA GPU only."
+        )
+
+
 def check_report() -> dict:
     """Library versions, CUDA, bf16 and the TRL interface this trainer uses.
 
@@ -136,6 +153,7 @@ def check_report() -> dict:
         except Exception as e:
             report["problems"].append(f"torch: {type(e).__name__}: {e}")
         try:
+            require_cuda()
             import unsloth  # noqa: F401  (patches transformers and TRL on import)
             from unsloth import FastLanguageModel  # noqa: F401
         except Exception as e:
@@ -362,6 +380,7 @@ def finetune(
         dataset_callback: Called with the dataset report before training
     """
 
+    require_cuda()
     from unsloth import FastLanguageModel
     from trl import SFTConfig, SFTTrainer
 

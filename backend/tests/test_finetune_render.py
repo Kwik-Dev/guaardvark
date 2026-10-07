@@ -5,7 +5,8 @@ where the GPU has it, and takes the loss on replies only for all-chat data.
 
 Seams: unsloth, trl, transformers and datasets are imported by finetune() at
 call time, so sys.modules stand-ins reach them; torch is real with CUDA
-reported absent, so nothing touches the GPU."""
+reported absent, so nothing touches the GPU, and the trainer's own GPU check
+(require_cuda) is stood in alongside them."""
 import dataclasses
 import importlib.util
 import inspect
@@ -117,7 +118,9 @@ def test_finetune_takes_no_cpu_offload_switch(script):
 # ---- one run through finetune() with the libraries stood in ---------------------
 
 @pytest.fixture
-def libraries(monkeypatch):
+def libraries(monkeypatch, script):
+    # The stand-ins below replace Unsloth, so its GPU precondition is stood in too.
+    monkeypatch.setattr(script, "require_cuda", lambda: None)
     import torch
 
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
