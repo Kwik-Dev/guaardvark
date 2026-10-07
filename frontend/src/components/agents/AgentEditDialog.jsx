@@ -204,6 +204,8 @@ const AgentEditDialog = ({ agent, onClose, onSaved, onToggle, onTest, onError })
                       size="small"
                       label="Model"
                       value={form.model}
+                      SelectProps={{ displayEmpty: true }}
+                      InputLabelProps={{ shrink: true }}
                       onChange={(e) => setForm((f) => ({ ...f, model: e.target.value }))}
                       sx={{ minWidth: 260 }}
                     >

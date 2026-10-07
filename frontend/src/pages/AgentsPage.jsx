@@ -23,7 +23,7 @@ import AlertSnackbar from "../components/common/AlertSnackbar";
 import EmptyState from "../components/common/EmptyState";
 import EntityContextMenu from "../components/common/EntityContextMenu";
 import { ContextualLoader } from "../components/common/LoadingStates";
-import { ActionButton, Cluster, DashboardStrip } from "../components/settings/ui";
+import { ActionButton, Cluster } from "../components/settings/ui";
 import AgentTile, { agentEdits } from "../components/agents/AgentTile";
 import AgentEditDialog, { ResetAgentDialog } from "../components/agents/AgentEditDialog";
 import useContextMenu from "../hooks/useContextMenu";
@@ -76,6 +76,15 @@ function groupAgents(agents) {
   if (other.length) groups.push({ key: "other", label: "Other", help: "", agents: other });
   return groups.filter((g) => g.agents.length > 0);
 }
+
+
+// Small fixed-width tiles, like the Interconnector tile on Settings: they wrap
+// instead of stretching across the row when a group has only one or two agents.
+const TILE_GRID = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fill, minmax(200px, 240px))",
+  gap: 1.25,
+};
 
 const AgentsPage = () => {
   const { activeModel, isLoadingModel, modelError } = useStatus();
@@ -263,7 +272,7 @@ const AgentsPage = () => {
         <Box sx={{ display: "flex", flexDirection: "column", gap: 2.5 }}>
           {groups.map((group) => (
             <Cluster key={group.key} label={group.label} help={group.help || undefined}>
-              <DashboardStrip>
+              <Box sx={TILE_GRID}>
                 {group.agents.map((agent) => (
                   <AgentTile
                     key={agent.id}
@@ -272,7 +281,7 @@ const AgentsPage = () => {
                     onContextMenu={(event, a) => menu.open(event, a)}
                   />
                 ))}
-              </DashboardStrip>
+              </Box>
             </Cluster>
           ))}
         </Box>
