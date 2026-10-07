@@ -30,6 +30,12 @@ const MODEL_COLORS = {
   whisper: "#ffd54f",
 };
 
+const TIERS = [
+  { value: "speed", label: "Speed" },
+  { value: "balanced", label: "Balanced" },
+  { value: "quality", label: "Quality" },
+];
+
 const STATE_LABELS = {
   loaded: "Loaded",
   loading: "Loading...",
@@ -130,6 +136,22 @@ const GpuStatusCard = React.forwardRef(
     const usedPct = vram ? Math.round((vram.used_mb / vram.total_mb) * 100) : 0;
     const usedGb = vram ? (vram.used_mb / 1024).toFixed(1) : "?";
     const totalGb = vram ? (vram.total_mb / 1024).toFixed(1) : "?";
+    const loadedModels = models.filter((m) => m.state === "loaded");
+
+    const menuActions = [
+      { label: "Refresh", onClick: fetchStatus },
+      ...TIERS.map((t, idx) => ({
+        label: `${t.label} tier`,
+        checked: tier === t.value,
+        onClick: () => handleTierChange(null, t.value),
+        dividerBefore: idx === 0,
+      })),
+      ...loadedModels.map((m, idx) => ({
+        label: `Evict ${m.slot_id}`,
+        onClick: () => handleEvict(m.slot_id),
+        dividerBefore: idx === 0,
+      })),
+    ];
 
     return (
       <DashboardCardWrapper
@@ -148,6 +170,7 @@ const GpuStatusCard = React.forwardRef(
           </Tooltip>
         }
         {...props}
+        contextMenuActions={menuActions}
       >
         <Box sx={{ p: 1.5, overflow: "auto", height: "100%" }}>
           {error && (

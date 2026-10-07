@@ -112,6 +112,7 @@ const FamilySelfImprovementCard = React.forwardRef(
 
     const usage = claudeStatus?.usage || {};
     const isRunning = progress && progress.stage !== "complete" && progress.stage !== "error";
+    const canRunCheck = siStatus?.enabled && !siStatus?.codebase_locked && !isRunning;
 
     return (
       <DashboardCardWrapper
@@ -126,6 +127,10 @@ const FamilySelfImprovementCard = React.forwardRef(
           <PsychologyIcon fontSize="small" sx={{ color: UNCLE_GOLD, opacity: 0.8 }} />
         }
         {...props}
+        contextMenuActions={[
+          { label: "Refresh", onClick: fetchData },
+          canRunCheck && { label: "Run Check", onClick: handleTrigger },
+        ]}
       >
         {loading ? (
           <Box sx={{ display: "flex", justifyContent: "center", py: 2 }}>
@@ -248,7 +253,7 @@ const FamilySelfImprovementCard = React.forwardRef(
             )}
 
             {/* Quick Actions */}
-            {siStatus?.enabled && !siStatus?.codebase_locked && !isRunning && (
+            {canRunCheck && (
               <Button
                 size="small"
                 variant="outlined"

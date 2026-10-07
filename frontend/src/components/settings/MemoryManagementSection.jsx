@@ -28,6 +28,9 @@ import MemoryIcon from "@mui/icons-material/Memory";
 import SettingsSection from "./SettingsSection";
 import LessonSummaryModal from "../modals/LessonSummaryModal";
 import { ActionButton, ChoiceChips, ConfirmActionDialog, Hint } from "./ui";
+import EntityContextMenu from "../common/EntityContextMenu";
+import useContextMenu from "../../hooks/useContextMenu";
+import copyText from "../../utils/copyText";
 
 // Compact spreadsheet-style timestamp: "MM/DD HH:MM:SS". Full ISO available
 // on hover via title attribute for forensic detail.
@@ -107,6 +110,7 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
   const [mergeTargetId, setMergeTargetId] = useState("");
   const [mergeConfirmOpen, setMergeConfirmOpen] = useState(false);
   const [merging, setMerging] = useState(false);
+  const rowMenu = useContextMenu();
 
   const openEditForMemory = (memory) => {
     if (memory?.source === "lesson_summary") {
@@ -431,6 +435,7 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
                     key={memory.id}
                     hover
                     onClick={() => openEditForMemory(memory)}
+                    onContextMenu={(e) => rowMenu.open(e, memory)}
                     sx={{ cursor: "pointer", "& td": { py: 0.5, fontSize: "0.75rem" } }}
                   >
                     <TableCell sx={{ fontFamily: "monospace", whiteSpace: "nowrap" }}>
@@ -519,6 +524,41 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
           </Table>
         )}
       </TableContainer>
+
+      <EntityContextMenu
+        anchorPosition={rowMenu.anchorPosition}
+        onClose={rowMenu.close}
+        actions={
+          rowMenu.payload
+            ? [
+                { label: "Edit…", onClick: () => openEditForMemory(rowMenu.payload) },
+                { label: "Copy content", onClick: () => copyText(rowMenu.payload.content) },
+                rowMenu.payload.status !== "active" && {
+                  label: "Restore",
+                  onClick: () => handleStatusChange(rowMenu.payload, "active"),
+                  dividerBefore: true,
+                },
+                {
+                  label: "Archive",
+                  onClick: () => handleStatusChange(rowMenu.payload, "archived"),
+                  disabled: rowMenu.payload.status === "archived",
+                  dividerBefore: rowMenu.payload.status === "active",
+                },
+                {
+                  label: "Mark wrong",
+                  onClick: () => handleStatusChange(rowMenu.payload, "wrong"),
+                  disabled: rowMenu.payload.status === "wrong",
+                },
+                {
+                  label: "Delete",
+                  onClick: () => handleDelete(rowMenu.payload.id),
+                  color: "error.main",
+                  dividerBefore: true,
+                },
+              ]
+            : []
+        }
+      />
 
       {memories.length > 0 && (
         <Box sx={{ mt: 2, display: "flex", justifyContent: "flex-end" }}>

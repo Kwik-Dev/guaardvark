@@ -36,6 +36,9 @@ import GavelOutlined from "@mui/icons-material/GavelOutlined";
 import * as apiService from "../api";
 import PageLayout from "../components/layout/PageLayout";
 import EmptyState from "../components/common/EmptyState";
+import EntityContextMenu from "../components/common/EntityContextMenu";
+import useContextMenu from "../hooks/useContextMenu";
+import copyText from "../utils/copyText";
 import RuleActionModal from "../components/modals/RuleActionModal";
 import LinkingModal from "../components/modals/LinkingModal";
 import { useStatus } from "../contexts/StatusContext";
@@ -122,6 +125,7 @@ const RulesPage = () => {
 
   const [isLinkingModalOpen, setIsLinkingModalOpen] = useState(false);
   const [linkingModalRule, setLinkingModalRule] = useState(null);
+  const rowMenu = useContextMenu();
 
   // Load sorting state from localStorage or use defaults
   const loadSortingState = () => {
@@ -546,6 +550,7 @@ const RulesPage = () => {
                       "&:last-child td, &:last-child th": { border: 0 },
                     }}
                     onClick={() => handleOpenActionModal(rule)}
+                    onContextMenu={(e) => rowMenu.open(e, rule)}
                   >
                     <TableCell sx={{ minWidth: 10, maxWidth: 50 }}>
                       <Tooltip title={`Rule ID: ${rule.id}`}>
@@ -769,6 +774,30 @@ const RulesPage = () => {
             </TableBody>
           </Table>
         </TableContainer>
+        <EntityContextMenu
+          anchorPosition={rowMenu.anchorPosition}
+          onClose={rowMenu.close}
+          actions={
+            rowMenu.payload
+              ? [
+                  { label: "Edit…", onClick: () => handleOpenActionModal(rowMenu.payload) },
+                  {
+                    label: rowMenu.payload.is_active ? "Deactivate" : "Activate",
+                    onClick: () => handleToggleActive(rowMenu.payload),
+                  },
+                  { label: "Duplicate", onClick: () => handleDuplicateRule(rowMenu.payload) },
+                  { label: "Link to projects…", onClick: () => handleOpenLinkingModal(rowMenu.payload) },
+                  { label: "Copy ID", onClick: () => copyText(rowMenu.payload.id), dividerBefore: true },
+                  {
+                    label: "Delete",
+                    onClick: () => handleDeleteRule(rowMenu.payload.id),
+                    color: "error.main",
+                    dividerBefore: true,
+                  },
+                ]
+              : []
+          }
+        />
         {rules.length > 0 && !isLoading && (
           <Typography
             variant="caption"

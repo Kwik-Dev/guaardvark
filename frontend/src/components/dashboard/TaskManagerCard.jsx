@@ -23,6 +23,8 @@ import {
 import { Link } from "@mui/material";
 import { Link as RouterLink, useNavigate } from "react-router-dom";
 import DashboardCardWrapper from "./DashboardCardWrapper";
+import EntityContextMenu from "../common/EntityContextMenu";
+import useContextMenu from "../../hooks/useContextMenu";
 // Import API functions - getTasks (functional), createTask (now functional)
 import { getTasks, createTask } from "../../api";
 
@@ -90,6 +92,7 @@ const TaskManagerCard = React.forwardRef(
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState(null);
     const navigate = useNavigate();
+    const rowMenu = useContextMenu();
     // State for Add Task Dialog
     const [addDialogOpen, setAddDialogOpen] = useState(false);
     const [newTaskData, setNewTaskData] = useState(initialNewTaskState);
@@ -205,6 +208,10 @@ const TaskManagerCard = React.forwardRef(
           cardColor={cardColor}
           onCardColorChange={onCardColorChange}
           {...props}
+          contextMenuActions={[
+            { label: "Refresh", onClick: fetchTasksAndCounts },
+            { label: "Add Task…", onClick: handleOpenAddDialog },
+          ]}
         >
           {isLoading ? (
             <Box
@@ -264,6 +271,7 @@ const TaskManagerCard = React.forwardRef(
                         // Navigate to Tasks page with the task ID
                         navigate(`/tasks?taskId=${task.id || task.task_id}`);
                       }}
+                      onContextMenu={(e) => rowMenu.open(e, task)}
                     >
                       <ListItemText
                         primary={
@@ -331,6 +339,20 @@ const TaskManagerCard = React.forwardRef(
               )}
             </Box>
           )}
+          <EntityContextMenu
+            anchorPosition={rowMenu.anchorPosition}
+            onClose={rowMenu.close}
+            actions={
+              rowMenu.payload
+                ? [
+                    {
+                      label: "Open",
+                      onClick: () => navigate(`/tasks?taskId=${rowMenu.payload.id || rowMenu.payload.task_id}`),
+                    },
+                  ]
+                : []
+            }
+          />
         </DashboardCardWrapper>
         {/* Add Task Dialog */}
         <Dialog

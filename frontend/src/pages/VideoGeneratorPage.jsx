@@ -99,6 +99,8 @@ import {
 } from "@mui/icons-material";
 
 import { formatUiError } from "../utils/uiError";
+import EntityContextMenu from "../components/common/EntityContextMenu";
+import useContextMenu from "../hooks/useContextMenu";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 
@@ -398,6 +400,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   const [highlightModelId, setHighlightModelId] = useState(null);
   const [confirmAction, setConfirmAction] = useState(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
+  const resultMenu = useContextMenu();
+  const batchMenu = useContextMenu();
 
   // Pull the authoritative model list + readiness. Extracted so we can re-run it
   // after the user closes the install modal (a freshly-installed model should
@@ -1506,6 +1510,99 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     return Object.entries(KEYFRAME_MODEL_OPTIONS).filter(([key]) => key !== "from-lora");
   }, [castIdentityLocked]);
 
+  // Shared by the result and batch buttons and their right-click menus.
+  const openResultPlayer = (res, idx, videoUrl) => {
+    const playable = currentResults.filter(r => r.video_path);
+    const playIdx = playable.findIndex(r => r.item_id === res.item_id);
+    setVideoPlayer({
+      url: videoUrl,
+      title: res.video_path?.split("/").pop() || `Video ${idx + 1}`,
+      batchId: batchStatus.batch_id,
+      results: playable,
+      currentIndex: playIdx >= 0 ? playIdx : 0,
+    });
+  };
+
+  const confirmDeleteVideo = (batchId, res) => setConfirmAction({
+    title: "Delete this video?",
+    description: "Removes the file. Other clips in the batch stay.",
+    facts: [{ label: "File", value: PathFromUrl(res.video_path) }],
+    keeps: "the rest of this batch, other batches, the form",
+    confirmLabel: "Delete video",
+    run: () => handleDeleteVideo(batchId, PathFromUrl(res.video_path)),
+  });
+
+  const confirmCancelBatch = (b) => setConfirmAction({
+    title: "Cancel this batch?",
+    description: "Stops the GPU job. Clips already written stay on disk.",
+    facts: [{ label: "Batch", value: b.display_name || b.batch_id.slice(0, 8) }],
+    keeps: "finished videos in this batch, the form, other batches",
+    confirmLabel: "Cancel batch",
+    run: () => handleCancelBatch(b.batch_id),
+  });
+
+  const confirmDeleteBatch = (b) => setConfirmAction({
+    title: `Delete "${b.display_name || `Batch ${b.batch_id.slice(0, 8)}`}"?`,
+    description: "Removes this batch and every video in it.",
+    facts: [{ label: "Videos", value: String(b.completed_videos ?? 0) }],
+    keeps: "other batches, installed models, and the prompt in the form",
+    confirmLabel: "Delete batch",
+    run: () => handleDeleteBatch(b.batch_id),
+  });
+
+  const resultMenuActions = () => {
+    if (!resultMenu.payload || !batchStatus) return [];
+    const { res, idx, videoUrl } = resultMenu.payload;
+    const batchId = batchStatus.batch_id;
+    const held = res.success && res.review?.state === "needs_review";
+    return [
+      videoUrl && { label: "Play", onClick: () => openResultPlayer(res, idx, videoUrl) },
+      videoUrl && { label: "Open in new tab", onClick: () => window.open(videoUrl, "_blank") },
+      held && { label: "Approve clip", onClick: () => handleApproveClip(batchId, res.item_id), dividerBefore: true },
+      held && { label: "Re-render clip", onClick: () => handleRerenderClip(batchId, res.item_id) },
+      !res.video_path && res.frame_paths?.length > 0 && {
+        label: "Combine Frames",
+        onClick: () => handleCombineFrames(batchId, res.item_id),
+      },
+      res.video_path && {
+        label: "Rename…",
+        onClick: () => handleRenameVideo(batchId, PathFromUrl(res.video_path)),
+        dividerBefore: true,
+      },
+      res.video_path && {
+        label: "Delete video…",
+        onClick: () => confirmDeleteVideo(batchId, res),
+        color: "error.main",
+      },
+    ];
+  };
+
+  const batchMenuActions = () => {
+    const b = batchMenu.payload;
+    if (!b) return [];
+    const running = b.status === "running" || b.status === "pending" || b.status === "processing";
+    const finished = b.status === "completed" || b.status === "error" || b.status === "cancelled";
+    return [
+      {
+        label: "Open",
+        onClick: () => {
+          setActiveBatchId(b.batch_id);
+          startPollingStatus(b.batch_id);
+        },
+      },
+      b.status === "completed" && { label: "Download All Videos", onClick: () => handleDownloadBatch(b.batch_id) },
+      finished && { label: "Adjust & Retry", onClick: () => handleAdjustRetry(b.batch_id) },
+      b.status === "error" && b.can_retry && { label: "Retry", onClick: () => handleRetryBatch(b.batch_id) },
+      running && { label: "Cancel batch…", onClick: () => confirmCancelBatch(b), dividerBefore: true },
+      {
+        label: "Delete batch…",
+        onClick: () => confirmDeleteBatch(b),
+        color: "error.main",
+        dividerBefore: !running,
+      },
+    ];
+  };
+
   return (
     <PageLayout title={embedded ? undefined : "Video Generation"} variant={embedded ? "fullscreen" : "standard"} noPadding={embedded}>
 
@@ -2387,14 +2484,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                             >
                               <IconButton
                                 size="small"
-                                onClick={() => setConfirmAction({
-                                  title: "Cancel this batch?",
-                                  description: "Stops the GPU job. Clips already written stay on disk.",
-                                  facts: [{ label: "Batch", value: q.display_name || q.batch_id.slice(0, 8) }],
-                                  keeps: "finished videos in this batch, the form, other batches",
-                                  confirmLabel: "Cancel batch",
-                                  run: () => handleCancelBatch(q.batch_id),
-                                })}
+                                onClick={() => confirmCancelBatch(q)}
                                 aria-label="cancel batch"
                               >
                                 <CloseIcon fontSize="small" />
@@ -2579,7 +2669,10 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                       : null;
                     return (
                     <Grid item xs={12} sm={6} key={res.item_id}>
-                      <Card variant="outlined">
+                      <Card
+                        variant="outlined"
+                        onContextMenu={(e) => resultMenu.open(e, { res, idx, videoUrl })}
+                      >
                         <CardContent sx={{ pb: 1 }}>
                           <Box
                             sx={{
@@ -2594,15 +2687,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                             }}
                             onClick={() => {
                               if (!videoUrl) return;
-                              const playable = currentResults.filter(r => r.video_path);
-                              const playIdx = playable.findIndex(r => r.item_id === res.item_id);
-                              setVideoPlayer({
-                                url: videoUrl,
-                                title: res.video_path?.split("/").pop() || `Video ${idx + 1}`,
-                                batchId: batchStatus.batch_id,
-                                results: playable,
-                                currentIndex: playIdx >= 0 ? playIdx : 0,
-                              });
+                              openResultPlayer(res, idx, videoUrl);
                             }}
                           >
                             {thumbUrl || liveThumb ? (
@@ -2660,17 +2745,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                               size="small"
                               variant="contained"
                               startIcon={<PlayIcon />}
-                              onClick={() => {
-                                const playable = currentResults.filter(r => r.video_path);
-                                const playIdx = playable.findIndex(r => r.item_id === res.item_id);
-                                setVideoPlayer({
-                                  url: videoUrl,
-                                  title: res.video_path?.split("/").pop() || `Video ${idx + 1}`,
-                                  batchId: batchStatus.batch_id,
-                                  results: playable,
-                                  currentIndex: playIdx >= 0 ? playIdx : 0,
-                                });
-                              }}
+                              onClick={() => openResultPlayer(res, idx, videoUrl)}
                             >
                               Play
                             </Button>
@@ -2692,14 +2767,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                               </IconButton>
                               <IconButton
                                 size="small"
-                                onClick={() => setConfirmAction({
-                                  title: "Delete this video?",
-                                  description: "Removes the file. Other clips in the batch stay.",
-                                  facts: [{ label: "File", value: PathFromUrl(res.video_path) }],
-                                  keeps: "the rest of this batch, other batches, the form",
-                                  confirmLabel: "Delete video",
-                                  run: () => handleDeleteVideo(batchStatus.batch_id, PathFromUrl(res.video_path)),
-                                })}
+                                onClick={() => confirmDeleteVideo(batchStatus.batch_id, res)}
                               >
                                 <CloseIcon fontSize="small" />
                               </IconButton>
@@ -2719,6 +2787,11 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                     );
                   })}
                 </Grid>
+                <EntityContextMenu
+                  anchorPosition={resultMenu.anchorPosition}
+                  onClose={resultMenu.close}
+                  actions={resultMenu.isOpen ? resultMenuActions() : []}
+                />
 
                 {(batchStatus.status === 'error' || batchStatus.status === 'cancelled') && (
                   <Box sx={{ display: 'flex', justifyContent: 'flex-end', mt: 2 }}>
@@ -2800,6 +2873,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                         setActiveBatchId(b.batch_id);
                         startPollingStatus(b.batch_id);
                       }}
+                      onContextMenu={(e) => batchMenu.open(e, b)}
                       sx={{
                         cursor: 'pointer',
                         position: 'relative',
@@ -2887,14 +2961,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                               className="batch-delete"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                setConfirmAction({
-                                  title: `Delete "${rawName}"?`,
-                                  description: "Removes this batch and every video in it.",
-                                  facts: [{ label: "Videos", value: String(videoCount) }],
-                                  keeps: "other batches, installed models, and the prompt in the form",
-                                  confirmLabel: "Delete batch",
-                                  run: () => handleDeleteBatch(b.batch_id),
-                                });
+                                confirmDeleteBatch(b);
                               }}
                               sx={{
                                 position: 'absolute', top: 4, left: 4,
@@ -2924,6 +2991,11 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                 })}
               </Grid>
               </Box>
+              <EntityContextMenu
+                anchorPosition={batchMenu.anchorPosition}
+                onClose={batchMenu.close}
+                actions={batchMenu.isOpen ? batchMenuActions() : []}
+              />
               {batches.length === 0 && (
                 <Box sx={{ textAlign: 'center', py: 4 }}>
                   <VideoIcon sx={{ fontSize: 48, color: 'text.disabled', mb: 1 }} />
@@ -2938,14 +3010,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
           {/* Legacy batch controls — keep for running/pending batches */}
           {batches.filter(b => b.status === "running" || b.status === "pending" || b.status === "processing").map((b) => (
             <Box key={`ctrl-${b.batch_id}`} sx={{ mt: 1 }}>
-              <Button size="small" color="warning" variant="outlined" onClick={() => setConfirmAction({
-                title: "Cancel this batch?",
-                description: "Stops the GPU job. Clips already written stay on disk.",
-                facts: [{ label: "Batch", value: b.display_name || b.batch_id.slice(0, 8) }],
-                keeps: "finished videos in this batch, the form, other batches",
-                confirmLabel: "Cancel batch",
-                run: () => handleCancelBatch(b.batch_id),
-              })}>
+              <Button size="small" color="warning" variant="outlined" onClick={() => confirmCancelBatch(b)}>
                 Cancel {b.display_name || b.batch_id.slice(0, 8)}
               </Button>
             </Box>

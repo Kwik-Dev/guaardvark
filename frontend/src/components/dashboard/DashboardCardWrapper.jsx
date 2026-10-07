@@ -18,11 +18,58 @@ import {
 import { useTheme } from "@mui/material/styles";
 import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
 import { useNavigate } from "react-router-dom";
+import useContextMenu from "../../hooks/useContextMenu";
+import EntityContextMenu from "../common/EntityContextMenu";
 
+// Page each dashboard card's title opens.
+const CARD_ROUTES = {
+  project: "/projects",
+  website: "/websites",
+  tasks: "/tasks",
+  chat: "/chat",
+  clients: "/clients",
+  csvgen: "/file-generation",
+  codegen: "/code-editor",
+  imggen: "/images",
+  files: "/documents",
+  family: "/settings",
+  autoresearch: "/autoresearch",
+  gpu: "/plugins",
+};
+
+const getCardRoute = (cardId) => CARD_ROUTES[cardId] || "/";
+
+/**
+ * Card frame shared by the dashboard, the code editor, the video editor, sticky
+ * notes and document windows.
+ *
+ * Right-click is opt-in: pass `contextMenuActions` (an EntityContextMenu action
+ * list, may be empty) and the card gets a menu of its generic actions (open page,
+ * minimize, colour, hide when `onHideCard` is given) followed by those actions.
+ * `contextMenuArea="header"` limits it to the title bar, for cards whose body has
+ * menus of its own.
+ */
 const DashboardCardWrapper = React.forwardRef(
-  ({ title, children, cardColor, onCardColorChange, isMinimized, onToggleMinimize, titleBarActions, minimizedContent, ...props }, ref) => {
+  (
+    {
+      title,
+      children,
+      cardColor,
+      onCardColorChange,
+      isMinimized,
+      onToggleMinimize,
+      titleBarActions,
+      minimizedContent,
+      contextMenuActions,
+      contextMenuArea = "card",
+      onHideCard,
+      ...props
+    },
+    ref,
+  ) => {
     const routerNavigate = useNavigate();
     const clickState = useRef({ timeout: null, lastTime: 0, count: 0 });
+    const menu = useContextMenu();
     // Destructure known react-grid-layout props AND custom props
     // to prevent them from being spread onto the Paper component.
     const {
@@ -100,7 +147,8 @@ const DashboardCardWrapper = React.forwardRef(
 
     // Handle mouse down to implement custom double-click detection
     // Uses refs instead of state to avoid stale closures on rapid clicks
-    const handleMouseDown = useCallback((_e) => {
+    const handleMouseDown = useCallback((e) => {
+      if (e.button !== 0) return;
       const cs = clickState.current;
       const now = Date.now();
       const timeDiff = now - cs.lastTime;
@@ -175,22 +223,20 @@ const DashboardCardWrapper = React.forwardRef(
       }
     };
 
-    // Get the route for the card title link
-    const getCardRoute = (cardId) => {
-      const routeMap = {
-        project: "/projects",
-        website: "/websites",
-        tasks: "/tasks",
-        chat: "/chat",
-        clients: "/clients",
-        csvgen: "/file-generation",
-        codegen: "/code-editor",
-        imggen: "/images",
-        files: "/documents",
-        family: "/settings",
-        autoresearch: "/settings",
-      };
-      return routeMap[cardId] || "/";
+    const menuEnabled = Array.isArray(contextMenuActions);
+    const handleContextMenu = menuEnabled ? (e) => menu.open(e) : undefined;
+
+    const buildMenuActions = () => {
+      const route = getCardRoute(cardId);
+      const own = contextMenuActions.filter(Boolean);
+      return [
+        route !== "/" && { label: "Open page", onClick: () => routerNavigate(route) },
+        onToggleMinimize && { label: isMinimized ? "Expand" : "Minimize", onClick: onToggleMinimize },
+        onCardColorChange && { label: "Change colour…", onClick: openPicker },
+        onCardColorChange && cardColor && { label: "Reset colour", onClick: () => onCardColorChange(null) },
+        onHideCard && { label: "Hide card", onClick: onHideCard },
+        ...own.map((action, idx) => (idx === 0 ? { ...action, dividerBefore: true } : action)),
+      ];
     };
 
     // Conditionally render content based on isMinimized
@@ -253,6 +299,7 @@ const DashboardCardWrapper = React.forwardRef(
             }),
             ...restProps.sx,
           }}
+          onContextMenu={contextMenuArea === "card" ? handleContextMenu : undefined}
           {...restProps}
         >
           {/* Card Header Area - Always visible */}
@@ -281,6 +328,7 @@ const DashboardCardWrapper = React.forwardRef(
               },
             }}
             onMouseDown={handleMouseDown}
+            onContextMenu={contextMenuArea === "header" ? handleContextMenu : undefined}
             className="card-header-buttons" // Draggable handle for react-grid-layout
           >
             {/* Title text - clickable to navigate to linked page */}
@@ -383,6 +431,14 @@ const DashboardCardWrapper = React.forwardRef(
 
           {/* Card Content */}
           {cardContent}
+
+          {menuEnabled && (
+            <EntityContextMenu
+              anchorPosition={menu.anchorPosition}
+              onClose={menu.close}
+              actions={menu.isOpen ? buildMenuActions() : []}
+            />
+          )}
         </Paper>
       </>
     );
@@ -399,6 +455,9 @@ DashboardCardWrapper.propTypes = {
   isMinimized: PropTypes.bool,
   onToggleMinimize: PropTypes.func,
   minimizedContent: PropTypes.node,
+  contextMenuActions: PropTypes.array,
+  contextMenuArea: PropTypes.oneOf(["card", "header"]),
+  onHideCard: PropTypes.func,
 };
 
 export default DashboardCardWrapper;

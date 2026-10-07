@@ -108,6 +108,11 @@ const ImageGenerationCard = React.forwardRef(
         onCardColorChange={onCardColorChange}
         title="Image Generation"
         {...props}
+        contextMenuActions={[
+          { label: "New Images", onClick: () => navigate("/images") },
+          { label: "Batch Mode", onClick: () => navigate("/images?mode=batch") },
+          { label: "Refresh", onClick: fetchRecentGenerations },
+        ]}
       >
         {isLoading && (
           <CircularProgress

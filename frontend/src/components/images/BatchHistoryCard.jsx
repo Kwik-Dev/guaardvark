@@ -7,6 +7,8 @@ import {
   Settings as SettingsIcon,
   Visibility,
 } from '@mui/icons-material';
+import EntityContextMenu from '../common/EntityContextMenu';
+import useContextMenu from '../../hooks/useContextMenu';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
 
@@ -32,10 +34,13 @@ const BatchHistoryCard = React.memo(function BatchHistoryCard({
   const rawName = batch.display_name || `Batch ${batch.batch_id.slice(0, 8)}`;
   const label = rawName.length > 36 ? rawName.slice(0, 35).trimEnd() + '…' : rawName;
   const isCompleted = batch.status === 'completed';
+  const menu = useContextMenu();
 
   return (
+    <>
     <Box
       onClick={() => (isCompleted ? onOpen(batch, 0) : onLoad(batch.batch_id))}
+      onContextMenu={(e) => menu.open(e, batch)}
       sx={{
         // Backend thumbnails are 256px max — don't upscale past that.
         maxWidth: 256,
@@ -194,6 +199,27 @@ const BatchHistoryCard = React.memo(function BatchHistoryCard({
         </Box>
       </Box>
     </Box>
+    <EntityContextMenu
+      anchorPosition={menu.anchorPosition}
+      onClose={menu.close}
+      actions={
+        menu.payload
+          ? [
+              isCompleted && { label: 'Browse', onClick: () => onOpen(batch, 0) },
+              isCompleted && { label: 'Download', onClick: () => onDownload(batch.batch_id) },
+              !isCompleted && { label: 'Load batch', onClick: () => onLoad(batch.batch_id) },
+              { label: 'Adjust & Retry', onClick: () => onAdjustRetry(batch.batch_id) },
+              {
+                label: 'Clear from list',
+                onClick: () => onHide(batch.batch_id),
+                color: 'error.main',
+                dividerBefore: true,
+              },
+            ]
+          : []
+      }
+    />
+    </>
   );
 });
 

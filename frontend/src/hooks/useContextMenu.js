@@ -7,8 +7,8 @@
 //                      actions={menu.payload ? actionsFor(menu.payload) : []} />
 //
 // The browser's own menu is left alone where people rely on it: text fields,
-// links, selected text, and anything marked data-native-contextmenu (code
-// editors, canvases).
+// links, selected text, anything marked data-native-contextmenu (code
+// editors, canvases), and dialogs or popovers the owner rendered in a portal.
 
 import { useCallback, useState } from "react";
 
@@ -20,9 +20,14 @@ export function prefersNativeMenu(event) {
   if (target && typeof target.closest === "function" && target.closest(NATIVE_TARGETS)) {
     return true;
   }
+  // React bubbles events out of portals (dialogs, popovers) to their owner; a
+  // right-click inside an owner's dialog is not a right-click on the owner.
+  const host = event?.currentTarget;
+  if (host && target && typeof host.contains === "function" && !host.contains(target)) {
+    return true;
+  }
   const selection = typeof window !== "undefined" && window.getSelection ? window.getSelection() : null;
   if (selection && !selection.isCollapsed && selection.toString().trim()) {
-    const host = event?.currentTarget;
     const node = selection.anchorNode;
     if (!host || typeof host.contains !== "function" || (node && host.contains(node))) return true;
   }

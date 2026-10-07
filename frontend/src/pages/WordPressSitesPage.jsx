@@ -36,6 +36,9 @@ import WordPressSiteModal from "../components/modals/WordPressSiteModal";
 import { useStatus } from "../contexts/StatusContext";
 import PageLayout from "../components/layout/PageLayout";
 import { ContextualLoader } from "../components/common/LoadingStates";
+import EntityContextMenu from "../components/common/EntityContextMenu";
+import useContextMenu from "../hooks/useContextMenu";
+import copyText from "../utils/copyText";
 
 const AlertSnackbar = React.forwardRef(function Alert(props, ref) {
   return <MuiAlert elevation={6} ref={ref} variant="filled" {...props} />;
@@ -136,6 +139,8 @@ function WordPressSitesPage() {
     fetchSites();
     fetchClientsAndProjects();
   }, [fetchSites, fetchClientsAndProjects]);
+
+  const siteMenu = useContextMenu();
 
   const handleCreate = () => {
     setCurrentSite(null);
@@ -300,6 +305,7 @@ function WordPressSitesPage() {
           {sortedSites.map((site) => (
             <Grid item xs={12} sm={6} md={4} key={site.id}>
               <Card
+                onContextMenu={(e) => siteMenu.open(e, site)}
                 sx={{
                   height: "100%",
                   display: "flex",
@@ -389,7 +395,7 @@ function WordPressSitesPage() {
             </TableHead>
             <TableBody>
               {sortedSites.map((site) => (
-                <TableRow key={site.id} hover>
+                <TableRow key={site.id} hover onContextMenu={(e) => siteMenu.open(e, site)}>
                   <TableCell>{site.url}</TableCell>
                   <TableCell>{site.site_name || "-"}</TableCell>
                   <TableCell>{site.client?.name || "-"}</TableCell>
@@ -437,6 +443,26 @@ function WordPressSitesPage() {
           </Button>
         </Box>
       )}
+
+      <EntityContextMenu
+        anchorPosition={siteMenu.anchorPosition}
+        onClose={siteMenu.close}
+        actions={
+          siteMenu.payload
+            ? [
+                { label: "Edit…", onClick: () => handleEdit(siteMenu.payload) },
+                { label: "Test Connection", onClick: () => handleTestConnection(siteMenu.payload) },
+                siteMenu.payload.url && { label: "Copy URL", onClick: () => copyText(siteMenu.payload.url) },
+                {
+                  label: "Delete",
+                  onClick: () => handleDelete(siteMenu.payload),
+                  color: "error.main",
+                  dividerBefore: true,
+                },
+              ]
+            : []
+        }
+      />
 
       {/* Modals */}
       <WordPressSiteModal

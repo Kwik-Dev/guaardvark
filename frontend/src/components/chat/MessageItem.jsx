@@ -36,6 +36,8 @@ import AgentThinkingTrail from "./AgentThinkingTrail";
 import OrchestratorPlanView from "../orchestrator/OrchestratorPlanView";
 import ImageLightbox from "../images/ImageLightbox";
 import NarrateButton from "../common/NarrateButton";
+import EntityContextMenu from "../common/EntityContextMenu";
+import useContextMenu from "../../hooks/useContextMenu";
 import { agentNoteCaption } from "./agentNoteCaptions";
 
 
@@ -118,6 +120,7 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate, 
   })();
   const [feedback, setFeedback] = useState(initialFeedback); // null | "up" | "down"
   const [copied, setCopied] = useState(false);
+  const bubbleMenu = useContextMenu();
   // Tag every thumb with the active lesson, if one is open. Pearls with a
   // lesson_id skip the per-👍 distill path and flow through the End-Lesson
   // summary distiller instead.
@@ -380,6 +383,16 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate, 
   const formattedTime = formatTime(message.timestamp);
   const webSearchOffer = webSearchOfferOf(message);
 
+  // Same condition as the thumbs row under assistant replies.
+  const canRate =
+    message.role === "assistant" && !isCommand && !isProgress &&
+    typeof message.content === "string" && message.content.length > 10;
+  // Media keeps the browser menu (save or copy image).
+  const handleBubbleContextMenu = (e) => {
+    if (e.target?.closest?.("img, video, audio, canvas")) return;
+    bubbleMenu.open(e);
+  };
+
   return (
     <>
     <Box
@@ -438,6 +451,7 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate, 
       )}
       <Paper
         elevation={isCommand ? 0 : 2}
+        onContextMenu={message.content ? handleBubbleContextMenu : undefined}
         sx={{
           p: 1.5,
           maxWidth: "80%",
@@ -882,6 +896,24 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate, 
         </Typography>
       )}
     </Box>
+    <EntityContextMenu
+      anchorPosition={bubbleMenu.anchorPosition}
+      onClose={bubbleMenu.close}
+      actions={
+        bubbleMenu.isOpen
+          ? [
+              { label: "Copy", onClick: handleCopy },
+              canRate && {
+                label: "Good response",
+                checked: feedback === "up",
+                onClick: () => handleFeedback(true),
+                dividerBefore: true,
+              },
+              canRate && { label: "Bad response", checked: feedback === "down", onClick: () => handleFeedback(false) },
+            ]
+          : []
+      }
+    />
     {lightbox && (
       <ImageLightbox
         imageUrl={lightbox.images[lightbox.index]?.url || lightbox.url}

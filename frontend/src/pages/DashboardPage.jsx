@@ -6,6 +6,8 @@
 // - Compact Layered: real DashboardCardWrapper bars with card colors, indicators, expand-on-double-click
 // - Collapsed: simple text-only Paper bars
 // - Clicking any card brings it to the top z-layer
+// - Right-click: each card has its own menu (Hide card among them); the empty grid
+//   has one for layout mode, reset, hidden cards and Sticky Notes
 // WARNING: Visual/UX changes to this file are forbidden without explicit written approval from the project maintainer.
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
@@ -51,6 +53,16 @@ import RAGAutoresearchCard from "../components/dashboard/RAGAutoresearchCard";
 import GpuStatusCard from "../components/dashboard/GpuStatusCard";
 import { useLayout, useDashboardWidth } from "../contexts/LayoutContext";
 import { ContextualLoader } from "../components/common/LoadingStates";
+import EntityContextMenu from "../components/common/EntityContextMenu";
+import ConfirmActionDialog from "../components/settings/ui/ConfirmActionDialog";
+import useContextMenu from "../hooks/useContextMenu";
+import {
+  ensureLayoutItem,
+  hiddenCardIds,
+  showCard,
+  visibleLayout,
+  withHiddenItems,
+} from "../components/dashboard/dashboardCardVisibility";
 
 const cardComponents = {
   project: ProjectManagerCard,
@@ -66,6 +78,25 @@ const cardComponents = {
   autoresearch: RAGAutoresearchCard,
   gpu: GpuStatusCard,
 };
+
+// Names for the "Show <card>" items of the background menu; match each card's title.
+const CARD_TITLES = {
+  project: "Project Manager",
+  website: "Website Data",
+  tasks: "Tasks",
+  chat: "Chat",
+  clients: "Clients",
+  csvgen: "CSV Generation",
+  codegen: "Code Generation",
+  imggen: "Image Generation",
+  files: "File Manager",
+  family: "Family & Self-Improvement",
+  autoresearch: "RAG Autoresearch",
+  gpu: "GPU Memory",
+};
+
+// Turns on each card's right-click menu; a card adds its own items over this.
+const NO_CARD_ACTIONS = [];
 
 // Layout mode cycle: normal -> compact -> layered -> modex -> normal
 const LAYOUT_MODES = ["normal", "compact", "layered", "modex"];
@@ -104,6 +135,9 @@ const DashboardPage = () => {
   const [layoutError, setLayoutError] = useState(null);
   const [cardColors, setCardColors] = useState({});
   const [minimizedCards, setMinimizedCards] = useState({});
+  const [hiddenCards, setHiddenCards] = useState({});
+  const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
+  const backgroundMenu = useContextMenu();
   const [originalDimensions, setOriginalDimensions] = useState({});
   const [cardZIndex, setCardZIndex] = useState({});
   const [maxZIndex, setMaxZIndex] = useState(0);
@@ -156,12 +190,18 @@ const DashboardPage = () => {
     return items;
   }, [gridSettings]);
 
+  // Layout presets place only the cards that are showing, so hidden ones leave no gaps.
+  const visibleCardIds = useMemo(
+    () => Object.keys(cardComponents).filter((id) => !hiddenCards[id]),
+    [hiddenCards],
+  );
+
   // Compact layout: smaller cards arranged in rows filling available width
   const compactLayout = useMemo(() => {
     const { cardGridW, cardGridH } = gridSettings;
     const compactW = Math.round(cardGridW * 0.71);
     const compactH = Math.round(cardGridH * 0.71);
-    const cardIds = Object.keys(cardComponents);
+    const cardIds = visibleCardIds;
     const colWidthPx = gridWidth / COLS_COUNT;
     const cardPixelW = compactW * colWidthPx;
     const cardsPerRow = Math.max(1, Math.floor(gridWidth / cardPixelW));
@@ -176,12 +216,12 @@ const DashboardPage = () => {
       isDraggable: true,
       isResizable: true,
     }));
-  }, [gridSettings, gridWidth, COLS_COUNT, cardMinGridW]);
+  }, [gridSettings, gridWidth, COLS_COUNT, cardMinGridW, visibleCardIds]);
 
   // Layered layout: stacked bars on right side (same geometry as collapsed,
   // but renders real minimized DashboardCardWrapper components)
   const layeredLayout = useMemo(() => {
-    const cardIds = Object.keys(cardComponents);
+    const cardIds = visibleCardIds;
     const colWidthPx = gridWidth / COLS_COUNT;
     const barW = Math.round(300 / colWidthPx);
     const barH = Math.round(50 / ROW_HEIGHT_PX);
@@ -196,7 +236,7 @@ const DashboardPage = () => {
       isDraggable: true,
       isResizable: true,
     }));
-  }, [gridWidth, COLS_COUNT, ROW_HEIGHT_PX, cardMinGridW]);
+  }, [gridWidth, COLS_COUNT, ROW_HEIGHT_PX, cardMinGridW, visibleCardIds]);
 
   const [layout, setLayout] = useState(defaultFixedLayout);
   // Store the user's normal-mode layout separately so switching modes doesn't lose it
@@ -217,6 +257,7 @@ const DashboardPage = () => {
             setCardColors({});
             setMinimizedCards({});
             setOriginalDimensions({});
+            setHiddenCards({});
             setLayoutMode("normal");
           } else {
             throw new Error(
@@ -315,6 +356,10 @@ const DashboardPage = () => {
           ) {
             setOriginalDimensions(savedState.originalDimensions);
           }
+
+          if (savedState.hiddenCards && typeof savedState.hiddenCards === "object") {
+            setHiddenCards(savedState.hiddenCards);
+          }
         }
       } catch (e) {
         console.error("Dashboard: Error fetching or processing state:", e);
@@ -326,6 +371,7 @@ const DashboardPage = () => {
         setCardColors({});
         setMinimizedCards({});
         setOriginalDimensions({});
+        setHiddenCards({});
         setLayoutMode("normal");
       }
       setInitialStateLoaded(true);
@@ -353,7 +399,7 @@ const DashboardPage = () => {
       setOriginalDimensions(dims);
     } else if (layoutMode === "modex") {
       // Content-visible bars: taller than layered so content is readable
-      const mxCardIds = Object.keys(cardComponents);
+      const mxCardIds = visibleCardIds;
       const mxColWidthPx = gridWidth / COLS_COUNT;
       const mxBarW = Math.round(300 / mxColWidthPx);
       const mxBarH = Math.round(150 / ROW_HEIGHT_PX);
@@ -383,9 +429,9 @@ const DashboardPage = () => {
     });
   }, [cardZIndex, layout, layoutKey]);
 
-  // Save dashboard state (layout, minimized states, colors, originalDimensions, layoutMode)
+  // Save dashboard state (layout, minimized states, colors, originalDimensions, layoutMode, hiddenCards)
   const saveDashboardState = useCallback(
-    async (newLayout, newCardColors, newMinimizedCards, newLayoutMode, newOriginalDimensions) => {
+    async (newLayout, newCardColors, newMinimizedCards, newLayoutMode, newOriginalDimensions, newHiddenCards) => {
       try {
         const stateToSave = {
           layout: normalLayoutRef.current || newLayout || layout,
@@ -393,6 +439,7 @@ const DashboardPage = () => {
           minimizedCards: newMinimizedCards || minimizedCards,
           originalDimensions: newOriginalDimensions !== undefined ? newOriginalDimensions : originalDimensions,
           layoutMode: newLayoutMode !== undefined ? newLayoutMode : layoutMode,
+          hiddenCards: newHiddenCards !== undefined ? newHiddenCards : hiddenCards,
           lastSaved: new Date().toISOString(),
         };
 
@@ -411,7 +458,7 @@ const DashboardPage = () => {
         setLayoutError("Failed to save dashboard state changes.");
       }
     },
-    [layout, cardColors, minimizedCards, originalDimensions, layoutMode],
+    [layout, cardColors, minimizedCards, originalDimensions, layoutMode, hiddenCards],
   );
 
   // Apply a single card's z-index to its react-grid-item wrapper.
@@ -474,7 +521,11 @@ const DashboardPage = () => {
       // In the narrow re-packed view the layout is derived from the saved free
       // layout — don't let drags/resizes here overwrite the user's wide layout.
       if (isNarrow) return;
-      const validLayout = newLayout.filter((item) => item !== undefined);
+      const validLayout = withHiddenItems(
+        newLayout.filter((item) => item !== undefined),
+        layout,
+        hiddenCards,
+      );
       // Only persist to normalLayoutRef in normal mode — dragging in
       // compact/layered modes must NOT pollute the normal layout.
       if (layoutMode === "normal") {
@@ -485,15 +536,14 @@ const DashboardPage = () => {
       // Re-apply z-indices after RGL finishes — drag end resets inline styles
       requestAnimationFrame(() => applyAllZIndices());
     },
-    [cardColors, minimizedCards, saveDashboardState, layoutMode, applyAllZIndices, isNarrow],
+    [cardColors, minimizedCards, saveDashboardState, layoutMode, applyAllZIndices, isNarrow, layout, hiddenCards],
   );
 
+  // A null colour resets the card to the theme's.
   const handleCardColorChange = useCallback(
     (cardId, color) => {
-      const newCardColors = {
-        ...cardColors,
-        [cardId]: color,
-      };
+      const newCardColors = { ...cardColors, [cardId]: color };
+      if (!color) delete newCardColors[cardId];
       setCardColors(newCardColors);
       saveDashboardState(layout, newCardColors, minimizedCards);
     },
@@ -549,17 +599,47 @@ const DashboardPage = () => {
     [minimizedCards, layout, cardColors, saveDashboardState, cardMinGridH, originalDimensions],
   );
 
-  const _handleResetLayout = useCallback(() => {
+  const handleResetLayout = useCallback(() => {
     normalLayoutRef.current = defaultFixedLayout;
     setLayout(defaultFixedLayout);
+    setLayoutKey((k) => k + 1);
     setCardColors({});
     setMinimizedCards({});
     setOriginalDimensions({});
+    setHiddenCards({});
     setCardZIndex({});
     setMaxZIndex(0);
     setLayoutMode("normal");
-    saveDashboardState(defaultFixedLayout, {}, {}, "normal", {});
+    saveDashboardState(defaultFixedLayout, {}, {}, "normal", {}, {});
   }, [defaultFixedLayout, saveDashboardState]);
+
+  const handleHideCard = useCallback(
+    (cardId) => {
+      const next = { ...hiddenCards, [cardId]: true };
+      setHiddenCards(next);
+      saveDashboardState(undefined, undefined, undefined, undefined, undefined, next);
+    },
+    [hiddenCards, saveDashboardState],
+  );
+
+  // Shows one hidden card, or all of them when cardId is omitted.
+  const handleShowCards = useCallback(
+    (cardId) => {
+      const ids = cardId === undefined ? hiddenCardIds(hiddenCards) : [cardId];
+      const nextLayout = ids.reduce(
+        (acc, id) => ensureLayoutItem(acc, id, defaultFixedLayout.find((item) => item.i === id)),
+        layout,
+      );
+      if (nextLayout !== layout) {
+        setLayout(nextLayout);
+        if (layoutMode === "normal") normalLayoutRef.current = nextLayout;
+      }
+      const next = showCard(hiddenCards, cardId);
+      setHiddenCards(next);
+      saveDashboardState(nextLayout, undefined, undefined, undefined, undefined, next);
+    },
+    [hiddenCards, layout, layoutMode, defaultFixedLayout, saveDashboardState],
+  );
 
   // 4-way layout mode toggle: one-shot placement actions
   // Each toggle applies layout + minimize state directly — no useEffect dependency
@@ -592,7 +672,7 @@ const DashboardPage = () => {
       case "layered": {
         // Apply layered bars: all cards minimized, stacked on the right.
         // Compute positions inline to guarantee fresh gridWidth values.
-        const cardIds = Object.keys(cardComponents);
+        const cardIds = visibleCardIds;
         const colWidthPx = gridWidth / COLS_COUNT;
         const barW = Math.round(300 / colWidthPx);
         const barH = Math.round(50 / ROW_HEIGHT_PX);
@@ -620,7 +700,7 @@ const DashboardPage = () => {
       }
       case "modex": {
         // Content-visible bars: taller than layered so card content is readable
-        const mxCardIds = Object.keys(cardComponents);
+        const mxCardIds = visibleCardIds;
         const mxColWidthPx = gridWidth / COLS_COUNT;
         const mxBarW = Math.round(300 / mxColWidthPx);
         const mxBarH = Math.round(150 / ROW_HEIGHT_PX);
@@ -655,7 +735,7 @@ const DashboardPage = () => {
       newOriginalDimensions,
     );
 
-  }, [layoutMode, layout, cardColors, minimizedCards, originalDimensions, defaultFixedLayout, compactLayout, layeredLayout, saveDashboardState, gridWidth, COLS_COUNT, ROW_HEIGHT_PX, cardMinGridW]);
+  }, [layoutMode, layout, cardColors, minimizedCards, originalDimensions, defaultFixedLayout, compactLayout, layeredLayout, saveDashboardState, gridWidth, COLS_COUNT, ROW_HEIGHT_PX, cardMinGridW, visibleCardIds]);
 
   // ── Responsive reflow (helpers) ───────────────────────────────────────────
   // Scalar inputs (isNarrow/cardsPerRow) are computed earlier, above the layout
@@ -690,15 +770,39 @@ const DashboardPage = () => {
   // warns "minWidth larger than item width" whenever minW > w. This single chokepoint
   // fixes every source (repackLayout already sets minW:1, so it's unaffected).
   const renderedLayout = useMemo(() => {
-    const base = isNarrow ? repackLayout(layout) : layout;
+    const shown = visibleLayout(layout, hiddenCards);
+    const base = isNarrow ? repackLayout(shown) : shown;
     return base.map((it) => ({
       ...it,
       minW: Math.min(it.minW ?? 1, it.w),
       minH: Math.min(it.minH ?? 1, it.h),
     }));
-  }, [isNarrow, repackLayout, layout]);
+  }, [isNarrow, repackLayout, layout, hiddenCards]);
 
   const LayoutModeIcon = LAYOUT_MODE_ICONS[layoutMode];
+  const nextLayoutMode = LAYOUT_MODES[(LAYOUT_MODES.indexOf(layoutMode) + 1) % LAYOUT_MODES.length];
+
+  // Right-click on the grid's empty space; cards open their own menus.
+  const handleBackgroundContextMenu = (e) => {
+    if (e.target?.closest?.("[data-card-id]")) return;
+    backgroundMenu.open(e);
+  };
+
+  const hiddenIds = hiddenCardIds(hiddenCards);
+  const backgroundActions = backgroundMenu.isOpen
+    ? [
+        { label: `Cycle layout (next: ${LAYOUT_MODE_LABELS[nextLayoutMode]})`, onClick: handleCycleLayoutMode },
+        { label: "Reset layout…", onClick: () => setResetConfirmOpen(true) },
+        hiddenIds.length === 0 && { label: "No hidden cards", disabled: true, dividerBefore: true },
+        ...hiddenIds.map((id, idx) => ({
+          label: `Show ${CARD_TITLES[id] || id}`,
+          onClick: () => handleShowCards(id),
+          dividerBefore: idx === 0,
+        })),
+        hiddenIds.length > 1 && { label: "Show all hidden cards", onClick: () => handleShowCards() },
+        { label: "Sticky Notes", onClick: () => navigate("/notes"), dividerBefore: true },
+      ]
+    : [];
 
   if (!initialStateLoaded) {
     return (
@@ -745,6 +849,7 @@ const DashboardPage = () => {
     >
 
         <Box
+          onContextMenu={handleBackgroundContextMenu}
           sx={{
             flex: 1,
             overflow: "auto",
@@ -841,6 +946,8 @@ const DashboardPage = () => {
                       }
                       isMinimized={isMinimized}
                       onToggleMinimize={() => handleToggleMinimize(cardId)}
+                      contextMenuActions={NO_CARD_ACTIONS}
+                      onHideCard={() => handleHideCard(cardId)}
                     />
                   ) : (
                     <Paper
@@ -865,6 +972,24 @@ const DashboardPage = () => {
           </ReactGridLayout>
         </Box>
       </Box>
+
+      <EntityContextMenu
+        anchorPosition={backgroundMenu.anchorPosition}
+        onClose={backgroundMenu.close}
+        actions={backgroundActions}
+      />
+      <ConfirmActionDialog
+        open={resetConfirmOpen}
+        title="Reset the dashboard layout?"
+        description="Every card goes back to its default place and size, card colours are cleared and hidden cards are shown again."
+        keeps="what the cards show (projects, tasks, chats, files)"
+        confirmLabel="Reset layout"
+        onConfirm={() => {
+          setResetConfirmOpen(false);
+          handleResetLayout();
+        }}
+        onClose={() => setResetConfirmOpen(false)}
+      />
     </PageLayout>
   );
 };

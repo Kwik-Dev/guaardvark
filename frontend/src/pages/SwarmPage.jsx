@@ -63,6 +63,9 @@ import { useTheme } from "@mui/material/styles";
 
 import PageLayout from "../components/layout/PageLayout";
 import { useSnackbar } from "../components/common/SnackbarProvider";
+import EntityContextMenu from "../components/common/EntityContextMenu";
+import useContextMenu from "../hooks/useContextMenu";
+import copyText from "../utils/copyText";
 import SwarmGraph from "../components/swarm/SwarmGraph";
 import {
   getAllStatus,
@@ -102,6 +105,7 @@ const STATUS_CONFIG = {
 const SwarmPage = () => {
   const theme = useTheme();
   const { showMessage } = useSnackbar();
+  const itemMenu = useContextMenu();
 
   // state
   const [serviceOnline, setServiceOnline] = useState(false);
@@ -389,6 +393,64 @@ const SwarmPage = () => {
     }
   };
 
+  // Right-click items for a swarm, a task, a past swarm or a template; each
+  // mirrors the buttons and conditions shown on that item.
+  const itemMenuActions = () => {
+    const p = itemMenu.payload;
+    if (!p) return [];
+    if (p.kind === "swarm") {
+      const { swarm } = p;
+      const isRunning = swarm.status === "running";
+      const isExpanded = expandedSwarm === swarm.swarm_id;
+      const actions = [
+        isRunning && { label: "Cancel", onClick: () => handleCancel(swarm.swarm_id), color: "error.main" },
+        !isRunning && (swarm.tasks || []).length > 0 && { label: "Merge All", onClick: () => handleMerge(swarm.swarm_id) },
+        !isRunning && { label: "Clean Up", onClick: () => handleCleanup(swarm.swarm_id) },
+      ].filter(Boolean);
+      if (actions.length) actions[0] = { ...actions[0], dividerBefore: true };
+      return [
+        {
+          label: isExpanded ? "Collapse" : "Expand",
+          onClick: () => setExpandedSwarm(isExpanded ? null : swarm.swarm_id),
+        },
+        ...actions,
+        { label: "Copy swarm ID", onClick: () => copyText(swarm.swarm_id), dividerBefore: true },
+      ];
+    }
+    if (p.kind === "task") {
+      const { swarmId, task } = p;
+      const canView = ["running", "done", "failed"].includes(task.status);
+      return [
+        canView && { label: "View logs", onClick: () => handleViewTask(swarmId, task.id) },
+        canView && { label: "View diff", onClick: () => handleViewTask(swarmId, task.id, 1) },
+        task.branch_name && {
+          label: "Copy branch name",
+          onClick: () => copyText(task.branch_name),
+          dividerBefore: canView,
+        },
+        { label: "Copy task ID", onClick: () => copyText(task.id), dividerBefore: canView && !task.branch_name },
+      ];
+    }
+    if (p.kind === "history") {
+      return [
+        { label: "Clean Up", onClick: () => handleCleanup(p.h.swarm_id) },
+        { label: "Copy swarm ID", onClick: () => copyText(p.h.swarm_id), dividerBefore: true },
+      ];
+    }
+    if (p.kind === "template") {
+      return [
+        {
+          label: "Launch…",
+          onClick: () => {
+            handleTemplateSelect(p.tmpl.filename);
+            setLaunchOpen(true);
+          },
+        },
+      ];
+    }
+    return [];
+  };
+
   const handleAiPlanBuilder = async () => {
     if (!aiPrompt.trim()) {
       showMessage("Enter what you want to achieve", "warning");
@@ -516,6 +578,7 @@ const SwarmPage = () => {
                 onMerge={handleMerge}
                 onCleanup={handleCleanup}
                 onViewTask={handleViewTask}
+                onItemContextMenu={itemMenu.open}
                 theme={theme}
                 />            ))}
           </Stack>
@@ -546,6 +609,7 @@ const SwarmPage = () => {
                     handleTemplateSelect(tmpl.filename);
                     setLaunchOpen(true);
                   }}
+                  onContextMenu={(e) => itemMenu.open(e, { kind: "template", tmpl })}
                 >
                   <CardContent>
                     <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
@@ -580,6 +644,7 @@ const SwarmPage = () => {
             {history.map((h) => (
               <Paper
                 key={h.swarm_id}
+                onContextMenu={(e) => itemMenu.open(e, { kind: "history", h })}
                 sx={{
                   p: 2,
                   border: "1px solid",
@@ -941,6 +1006,12 @@ const SwarmPage = () => {
           )}
         </DialogContent>
       </Dialog>
+
+      <EntityContextMenu
+        anchorPosition={itemMenu.anchorPosition}
+        onClose={itemMenu.close}
+        actions={itemMenu.isOpen ? itemMenuActions() : []}
+      />
     </PageLayout>
   );
 };
@@ -956,6 +1027,7 @@ const SwarmCard = ({
   onMerge,
   onCleanup,
   onViewTask,
+  onItemContextMenu,
   theme,
 }) => {
   const tasks = swarm.tasks || [];
@@ -973,6 +1045,7 @@ const SwarmCard = ({
 
   return (
     <Paper
+      onContextMenu={(e) => onItemContextMenu(e, { kind: "swarm", swarm })}
       sx={{
         border: "1px solid",
         borderColor: isRunning ? "primary.main" : "divider",
@@ -1070,8 +1143,8 @@ const SwarmCard = ({
       <Collapse in={expanded}>
         <Divider />
         <Box sx={{ p: 2 }}>
-          {/* Visual DAG */}
-          <Box sx={{ mb: 3 }}>
+          {/* Visual DAG: the graph keeps the browser's own right-click */}
+          <Box sx={{ mb: 3 }} data-native-contextmenu>
             <Typography variant="caption" color="text.secondary" fontWeight={600} sx={{ mb: 1, display: "block" }}>
               DEPENDENCY GRAPH
             </Typography>
@@ -1121,6 +1194,7 @@ const SwarmCard = ({
                   task={task}
                   swarmId={swarm.swarm_id}
                   onViewTask={onViewTask}
+                  onItemContextMenu={onItemContextMenu}
                   theme={theme}
                 />
               </Grid>
@@ -1135,12 +1209,13 @@ const SwarmCard = ({
 
 // ─── Task Card Component ─────────────────────────────────────────────
 
-const TaskCard = ({ task, swarmId, onViewTask, _theme }) => {
+const TaskCard = ({ task, swarmId, onViewTask, onItemContextMenu, _theme }) => {
   const cfg = STATUS_CONFIG[task.status] || STATUS_CONFIG.pending;
 
   return (
     <Card
       variant="outlined"
+      onContextMenu={(e) => onItemContextMenu(e, { kind: "task", swarmId, task })}
       sx={{
         height: "100%",
         borderColor:

@@ -23,6 +23,8 @@ import AddIcon from '@mui/icons-material/Add';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import { listCastLibrary, createCastSubject, deleteCastSubject } from '../../api/productionService';
 import DragDropImageUpload from './DragDropImageUpload';
+import EntityContextMenu from '../common/EntityContextMenu';
+import useContextMenu from '../../hooks/useContextMenu';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
 
@@ -59,6 +61,7 @@ const CastLibraryView = ({ onOpenSubject } = {}) => {
   const [submitting, setSubmitting] = useState(false);
   const uploaderRef = useRef(null);
   const navigate = useNavigate();
+  const cardMenu = useContextMenu();
 
   const openDetail = onOpenSubject || ((subject) => navigate(`/cast/${subject.id}`));
 
@@ -136,6 +139,7 @@ const CastLibraryView = ({ onOpenSubject } = {}) => {
           {subjects.map((s) => (
             <Card key={s.id} variant="outlined"
                   onClick={() => openDetail(s)}
+                  onContextMenu={(e) => cardMenu.open(e, s)}
                   sx={{ display: 'flex', flexDirection: 'column', cursor: 'pointer',
                         '&:hover': { borderColor: 'primary.main' } }}>
               <SubjectThumb subject={s} />
@@ -171,6 +175,24 @@ const CastLibraryView = ({ onOpenSubject } = {}) => {
           ))}
         </Box>
       )}
+
+      <EntityContextMenu
+        anchorPosition={cardMenu.anchorPosition}
+        onClose={cardMenu.close}
+        actions={
+          cardMenu.payload
+            ? [
+                { label: 'Open studio', onClick: () => openDetail(cardMenu.payload) },
+                {
+                  label: 'Remove from cast library',
+                  onClick: () => handleDelete(cardMenu.payload.id),
+                  color: 'error.main',
+                  dividerBefore: true,
+                },
+              ]
+            : []
+        }
+      />
 
       <Dialog open={open} onClose={() => setOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Add to Cast Library</DialogTitle>

@@ -22,6 +22,8 @@ import ChatBubbleOutlineIcon from "@mui/icons-material/ChatBubbleOutline";
 import SmartToyIcon from "@mui/icons-material/SmartToy";
 import AccessTimeIcon from "@mui/icons-material/AccessTime";
 import { listChatSessions, deleteChatSession } from "../../api/chatService";
+import EntityContextMenu from "../common/EntityContextMenu";
+import useContextMenu from "../../hooks/useContextMenu";
 
 const DRAWER_WIDTH = 340;
 
@@ -36,6 +38,7 @@ const ChatSessionDrawer = ({
   const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const rowMenu = useContextMenu();
 
   const loadSessions = useCallback(async () => {
     setLoading(true);
@@ -56,7 +59,7 @@ const ChatSessionDrawer = ({
   }, [open, loadSessions]);
 
   const handleDelete = async (sessionId, e) => {
-    e.stopPropagation();
+    e?.stopPropagation();
     try {
       await deleteChatSession(sessionId);
       setSessions((prev) => prev.filter((s) => s.session_id !== sessionId));
@@ -152,7 +155,12 @@ const ChatSessionDrawer = ({
     const hasResponse = !!session.response_preview;
 
     return (
-      <ListItem key={session.session_id} disablePadding sx={{ px: 1 }}>
+      <ListItem
+        key={session.session_id}
+        disablePadding
+        sx={{ px: 1 }}
+        onContextMenu={(e) => rowMenu.open(e, session)}
+      >
         <ListItemButton
           selected={isCurrent}
           onClick={() => {
@@ -402,6 +410,29 @@ const ChatSessionDrawer = ({
             {renderGroup("Older", groups.older)}
           </List>
         )}
+        <EntityContextMenu
+          anchorPosition={rowMenu.anchorPosition}
+          onClose={rowMenu.close}
+          actions={
+            rowMenu.payload
+              ? [
+                  {
+                    label: "Open",
+                    onClick: () => {
+                      onSelectSession(rowMenu.payload.session_id);
+                      onClose();
+                    },
+                  },
+                  {
+                    label: "Delete",
+                    onClick: () => handleDelete(rowMenu.payload.session_id),
+                    color: "error.main",
+                    dividerBefore: true,
+                  },
+                ]
+              : []
+          }
+        />
       </Box>
 
       {/* Footer stats */}

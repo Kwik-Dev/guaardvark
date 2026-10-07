@@ -48,6 +48,8 @@ import { useSearchParams } from "react-router-dom";
 import PageLayout from "../components/layout/PageLayout";
 import DOMPurify from "dompurify";
 import { ContextualLoader } from "../components/common/LoadingStates";
+import EntityContextMenu from "../components/common/EntityContextMenu";
+import useContextMenu from "../hooks/useContextMenu";
 
 const AlertSnackbar = React.forwardRef(function Alert(props, ref) {
   return <MuiAlert elevation={6} ref={ref} variant="filled" {...props} />;
@@ -393,6 +395,8 @@ function WordPressPagesPage() {
     }
   };
 
+  const pageMenu = useContextMenu();
+
   const handleViewDiff = (page) => {
     setSelectedPage(page);
     setDiffTab(0); // Reset to first tab
@@ -557,6 +561,7 @@ function WordPressPagesPage() {
                   hover 
                   sx={{ cursor: "pointer" }}
                   onClick={() => handleViewDiff(page)}
+                  onContextMenu={(e) => pageMenu.open(e, page)}
                 >
                   <TableCell>
                     <Typography variant="body2" sx={{ fontWeight: 500 }}>
@@ -606,6 +611,26 @@ function WordPressPagesPage() {
           </Table>
         </TableContainer>
       )}
+
+      <EntityContextMenu
+        anchorPosition={pageMenu.anchorPosition}
+        onClose={pageMenu.close}
+        actions={
+          pageMenu.payload
+            ? [
+                { label: "View Details", onClick: () => handleViewDiff(pageMenu.payload) },
+                pageMenu.payload.pull_status === "pulled" &&
+                  pageMenu.payload.process_status === "pending" && {
+                    label: "Process Now",
+                    onClick: () => handleProcessPage(pageMenu.payload.id),
+                    disabled: isProcessing,
+                  },
+                { label: "Refresh", onClick: fetchPages, dividerBefore: true },
+                { label: "Pull Pages…", onClick: () => setPullDialogOpen(true), disabled: isPulling },
+              ]
+            : []
+        }
+      />
 
       {pages.length === 0 && !isLoading && (
         <Box sx={{ textAlign: "center", py: 8 }}>
