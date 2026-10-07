@@ -3,6 +3,7 @@
 
 import React from 'react';
 import { Menu, MenuItem, Divider, ListItemIcon, ListItemText } from '@mui/material';
+import CheckIcon from '@mui/icons-material/Check';
 
 const menuStyles = {
   '& .MuiPaper-root': {
@@ -28,12 +29,18 @@ const menuStyles = {
  * @param {object|null} anchorPosition - { top, left } coordinates or null to hide
  * @param {function} onClose - called when the menu should close
  * @param {Array} actions - array of action objects:
- *   { label, onClick, icon?, dividerBefore?, disabled?, color? }
+ *   { label, onClick, icon?, dividerBefore?, disabled?, color?, checked? }
+ *   `checked` (true/false) marks one choice of a set, e.g. a tier; it draws a
+ *   tick in the icon column. Falsy entries are skipped, so callers can write
+ *   `cond && {...}` inline.
+ *
+ * Pair it with hooks/useContextMenu, which supplies anchorPosition and onClose.
  */
 const EntityContextMenu = ({ anchorPosition, onClose, actions = [] }) => {
   const open = Boolean(anchorPosition);
+  const shown = actions.filter(Boolean);
 
-  if (!open || actions.length === 0) return null;
+  if (!open || shown.length === 0) return null;
 
   return (
     <Menu
@@ -43,7 +50,7 @@ const EntityContextMenu = ({ anchorPosition, onClose, actions = [] }) => {
       anchorPosition={anchorPosition || { top: 0, left: 0 }}
       sx={menuStyles}
     >
-      {actions.map((action, index) => {
+      {shown.map((action, index) => {
         const items = [];
 
         if (action.dividerBefore) {
@@ -54,18 +61,21 @@ const EntityContextMenu = ({ anchorPosition, onClose, actions = [] }) => {
           <MenuItem
             key={action.label || index}
             onClick={() => {
-              action.onClick();
+              action.onClick?.();
               onClose();
             }}
             disabled={action.disabled}
+            selected={action.checked === true}
             sx={action.color ? { color: action.color } : undefined}
           >
-            {action.icon && (
+            {(action.icon || typeof action.checked === 'boolean') && (
               <ListItemIcon sx={action.color ? { color: action.color, minWidth: 32 } : { minWidth: 32 }}>
-                {action.icon}
+                {typeof action.checked === 'boolean'
+                  ? action.checked && <CheckIcon fontSize="small" />
+                  : action.icon}
               </ListItemIcon>
             )}
-            {action.icon ? (
+            {action.icon || typeof action.checked === 'boolean' ? (
               <ListItemText primaryTypographyProps={{ fontSize: '0.8125rem' }}>
                 {action.label}
               </ListItemText>

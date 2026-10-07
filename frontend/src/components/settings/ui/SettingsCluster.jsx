@@ -1,12 +1,14 @@
 // frontend/src/components/settings/ui/SettingsCluster.jsx
 // The unit of layout inside a SettingsPanel: a small uppercase label, then one
 // wrapping line of chips, fields and buttons. Nothing here puts a label on the
-// left and a lone control on the right.
+// left and a lone control on the right. `help` explains the cluster on hover over
+// its label; `note` is for state that must stay visible.
 
 import React from "react";
 import { Box, Typography } from "@mui/material";
+import HelpTitle from "./HelpTitle";
 
-export const Cluster = ({ label, note, children, sx }) => (
+export const Cluster = ({ label, help, note, children, sx }) => (
   <Box sx={{ display: "flex", flexDirection: "column", gap: 0.75, minWidth: 0, ...sx }}>
     {label && (
       <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
@@ -14,7 +16,7 @@ export const Cluster = ({ label, note, children, sx }) => (
           component="span"
           sx={{ fontSize: "0.66rem", letterSpacing: 1, textTransform: "uppercase", color: "text.secondary", opacity: 0.85 }}
         >
-          {label}
+          <HelpTitle help={help}>{label}</HelpTitle>
         </Typography>
         {note && (
           <Typography component="span" variant="caption" sx={{ color: "text.secondary", opacity: 0.7 }}>
