@@ -18,19 +18,50 @@ import {
   Divider,
   RadioGroup,
   Radio,
+  ListItemText,
 } from "@mui/material";
 import {
   getTrainingDatasets,
   getDeviceProfiles,
   getBaseModels,
-  getBaseModelStatus,
   getImageFolders,
   getHardwareCapabilities,
   getTrainingLibraries,
-} from "../../api";
+} from "../../api/trainingService";
 import TrainingLibrariesModal from "./TrainingLibrariesModal";
 
 import ComputerIcon from "@mui/icons-material/Computer";
+
+const emptyForm = () => ({
+  name: "",
+  task_type: "text", // "text" or "vision"
+  base_model: "",
+  dataset_id: "",
+  images_path: "", // For vision tasks
+  device_profile_id: "",
+  output_model_name: "",
+  config: {
+    // Empty: the backend picks the steps from the dataset's size.
+    steps: "",
+    lr: 0.0002,
+    batch_size: 2,
+    rank: 16,
+    seq_length: 2048,
+  },
+  start_immediately: false,
+});
+
+/** Keep batch size and sequence length inside what the model declares. */
+const withinModel = (config, model) => {
+  if (!model) return config;
+  return {
+    ...config,
+    batch_size: Math.min(config.batch_size || 1, model.max_batch_size),
+    seq_length: Math.min(config.seq_length || model.max_seq_length, model.max_seq_length),
+  };
+};
+
+const LOAD_LABELS = ["datasets", "device profiles", "base models", "image folders", "hardware"];
 
 const NewTrainingJobModal = ({
   open,
@@ -38,23 +69,7 @@ const NewTrainingJobModal = ({
   onSave,
   isSaving,
 }) => {
-  const [formData, setFormData] = useState({
-    name: "",
-    task_type: "text", // "text" or "vision"
-    base_model: "",
-    dataset_id: "",
-    images_path: "", // For vision tasks
-    device_profile_id: "",
-    output_model_name: "",
-    config: {
-      steps: 500,
-      lr: 0.0002,
-      batch_size: 2,
-      rank: 16,
-      seq_length: 2048,
-    },
-    start_immediately: false,
-  });
+  const [formData, setFormData] = useState(emptyForm);
   const [formError, setFormError] = useState(null);
   const [datasets, setDatasets] = useState([]);
   const [deviceProfiles, setDeviceProfiles] = useState([]);
@@ -62,8 +77,8 @@ const NewTrainingJobModal = ({
   const [imageFolders, setImageFolders] = useState([]);
   const [hardwareCaps, setHardwareCaps] = useState(null);
   const [loading, setLoading] = useState(false);
-  // null = unknown / not checked yet; otherwise the backend's download_status.
-  const [baseModelStatus, setBaseModelStatus] = useState(null);
+  // What could not be read, so a list left empty says why.
+  const [loadProblems, setLoadProblems] = useState([]);
   // Settings > Training libraries status; null until read. Jobs need them, so
   // when they are missing the form points there instead of creating a job
   // that would fail.
@@ -76,81 +91,68 @@ const NewTrainingJobModal = ({
       .catch(() => setLibraries(null));
   };
 
-  // Nothing leaves this machine unannounced: before Create, say whether the
-  // chosen base model is on disk or will be fetched from huggingface.co.
-  useEffect(() => {
-    const name = formData.base_model;
-    if (!name) {
-      setBaseModelStatus(null);
-      return undefined;
+  const applyBaseModels = (status) => {
+    const models = Array.isArray(status?.models) ? status.models : [];
+    setBaseModels(models);
+    setFormData((prev) => {
+      const current = models.find((m) => m.id === prev.base_model && m.fits && m.installed);
+      const chosen = current || models.find((m) => m.fits && m.installed);
+      return { ...prev, base_model: chosen ? chosen.id : "", config: withinModel(prev.config, chosen) };
+    });
+  };
+
+  const loadOptions = async () => {
+    setLoading(true);
+    const results = await Promise.allSettled([
+      getTrainingDatasets(),
+      getDeviceProfiles(),
+      getBaseModels(),
+      getImageFolders(),
+      getHardwareCapabilities(),
+    ]);
+    const value = (i) => (results[i].status === "fulfilled" ? results[i].value : null);
+    const problems = results
+      .map((r, i) => {
+        if (r.status === "rejected") return `${LOAD_LABELS[i]} (${r.reason?.message || "failed"})`;
+        if (r.value && r.value.error) return `${LOAD_LABELS[i]} (${r.value.error})`;
+        return null;
+      })
+      .filter(Boolean);
+    setLoadProblems(problems);
+    setDatasets(Array.isArray(value(0)) ? value(0) : []);
+    setDeviceProfiles(Array.isArray(value(1)) ? value(1) : []);
+    setImageFolders(Array.isArray(value(3)) ? value(3) : []);
+    const capsData = value(4);
+    setHardwareCaps(capsData && !capsData.error ? capsData : null);
+    if (capsData?.recommended_config) {
+      setFormData((prev) => ({
+        ...prev,
+        config: {
+          ...prev.config,
+          batch_size: capsData.recommended_config.batch_size,
+          seq_length: capsData.recommended_config.max_seq_length,
+          rank: capsData.recommended_config.lora_rank,
+        },
+      }));
     }
-    let cancelled = false;
-    getBaseModelStatus(name)
-      .then((status) => { if (!cancelled) setBaseModelStatus(status); })
-      .catch(() => { if (!cancelled) setBaseModelStatus(null); });
-    return () => { cancelled = true; };
-  }, [formData.base_model]);
+    applyBaseModels(value(2));
+    setLoading(false);
+  };
 
   useEffect(() => {
     if (open) {
-      setFormData({
-        name: "",
-        task_type: "text",
-        base_model: "",
-        dataset_id: "",
-        images_path: "",
-        device_profile_id: "",
-        output_model_name: "",
-        config: {
-          steps: 500,
-          lr: 0.0002,
-          batch_size: 2,
-          rank: 16,
-          seq_length: 2048,
-        },
-        start_immediately: false,
-      });
+      setFormData(emptyForm());
       setFormError(null);
       loadOptions();
       checkLibraries();
     }
   }, [open]);
 
-  const loadOptions = async () => {
-    setLoading(true);
-    try {
-      const [datasetsData, profilesData, modelsData, imagesData, capsData] = await Promise.all([
-        getTrainingDatasets(),
-        getDeviceProfiles(),
-        getBaseModels(),
-        getImageFolders(),
-        getHardwareCapabilities(),
-      ]);
-      
-      setDatasets(Array.isArray(datasetsData) ? datasetsData : []);
-      setDeviceProfiles(Array.isArray(profilesData) ? profilesData : []);
-      setBaseModels(Array.isArray(modelsData) ? modelsData : []);
-      setImageFolders(Array.isArray(imagesData) ? imagesData : []);
-      setHardwareCaps(capsData);
-
-      // Apply intelligent defaults from hardware detection
-      if (capsData && capsData.recommended_config) {
-        setFormData(prev => ({
-          ...prev,
-          config: {
-            ...prev.config,
-            batch_size: capsData.recommended_config.batch_size,
-            seq_length: capsData.recommended_config.max_seq_length,
-            rank: capsData.recommended_config.lora_rank,
-          }
-        }));
-      }
-    } catch (err) {
-      console.error("Error loading options:", err);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const selectedModel = baseModels.find((m) => m.id === formData.base_model);
+  const fittingModels = baseModels.filter((m) => m.fits);
+  const notDownloaded = fittingModels.filter((m) => !m.installed);
+  // The Vision choice appears once a vision base model is declared.
+  const visionDeclared = baseModels.some((m) => m.vision);
 
   const handleInputChange = (e) => {
     const { name, value, type, checked } = e.target;
@@ -160,11 +162,19 @@ const NewTrainingJobModal = ({
         ...prev,
         config: {
           ...prev.config,
-          [configKey]: type === "number" ? parseFloat(value) || 0 : value,
+          [configKey]:
+            type === "number"
+              ? value === ""
+                ? ""
+                : parseFloat(value) || 0
+              : value,
         },
       }));
     } else if (name === "start_immediately") {
       setFormData((prev) => ({ ...prev, [name]: checked }));
+    } else if (name === "base_model") {
+      const model = baseModels.find((m) => m.id === value);
+      setFormData((prev) => ({ ...prev, base_model: value, config: withinModel(prev.config, model) }));
     } else if (name === "dataset_id" || name === "device_profile_id") {
       // Keep as string for Select component, will convert on save
       setFormData((prev) => ({
@@ -182,17 +192,17 @@ const NewTrainingJobModal = ({
   const handleDeviceProfileChange = (e) => {
     const profileId = e.target.value;
     setFormData((prev) => ({ ...prev, device_profile_id: profileId }));
-    
+
     // Auto-fill config from device profile
     const profile = deviceProfiles.find((p) => p.id === parseInt(profileId));
     if (profile) {
       setFormData((prev) => ({
         ...prev,
-        config: {
+        config: withinModel({
           ...prev.config,
           batch_size: profile.max_batch_size || prev.config.batch_size,
           seq_length: profile.max_seq_length || prev.config.seq_length,
-        },
+        }, selectedModel),
       }));
     }
   };
@@ -202,8 +212,8 @@ const NewTrainingJobModal = ({
       setFormError("Job name is required.");
       return;
     }
-    if (!formData.base_model) {
-      setFormError("Base model is required.");
+    if (!formData.base_model || !selectedModel?.installed) {
+      setFormError("Choose a downloaded base model.");
       return;
     }
     if (!formData.dataset_id) {
@@ -216,18 +226,19 @@ const NewTrainingJobModal = ({
     }
 
     setFormError(null);
-    
-    // Convert IDs to integers
+
+    const { steps, ...config } = formData.config;
     const jobData = {
       ...formData,
       dataset_id: parseInt(formData.dataset_id),
       device_profile_id: formData.device_profile_id ? parseInt(formData.device_profile_id) : null,
       config: {
-          ...formData.config,
+          ...config,
+          ...(steps ? { steps: Math.round(steps) } : {}),
           images_path: formData.task_type === "vision" ? formData.images_path : null
       }
     };
-    
+
     onSave(jobData);
   };
 
@@ -270,6 +281,11 @@ const NewTrainingJobModal = ({
             </Typography>
           </Alert>
         )}
+        {loadProblems.length > 0 && (
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            Could not load {loadProblems.join(", ")}.
+          </Alert>
+        )}
         {formError && (
           <Alert severity="error" sx={{ mb: 2 }}>
             {formError}
@@ -295,58 +311,63 @@ const NewTrainingJobModal = ({
               helperText="A descriptive name for this training job"
             />
           </Grid>
-          
-          <Grid item xs={12}>
-            <FormControl component="fieldset">
-              <Typography variant="caption" color="textSecondary">Task Type</Typography>
-              <RadioGroup
-                row
-                name="task_type"
-                value={formData.task_type}
-                onChange={handleInputChange}
-              >
-                <FormControlLabel value="text" control={<Radio />} label="Text Generation" disabled={isSaving} />
-                <FormControlLabel value="vision" control={<Radio />} label="Vision Fine-Tuning" disabled={isSaving} />
-              </RadioGroup>
-            </FormControl>
-          </Grid>
+
+          {visionDeclared && (
+            <Grid item xs={12}>
+              <FormControl component="fieldset">
+                <Typography variant="caption" color="textSecondary">Task Type</Typography>
+                <RadioGroup
+                  row
+                  name="task_type"
+                  value={formData.task_type}
+                  onChange={handleInputChange}
+                >
+                  <FormControlLabel value="text" control={<Radio />} label="Text Generation" disabled={isSaving} />
+                  <FormControlLabel value="vision" control={<Radio />} label="Vision Fine-Tuning" disabled={isSaving} />
+                </RadioGroup>
+              </FormControl>
+            </Grid>
+          )}
 
           <Grid item xs={12} sm={6}>
             <FormControl fullWidth margin="dense" required>
-              <InputLabel>Base Model</InputLabel>
+              <InputLabel id="base-model-label">Base Model</InputLabel>
               <Select
+                labelId="base-model-label"
                 name="base_model"
                 value={formData.base_model}
                 onChange={handleInputChange}
                 disabled={isSaving}
                 label="Base Model"
+                renderValue={(id) => baseModels.find((m) => m.id === id)?.name || id}
               >
-                {baseModels.map((model) => (
-                  <MenuItem key={model.name || model} value={model.name || model}>
-                    {model.name || model}
+                {fittingModels.map((model) => (
+                  <MenuItem key={model.id} value={model.id} disabled={!model.installed}>
+                    <ListItemText
+                      primary={model.name}
+                      secondary={
+                        model.installed
+                          ? `${model.license} · up to ${model.max_seq_length} tokens`
+                          : `Not downloaded (${model.size_gb} GB)`
+                      }
+                    />
                   </MenuItem>
                 ))}
               </Select>
             </FormControl>
-            {baseModelStatus && baseModelStatus.cached && (
-              <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>
-                Base model is already on this machine — no download.
-              </Typography>
-            )}
-            {baseModelStatus && !baseModelStatus.cached && (
+            {!loading && baseModels.length > 0 && fittingModels.length === 0 && (
               <Alert severity="warning" sx={{ mt: 1 }}>
-                <Typography variant="body2">
-                  <strong>This job will download.</strong> {baseModelStatus.name} is not on this
-                  machine; training fetches it from huggingface.co when the job starts. Nothing
-                  else leaves this machine.
-                  {!baseModelStatus.looks_like_hub_id && (
-                    <>
-                      {" "}This looks like an Ollama tag, not a Hugging Face model id — the
-                      download will fail unless the trainer knows how to resolve it.
-                    </>
-                  )}
-                </Typography>
+                No declared base model fits this machine: {baseModels[0].fit_reason}
               </Alert>
+            )}
+            {notDownloaded.length > 0 && (
+              <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>
+                {notDownloaded.map((m) => m.name).join(", ")} {notDownloaded.length === 1 ? "is" : "are"} not
+                downloaded.{" "}
+                <Button size="small" onClick={() => setLibrariesOpen(true)} sx={{ p: 0, minWidth: 0, verticalAlign: "baseline" }}>
+                  Download base models
+                </Button>
+              </Typography>
             )}
           </Grid>
 
@@ -365,13 +386,14 @@ const NewTrainingJobModal = ({
 
           <Grid item xs={12} sm={6}>
             <FormControl fullWidth margin="dense" required>
-              <InputLabel>Dataset (JSONL)</InputLabel>
+              <InputLabel id="dataset-label">Dataset</InputLabel>
               <Select
+                labelId="dataset-label"
                 name="dataset_id"
                 value={formData.dataset_id}
                 onChange={handleInputChange}
                 disabled={isSaving}
-                label="Dataset (JSONL)"
+                label="Dataset"
               >
                 {datasets.map((ds) => (
                   <MenuItem key={ds.id} value={ds.id}>
@@ -422,8 +444,8 @@ const NewTrainingJobModal = ({
             </FormControl>
             {selectedProfile && (
               <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: "block" }}>
-                {selectedProfile.device_type?.toUpperCase()} | 
-                Max Batch: {selectedProfile.max_batch_size} | 
+                {selectedProfile.device_type?.toUpperCase()} |
+                Max Batch: {selectedProfile.max_batch_size} |
                 Max Seq: {selectedProfile.max_seq_length}
                 {selectedProfile.gpu_vram_mb && ` | VRAM: ${selectedProfile.gpu_vram_mb / 1024}GB`}
               </Typography>
@@ -448,6 +470,9 @@ const NewTrainingJobModal = ({
               onChange={handleInputChange}
               disabled={isSaving}
               inputProps={{ min: 1 }}
+              placeholder="Auto"
+              InputLabelProps={{ shrink: true }}
+              helperText="Empty: about three passes over the dataset"
             />
           </Grid>
 
@@ -476,8 +501,8 @@ const NewTrainingJobModal = ({
               value={formData.config.batch_size}
               onChange={handleInputChange}
               disabled={isSaving}
-              inputProps={{ min: 1 }}
-              helperText={selectedProfile && `Max: ${selectedProfile.max_batch_size}`}
+              inputProps={{ min: 1, max: selectedModel?.max_batch_size }}
+              helperText={selectedModel ? `Max: ${selectedModel.max_batch_size}` : selectedProfile && `Max: ${selectedProfile.max_batch_size}`}
             />
           </Grid>
 
@@ -506,8 +531,8 @@ const NewTrainingJobModal = ({
               value={formData.config.seq_length}
               onChange={handleInputChange}
               disabled={isSaving}
-              inputProps={{ min: 128 }}
-              helperText={selectedProfile && `Max: ${selectedProfile.max_seq_length}`}
+              inputProps={{ min: 128, max: selectedModel?.max_seq_length }}
+              helperText={selectedModel ? `Max: ${selectedModel.max_seq_length}` : selectedProfile && `Max: ${selectedProfile.max_seq_length}`}
             />
           </Grid>
 
@@ -533,7 +558,7 @@ const NewTrainingJobModal = ({
         <Button
           onClick={handleSave}
           variant="contained"
-          disabled={isSaving || (libraries !== null && !libraries.ready)}
+          disabled={isSaving || (libraries !== null && !libraries.ready) || !selectedModel?.installed}
         >
           Create Job
         </Button>
@@ -543,8 +568,10 @@ const NewTrainingJobModal = ({
         onClose={() => {
           setLibrariesOpen(false);
           checkLibraries();
+          getBaseModels().then(applyBaseModels).catch(() => {});
         }}
         onChanged={setLibraries}
+        onBaseModelsChanged={applyBaseModels}
       />
     </Dialog>
   );

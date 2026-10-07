@@ -635,6 +635,9 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False,
 
         base_model = job.base_model
         output_name = job.output_model_name or f"guaardvark-{base_model.replace('/', '-').replace(':', '-')}"
+        # The declared model's snapshot on this machine; the trainer never downloads.
+        from backend.services import training_base_models
+        _, base_model_path = training_base_models.resolve_for_training(base_model)
         trained_name = output_name
         data_path = job_config.get("data_path") or job_config.get("dataset_path")
         images_path = job_config.get("images_path")
@@ -712,7 +715,7 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False,
                  resume_msg = " (resuming from checkpoint)" if resume else ""
                  emit(10, f"Starting vision training loop{resume_msg}...")
                  model_dir = finetune(
-                    base_model=base_model,
+                    base_model=base_model_path,
                     data_path=data_path,
                     image_folder=images_path,
                     output_name=output_name,
@@ -730,7 +733,7 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False,
                  resume_msg = " (resuming from checkpoint)" if resume else ""
                  emit(10, f"Starting text training loop{resume_msg}...")
                  model_dir = finetune(
-                    base_model=base_model,
+                    base_model=base_model_path,
                     data_path=train_path,
                     output_name=output_name,
                     max_steps=max_steps,

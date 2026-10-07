@@ -246,16 +246,36 @@ export const deleteDeviceProfile = async (id) => {
 };
 
 // Base Models API
-export const getBaseModels = async () => {
-  try {
-    const response = await fetch(`${BASE_URL}/training/base-models`);
-    const data = await handleResponse(response);
-    if (data.error) throw new Error(data.error);
-    return data.data || data;
-  } catch (err) {
-    console.error("trainingService: Error getting base models:", err.message);
-    throw err;
-  }
+/**
+ * The declared base models: { models: [{ id, name, installed, fits,
+ * fit_reason, size_gb, license, max_batch_size, max_seq_length, vision, ... }],
+ * hardware, download }. plan: also ask for the one-use token Download and
+ * Remove send back.
+ */
+export const getBaseModels = async ({ plan = false } = {}) => {
+  const response = await fetch(`${BASE_URL}/training/base-models${plan ? "?plan=1" : ""}`);
+  const data = await handleResponse(response);
+  return data.data || data;
+};
+
+export const installTrainingBaseModel = async (planToken, modelId) => {
+  const response = await fetch(`${BASE_URL}/training/base-models/install`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm: "download", model: modelId, plan_token: planToken }),
+  });
+  const data = await handleResponse(response);
+  return data.data || data;
+};
+
+export const removeTrainingBaseModel = async (planToken, modelId) => {
+  const response = await fetch(`${BASE_URL}/training/base-models/remove`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm: "remove", model: modelId, plan_token: planToken }),
+  });
+  const data = await handleResponse(response);
+  return data.data || data;
 };
 
 // Whether a base model is already on this machine (a miss means the job

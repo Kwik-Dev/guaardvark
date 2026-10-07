@@ -179,6 +179,8 @@ MUTATION_PROTECTED_PREFIXES = (
     # Installing or removing the training libraries runs pip in the backend's
     # Python environment; their status stays readable.
     '/api/training/libraries/',
+    # Downloading or deleting a training base model; the list stays readable.
+    '/api/training/base-models/',
 )
 
 # Mutation-only protection for routes whose id sits mid-path: (prefix, suffix).

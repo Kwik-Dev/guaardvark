@@ -288,6 +288,12 @@ def _take_token(token: Any) -> bool:
     return expires is not None and expires >= time.monotonic()
 
 
+def take_plan_token(token: Any) -> bool:
+    """Use up a plan token; True when it was issued and has not expired. The
+    base-model Download and Remove (training_base_models) spend these too."""
+    return _take_token(token)
+
+
 # ---- the record of what an install changed ---------------------------------------
 
 def _record_path() -> Path:

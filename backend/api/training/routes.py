@@ -218,6 +218,31 @@ def _libraries_missing_response():
     return None
 
 
+def _job_refusal(base_model, job_config: dict):
+    """The refusal for a job its base model cannot run here, or for settings
+    past the limits the model declares; None when it may be created."""
+    from backend.services import training_base_models
+    reason = training_base_models.refusal_for_job(base_model, vision=bool(job_config.get("images_path")))
+    if reason:
+        return error_response(reason, 400, "BASE_MODEL_UNAVAILABLE")
+    entry = training_base_models.get(base_model)
+    if entry:
+        for key, limit_key, label in (("batch_size", "max_batch_size", "Batch size"),
+                                      ("seq_length", "max_seq_length", "Sequence length")):
+            value = job_config.get(key)
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                return error_response(f"{label} must be a whole number of 1 or more", 400)
+            if value > entry[limit_key]:
+                return error_response(f"{label} {value} is above the {entry[limit_key]} "
+                                      f"{entry['name']} is set up for", 400)
+    steps = job_config.get("steps")
+    if steps is not None and (isinstance(steps, bool) or not isinstance(steps, int) or steps < 1):
+        return error_response("steps must be a whole number of 1 or more, or left out", 400)
+    return None
+
+
 @training_bp.route("/jobs", methods=["POST"])
 @ensure_db_session_cleanup
 def create_job():
@@ -235,12 +260,18 @@ def create_job():
         if missing_libraries:
             return missing_libraries
 
+        job_config = data.get("config") or {}
+        if not isinstance(job_config, dict):
+            return error_response("config must be an object", 400)
+        refusal = _job_refusal(data["base_model"], job_config)
+        if refusal:
+            return refusal
+
         # The trainer reads the dataset's file when the config names none, so a
         # dataset it cannot read is refused here rather than failing the run.
         dataset = db.session.get(TrainingDataset, data["dataset_id"])
         if not dataset:
             return error_response("Dataset not found", 400)
-        job_config = data.get("config") or {}
         if not (job_config.get("data_path") or job_config.get("dataset_path")):
             from backend.tasks.training_tasks import dataset_training_files
             _, reason = dataset_training_files(dataset.path)
@@ -255,28 +286,29 @@ def create_job():
                 return error_response("Device profile not found", 400)
             if not device_profile.is_active:
                 return error_response("Device profile is not active", 400)
-            
-            config = data.get("config", {})
-            batch_size = config.get("batch_size", device_profile.max_batch_size)
-            seq_length = config.get("seq_length", device_profile.max_seq_length)
-            
+
+            batch_size = job_config.get("batch_size", device_profile.max_batch_size)
+            seq_length = job_config.get("seq_length", device_profile.max_seq_length)
+
             if batch_size > device_profile.max_batch_size:
                 return error_response(
                     f"Batch size {batch_size} exceeds device profile maximum {device_profile.max_batch_size}",
                     400
                 )
-            
+
             if seq_length > device_profile.max_seq_length:
                 return error_response(
                     f"Sequence length {seq_length} exceeds device profile maximum {device_profile.max_seq_length}",
                     400
                 )
-            
-            if device_profile.device_type == "gpu" and device_profile.gpu_vram_mb:
-                estimated_vram = batch_size * 2048
-                if estimated_vram > device_profile.gpu_vram_mb * 0.9:
+
+            from backend.services import training_base_models
+            entry = training_base_models.get(data["base_model"])
+            if entry and device_profile.device_type == "gpu" and device_profile.gpu_vram_mb:
+                if entry["vram_mb"] > device_profile.gpu_vram_mb:
                     return error_response(
-                        f"Estimated VRAM usage ({estimated_vram}MB) exceeds available VRAM ({device_profile.gpu_vram_mb}MB)",
+                        f"{entry['name']} is budgeted {entry['vram_mb']} MB of GPU memory "
+                        f"({entry['vram_measured']}); this device profile has {device_profile.gpu_vram_mb} MB",
                         400
                     )
         
@@ -661,16 +693,61 @@ def delete_device_profile(profile_id):
 @training_bp.route("/base-models", methods=["GET"])
 @ensure_db_session_cleanup
 def list_base_models():
+    """The declared base models (training_base_models.BASE_MODELS) with
+    whether each is downloaded and fits this GPU, plus the download in
+    progress. ?plan=1 also hands out the one-use token Download and Remove send."""
     try:
-        from backend.api.model_api import get_available_ollama_models
-        
-        models = get_available_ollama_models()
-        
-        base_models = [m for m in models if ":" in m.get("name", "")]
-        
-        return success_response(base_models)
+        from backend.services import training_base_models
+        return success_response(
+            training_base_models.status(with_plan_token=request.args.get("plan") == "1"))
     except Exception as e:
         logger.error(f"Error listing base models: {e}", exc_info=True)
+        return error_response(str(e), 500)
+
+
+@training_bp.route("/base-models/install", methods=["POST"])
+@ensure_db_session_cleanup
+def install_base_model():
+    """Download one declared base model from Hugging Face, without a token.
+
+    Only the Download click sends what this needs:
+    {"confirm": "download", "model": <id>, "plan_token": <from GET /base-models?plan=1>}."""
+    from backend.services import training_base_models
+    data = request.get_json(silent=True) or {}
+    if data.get("confirm") != "download":
+        return error_response(training_base_models.NEEDS_CLICK, 403, "NEEDS_CLICK")
+    try:
+        result = training_base_models.start_install(data.get("plan_token"), data.get("model"))
+        logger.info("Training base model download started: %s", data.get("model"))
+        return success_response(result, "Download started", status_code=202)
+    except training_base_models.Refused as e:
+        return error_response(str(e), e.status, e.code)
+    except Exception as e:
+        logger.error(f"Error starting a base model download: {e}", exc_info=True)
+        return error_response(str(e), 500)
+
+
+@training_bp.route("/base-models/remove", methods=["POST"])
+@ensure_db_session_cleanup
+def remove_base_model():
+    """Delete one base model's weights.
+    Body: {"confirm": "remove", "model": <id>, "plan_token": <from GET /base-models?plan=1>}."""
+    from backend.services import training_base_models
+    data = request.get_json(silent=True) or {}
+    if data.get("confirm") != "remove":
+        return error_response(training_base_models.NEEDS_CLICK, 403, "NEEDS_CLICK")
+    running = db.session.query(TrainingJob).filter(
+        TrainingJob.status == "running", TrainingJob.base_model == data.get("model")).count()
+    if running:
+        return error_response(f"{running} training job(s) on this model are running; wait for them "
+                              f"to finish or cancel them.", 409, "TRAINING_RUNNING")
+    try:
+        return success_response(training_base_models.start_remove(data.get("plan_token"), data.get("model")),
+                                "Removed")
+    except training_base_models.Refused as e:
+        return error_response(str(e), e.status, e.code)
+    except Exception as e:
+        logger.error(f"Error removing a base model: {e}", exc_info=True)
         return error_response(str(e), 500)
 
 

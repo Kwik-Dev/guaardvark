@@ -48,6 +48,18 @@ def task_bodies_run_in_this_app(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def base_model_on_disk(monkeypatch, tmp_path):
+    """The job's base model counts as declared and downloaded; the trainer
+    stand-ins receive its snapshot folder."""
+    snapshot = tmp_path / "snapshot"
+    monkeypatch.setattr("backend.services.training_base_models.resolve_for_training",
+                        lambda model_id: ({"id": model_id}, str(snapshot)))
+    monkeypatch.setattr("backend.services.training_base_models.refusal_for_job",
+                        lambda model_id, vision=False: None)
+    return str(snapshot)
+
+
+@pytest.fixture(autouse=True)
 def no_gpu_claim(monkeypatch):
     """finetune_model_task claims the GPU through gpu_session (a real VRAM
     check, Ollama eviction, a cross-process lease); none of that belongs in

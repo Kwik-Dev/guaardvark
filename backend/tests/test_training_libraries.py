@@ -203,7 +203,9 @@ def test_a_machine_that_is_not_practical_installs_only_anyway(env, monkeypatch):
 
 def test_nothing_but_the_routes_starts_a_run():
     """No task, schedule or startup step can install: the only code that
-    calls start_install or start_remove is the route behind the modal."""
+    calls start_install or start_remove is the route behind the modal. The
+    base-model Download (training_base_models) defines its own pair, called
+    from the same routes file."""
     backend = Path(tl.__file__).resolve().parents[1]
     skip = {"tests", "venv", ".venv", "node_modules", "__pycache__"}
     callers = set()
@@ -216,7 +218,8 @@ def test_nothing_but_the_routes_starts_a_run():
             text = path.read_text(encoding="utf-8", errors="replace")
             if "start_install(" in text or "start_remove(" in text:
                 callers.add(path.relative_to(backend).as_posix())
-    assert callers == {"api/training/routes.py", "services/training_libraries.py"}
+    assert callers == {"api/training/routes.py", "services/training_libraries.py",
+                       "services/training_base_models.py"}
 
 
 # ---- the install ---------------------------------------------------------------------

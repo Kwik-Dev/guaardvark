@@ -352,8 +352,7 @@ const TrainingPage = () => {
   const fetchBaseModels = useCallback(async () => {
     try {
       const data = await getBaseModels();
-      if (data?.error) throw new Error(data.error.message || data.error);
-      setBaseModels(Array.isArray(data) ? data : []);
+      setBaseModels(Array.isArray(data?.models) ? data.models : []);
     } catch (err) {
       console.error("Error fetching base models:", err);
     }
