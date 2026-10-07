@@ -73,6 +73,62 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+# ---- ledger reading ------------------------------------------------------
+# Rows in one ExperimentRun ledger are of three kinds: parameter experiments
+# (the RAG loop, measured by the eval harness), health checks (the pytest
+# snapshot, proposal_source "heal") and self-reported rows (code-tuning arms
+# and anything else posted to /experiments, which the harness did not score).
+
+def is_health_check(row: dict) -> bool:
+    return row.get("proposal_source") == "heal"
+
+
+def is_self_reported(row: dict) -> bool:
+    metrics = row.get("retrieval_metrics") or {}
+    return bool(metrics.get("self_reported")) or row.get("proposal_source") == "code_arm"
+
+
+def is_parameter_experiment(row: dict) -> bool:
+    return not is_health_check(row) and not is_self_reported(row)
+
+
+def measured_score(row: dict):
+    """The judged composite of a parameter experiment, or None when the row
+    measured nothing: a crash, a health check, a self-reported row, or an F0
+    screen (which records the baseline as its score without judging)."""
+    if not is_parameter_experiment(row) or row.get("status") == "crash":
+        return None
+    metrics = row.get("retrieval_metrics") or {}
+    fidelity = row.get("fidelity", metrics.get("fidelity"))
+    judged = metrics.get("judged_pairs")
+    if fidelity is None and judged is None:
+        # Rows from before fidelity was recorded: an F0 screen kept no details.
+        if not row.get("eval_details"):
+            return None
+    elif (fidelity is not None and int(fidelity) < 1) or judged == 0:
+        return None
+    score = row.get("composite_score")
+    return float(score) if score is not None else None
+
+
+def summarize_ledger(rows: list) -> dict:
+    """Counts and measured scores for one run's ledger rows, oldest first.
+
+    latest_score is the newest measured experiment and may be below the
+    baseline; best_tried_score is the best measured one. Both are None when
+    nothing was measured.
+    """
+    scores = [s for s in (measured_score(r) for r in rows) if s is not None]
+    return {
+        "experiments": sum(1 for r in rows if is_parameter_experiment(r)),
+        "measured_experiments": len(scores),
+        "latest_score": scores[-1] if scores else None,
+        "best_tried_score": max(scores) if scores else None,
+        "health_checks": sum(1 for r in rows if is_health_check(r)),
+        "self_reported": sum(1 for r in rows if is_self_reported(r)),
+    }
+
+
 class ResearchRunService:
     """Creates and executes bounded research runs."""
 
@@ -296,9 +352,17 @@ class ResearchRunService:
         db.session.commit()
 
     def _log_heal_row(self, run, diagnose: dict) -> None:
+        """Record the pytest snapshot as a health check. Its status is
+        pass/fail/skipped, never keep/discard: it is not an experiment."""
         try:
             from backend.models import ExperimentRun, db
             pytest_info = diagnose.get("pytest") or {}
+            if diagnose.get("tests_red"):
+                status = "fail"
+            elif pytest_info.get("skipped"):
+                status = "skipped"
+            else:
+                status = "pass" if pytest_info.get("ok") else "fail"
             row = ExperimentRun(
                 id=str(uuid.uuid4()),
                 run_tag=run.run_tag,
@@ -310,7 +374,7 @@ class ResearchRunService:
                 composite_score=0.0,
                 baseline_score=run.baseline_score or 0.0,
                 delta=0.0,
-                status="discard" if diagnose.get("tests_red") else "keep",
+                status=status,
                 proposal_source="heal",
                 retrieval_metrics={"layer": "heal", "pytest": pytest_info},
             )
@@ -568,6 +632,9 @@ class ResearchRunService:
         if self._kill_requested():
             return [], [], "killed", "killed"
 
+        # Resolve judge and answer models from tonight's settings, not from
+        # whatever this worker cached on an earlier run.
+        svc.eval_harness.reset_models()
         cfg = svc._load_config()
         if cfg.get("avg_pair_seconds") and not getattr(svc.eval_harness, "avg_pair_seconds", None):
             svc.eval_harness.avg_pair_seconds = float(cfg["avg_pair_seconds"])
@@ -614,11 +681,15 @@ class ResearchRunService:
             if result.get("config_id"):
                 candidate_ids.append(result["config_id"])
             run.experiments_completed = len(ledger)
+            summary = summarize_ledger(ledger)
             meta = self._meta(run)
             meta["candidate_ids"] = list(candidate_ids)
+            meta["latest_score"] = summary["latest_score"]
+            meta["best_tried_score"] = summary["best_tried_score"]
+            meta["measured_experiments"] = summary["measured_experiments"]
             run.promotions = meta
-            best = max((float(r.get("composite_score") or 0.0) for r in ledger), default=0.0)
-            run.best_score = max(best, baseline)
+            # Best measured experiment, or NULL; never the baseline standing in.
+            run.best_score = summary["best_tried_score"]
             db.session.commit()
 
             if result.get("status") == "crash":

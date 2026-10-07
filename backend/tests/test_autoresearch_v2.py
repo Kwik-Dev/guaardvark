@@ -590,6 +590,106 @@ class TestKickoffRefusesWithReasons:
             assert result["status"] == "started" and result["warnings"] == []
 
 
+class TestLedgerScores:
+    def test_heal_rows_are_health_checks_not_keeps(self, app):
+        from backend.models import ExperimentRun
+        with app.app_context():
+            run = ResearchRun(run_tag="t-heal", mode="unified")
+            db.session.add(run)
+            db.session.commit()
+            svc_run = ResearchRunService()
+            svc_run._log_heal_row(run, {"pytest": {"ok": True, "red": False}})
+            svc_run._log_heal_row(run, {"tests_red": True, "pytest": {"ok": False, "red": True}})
+            svc_run._log_heal_row(run, {"pytest": {"ok": False, "skipped": True}})
+            statuses = [r.status for r in ExperimentRun.query.filter_by(run_tag="t-heal")
+                        .order_by(ExperimentRun.created_at).all()]
+            assert sorted(statuses) == ["fail", "pass", "skipped"]
+
+    def test_best_and_latest_come_from_measured_experiments_only(self):
+        from backend.services.research_run_service import summarize_ledger
+        rows = [
+            {"proposal_source": "heal", "status": "keep", "composite_score": 0.0},
+            {"proposal_source": "tpe", "status": "discard", "composite_score": 2.6,
+             "retrieval_metrics": {"fidelity": 1, "judged_pairs": 11}},
+            # F0 screen: records the baseline without judging anything.
+            {"proposal_source": "tpe", "status": "discard", "composite_score": 4.9,
+             "retrieval_metrics": {"fidelity": 0, "judged_pairs": 0}},
+            {"proposal_source": "llm", "status": "crash", "composite_score": 0.0},
+            {"proposal_source": "code_arm", "status": "keep", "composite_score": 4.8,
+             "retrieval_metrics": {"layer": "code"}},
+            {"proposal_source": "tpe", "status": "discard", "composite_score": 2.1,
+             "retrieval_metrics": {"fidelity": 1, "judged_pairs": 11}},
+        ]
+        s = summarize_ledger(rows)
+        assert s["latest_score"] == 2.1
+        assert s["best_tried_score"] == 2.6
+        assert s["measured_experiments"] == 2
+        assert s["experiments"] == 4
+        assert s["health_checks"] == 1
+        assert s["self_reported"] == 1
+
+    def test_old_rows_without_fidelity_count_only_when_judged(self):
+        from backend.services.research_run_service import summarize_ledger
+        rows = [
+            {"proposal_source": "tpe", "status": "discard", "composite_score": 1.9,
+             "eval_details": [{"composite": 2}], "retrieval_metrics": {"layer": "params"}},
+            {"proposal_source": "tpe", "status": "discard", "composite_score": 4.94,
+             "eval_details": [], "retrieval_metrics": {"layer": "params"}},
+        ]
+        assert summarize_ledger(rows)["best_tried_score"] == 1.9
+
+    def test_nothing_measured_leaves_best_score_empty(self, app):
+        with app.app_context():
+            run = ResearchRun(run_tag="t-nobest", mode="rag_tuning", status="running",
+                              wall_clock_budget_s=3600, started_at=utcnow())
+            db.session.add(run)
+            db.session.commit()
+            auto_svc = MagicMock()
+            auto_svc._load_config.return_value = {"params": {}, "phase": 1,
+                                                  "phase_plateau_count": 0}
+            auto_svc.eval_harness.avg_pair_seconds = None
+            auto_svc.eval_harness.run_full_eval.return_value = {
+                "composite_score": 4.0, "num_pairs": 11, "judged_pairs": 11,
+                "parse_fail_crash": False}
+            svc_run = ResearchRunService()
+
+            def crash(**kwargs):
+                svc_run._set_kill(True)
+                return {"experiment_id": "c1", "parameter": "top_k", "status": "crash",
+                        "composite_score": 0.0, "retrieval_metrics": {"judged_pairs": 0}}
+            auto_svc.run_single_experiment.side_effect = crash
+            with patch("backend.services.research_run_service.time.sleep"), \
+                 patch("backend.utils.gpu_check.gpu_busy", return_value=False):
+                svc_run._run_rag_slice(run, auto_svc, time.time(), 3600)
+            assert run.baseline_score == 4.0
+            assert run.best_score is None
+            assert run.promotions["latest_score"] is None
+
+    def test_runs_list_carries_measured_scores_and_health_checks(self, app):
+        from backend.models import ExperimentRun
+        from backend.api.rag_autoresearch_api import autoresearch_bp
+        if "autoresearch" not in app.blueprints:
+            app.register_blueprint(autoresearch_bp)
+        with app.app_context():
+            db.session.add(ResearchRun(run_tag="t-list", mode="unified", status="completed",
+                                       baseline_score=3.0, best_score=3.0))
+            t = utcnow()
+            for i, (src, status, score) in enumerate(
+                    [("heal", "keep", 0.0), ("tpe", "discard", 2.4), ("tpe", "discard", 2.2)]):
+                db.session.add(ExperimentRun(
+                    id=f"r{i}", run_tag="t-list", phase=1, parameter_changed="top_k",
+                    new_value="4", status=status, proposal_source=src,
+                    composite_score=score, eval_details=[{"composite": score}],
+                    created_at=t + timedelta(seconds=i)))
+            db.session.commit()
+        with app.test_client() as client:
+            run = client.get("/api/autoresearch/runs").get_json()["runs"][0]
+        assert run["latest_score"] == 2.2
+        assert run["best_tried_score"] == 2.4
+        assert run["health_checks"] == 1
+        assert run["best_score"] == 3.0  # the stored column is left as it was
+
+
 class TestExecuteRunRunsOnce:
     def test_a_run_that_is_not_pending_is_left_alone(self, app):
         with app.app_context():

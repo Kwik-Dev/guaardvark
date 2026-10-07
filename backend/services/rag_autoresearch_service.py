@@ -27,6 +27,15 @@ from backend.utils.clock import utcnow
 logger = logging.getLogger(__name__)
 
 CONFIG_FILENAME = "rag_experiment_config.json"
+# ExperimentRun.proposal_source of the research run's pytest snapshot rows.
+HEALTH_CHECK_SOURCE = "heal"
+
+
+def _not_health_check(model):
+    """SQL filter for ledger rows that are not health checks (a NULL source
+    is an old experiment row, not a health check)."""
+    from sqlalchemy import or_
+    return or_(model.proposal_source.is_(None), model.proposal_source != HEALTH_CHECK_SOURCE)
 
 
 class RAGAutoresearchService:
@@ -289,11 +298,12 @@ class RAGAutoresearchService:
         new_value = proposal["new_value"]
         hypothesis = proposal.get("hypothesis", "")
         # Provenance for the ledger: was this a real LLM proposal or the random
-        # fallback, and which models proposed/judged.
+        # fallback, and which models proposed/judged. The judge is resolved
+        # during the eval, so it is read after it (see _record_judge).
         provenance = {
             "proposal_source": proposal.get("source", "llm"),
             "proposer_model": getattr(self.agent, "proposer_model_name", None),
-            "judge_model": getattr(self.eval_harness, "judge_model_name", None),
+            "judge_model": None,
             "run_tag": run_tag,
         }
 
@@ -334,6 +344,7 @@ class RAGAutoresearchService:
                 eval_result = {
                     "composite_score": baseline,
                     "num_pairs": test_retr.get("num_pairs") or 1,
+                    "judged_pairs": 0,
                     "details": [],
                     "retrieval": test_retr,
                     "parse_fail_ratio": 0.0,
@@ -376,6 +387,7 @@ class RAGAutoresearchService:
         except Exception as e:
             logger.error(f"Experiment crashed: {e}")
             self._persist_timings(config)
+            self._record_judge(provenance)
             result = {
                 "experiment_id": experiment_id,
                 "parameter": param_name,
@@ -389,6 +401,7 @@ class RAGAutoresearchService:
                 "duration": time.time() - t0,
                 "phase": phase,
                 "fidelity": fidelity,
+                "retrieval_metrics": self._ledger_metrics({}, fidelity, 0),
                 **provenance,
             }
             self._log_experiment(result)
@@ -401,6 +414,7 @@ class RAGAutoresearchService:
         # 2026-08 runaway kept spinning for 3.4 days. No eval pairs means no
         # experiment actually happened; report it as a crash so run_loop's
         # consecutive-crash guard halts the loop instead of iterating forever.
+        self._record_judge(provenance)
         if eval_result.get("num_pairs", 0) == 0:
             logger.error(
                 "Eval set is empty — nothing was measured. Generate eval pairs "
@@ -419,6 +433,7 @@ class RAGAutoresearchService:
                 "duration": duration,
                 "phase": phase,
                 "fidelity": fidelity,
+                "retrieval_metrics": self._ledger_metrics({}, fidelity, 0),
                 **provenance,
             }
             self._log_experiment(result)
@@ -473,7 +488,10 @@ class RAGAutoresearchService:
             "duration": duration,
             "phase": phase,
             "eval_details": eval_result.get("details", []),
-            "retrieval_metrics": retr if retr else eval_result.get("retrieval"),
+            "retrieval_metrics": self._ledger_metrics(
+                retr or eval_result.get("retrieval"), fidelity,
+                eval_result.get("judged_pairs"),
+            ),
             "fidelity": fidelity,
             "config_id": promoted_id,
             **provenance,
@@ -488,6 +506,24 @@ class RAGAutoresearchService:
         self._current_experiment_id = None
         self._current_parameter = None
         return result
+
+    def _record_judge(self, provenance: dict) -> None:
+        provenance["judge_model"] = getattr(self.eval_harness, "judge_model_name", None)
+
+    def _ledger_metrics(self, retrieval, fidelity: int, judged_pairs) -> dict:
+        """The ledger row's retrieval_metrics: the retrieval scores plus what
+        the experiment measured with. judged_pairs is 0 when no judge scored
+        anything (an F0 screen or a crash); answer_model lets the report tell
+        whether the judge graded its own model's answers."""
+        out = dict(retrieval or {})
+        out["fidelity"] = fidelity
+        out["judged_pairs"] = judged_pairs
+        try:
+            out["active_pairs"] = len(self.eval_harness._get_active_eval_pairs())
+        except Exception:
+            out["active_pairs"] = None
+        out["answer_model"] = getattr(self.eval_harness, "answer_model_name", None)
+        return out
 
     def _decide_keep(
         self, new_score, baseline, new_retr, base_retr, f0_lose=False,
@@ -712,11 +748,14 @@ class RAGAutoresearchService:
             return None
 
     def _get_recent_history(self, limit: int = 20) -> list:
-        """Get recent experiment results from DB."""
+        """Recent parameter experiments, oldest first. Health-check rows are
+        left out: they change no parameter and would read as keeps or
+        discards to the proposer and the plateau check."""
         try:
             from backend.models import ExperimentRun
             runs = (
                 ExperimentRun.query
+                .filter(_not_health_check(ExperimentRun))
                 .order_by(ExperimentRun.created_at.desc())
                 .limit(limit)
                 .all()
@@ -828,33 +867,95 @@ class RAGAutoresearchService:
         except Exception:
             pass
         running = bool(self._running or active_run)
+        eval_pairs = None
+        try:
+            sources = self.eval_harness.eval_source_status()
+            eval_pairs = {k: sources[k] for k in ("active", "not_indexed", "by_status")}
+            eval_pair_count = sources["active"]
+        except Exception:
+            pass
+        judge = None
+        try:
+            js = self.eval_harness.judge_status()
+            judge = {k: js[k] for k in ("configured", "answer_model", "independent", "problem")}
+        except Exception:
+            pass
         return {
             "running": running,
             "paused": self._paused,
+            "auto_enabled": self._auto_enabled(),
             "current_experiment_id": self._current_experiment_id,
             "current_parameter": self._current_parameter,
             "phase": config.get("phase", 1),
             "baseline_score": config.get("baseline_score", 0.0),
+            "baseline_measured_at": config.get("baseline_measured_at"),
+            "baseline_eval_generation": config.get("baseline_eval_generation"),
+            "baseline_pairs": config.get("baseline_pairs"),
             "params": config.get("params", {}),
             "total_experiments": self._count_experiments(),
+            "total_health_checks": self._count_health_checks(),
             "total_improvements": self._count_improvements(),
             "active_run": active_run,
+            "last_run": self._last_run(),
             "code_keeps": code_keeps,
             "eval_pair_count": eval_pair_count,
+            "eval_pairs": eval_pairs,
+            "judge": judge,
             "config_migration_pending": migration_pending,
         }
 
+    def _auto_enabled(self) -> bool:
+        try:
+            from backend.models import Setting
+            s = Setting.query.filter_by(key="rag_autoresearch_auto_enabled").first()
+            return bool(s and str(s.value).strip().lower() == "true")
+        except Exception:
+            return False
+
+    def _last_run(self):
+        """The newest ResearchRun of any status (a refused one included),
+        with its measured scores from the ledger."""
+        try:
+            from backend.models import ExperimentRun, ResearchRun
+            from backend.services.research_run_service import summarize_ledger
+            run = ResearchRun.query.order_by(ResearchRun.created_at.desc()).first()
+            if run is None:
+                return None
+            rows = (
+                ExperimentRun.query.filter_by(run_tag=run.run_tag)
+                .order_by(ExperimentRun.created_at.asc())
+                .all()
+            )
+            out = run.to_dict()
+            out.update(summarize_ledger([r.to_dict() for r in rows]))
+            return out
+        except Exception:
+            return None
+
     def _count_experiments(self) -> int:
+        """Ledger rows that tried a change; health checks are counted apart."""
         try:
             from backend.models import ExperimentRun
-            return ExperimentRun.query.count()
+            return ExperimentRun.query.filter(_not_health_check(ExperimentRun)).count()
+        except Exception:
+            return 0
+
+    def _count_health_checks(self) -> int:
+        try:
+            from backend.models import ExperimentRun
+            return ExperimentRun.query.filter_by(proposal_source=HEALTH_CHECK_SOURCE).count()
         except Exception:
             return 0
 
     def _count_improvements(self) -> int:
+        """Configs this install's autoresearch put live. A kept experiment is
+        only a candidate until the run-end confirmation promotes it."""
         try:
-            from backend.models import ExperimentRun
-            return ExperimentRun.query.filter_by(status="keep").count()
+            from backend.models import ResearchConfig
+            return ResearchConfig.query.filter(
+                ResearchConfig.promoted_at.isnot(None),
+                ResearchConfig.source == "local",
+            ).count()
         except Exception:
             return 0
 

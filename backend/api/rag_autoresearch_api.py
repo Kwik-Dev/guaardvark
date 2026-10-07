@@ -306,9 +306,26 @@ def create_run():
 
 @autoresearch_bp.route("/runs", methods=["GET"])
 def list_runs():
+    """The newest 30 runs, each with its measured scores from the ledger
+    (latest_score, best_tried_score, health_checks; see summarize_ledger).
+    The stored best_score of older runs is the baseline whenever nothing beat
+    it, so the page reads best_tried_score instead."""
+    from collections import defaultdict
     from backend.models import ResearchRun
+    from backend.services.research_run_service import summarize_ledger
     runs = ResearchRun.query.order_by(ResearchRun.created_at.desc()).limit(30).all()
-    return jsonify({"runs": [r.to_dict() for r in runs]})
+    rows_by_tag = defaultdict(list)
+    tags = [r.run_tag for r in runs]
+    if tags:
+        for row in (ExperimentRun.query.filter(ExperimentRun.run_tag.in_(tags))
+                    .order_by(ExperimentRun.created_at.asc()).all()):
+            rows_by_tag[row.run_tag].append(row.to_dict())
+    out = []
+    for run in runs:
+        d = run.to_dict()
+        d.update(summarize_ledger(rows_by_tag[run.run_tag]))
+        out.append(d)
+    return jsonify({"runs": out})
 
 
 @autoresearch_bp.route("/runs/<run_id>", methods=["GET"])

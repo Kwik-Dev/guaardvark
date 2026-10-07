@@ -125,6 +125,7 @@ class RAGEvalHarness:
     def __init__(self):
         self._llms = {}  # role -> LLM instance
         self.judge_model_name = None  # resolved lazily; recorded in the ledger
+        self.answer_model_name = None
         self.single_model_judging = False
         self._llm_calls = 0
         self._deadline = None
@@ -195,8 +196,19 @@ class RAGEvalHarness:
                 self.judge_model_name = getattr(llm, "model", None) or "active"
 
         if llm is not None:
+            if role == "answer":
+                self.answer_model_name = getattr(llm, "model", None) or "active"
             self._llms[role] = llm
         return llm
+
+    def reset_models(self) -> None:
+        """Drop the cached LLMs so the next call resolves the judge and answer
+        models from the current settings. A long-lived worker otherwise keeps
+        the judge it first resolved, whatever the setting says now."""
+        self._llms = {}
+        self.judge_model_name = None
+        self.answer_model_name = None
+        self.single_model_judging = False
 
     def judge_status(self) -> dict:
         """Which model grades eval answers, and whether it is a different
@@ -754,7 +766,7 @@ class RAGEvalHarness:
         pairs = list(pairs if pairs is not None else self._get_active_eval_pairs())
         if not pairs:
             return {
-                "composite_score": 0.0, "num_pairs": 0, "details": [],
+                "composite_score": 0.0, "num_pairs": 0, "judged_pairs": 0, "details": [],
                 "parse_fail_ratio": 0.0, "parse_fail_crash": False,
             }
 
@@ -786,6 +798,7 @@ class RAGEvalHarness:
         result = {
             "composite_score": round(avg_composite, 4),
             "num_pairs": len(details),
+            "judged_pairs": len(usable),
             "details": details,
             "parse_fail_ratio": round(parse_fail_ratio, 4),
             "parse_fail_crash": parse_fail_ratio > AUTORESEARCH_PARSE_FAIL_CRASH_RATIO,
