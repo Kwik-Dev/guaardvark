@@ -2457,9 +2457,12 @@ class UnifiedChatEngine:
         model_name = getattr(self.llm, "model", "unknown")
         self._prov_note("model", model_name)
         from backend.services.agent_router import declines_tools
+        # A request the chat page's file card owns is only acknowledged here:
+        # with tools on offer the model also wrote the file, a second copy.
         _skip_tools = bool(
             getattr(self, "_skip_tools", False) or options.get("skip_tools")
             or declines_tools(message)
+            or options.get("file_generation") in ("offered", "started")
         )
 
         if _skip_tools:
