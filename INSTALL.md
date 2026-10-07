@@ -6,7 +6,7 @@
 
 ## Install (Linux)
 
-**One-liner:**
+**One-liner** (a fresh Ubuntu desktop has no `curl` or `git`: `sudo apt install -y curl git` first):
 
 ```bash
 curl -fsSL https://guaardvark.com/install.sh | bash
@@ -104,6 +104,30 @@ If you want to evaluate the UI/API without a native Python install:
 ```
 
 Docker runs the **core stack** (API, UI, PostgreSQL, Redis, Ollama). It does not include plugins, ComfyUI, or the virtual agent display. For the full experience, use `./start.sh`.
+
+**Before the first start (Ubuntu).** A fresh Ubuntu has no Docker, and Ubuntu's `docker.io` does not bring Compose or buildx with it:
+
+```bash
+sudo apt install docker.io docker-compose-v2 docker-buildx
+sudo usermod -aG docker $USER    # then log out and back in (newgrp is not installed on 26.04)
+```
+
+**GPU (`--gpu`).** Containers reach an NVIDIA GPU through NVIDIA Container Toolkit, which is not in Ubuntu's archive. From [NVIDIA's install guide](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html):
+
+```bash
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+  | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+  | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+sudo apt update && sudo apt install -y nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker
+```
+
+`./start-docker.sh` checks each of these before it builds anything and says which one is missing. With `--gpu` it also builds PyTorch for your card: `cu118` for GTX 10/16 and RTX 20 cards, `cu124` for RTX 30/40, `cu128` for newer ones. Set `GUAARDVARK_TORCH_CHANNEL` to pick one yourself.
+
+**Restarts.** The containers start again on their own after a reboot or a crash. `docker compose down` stops them until the next `./start-docker.sh`.
+
+**Build stops at "network is unreachable" with an IPv6 address.** Seen on networks without IPv6 routing, where the image build tried Docker Hub's IPv6 address. Running `./start-docker.sh` again got through.
 
 **API key.** Under Docker the UI reaches the backend through the frontend container, so every browser, this host's included, counts as another device, and protected actions (running tools, automation, backups, file edits) need this install's API key. The first `./start-docker.sh` creates one, saves it as `GUAARDVARK_API_KEY` in `.env` next to `docker-compose.yml`, and prints it. Open the Web UI, go to **Settings → API key**, paste it and press Save. That signs the browser in once (it keeps a sign-in cookie, not the key); do the same once in each browser you use. Later starts leave the key alone; `grep GUAARDVARK_API_KEY .env` shows it again. To change it, edit that line (or delete it and let the next start make a new one) and run `./start-docker.sh` again; every browser then signs in again with the new key. Running `docker compose up` yourself skips this step, and protected actions stay refused until `GUAARDVARK_API_KEY` is set in `.env`.
 

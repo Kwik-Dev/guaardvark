@@ -39,6 +39,8 @@
 
 ## 快速开始
 
+全新安装的 Ubuntu 桌面没有 `git`（也没有 `curl`），请先运行 `sudo apt install -y curl git`。
+
 ```bash
 git clone https://github.com/guaardvark/guaardvark.git
 cd guaardvark
