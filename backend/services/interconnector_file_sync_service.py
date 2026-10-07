@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 from flask import current_app
 from backend.utils.path_guard import PathEscapesRoot, contained, contained_path
+from backend.utils import update_state
 
 logger = logging.getLogger(__name__)
 
@@ -960,6 +961,12 @@ class InterconnectorFileSyncService:
                         prune_err,
                     )
 
+            written = [
+                d["path"] for d in result["details"] if d.get("created") or d.get("updated")
+            ]
+            if written:
+                result["update_state"] = self._record_update_applied(project_root, written)
+
             return True, result
 
         except Exception as e:
@@ -968,6 +975,25 @@ class InterconnectorFileSyncService:
             result["summary"]["rolled_back"] = True
             result["summary"]["total_errors"] += 1
             return False, result
+
+    def _record_update_applied(self, project_root: Path, written: List[str]) -> Optional[Dict[str, Any]]:
+        """Mark that a reload or restart is pending and tell open pages.
+
+        Best effort: the files are already on disk, so a failure here is logged
+        and never turns the apply into a failure.
+        """
+        try:
+            update_state.record_update_applied(project_root, written)
+            state = update_state.restart_state(project_root)
+        except Exception as e:
+            logger.warning(f"[FILE_SYNC] Could not record the pending restart: {e}")
+            return None
+        try:
+            from backend.socketio_instance import socketio
+            socketio.emit("system:update_applied", state)
+        except Exception as e:
+            logger.debug(f"[FILE_SYNC] system:update_applied not emitted: {e}")
+        return state
 
     def _create_backup_return_path(self, file_path: Path) -> Optional[Path]:
         try:
