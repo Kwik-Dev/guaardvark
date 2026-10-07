@@ -45,6 +45,10 @@ plugins/*/.cache/
 plugins/*/__pycache__/
 data/plugin_state.json
 data/agent_state.json
+# Signing key for agent screenshot links (backend/utils/screenshot_urls.py)
+data/.screenshot_url_secret
+# Which training base models this install has downloaded
+data/training/base_models.json
 # Per-machine UI state and MCP server config
 data/folder_state.json
 data/images_windows_state.json

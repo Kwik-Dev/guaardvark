@@ -106,7 +106,8 @@ def test_status_says_which_models_are_downloaded_and_fit(machine, hub):
 
     assert models[SMALL]["installed"] is False and models[DEFAULT]["installed"] is True
     assert all(m["fits"] for m in models.values())
-    assert models[DEFAULT]["vram_measured"] == "estimate, not yet measured"
+    entry = next(m for m in tbm.BASE_MODELS if m["id"] == DEFAULT)
+    assert models[DEFAULT]["vram_measured"] == entry["vram_measured"]
     assert all(call["local_files_only"] and call["token"] is False for call in hub.calls)
 
 

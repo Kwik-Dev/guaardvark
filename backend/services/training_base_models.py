@@ -89,7 +89,11 @@ BASE_MODELS: tuple[dict[str, Any], ...] = (
         "max_seq_length": 2048,
         "max_batch_size": 4,
         "vram_mb": 8000,
-        "vram_measured": "estimate, not yet measured",
+        "vram_measured": (
+            "peak 3355 MB measured 2026-10-07 on a 16 GB NVIDIA card: bf16 LoRA r16, "
+            "batch 2, seq 1024, 108 short chat rows. 8000 stays the cap for batch 4 at "
+            "seq 2048 with long rows, which has not been measured."
+        ),
         "load_in_4bit": False,
         "response_markers": QWEN25_MARKERS,
         "vision": False,
