@@ -6,6 +6,7 @@ import { useVoiceSessionStore, INITIAL_VOICE_SESSION } from "../../stores/useVoi
 import { useAppStore } from "../../stores/useAppStore";
 import { VOICE_SETTINGS_KEY } from "../../config/voiceDefaults";
 import { VoiceSessionProvider, useVoiceSession } from "../VoiceSessionContext";
+import voiceService from "../../api/voiceService";
 
 // VoiceContext needs the health and backend providers; the session only reads
 // isPlaying from it, which each test sets here.
@@ -223,6 +224,35 @@ describe("VoiceSessionProvider", () => {
     await utterance();
     expect(sttCalls()).toHaveLength(1);
     expect(delivered).toEqual(["what is on my calendar"]);
+  });
+
+  it("with barge-in on, talking loudly over a reply stops it; echo-level sound does not", async () => {
+    localStorage.setItem(VOICE_SETTINGS_KEY, JSON.stringify({ bargeIn: true }));
+    const stopPlayback = vi.spyOn(voiceService, "stopPlayback");
+    const delivered = [];
+    const sink = { id: "test", deliver: (turn) => delivered.push(turn.text) };
+    const view = renderSession(sink);
+    await act(async () => {
+      await actions.start("handsfree");
+    });
+    voiceContextValue = { isPlaying: true };
+    view.rerender(
+      <VoiceSessionProvider>
+        <Harness sink={sink} />
+      </VoiceSessionProvider>
+    );
+    await frames(0.05, 600); // the reply coming back through the mic: above 0.03, below 0.03 * 2.5
+    expect(stopPlayback).not.toHaveBeenCalled();
+    expect(useVoiceSessionStore.getState().phase).toBe("speaking");
+
+    await frames(0.2, 200); // someone talking over it
+    expect(stopPlayback).toHaveBeenCalledTimes(1);
+    expect(useVoiceSessionStore.getState().speaking).toBe(false);
+    await frames(0.2, 700);
+    await frames(0.001, 2000);
+    await settle();
+    expect(delivered).toEqual(["what is on my calendar"]);
+    stopPlayback.mockRestore();
   });
 
   it("a blocked microphone shows as denied with the reason", async () => {
