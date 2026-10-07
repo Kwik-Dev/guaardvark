@@ -39,6 +39,7 @@ import { scrapeWebsite } from "../api/websiteService";
 import WebsiteActionModal from "../components/modals/WebsiteActionModal";
 import PageLayout from "../components/layout/PageLayout";
 import EntityContextMenu from "../components/common/EntityContextMenu";
+import { entityLinkActions } from "../utils/entityLinks";
 import { useStatus } from "../contexts/StatusContext"; // For active model display
 import { useAppStore } from "../stores/useAppStore";
 import ProjectStateErrorBoundary from "../components/common/ProjectStateErrorBoundary";
@@ -709,8 +710,7 @@ const WebsitesPage = () => {
           { label: 'Edit', onClick: () => handleOpenActionModal(contextItem) },
           { label: 'Crawl', onClick: () => handleCrawlWebsite(contextItem.id) },
           { label: 'Delete', onClick: () => handleDeleteWebsite(contextItem.id, contextItem.url), color: 'error.main' },
-          { label: 'Files', onClick: () => navigate(`/documents?website_id=${contextItem.id}`), dividerBefore: true },
-          { label: 'Schedule Task', onClick: () => navigate(`/tasks?website_id=${contextItem.id}`) },
+          ...entityLinkActions('website', contextItem.id, navigate),
         ] : [
           { label: 'New Website', icon: <AddIcon fontSize="small" />, onClick: () => handleOpenActionModal(null) },
         ]}

@@ -23,6 +23,10 @@ import {
 import { Link as RouterLink, useNavigate } from "react-router-dom";
 import DashboardCardWrapper from "./DashboardCardWrapper";
 
+// The Image Gen tab; BatchImageGeneratorPage reads ?mode= to pick its input mode.
+export const IMAGE_GEN_PATH = "/batch-images";
+export const IMAGE_GEN_BATCH_PATH = "/batch-images?mode=bulk";
+
 const ImageGenerationCard = React.forwardRef(
   (
     {
@@ -109,8 +113,8 @@ const ImageGenerationCard = React.forwardRef(
         title="Image Generation"
         {...props}
         contextMenuActions={[
-          { label: "New Images", onClick: () => navigate("/images") },
-          { label: "Batch Mode", onClick: () => navigate("/images?mode=batch") },
+          { label: "New Images", onClick: () => navigate(IMAGE_GEN_PATH) },
+          { label: "Batch Mode", onClick: () => navigate(IMAGE_GEN_BATCH_PATH) },
         ]}
       >
         {isLoading && (
@@ -131,7 +135,7 @@ const ImageGenerationCard = React.forwardRef(
             variant="contained"
             size="small"
             startIcon={<Add />}
-            onClick={() => navigate("/images")}
+            onClick={() => navigate(IMAGE_GEN_PATH)}
             sx={{
               minWidth: "100px",
               textTransform: "none",
@@ -146,7 +150,7 @@ const ImageGenerationCard = React.forwardRef(
             variant="outlined"
             size="small"
             startIcon={<PlayArrow />}
-            onClick={() => navigate("/images?mode=batch")}
+            onClick={() => navigate(IMAGE_GEN_BATCH_PATH)}
             sx={{
               minWidth: "100px",
               textTransform: "none",

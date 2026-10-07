@@ -57,6 +57,7 @@ import { useStatus } from "../contexts/StatusContext";
 import { getLogoUrl } from "../config/logoConfig";
 import PageLayout from "../components/layout/PageLayout";
 import EntityContextMenu from "../components/common/EntityContextMenu";
+import { entityLinkActions } from "../utils/entityLinks";
 import EmptyState from "../components/common/EmptyState";
 import { ContextualLoader } from "../components/common/LoadingStates";
 
@@ -660,8 +661,7 @@ function ProjectsPage() {
         actions={contextItem ? [
           { label: 'Edit', onClick: () => handleOpenEditDialog(contextItem) },
           { label: 'Delete', onClick: () => handleOpenDeleteDialog(contextItem), color: 'error.main' },
-          { label: 'Files', onClick: () => navigate(`/documents?project_id=${contextItem.id}`), dividerBefore: true },
-          { label: 'Schedule Task', onClick: () => navigate(`/tasks?project_id=${contextItem.id}`) },
+          ...entityLinkActions('project', contextItem.id, navigate),
         ] : [
           { label: 'New Project', icon: <AddIcon fontSize="small" />, onClick: () => handleOpenEditDialog(null) },
         ]}

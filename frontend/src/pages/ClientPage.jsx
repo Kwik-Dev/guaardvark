@@ -39,6 +39,7 @@ import ClientActionModal from "../components/modals/ClientActionModal";
 import LinkingModal from "../components/modals/LinkingModal";
 import PageLayout from "../components/layout/PageLayout";
 import EntityContextMenu from "../components/common/EntityContextMenu";
+import { entityLinkActions } from "../utils/entityLinks";
 import { useStatus } from "../contexts/StatusContext";
 import { getLogoUrl } from "../config/logoConfig";
 import { ContextualLoader } from "../components/common/LoadingStates";
@@ -714,8 +715,7 @@ const ClientPage = () => {
         actions={contextItem ? [
           { label: 'Edit', onClick: () => handleOpenActionModal(contextItem) },
           { label: 'Delete', onClick: () => handleDeleteClient(contextItem.id, contextItem.name), color: 'error.main' },
-          { label: 'Files', onClick: () => navigate(`/documents?client_id=${contextItem.id}`), dividerBefore: true },
-          { label: 'Schedule Task', onClick: () => navigate(`/tasks?client_id=${contextItem.id}`) },
+          ...entityLinkActions('client', contextItem.id, navigate),
         ] : [
           { label: 'New Client', icon: <AddIcon fontSize="small" />, onClick: () => handleOpenActionModal(null) },
         ]}
