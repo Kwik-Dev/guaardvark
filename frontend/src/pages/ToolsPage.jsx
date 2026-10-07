@@ -58,6 +58,9 @@ import {
   getToolCategories,
 } from "../api/toolsService";
 import AlertSnackbar from "../components/common/AlertSnackbar";
+import EntityContextMenu from "../components/common/EntityContextMenu";
+import useContextMenu from "../hooks/useContextMenu";
+import copyText from "../utils/copyText";
 import { ApiKeyRefusalAlert } from "../components/common/ApiKeyRefusalNotice";
 import { useStatus } from "../contexts/StatusContext";
 import { ContextualLoader } from "../components/common/LoadingStates";
@@ -87,6 +90,7 @@ const ToolsPage = () => {
     return localStorage.getItem("toolsPageViewMode") || "card";
   });
   const [orderBy, setOrderBy] = useState("name");
+  const toolMenu = useContextMenu();
   const [order, setOrder] = useState("asc");
 
   // Load tools on mount
@@ -295,6 +299,7 @@ const ToolsPage = () => {
     return (
       <Card
         key={tool.name}
+        onContextMenu={(e) => toolMenu.open(e, tool)}
         sx={{
           height: "100%",
           display: "flex",
@@ -434,6 +439,7 @@ const ToolsPage = () => {
                 <TableRow
                   key={tool.name}
                   hover
+                  onContextMenu={(e) => toolMenu.open(e, tool)}
                   sx={{ "&:hover": { cursor: "pointer" } }}
                 >
                   <TableCell>
@@ -711,6 +717,10 @@ const ToolsPage = () => {
                           const tool = tools.find((t) => t.name === toolName);
                           if (tool) handleTestTool(tool);
                         }}
+                        onContextMenu={(e) => {
+                          const tool = tools.find((t) => t.name === toolName);
+                          if (tool) toolMenu.open(e, tool);
+                        }}
                         clickable
                       />
                     ))}
@@ -721,6 +731,25 @@ const ToolsPage = () => {
           ))}
         </Grid>
       )}
+
+      <EntityContextMenu
+        anchorPosition={toolMenu.anchorPosition}
+        onClose={toolMenu.close}
+        actions={
+          toolMenu.payload
+            ? [
+                { label: "Test…", onClick: () => handleTestTool(toolMenu.payload) },
+                {
+                  label: "Copy tool name",
+                  onClick: () =>
+                    copyText(toolMenu.payload.name).then(
+                      (ok) => ok && setSnackbar({ open: true, message: "Copied to clipboard", severity: "success" }),
+                    ),
+                },
+              ]
+            : []
+        }
+      />
 
       {/* Test Dialog */}
       <Dialog
