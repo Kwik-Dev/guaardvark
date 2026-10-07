@@ -29,7 +29,7 @@ done
 if ! command -v docker >/dev/null 2>&1; then
     echo "Error: docker not found. Install Docker Engine, then re-run." >&2
     echo "  Ubuntu:  sudo apt install docker.io docker-compose-v2 docker-buildx" >&2
-    echo "  Others:  https://docs.docker.com/engine/install/" >&2
+    echo "  Others:  INSTALL.md, Docker section" >&2
     exit 1
 fi
 
@@ -40,7 +40,7 @@ if ! docker compose version >/dev/null 2>&1; then
     else
         echo "Error: docker compose plugin not found." >&2
         echo "  Ubuntu:  sudo apt install docker-compose-v2" >&2
-        echo "  Others:  https://docs.docker.com/compose/install/linux/" >&2
+        echo "  Others:  INSTALL.md, Docker section" >&2
         exit 1
     fi
 fi
@@ -70,9 +70,9 @@ if [ "$GPU_PROFILE" -eq 1 ]; then
     # driver nvidia", so check first.
     if ! docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q '"nvidia"'; then
         echo "Error: --gpu needs NVIDIA Container Toolkit, and Docker has no nvidia runtime." >&2
-        echo "  Install it (https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)," >&2
-        echo "  then: sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker" >&2
-        echo "  INSTALL.md (Docker -> GPU) has the commands. Or run without --gpu (CPU only)." >&2
+        echo "  INSTALL.md (Docker section, GPU) has the commands, ending with:" >&2
+        echo "  sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker" >&2
+        echo "  Or run without --gpu (CPU only)." >&2
         exit 1
     fi
 
