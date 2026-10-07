@@ -78,6 +78,8 @@ import ColourMatchPill from "../components/videogen/ColourMatchPill";
 import ClipReviewHold, { ReviewStatePill } from "../components/videogen/ClipReviewHold";
 import RenderFailureNote from "../components/videogen/RenderFailureNote";
 import { refusalText } from "../utils/renderFailure";
+import { applicableAdapters as applicableAdapterModels } from "../utils/videoAdapters";
+import { applyClipRename, applyClipRenameToPlayer, clipFileName } from "../utils/videoRename";
 import VideoGenEffectiveSettings from "../components/videogen/VideoGenEffectiveSettings";
 import LiveLatentPreview from "../components/videogen/LiveLatentPreview";
 import { videoGenStageLabel } from "../components/videogen/stageLabels";
@@ -690,20 +692,10 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     return { width, height };
   }, [aspectRatio, videoSize, model, modelMeta]);
 
-  // A speed profile's LoRAs are trained for that profile's steps, cfg and shift, and
-  // Wan's pair is split per expert; offered here they would stack on both experts at
-  // the base settings. The profile picker is the only way to use them.
-  const applicableAdapters = useMemo(() => {
-    const owned = new Set();
-    Object.values(modelCaps?.speed_profiles || {}).forEach((spec) => {
-      if (spec?.lora) owned.add(spec.lora);
-      Object.values(spec?.loras || {}).forEach((id) => owned.add(id));
-    });
-    return (adapterModels || []).filter((m) => {
-      const applies = m.applies_to || [];
-      return (applies.length === 0 || applies.includes(model)) && !owned.has(m.id);
-    });
-  }, [adapterModels, model, modelCaps]);
+  const applicableAdapters = useMemo(
+    () => applicableAdapterModels(adapterModels, model, modelCaps?.speed_profiles),
+    [adapterModels, model, modelCaps],
+  );
   const applicableEncoders = useMemo(
     () => (encoderModels || []).filter((m) => (m.applies_to || []).includes(model)),
     [encoderModels, model],
@@ -1450,29 +1442,41 @@ const VideoGeneratorPage = ({ embedded = false }) => {
           startPollingStatus(batchId);
         }
         await fetchBatches();
+      } else {
+        const body = await res.json().catch(() => ({}));
+        setError(`Couldn't delete the video: ${refusalText(body) || res.statusText}`);
       }
     } catch (e) {
-      // ignore
+      setError(`Couldn't delete the video: ${e.message}`);
     }
   };
 
-  const handleRenameVideo = async (batchId, videoName) => {
-    const newName = window.prompt("Enter new video filename (include extension)", videoName);
-    if (!newName) return;
+  // The server answers with the clip's new paths; the page repoints its cards and
+  // an open player from them, so Play serves the renamed file without a reload.
+  const handleRenameVideo = async (batchId, videoPath) => {
+    const current = clipFileName(videoPath);
+    const newName = window.prompt("Rename video (the extension stays the same)", current);
+    if (newName === null || !newName.trim() || newName.trim() === current) return;
     try {
-      const res = await fetch(`${API_BASE}/batch-video/video/${batchId}/${encodePathSegments(videoName)}/rename`, {
+      const res = await fetch(`${API_BASE}/batch-video/video/${batchId}/${encodePathSegments(videoPath)}/rename`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ new_name: newName }),
+        body: JSON.stringify({ new_name: newName.trim() }),
       });
-      if (res.ok) {
-        if (activeBatchId === batchId) {
-          startPollingStatus(batchId);
-        }
-        await fetchBatches();
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || !body.success) {
+        setError(`Couldn't rename the video: ${refusalText(body) || res.statusText}`);
+        return;
       }
+      const renamed = body.data;
+      setBatchStatus((prev) => applyClipRename(prev, batchId, renamed));
+      setVideoPlayer((prev) => applyClipRenameToPlayer(prev, batchId, renamed, (path) =>
+        `${API_BASE}/batch-video/video/${batchId}/${encodePathSegments(PathFromUrl(path))}`,
+      ));
+      setSuccess(`Renamed to ${clipFileName(renamed.video_path)}.`);
+      fetchBatches();
     } catch (e) {
-      // ignore
+      setError(`Couldn't rename the video: ${e.message}`);
     }
   };
 

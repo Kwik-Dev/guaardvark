@@ -946,6 +946,10 @@ VIDEO_MODEL_REGISTRY = {
         "size_gb": 2.74,
         "vram_mb": 0,
         "type": "lora",
+        # Pairs with an LTX-2.3 dev checkpoint, which is not registered; the distilled
+        # FP8 model does not need it, so no adapter picker offers it.
+        "applies_to": [],
+        "adapter": False,
     },
     # ── LTX-2.5 (Lightricks) — 16GB Ada: distilled Comfy int8 + Gemma 4 int8 ──
     # Official ComfyUI T2V/I2V templates (0.32+). Gated repo: accept the license
@@ -2755,6 +2759,25 @@ def _verify_capabilities(mid: str, entry: dict) -> list:
     return problems
 
 
+def _verify_lora_scope(mid: str, entry: dict) -> list:
+    """A LoRA names the generation models it applies to, or declares
+    `adapter: False` so no picker offers it. An empty `applies_to` means
+    "applies to nothing", never "applies to everything"."""
+    applies = entry.get("applies_to") or []
+    if entry.get("adapter") is False:
+        return [f"{mid}: adapter False but applies_to lists models"] if applies else []
+    if not applies:
+        return [f"{mid}: LoRA must list the models it applies to, or set adapter False"]
+    problems = []
+    for target in applies:
+        target_entry = VIDEO_MODEL_REGISTRY.get(target)
+        if not target_entry:
+            problems.append(f"{mid}: applies_to names unknown model '{target}'")
+        elif target_entry.get("type") not in GENERATION_TYPES:
+            problems.append(f"{mid}: applies_to names '{target}', which is not a generation model")
+    return problems
+
+
 def verify_registry() -> list:
     """Sanity-check the registry is internally complete. Returns a list of
     human-readable problems (empty = healthy). Never raises."""
@@ -2766,6 +2789,8 @@ def verify_registry() -> list:
             for dep in entry.get("requires", []):
                 if dep not in VIDEO_MODEL_REGISTRY:
                     problems.append(f"{mid}: requires unknown model '{dep}'")
+            if entry.get("type") == "lora":
+                problems.extend(_verify_lora_scope(mid, entry))
             if entry.get("type") == "wan":
                 problems.extend(_verify_capabilities(mid, entry))
                 m = wan_comfyui_map().get(mid, {})

@@ -230,6 +230,15 @@ def test_resolve_text_encoder(catalog_dir, tmp_path, monkeypatch):
         uvm.remove_user_model(mid, delete_files=False)
 
 
+def test_an_encoder_naming_no_models_replaces_none(monkeypatch):
+    monkeypatch.setitem(vmr.VIDEO_MODEL_REGISTRY, "user-enc-empty", {
+        "name": "Loose encoder", "type": "encoder", "user": True, "applies_to": [],
+        "files": [{"dst": "loose.safetensors"}], "local_subdir": "text_encoders"})
+    monkeypatch.setattr(vmr, "is_model_installed", lambda mid: True)
+    filename, err = uvm.resolve_text_encoder("wan22-5b", "user-enc-empty")
+    assert filename is None and "does not replace" in err
+
+
 def test_graphs_load_the_chosen_encoder():
     from backend.services.comfyui_video_generator import ComfyUIVideoGenerator
     # Skip __init__ (it probes a live ComfyUI); graph builders only need the class-level maps.

@@ -77,6 +77,12 @@ import {
   stripCopyCounter,
 } from '../utils/batchImageSettings';
 import lazyWithReload from '../utils/lazyWithReload';
+import {
+  batchToResume,
+  createGalleryRefresher,
+  imageProcessEvents,
+  overlayLiveCounts,
+} from '../utils/batchImageQueueWatch';
 
 const ImageModelsModal = lazyWithReload(() => import('../components/modals/ImageModelsModal'));
 
@@ -110,6 +116,8 @@ const mapBatchResultsToImages = (batchStatus) => {
 
 const POLLABLE_STATUSES = new Set(['queued', 'pending', 'running']);
 const TERMINAL_BATCH_STATUSES = new Set(['completed', 'error', 'cancelled']);
+// Recent Batches reloads at most this often while a batch is landing images.
+const GALLERY_REFRESH_MS = 1500;
 
 const debugLog = (...args) => {
   if (import.meta.env.DEV) {
@@ -427,51 +435,6 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     setSelectedPreset(presetName);
   }, []);
 
-  const fetchQueue = useCallback(async () => {
-    try {
-      const response = await fetch(`${API_BASE}/batch-image/queue`);
-      if (!response.ok) return;
-      const data = await response.json();
-      const rows = data?.data?.queue ?? data?.queue ?? [];
-      // Frontend-only dismissal: hide terminal rows the user cleared. Only
-      // terminal statuses are filtered so a live batch can never be masked.
-      let clearedQueue = [];
-      try {
-        clearedQueue = JSON.parse(localStorage.getItem('clearedImageQueueIds') || '[]');
-      } catch (e) {
-        clearedQueue = [];
-      }
-      const visible = (Array.isArray(rows) ? rows : []).filter(
-        (q) => !(TERMINAL_BATCH_STATUSES.has(q.status) && clearedQueue.includes(q.batch_id))
-      );
-      // This polls every 2.5s. Replacing `queue` with a fresh array each tick re-renders
-      // the whole page — including every batch thumbnail card — even when nothing moved,
-      // so only commit when the queue actually changed.
-      const signature = visible
-        .map((q) => `${q.batch_id}:${q.status}:${q.completed_images ?? ''}/${q.total_images ?? ''}`)
-        .join('|');
-      if (signature === queueSignatureRef.current) return;
-      queueSignatureRef.current = signature;
-      setQueue(visible);
-    } catch (err) {
-      console.debug('Failed to load image batch queue:', err);
-    }
-  }, []);
-
-  const handleClearCompletedQueue = useCallback(() => {
-    const doneIds = queue.filter((q) => TERMINAL_BATCH_STATUSES.has(q.status)).map((q) => q.batch_id);
-    if (doneIds.length === 0) return;
-    // Drop the memoised signature so the next poll re-commits against the new baseline.
-    queueSignatureRef.current = '';
-    try {
-      const stored = JSON.parse(localStorage.getItem('clearedImageQueueIds') || '[]');
-      localStorage.setItem('clearedImageQueueIds', JSON.stringify(Array.from(new Set([...stored, ...doneIds]))));
-    } catch (e) {
-      console.error('Failed to save cleared queue items to localStorage:', e);
-    }
-    setQueue((prev) => prev.filter((q) => !TERMINAL_BATCH_STATUSES.has(q.status)));
-  }, [queue]);
-
   const loadBatchHistory = useCallback(async () => {
     try {
       const response = await fetch(`${API_BASE}/batch-image/list`);
@@ -504,6 +467,65 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       console.error('Failed to load batch history:', err);
     }
   }, []);
+
+  // Follows every image batch, not only the one on screen: a batch finishing behind
+  // the open one, or queued from chat, still reaches Recent Batches, and ImagesPage
+  // (listening for images-updated) re-reads the library once a batch finishes.
+  const galleryRefresherRef = useRef(null);
+  if (!galleryRefresherRef.current) {
+    galleryRefresherRef.current = createGalleryRefresher({
+      reload: loadBatchHistory,
+      notifyLibrary: () => window.dispatchEvent(new Event('images-updated')),
+      delayMs: GALLERY_REFRESH_MS,
+    });
+  }
+  useEffect(() => () => galleryRefresherRef.current.cancel(), []);
+
+  const fetchQueue = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE}/batch-image/queue`);
+      if (!response.ok) return;
+      const data = await response.json();
+      const rows = data?.data?.queue ?? data?.queue ?? [];
+      // Frontend-only dismissal: hide terminal rows the user cleared. Only
+      // terminal statuses are filtered so a live batch can never be masked.
+      let clearedQueue = [];
+      try {
+        clearedQueue = JSON.parse(localStorage.getItem('clearedImageQueueIds') || '[]');
+      } catch (e) {
+        clearedQueue = [];
+      }
+      const visible = (Array.isArray(rows) ? rows : []).filter(
+        (q) => !(TERMINAL_BATCH_STATUSES.has(q.status) && clearedQueue.includes(q.batch_id))
+      );
+      galleryRefresherRef.current.observeQueue(visible);
+      // This polls every 2.5s. Replacing `queue` with a fresh array each tick re-renders
+      // the whole page — including every batch thumbnail card — even when nothing moved,
+      // so only commit when the queue actually changed.
+      const signature = visible
+        .map((q) => `${q.batch_id}:${q.status}:${q.completed_images ?? ''}/${q.total_images ?? ''}`)
+        .join('|');
+      if (signature === queueSignatureRef.current) return;
+      queueSignatureRef.current = signature;
+      setQueue(visible);
+    } catch (err) {
+      console.debug('Failed to load image batch queue:', err);
+    }
+  }, []);
+
+  const handleClearCompletedQueue = useCallback(() => {
+    const doneIds = queue.filter((q) => TERMINAL_BATCH_STATUSES.has(q.status)).map((q) => q.batch_id);
+    if (doneIds.length === 0) return;
+    // Drop the memoised signature so the next poll re-commits against the new baseline.
+    queueSignatureRef.current = '';
+    try {
+      const stored = JSON.parse(localStorage.getItem('clearedImageQueueIds') || '[]');
+      localStorage.setItem('clearedImageQueueIds', JSON.stringify(Array.from(new Set([...stored, ...doneIds]))));
+    } catch (e) {
+      console.error('Failed to save cleared queue items to localStorage:', e);
+    }
+    setQueue((prev) => prev.filter((q) => !TERMINAL_BATCH_STATUSES.has(q.status)));
+  }, [queue]);
 
   const handleClearBatchList = useCallback(() => {
     const allIds = batchHistory.map((b) => b.batch_id);
@@ -719,6 +741,36 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       }
     }
   }, [activeProcesses, activeBatch?.batch_id, loadBatchById]);
+
+  // Every image batch's progress events, not only the open batch's: a finish
+  // refreshes Recent Batches and the library, and a batch the queue does not list
+  // yet (started from chat or MCP while this page idled) gets the queue re-read.
+  const finishedBatchesRef = useRef(new Set());
+  const queueReadForRef = useRef(new Set());
+  useEffect(() => {
+    const refresher = galleryRefresherRef.current;
+    const { finished, unknown } = imageProcessEvents(
+      activeProcesses.values(), finishedBatchesRef.current, refresher.knownBatchIds(),
+    );
+    finished.forEach((id) => finishedBatchesRef.current.add(id));
+    const unread = unknown.filter((id) => !queueReadForRef.current.has(id));
+    unread.forEach((id) => queueReadForRef.current.add(id));
+    if (finished.length) refresher.schedule({ library: true });
+    if (finished.length || unread.length) fetchQueue();
+  }, [activeProcesses, fetchQueue]);
+
+  // With no batch open, show the running one live (after a tab switch remounts the
+  // page, or when one starts from elsewhere). A ?batch= link picks its own.
+  const resumeRequestedRef = useRef(null);
+  useEffect(() => {
+    if (activeBatch || searchParams.get('batch')) return;
+    const batchId = batchToResume(queue);
+    if (!batchId || resumeRequestedRef.current === batchId) return;
+    resumeRequestedRef.current = batchId;
+    loadBatchById(batchId);
+  }, [queue, activeBatch, searchParams, loadBatchById]);
+
+  const liveBatchHistory = useMemo(() => overlayLiveCounts(batchHistory, queue), [batchHistory, queue]);
 
   const handleBatchItemsChange = (event) => {
     setBatchItems(event.target.value);
@@ -2424,7 +2476,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
 
               <Box sx={{ maxHeight: 520, overflowY: 'auto', pr: 0.5 }}>
                 <Grid container spacing={2}>
-                  {batchHistory.map((batch) => (
+                  {liveBatchHistory.map((batch) => (
                     <Grid item xs={6} sm={4} md={3} key={batch.batch_id}>
                       <BatchHistoryCard
                         batch={batch}

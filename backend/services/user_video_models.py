@@ -342,8 +342,7 @@ def resolve_text_encoder(model_key: str, encoder_id: str | None) -> tuple[str | 
     label = entry.get("name") or eid
     if entry.get("type") != "encoder" or not entry.get("user"):
         return None, f"'{eid}' is not a text encoder you added."
-    applies = entry.get("applies_to") or []
-    if applies and model_key not in applies:
+    if model_key not in (entry.get("applies_to") or []):
         return None, f"{label} does not replace the text encoder of this model."
     files = entry.get("files") or []
     filename = files[0].get("dst") if files else None

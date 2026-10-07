@@ -1750,6 +1750,18 @@ class BatchImageGenerator:
                             vram_reserve_mb=reserve_mb,
                             image_model=reuse_model,
                         ):
+                            if batch_status.gpu_wait_reason and self.progress_system:
+                                # Progress consumers merge additional_data, so the
+                                # wait reason stays until it is cleared explicitly.
+                                try:
+                                    self.progress_system.update_process(
+                                        process_id=batch_id,
+                                        progress=0,
+                                        message="Starting generation",
+                                        additional_data={"batch_id": batch_id, "gpu_wait_reason": None},
+                                    )
+                                except Exception:
+                                    pass
                             batch_status.gpu_wait_reason = None
                             _run_batch_body(session_held=True)
                         return
