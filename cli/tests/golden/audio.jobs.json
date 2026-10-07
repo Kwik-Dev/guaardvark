@@ -1,0 +1,24 @@
+{
+  "data": {
+    "generations": [
+      {
+        "created_at": "<volatile:str>",
+        "document_id": 9,
+        "duration_s": 30.0,
+        "error": null,
+        "id": 4,
+        "inputs": {
+          "style_prompt": "lo-fi piano"
+        },
+        "job_id": null,
+        "kind": "music",
+        "model": "acestep",
+        "output_path": "/out/song.wav",
+        "seed": 42,
+        "status": "completed",
+        "updated_at": "<volatile:str>"
+      }
+    ]
+  },
+  "status": "success"
+}

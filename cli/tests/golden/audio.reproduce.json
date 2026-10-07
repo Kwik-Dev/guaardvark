@@ -1,0 +1,16 @@
+{
+  "api_command_line": "guaardvark api request POST /api/audio-foundry/generate/music --yes --data '{\"style_prompt\":\"lo-fi piano\",\"duration_s\":30.0}'",
+  "body": {
+    "duration_s": 30.0,
+    "style_prompt": "lo-fi piano"
+  },
+  "command": "audio reproduce",
+  "command_line": "guaardvark audio music 'lo-fi piano' --seconds 30.0",
+  "inexpressible": [],
+  "method": "POST",
+  "named_command_line": "guaardvark audio music 'lo-fi piano' --seconds 30.0",
+  "path": "/api/audio-foundry/generate/music",
+  "sent": false,
+  "source": "4",
+  "status": "reproduce"
+}
