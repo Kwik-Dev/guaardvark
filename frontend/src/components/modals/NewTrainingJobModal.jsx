@@ -142,7 +142,6 @@ const NewTrainingJobModal = ({
             batch_size: capsData.recommended_config.batch_size,
             seq_length: capsData.recommended_config.max_seq_length,
             rank: capsData.recommended_config.lora_rank,
-            cpu_offload: capsData.recommended_config.cpu_offload
           }
         }));
       }

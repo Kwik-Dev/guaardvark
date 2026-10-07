@@ -12,6 +12,7 @@ from pathlib import Path
 from celery import shared_task
 from celery.exceptions import Retry
 
+from backend.services.training.scripts import dataset_formats
 from backend.utils.clock import utcnow
 
 try:
@@ -531,55 +532,25 @@ def _export_verdict(report: dict, margin: float, export_if_worse: bool, lora_pat
                    f"choose Export anyway on the job to export it")
 
 
-# File types both trainers read (finetune_model.load_training_data, _hold_out_split).
-TRAINING_DATA_SUFFIXES = (".jsonl", ".json")
-
-
 def dataset_training_files(path):
     """The training files a dataset's path names, or why it names none.
 
-    A .jsonl or .json file is used as it is. A folder contributes the .jsonl
-    and .json files directly inside it, in name order. Returns (files, reason):
-    files is empty exactly when reason is set."""
-    raw = (path or "").strip()
-    if not raw:
-        return [], "the dataset has no path"
-    if "://" in raw:
-        return [], f"its path is a URL ({raw}); training reads .jsonl or .json files on this machine"
-    target = Path(raw).expanduser()
-    if target.is_file():
-        if target.suffix in TRAINING_DATA_SUFFIXES:
-            return [str(target)], None
-        return [], f"{target.name} is not a .jsonl or .json file"
-    if target.is_dir():
-        files = sorted(str(f) for f in target.iterdir()
-                       if f.is_file() and f.suffix in TRAINING_DATA_SUFFIXES)
-        if files:
-            return files, None
-        return [], f"the folder {target} holds no .jsonl or .json file (parse its transcripts first)"
-    return [], f"{target} does not exist"
+    A .jsonl or .json file is used as it is. A folder contributes every .jsonl
+    and .json file under it, recursively, in path order, hidden ones skipped.
+    Returns (files, reason): files is empty exactly when reason is set."""
+    return dataset_formats.list_files(path)
 
 
 def _combine_training_files(files, out_path: Path) -> str:
     """Write the rows of several training files to one JSONL file.
 
-    JSONL rows are copied byte for byte in file and line order; a .json file
-    must hold a list of rows."""
+    Rows keep their file and line order; blank lines, lines that are not a
+    JSON object and a .json file that is not a list are left out."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "wb") as out:
         for name in files:
-            if name.endswith(".jsonl"):
-                with open(name, "rb") as f:
-                    for line in f:
-                        if line.strip():
-                            out.write(line.rstrip(b"\r\n") + b"\n")
-            else:
-                with open(name, encoding="utf-8") as f:
-                    records = json.load(f)
-                if not isinstance(records, list):
-                    raise ValueError(f"{name} is not a list of rows")
-                for record in records:
-                    out.write(json.dumps(record).encode("utf-8") + b"\n")
+            for record in dataset_formats.iter_rows(name):
+                out.write(json.dumps(record).encode("utf-8") + b"\n")
     return str(out_path)
 
 
@@ -669,8 +640,7 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False,
         batch_size = job_config.get("batch_size", device_profile.max_batch_size if device_profile else 2)
         lora_rank = job_config.get("rank", 16)
         max_seq_length = job_config.get("seq_length", device_profile.max_seq_length if device_profile else 2048)
-        offload_to_cpu = job_config.get("cpu_offload", device_profile.requires_cpu_offload if device_profile else False)
-        
+
         _update_job_status(job_id, total_steps=max_steps)
 
         gate_margin = float(job_config.get("eval_gate_margin", EVAL_GATE["margin"]))
@@ -738,7 +708,6 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False,
                     batch_size=batch_size,
                     lora_rank=lora_rank,
                     max_seq_length=max_seq_length,
-                    offload_to_cpu=offload_to_cpu,
                     progress_callback=progress_callback,
                     resume=resume
                 )
@@ -756,7 +725,6 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False,
                     batch_size=batch_size,
                     lora_rank=lora_rank,
                     max_seq_length=max_seq_length,
-                    offload_to_cpu=offload_to_cpu,
                     progress_callback=progress_callback,
                     resume=resume,
                     eval_data_path=eval_path,
