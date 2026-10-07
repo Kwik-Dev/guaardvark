@@ -16,6 +16,9 @@ import {
 import { useNavigate } from "react-router-dom";
 import DashboardCardWrapper from "./DashboardCardWrapper";
 import WebsiteActionModal from "../modals/WebsiteActionModal";
+import EntityContextMenu from "../common/EntityContextMenu";
+import useContextMenu from "../../hooks/useContextMenu";
+import copyText from "../../utils/copyText";
 import {
   getWebsites,
   updateWebsite,
@@ -43,6 +46,7 @@ const WebsiteDataCard = React.forwardRef(
     const [actionModalOpen, setActionModalOpen] = useState(false);
     const [currentWebsite, setCurrentWebsite] = useState(null);
     const [isSaving, setIsSaving] = useState(false);
+    const rowMenu = useContextMenu();
 
     const fetchWebsites = useCallback(async () => {
       setIsLoading(true);
@@ -66,7 +70,7 @@ const WebsiteDataCard = React.forwardRef(
       fetchWebsites();
     }, [fetchWebsites]);
 
-    const _handleOpenModal = (site) => {
+    const handleOpenModal = (site) => {
       setCurrentWebsite(site);
       setActionModalOpen(true);
     };
@@ -121,6 +125,7 @@ const WebsiteDataCard = React.forwardRef(
           onCardColorChange={onCardColorChange}
           title="Website Data"
           {...props}
+          contextMenuActions={[{ label: "Refresh", onClick: fetchWebsites }]}
         >
           {isLoading && (
             <CircularProgress
@@ -162,6 +167,7 @@ const WebsiteDataCard = React.forwardRef(
                     },
                   }}
                   onClick={() => navigate(`/websites?websiteId=${site.id}`)}
+                  onContextMenu={(e) => rowMenu.open(e, site)}
                   className="non-draggable"
                 >
                   {site.client?.logo_path && (
@@ -208,6 +214,30 @@ const WebsiteDataCard = React.forwardRef(
             </List>
             // --- END MODIFICATION ---
           )}
+          <EntityContextMenu
+            anchorPosition={rowMenu.anchorPosition}
+            onClose={rowMenu.close}
+            actions={
+              rowMenu.payload
+                ? [
+                    { label: "Open", onClick: () => navigate(`/websites?websiteId=${rowMenu.payload.id}`) },
+                    rowMenu.payload.url && {
+                      label: "Open URL in new tab",
+                      onClick: () => window.open(rowMenu.payload.url, "_blank", "noopener,noreferrer"),
+                    },
+                    rowMenu.payload.url && { label: "Copy URL", onClick: () => copyText(rowMenu.payload.url) },
+                    { label: "Edit…", onClick: () => handleOpenModal(rowMenu.payload), dividerBefore: true },
+                    { label: "Delete", onClick: () => handleDelete(rowMenu.payload.id), color: "error.main" },
+                    {
+                      label: "Files",
+                      onClick: () => navigate(`/documents?website_id=${rowMenu.payload.id}`),
+                      dividerBefore: true,
+                    },
+                    { label: "Schedule Task", onClick: () => navigate(`/tasks?website_id=${rowMenu.payload.id}`) },
+                  ]
+                : []
+            }
+          />
         </DashboardCardWrapper>
 
         {actionModalOpen && (

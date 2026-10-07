@@ -14,6 +14,8 @@ import {
 } from "@mui/material";
 import { useNavigate } from "react-router-dom";
 import DashboardCardWrapper from "./DashboardCardWrapper";
+import EntityContextMenu from "../common/EntityContextMenu";
+import useContextMenu from "../../hooks/useContextMenu";
 import { getClients } from "../../api";
 import { getLogoUrl } from "../../config/logoConfig";
 
@@ -33,6 +35,7 @@ const ClientsDashboardCard = React.forwardRef(
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState(null);
     const navigate = useNavigate();
+    const rowMenu = useContextMenu();
 
     const fetchClients = useCallback(async () => {
       setIsLoading(true);
@@ -66,6 +69,7 @@ const ClientsDashboardCard = React.forwardRef(
         onCardColorChange={onCardColorChange}
         title="Clients"
         {...props}
+        contextMenuActions={[{ label: "Refresh", onClick: fetchClients }]}
       >
         {isLoading && (
           <CircularProgress
@@ -104,6 +108,7 @@ const ClientsDashboardCard = React.forwardRef(
                   },
                 }}
                 onClick={() => navigate(`/clients?clientId=${client.id}`)}
+                onContextMenu={(e) => rowMenu.open(e, client)}
                 className="non-draggable"
               >
                 {client.logo_path && (
@@ -138,6 +143,23 @@ const ClientsDashboardCard = React.forwardRef(
             ))}
           </List>
         )}
+        <EntityContextMenu
+          anchorPosition={rowMenu.anchorPosition}
+          onClose={rowMenu.close}
+          actions={
+            rowMenu.payload
+              ? [
+                  { label: "Open", onClick: () => navigate(`/clients?clientId=${rowMenu.payload.id}`) },
+                  {
+                    label: "Files",
+                    onClick: () => navigate(`/documents?client_id=${rowMenu.payload.id}`),
+                    dividerBefore: true,
+                  },
+                  { label: "Schedule Task", onClick: () => navigate(`/tasks?client_id=${rowMenu.payload.id}`) },
+                ]
+              : []
+          }
+        />
       </DashboardCardWrapper>
     );
   },
