@@ -1,0 +1,26 @@
+{
+  "data": {
+    "generations": [
+      {
+        "created_at": "<volatile:str>",
+        "duration_s": 5.4,
+        "error": null,
+        "filename": "info_3.png",
+        "height": 684,
+        "id": 3,
+        "image_url": "/api/infographic/view?filename=info_3.png",
+        "inputs": {
+          "scene": "five facts about bees"
+        },
+        "prompt": "resolved",
+        "prompt_id": "p1",
+        "seed": 42,
+        "status": "completed",
+        "subfolder": "",
+        "updated_at": "<volatile:str>",
+        "width": 1216
+      }
+    ]
+  },
+  "status": "success"
+}

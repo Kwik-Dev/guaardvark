@@ -1,0 +1,20 @@
+{
+  "api_command_line": "guaardvark api request POST /api/infographic/generate --yes --data '{\"scene\":\"five facts about bees\",\"style\":\"editorial\",\"aspect\":\"16:9\",\"hashtags\":[],\"callouts\":[],\"seed\":42}'",
+  "body": {
+    "aspect": "16:9",
+    "callouts": [],
+    "hashtags": [],
+    "scene": "five facts about bees",
+    "seed": 42,
+    "style": "editorial"
+  },
+  "command": "infographic reproduce",
+  "command_line": "guaardvark infographic generate --scene 'five facts about bees' --seed 42",
+  "inexpressible": [],
+  "method": "POST",
+  "named_command_line": "guaardvark infographic generate --scene 'five facts about bees' --seed 42",
+  "path": "/api/infographic/generate",
+  "sent": false,
+  "source": "3",
+  "status": "reproduce"
+}
