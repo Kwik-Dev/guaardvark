@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Optional
 
 
 SUPPORTED_RECIPE_ACTIONS = {
@@ -16,6 +16,53 @@ SUPPORTED_RECIPE_ACTIONS = {
     "wait_until_settled",
     "wait_until_visible",
 }
+
+
+# Safety bounds. A recipe runs before any model reads the request: a trigger
+# match sends its keys and text straight to the agent's browser, which carries
+# the person's logged-in sessions. A recipe that breaks one of these is an
+# error, and the agent never loads it, wherever it came from (a pull request,
+# a local edit, a promoted candidate).
+
+# Hosts a type step may spell out in fixed text. Everything else a recipe
+# types comes from the person's own request through a {n} capture.
+RECIPE_URL_HOSTS = frozenset({"www.youtube.com", "youtube.com"})
+
+# Keys that leave the browser for the system, or open a console that runs code
+# in the page with the person's sessions.
+DENIED_HOTKEYS = {
+    frozenset({"ctrl", "alt", "t"}): "opens a terminal",
+    frozenset({"alt", "f2"}): "opens a run-command dialog",
+    frozenset({"ctrl", "alt", "delete"}): "reaches the session manager",
+    frozenset({"ctrl", "alt", "backspace"}): "kills the display server",
+    frozenset({"f12"}): "opens the browser's developer tools",
+    frozenset({"ctrl", "shift", "i"}): "opens the browser's developer tools",
+    frozenset({"ctrl", "shift", "c"}): "opens the browser's developer tools",
+    frozenset({"ctrl", "shift", "j"}): "opens the browser console",
+    frozenset({"ctrl", "shift", "k"}): "opens the browser console",
+    frozenset({"ctrl", "shift", "e"}): "opens the browser's network tools",
+}
+_SYSTEM_KEYS = frozenset({"super", "super_l", "super_r", "meta", "meta_l", "meta_r",
+                          "hyper", "hyper_l", "hyper_r", "win"})
+_KEY_ALIASES = {"control": "ctrl", "control_l": "ctrl", "control_r": "ctrl",
+                "alt_l": "alt", "alt_r": "alt", "shift_l": "shift", "shift_r": "shift",
+                "del": "delete"}
+
+# Click targets that spend, destroy or grant. Posting words are not here: the
+# recipes that post are confined to their site by the agent at run time.
+_DENIED_CLICK_WORDS = frozenset({"delete", "remove", "erase", "uninstall", "format",
+                                 "pay", "purchase", "buy", "checkout", "transfer",
+                                 "install", "allow", "grant", "authorize", "authorise"})
+
+# Requests no recipe may claim. A trigger that matches one would hijack an
+# everyday message before the model sees it.
+EVERYDAY_REQUESTS = (
+    "", "hi", "hello", "help", "yes", "no", "ok", "thanks", "continue", "stop", "do it",
+    "what can you do", "what time is it", "tell me a joke", "write a poem",
+    "summarize this document", "remember this", "make an image of a cat",
+    "what is the weather today", "show me my files", "delete all my files",
+    "check my email", "send an email to my boss", "open my bank account",
+)
 
 
 @dataclass
@@ -45,6 +92,40 @@ def _placeholders(text: str) -> Iterable[int]:
         yield int(match.group(1))
 
 
+def _hotkey_issue(keys: Any) -> Optional[str]:
+    """Why a hotkey step is refused, or None."""
+    if not isinstance(keys, list) or not keys or not all(isinstance(k, str) for k in keys):
+        return "hotkey step needs a non-empty list of key names"
+    names = frozenset(_KEY_ALIASES.get(k.strip().lower(), k.strip().lower()) for k in keys)
+    if names & _SYSTEM_KEYS:
+        return f"hotkey {'+'.join(keys)} uses the system key"
+    if {"ctrl", "alt"} <= names and any(re.fullmatch(r"f([1-9]|1[0-2])", n) for n in names):
+        return f"hotkey {'+'.join(keys)} switches to a console"
+    why = DENIED_HOTKEYS.get(names)
+    return f"hotkey {'+'.join(keys)} {why}" if why else None
+
+
+def _type_text_issue(text: Any) -> Optional[str]:
+    """Why a type step's text is refused, or None.
+
+    Fixed text is allowed only as an address prefix: a bare scheme, or a URL on
+    RECIPE_URL_HOSTS. Anything else must come from the request's {n} captures.
+    """
+    if not isinstance(text, str):
+        return "type step needs text"
+    literal = re.sub(r"\{\d+\}", "", text)
+    if literal in ("", "http://", "https://"):
+        return None
+    # The host must end at a path, query or the end of the text: a capture
+    # right after it ("youtube.com{1}") could extend it to another host.
+    host = re.match(r"https?://([^/\s?#{}]+)(?:[/?#]|$)", text)
+    if (host and host.group(1).split(":")[0].lower() in RECIPE_URL_HOSTS
+            and not re.search(r"\s", literal)):
+        return None
+    return (f"types fixed text {literal[:40]!r}; a recipe types only what the request "
+            f"supplies, or an address on {', '.join(sorted(RECIPE_URL_HOSTS))}")
+
+
 def validate_recipe(name: str, recipe: Dict[str, Any], strict: bool = False) -> ValidationResult:
     """Validate one recipes.json entry against LEARNING_PRINCIPLES.md."""
     result = ValidationResult()
@@ -66,11 +147,7 @@ def validate_recipe(name: str, recipe: Dict[str, Any], strict: bool = False) -> 
             result.add(path, "trigger must be a string")
             continue
         if not pattern.startswith("^"):
-            result.add(
-                path,
-                "trigger must be anchored with ^",
-                severity="error" if strict else "warning",
-            )
+            result.add(path, "trigger must be anchored with ^")
         if not pattern.endswith("$") and not pattern.endswith("\\s*$"):
             result.add(
                 path,
@@ -82,6 +159,12 @@ def validate_recipe(name: str, recipe: Dict[str, Any], strict: bool = False) -> 
             max_capture_group = max(max_capture_group, compiled.groups)
         except re.error as e:
             result.add(path, f"invalid regex: {e}")
+            continue
+        # The matcher searches case-insensitively; test the same way.
+        claimed = next((r for r in EVERYDAY_REQUESTS
+                        if re.search(pattern, r, re.IGNORECASE)), None)
+        if claimed is not None:
+            result.add(path, f"trigger claims the everyday request {claimed!r}")
 
     nontrivial_actions = 0
     for idx, step in enumerate(steps):
@@ -105,6 +188,19 @@ def validate_recipe(name: str, recipe: Dict[str, Any], strict: bool = False) -> 
             words = re.findall(r"[A-Za-z0-9_]+", target)
             if len(words) > 6:
                 result.add(path, "target_description must be <= 6 words")
+            denied = sorted({w.lower() for w in words} & _DENIED_CLICK_WORDS)
+            if denied:
+                result.add(path, f"click target {target!r} spends, destroys or grants ({', '.join(denied)})")
+
+        if action == "hotkey":
+            why = _hotkey_issue(step.get("keys"))
+            if why:
+                result.add(path, why)
+
+        if action == "type":
+            why = _type_text_issue(step.get("text"))
+            if why:
+                result.add(path, why)
 
         if action == "wait":
             result.add(path, "legacy wait step should migrate to wait_until_*", severity="warning")

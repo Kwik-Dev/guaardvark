@@ -3978,27 +3978,39 @@ Reply ONLY with JSON:
         try:
             with open(path, "r") as f:
                 data = json.load(f)
+            # A recipe runs before any model reads the request, so one that fails
+            # validation (including the safety bounds in agent_knowledge_validator)
+            # is never loaded. If the validator cannot run, none are: the agent
+            # still works through its loop.
+            refused = {}
             try:
-                from backend.services.agent_knowledge_validator import validate_recipe_library
-                validation = validate_recipe_library(data)
-                errors = [i for i in validation.issues if i.severity == "error"]
-                if errors:
+                from backend.services.agent_knowledge_validator import validate_recipe
+                warnings = []
+                for name, recipe in data.items():
+                    if name.startswith("_"):
+                        continue
+                    result = validate_recipe(name, recipe)
+                    if not result.ok:
+                        refused[name] = result.error_messages()
+                    warnings.extend(i for i in result.issues if i.severity != "error")
+                if refused:
                     logger.warning(
-                        "[AGENT][RECIPE] validation errors: %s",
-                        "; ".join(f"{i.path}:{i.message}" for i in errors[:8]),
+                        "[AGENT][RECIPE] not loading %d recipe(s) that fail validation: %s",
+                        len(refused),
+                        "; ".join(m for msgs in refused.values() for m in msgs[:2])[:1200],
                     )
-                elif validation.issues:
+                if warnings:
                     # Only debug-level for migration warnings (legacy waits, missing proof on old recipes)
                     logger.debug(
                         "[AGENT][RECIPE] validation warnings: %s",
-                        "; ".join(
-                            f"{i.severity}:{i.path}:{i.message}"
-                            for i in validation.issues[:8]
-                        ),
+                        "; ".join(f"{i.severity}:{i.path}:{i.message}" for i in warnings[:8]),
                     )
             except Exception as ve:
-                logger.debug(f"Recipe validation skipped: {ve}")
-            cls._recipe_cache = {k: v for k, v in data.items() if not k.startswith("_")}
+                logger.warning(f"[AGENT][RECIPE] validator unavailable, loading no recipes: {ve}")
+                refused = {k: [] for k in data if not k.startswith("_")}
+            cls._recipe_cache = {
+                k: v for k, v in data.items() if not k.startswith("_") and k not in refused
+            }
             cls._recipe_mtime = mtime
             logger.info(f"Loaded {len(cls._recipe_cache)} recipes from {path}")
             return cls._recipe_cache
