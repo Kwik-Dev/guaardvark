@@ -324,6 +324,7 @@ class TestResearchRunEngine:
             svc_run = self._mk_service()
             with patch.object(svc_run, "_celery_has_live_execute_run",
                               return_value=False), \
+                 patch.object(svc_run, "_precondition_failures", return_value=([], [])), \
                  patch.object(svc_run, "_enqueue_execute_run"):
                 result = svc_run.kickoff(budget_hours=1, trigger="manual")
             db.session.refresh(stale)
@@ -368,6 +369,167 @@ class TestResearchRunEngine:
             assert st["running"] is True
             assert st["active_run"]["run_tag"] == "t-status"
             assert st["active_run"]["budget_remaining_s"] is not None
+
+
+def _ollama_up():
+    return patch("requests.get", return_value=MagicMock(status_code=200))
+
+
+def _seed_corpus(eval_source_status="INDEXED", n_pairs=2):
+    """Enough indexed text documents for the corpus gate, plus active eval
+    pairs cut from a document in `eval_source_status`."""
+    from backend.models import Document
+    from backend.config import AUTORESEARCH_MIN_CORPUS_SIZE
+    text = "A paragraph of real text about pumps and valves. " * 10
+    for i in range(AUTORESEARCH_MIN_CORPUS_SIZE):
+        db.session.add(Document(filename=f"d{i}.md", path=f"/x/d{i}.md",
+                                content=text, index_status="INDEXED"))
+    source = Document(filename="src.md", path="/x/src.md", content=text,
+                      index_status=eval_source_status)
+    db.session.add(source)
+    db.session.flush()
+    for i in range(n_pairs):
+        db.session.add(EvalPair(question=f"q{i}", expected_answer="a",
+                                source_doc_id=source.id, is_active=True))
+    db.session.commit()
+
+
+class TestKickoffRefusesWithReasons:
+    def _kick(self, trigger="manual", active_model="gemma4:12b"):
+        svc_run = ResearchRunService()
+        enqueue = MagicMock()
+        with _ollama_up(), \
+             patch.object(svc_run, "_celery_has_live_execute_run", return_value=False), \
+             patch.object(svc_run, "_enqueue_execute_run", enqueue), \
+             patch("backend.utils.llm_service.get_saved_active_model_name",
+                   return_value=active_model):
+            result = svc_run.kickoff(budget_hours=1, trigger=trigger)
+        return result, enqueue
+
+    def test_unindexed_eval_sources_refuse_and_send_no_task(self, app):
+        with app.app_context():
+            _seed_corpus(eval_source_status="PENDING", n_pairs=3)
+            db.session.add(Setting(key="autoresearch_judge_model", value="qwen3:14b"))
+            db.session.commit()
+            result, enqueue = self._kick()
+            enqueue.assert_not_called()
+            assert result["not_run"] is True
+            assert len(result["reasons"]) == 1
+            assert result["reasons"][0].startswith(
+                "eval_sources_not_indexed — 3 of 3 active eval pairs come from "
+                "documents that are not indexed (PENDING: 3)")
+            run = db.session.get(ResearchRun, result["run"]["id"])
+            assert run.status == "failed_precondition"
+            assert run.halt_reason.startswith("eval_sources_not_indexed")
+            assert len(run.halt_reason) <= 200
+            assert run.ended_at is not None
+            assert "DID NOT RUN" in run.report_md
+            assert run.promotions["trigger"] == "manual"
+
+    def test_every_reason_is_collected(self, app):
+        with app.app_context():
+            svc_run = ResearchRunService()
+            with patch("requests.get", side_effect=ConnectionError("refused")), \
+                 patch.object(svc_run, "_celery_has_live_execute_run", return_value=False), \
+                 patch.object(svc_run, "_enqueue_execute_run") as enqueue, \
+                 patch("backend.utils.llm_service.get_saved_active_model_name",
+                       return_value="gemma4:12b"):
+                result = svc_run.kickoff(budget_hours=1, trigger="nightly")
+            enqueue.assert_not_called()
+            codes = [r.split(" ")[0] for r in result["reasons"]]
+            assert codes == ["ollama_unreachable", "insufficient_corpus",
+                             "no_eval_pairs", "judge_unset"]
+            run = db.session.get(ResearchRun, result["run"]["id"])
+            assert all(f"`{r}`" in run.report_md for r in result["reasons"])
+
+    def test_api_answers_422_with_the_reasons(self, app):
+        from backend.api.rag_autoresearch_api import autoresearch_bp
+        if "autoresearch" not in app.blueprints:
+            app.register_blueprint(autoresearch_bp)
+        with app.app_context():
+            _seed_corpus(eval_source_status="PENDING")
+        with app.test_client() as client, _ollama_up(), \
+             patch("backend.services.research_run_service.ResearchRunService._celery_has_live_execute_run",
+                   return_value=False), \
+             patch("backend.services.research_run_service.ResearchRunService._enqueue_execute_run") as enqueue:
+            res = client.post("/api/autoresearch/runs", json={"budget_hours": 1})
+        assert res.status_code == 422
+        body = res.get_json()
+        assert body["not_run"] is True
+        assert body["error"].startswith("eval_sources_not_indexed")
+        assert body["run"]["status"] == "failed_precondition"
+        enqueue.assert_not_called()
+
+    def test_nightly_refuses_without_a_judge_while_manual_warns(self, app):
+        with app.app_context():
+            _seed_corpus(eval_source_status="INDEXED")
+            nightly, enqueue = self._kick(trigger="nightly")
+            enqueue.assert_not_called()
+            assert nightly["not_run"] is True
+            assert [r.split(" ")[0] for r in nightly["reasons"]] == ["judge_unset"]
+            assert "gemma4:12b grades its own answers" in nightly["reasons"][0]
+
+            manual, enqueue = self._kick(trigger="manual")
+            enqueue.assert_called_once()
+            assert manual["status"] == "started"
+            assert manual["warnings"][0].startswith("judge_unset")
+            run = db.session.get(ResearchRun, manual["run"]["id"])
+            assert run.status == "pending"
+            assert run.promotions["trigger"] == "manual"
+            assert run.promotions["warnings"][0].startswith("judge_unset")
+
+    def test_nightly_refuses_a_judge_that_is_the_answer_model(self, app):
+        with app.app_context():
+            _seed_corpus(eval_source_status="INDEXED")
+            db.session.add(Setting(key="autoresearch_judge_model", value="gemma4:12b"))
+            db.session.commit()
+            result, enqueue = self._kick(trigger="nightly")
+            enqueue.assert_not_called()
+            assert result["reasons"][0].startswith("judge_same_as_answer_model")
+
+    def test_nightly_starts_with_an_independent_judge(self, app):
+        with app.app_context():
+            _seed_corpus(eval_source_status="INDEXED")
+            db.session.add(Setting(key="autoresearch_judge_model", value="qwen3:14b"))
+            db.session.commit()
+            result, enqueue = self._kick(trigger="nightly")
+            enqueue.assert_called_once()
+            assert result["status"] == "started" and result["warnings"] == []
+
+
+class TestExecuteRunRunsOnce:
+    def test_a_run_that_is_not_pending_is_left_alone(self, app):
+        with app.app_context():
+            run = ResearchRun(run_tag="t-redelivered", mode="unified",
+                              status="completed", halt_reason="plateaued",
+                              wall_clock_budget_s=3600)
+            db.session.add(run)
+            db.session.commit()
+            svc_run = ResearchRunService()
+            with patch.object(svc_run, "_check_preconditions") as pre, \
+                 patch.object(svc_run, "_run_rag_slice") as rag, \
+                 patch("backend.services.rag_autoresearch_service.get_autoresearch_service"):
+                svc_run.execute_run(run.id)
+            pre.assert_not_called()
+            rag.assert_not_called()
+            db.session.refresh(run)
+            assert run.status == "completed" and run.halt_reason == "plateaued"
+
+    def test_preconditions_are_checked_again_with_the_stored_trigger(self, app):
+        with app.app_context():
+            run = ResearchRun(run_tag="t-nightly", mode="rag_tuning", status="pending",
+                              wall_clock_budget_s=60, promotions={"trigger": "nightly"})
+            db.session.add(run)
+            db.session.commit()
+            svc_run = ResearchRunService()
+            with patch.object(svc_run, "_check_preconditions",
+                              return_value=(False, "judge_unset — x")) as pre, \
+                 patch("backend.services.rag_autoresearch_service.get_autoresearch_service"):
+                svc_run.execute_run(run.id)
+            assert pre.call_args.kwargs["trigger"] == "nightly"
+            db.session.refresh(run)
+            assert run.status == "failed_precondition"
+            assert run.halt_reason == "judge_unset — x"
 
 
 class TestDirector:

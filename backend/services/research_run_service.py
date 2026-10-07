@@ -65,6 +65,12 @@ to avoid, whether tonight should prefer retrieval knobs or code.
 VALID_MODES = ("unified", "rag_tuning", "code_tuning")
 SWARM_POLL_S = 15
 SI_PREFLIGHT_CAP_S = 600  # 10 min — snapshot_pytest is usually far cheaper
+HALT_REASON_MAX = 200  # ResearchRun.halt_reason column width
+
+
+def _clip(text: str, limit: int) -> str:
+    text = text or ""
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 class ResearchRunService:
@@ -80,6 +86,12 @@ class ResearchRunService:
         """Create a ResearchRun row and enqueue the Celery owner task.
 
         mode: unified (default) | rag_tuning | code_tuning
+        trigger: manual | nightly. Stored on the row; nightly runs also
+        require an independent judge model.
+
+        Preconditions are checked here, before anything is queued. A refused
+        run is recorded as `failed_precondition` with every reason, and the
+        result carries `not_run: True` (HTTP 422 at the API).
         """
         from backend.models import ResearchRun, db
 
@@ -99,9 +111,12 @@ class ResearchRunService:
             gate = self._code_gate_error()
             # unified degrades (code half skipped later); code-only refuses.
             if gate and mode == "code_tuning":
-                return {"error": gate}
+                return {"error": gate, "not_run": True, "reasons": [gate]}
 
         run_tag = f"{mode}-{utcnow().strftime('%Y%m%d-%H%M%S')}"
+        if ResearchRun.query.filter_by(run_tag=run_tag).first() is not None:
+            # A refused run keeps its row, so a retry in the same second needs its own tag.
+            run_tag = f"{run_tag}-{uuid.uuid4().hex[:4]}"
         run = ResearchRun(
             id=str(uuid.uuid4()),
             run_tag=run_tag,
@@ -109,9 +124,30 @@ class ResearchRunService:
             status="pending",
             wall_clock_budget_s=int(budget_hours * 3600),
             program_snapshot=self._load_program(),
+            promotions={"trigger": trigger},
         )
         db.session.add(run)
         db.session.commit()
+
+        from backend.services.rag_autoresearch_service import get_autoresearch_service
+        reasons, warnings = self._precondition_failures(
+            get_autoresearch_service(), trigger=trigger,
+        )
+        if reasons:
+            self._refuse(run, reasons, warnings)
+            logger.warning(f"Research run {run_tag} not run ({trigger}): "
+                           f"{'; '.join(reasons)}")
+            return {
+                "error": "; ".join(reasons),
+                "not_run": True,
+                "reasons": reasons,
+                "warnings": warnings,
+                "run": run.to_dict(),
+            }
+        if warnings:
+            meta = self._meta(run)
+            meta["warnings"] = warnings
+            self._save_meta(run, meta)
 
         # Clear any stale kill flag from a previous stop.
         self._set_kill(False)
@@ -119,19 +155,34 @@ class ResearchRunService:
         try:
             self._enqueue_execute_run(run.id)
         except Exception as e:
-            run.status = "failed_precondition"
-            run.halt_reason = f"celery_unreachable ({e.__class__.__name__})"
-            run.ended_at = utcnow()
-            run.report_md = self._write_report(
-                run, [], precondition_failure=run.halt_reason,
-            )
-            db.session.commit()
-            logger.error(f"Research run {run_tag}: {run.halt_reason}")
-            return {"error": run.halt_reason, "run": run.to_dict()}
+            reason = f"celery_unreachable ({e.__class__.__name__})"
+            self._refuse(run, [reason], warnings)
+            logger.error(f"Research run {run_tag}: {reason}")
+            return {"error": reason, "not_run": True, "reasons": [reason],
+                    "run": run.to_dict()}
 
         logger.info(f"Research run {run_tag} kicked off ({trigger}, "
                     f"mode {mode}, budget {budget_hours:.1f}h) via celery")
-        return {"status": "started", "run": run.to_dict()}
+        return {"status": "started", "run": run.to_dict(), "warnings": warnings}
+
+    def _refuse(self, run, reasons: list, warnings: list = None) -> None:
+        """Close a run that did not start: every reason in the report, the
+        first ones in halt_reason (the column holds 200 characters)."""
+        from backend.models import db
+        meta = self._meta(run)
+        meta["precondition_reasons"] = list(reasons)
+        if warnings:
+            meta["warnings"] = list(warnings)
+        meta.pop("current", None)
+        run.promotions = meta
+        run.status = "failed_precondition"
+        run.halt_reason = _clip("; ".join(reasons), HALT_REASON_MAX)
+        run.ended_at = utcnow()
+        run.report_md = self._write_report(
+            run, [], precondition_failure=reasons, warnings=warnings,
+        )
+        db.session.commit()
+        self._emit_run_complete(run)
 
     # ---- director / code-tuning -----------------------------------------
 
@@ -398,23 +449,34 @@ class ResearchRunService:
         if run is None:
             logger.error(f"Research run {run_id} vanished before start")
             return
+        if run.status != "pending":
+            # A redelivered task (the broker re-sends an unacked task after its
+            # visibility timeout) must not run a finished run a second time.
+            logger.warning(f"Research run {run.run_tag} is {run.status}, not pending; "
+                           "not executing it again")
+            return
         svc = get_autoresearch_service()
         mode = run.mode or "rag_tuning"
+        trigger = self._meta(run).get("trigger") or "manual"
 
-        ok, reason = self._check_preconditions(svc)
+        ok, reason = self._check_preconditions(svc, trigger=trigger)
         if not ok:
-            run.status = "failed_precondition"
-            run.halt_reason = reason
-            run.ended_at = utcnow()
-            run.report_md = self._write_report(run, [], precondition_failure=reason)
-            db.session.commit()
-            self._emit_run_complete(run)
+            self._refuse(run, reason.split("; "))
             logger.error(f"Research run {run.run_tag}: {reason}")
             return
 
-        run.status = "running"
-        run.started_at = utcnow()
+        # Claim the row: of two deliveries racing here, only one moves it on.
+        claimed = (
+            ResearchRun.query
+            .filter_by(id=run_id, status="pending")
+            .update({"status": "running", "started_at": utcnow()},
+                    synchronize_session=False)
+        )
         db.session.commit()
+        if not claimed:
+            logger.warning(f"Research run {run.run_tag} was claimed by another worker")
+            return
+        db.session.refresh(run)
         self._running_run_id = run_id
 
         t0 = time.time()
@@ -669,26 +731,70 @@ class ResearchRunService:
 
     # ---- preconditions / plumbing -------------------------------------
 
-    def _check_preconditions(self, svc) -> tuple:
-        """Fail loudly, never degrade. Returns (ok, reason)."""
+    def _precondition_failures(self, svc, trigger: str = "manual") -> tuple:
+        """Every reason a run cannot start, and warnings that do not stop it.
+
+        Returns (reasons, warnings), each a list of "code — explanation"
+        strings. Fail loudly, never degrade: a run on these conditions only
+        produces noise. The judge check refuses nightly runs and warns on
+        manual ones.
+        """
+        reasons, warnings = [], []
         # 1. Ollama reachable? (The old loop degraded to random.choice noise.)
         try:
             import requests
             from backend.config import OLLAMA_BASE_URL
             resp = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5)
             if resp.status_code != 200:
-                return False, f"ollama_unreachable (HTTP {resp.status_code})"
+                reasons.append(f"ollama_unreachable (HTTP {resp.status_code})")
         except Exception as e:
-            return False, f"ollama_unreachable ({e.__class__.__name__}) — start Ollama and re-kick"
-        # 2. Corpus + eval pairs (same gates as the loop, surfaced with names).
+            reasons.append(f"ollama_unreachable ({e.__class__.__name__}) — start Ollama and re-kick")
+        # 2. Corpus and eval pairs, each surfaced with its own name.
+        harness = svc.eval_harness
         try:
-            if not svc.eval_harness.has_sufficient_corpus():
-                return False, "insufficient_corpus"
-            if not svc.eval_harness._get_active_eval_pairs():
-                return False, "no_eval_pairs — POST /api/autoresearch/eval-pairs/regenerate first"
+            if not harness.has_sufficient_corpus():
+                from backend.config import AUTORESEARCH_MIN_CORPUS_SIZE
+                reasons.append(
+                    f"insufficient_corpus — {harness.text_document_count()} indexed text "
+                    f"documents, {AUTORESEARCH_MIN_CORPUS_SIZE} needed")
         except Exception as e:
-            return False, f"prerequisite_check_failed ({e})"
-        return True, ""
+            reasons.append(f"prerequisite_check_failed ({e})")
+        try:
+            sources = harness.eval_source_status()
+            active = int(sources.get("active") or 0)
+            not_indexed = int(sources.get("not_indexed") or 0)
+            if active == 0:
+                reasons.append("no_eval_pairs — regenerate eval pairs first")
+            elif not_indexed:
+                by_status = ", ".join(
+                    f"{status}: {n}" for status, n in sorted(sources["by_status"].items())
+                    if status != "INDEXED")
+                reasons.append(
+                    f"eval_sources_not_indexed — {not_indexed} of {active} active eval "
+                    f"pairs come from documents that are not indexed ({by_status}) — "
+                    "index them or regenerate")
+        except Exception as e:
+            reasons.append(f"prerequisite_check_failed ({e})")
+        # 3. A model grading its own answers.
+        try:
+            judge = harness.judge_status()
+        except Exception:
+            judge = {}
+        problem = judge.get("problem")
+        if problem:
+            answer = judge.get("answer_model") or "the active model"
+            text = (
+                f"judge_unset — no autoresearch judge model is set, so {answer} grades its own answers"
+                if problem == "judge_unset" else
+                f"judge_same_as_answer_model — the judge model is {answer}, which also writes the answers"
+            )
+            (reasons if trigger == "nightly" else warnings).append(text)
+        return reasons, warnings
+
+    def _check_preconditions(self, svc, trigger: str = "manual") -> tuple:
+        """Returns (ok, reason) with every failing reason joined by '; '."""
+        reasons, _warnings = self._precondition_failures(svc, trigger=trigger)
+        return (not reasons), "; ".join(reasons)
 
     def _enqueue_execute_run(self, run_id: str) -> None:
         from backend.celery_app import celery
@@ -804,17 +910,26 @@ class ResearchRunService:
     # ---- report --------------------------------------------------------
 
     def _write_report(self, run, ledger: list, promotion_note: str = None,
-                      precondition_failure: str = None) -> str:
-        """The morning report: what happened tonight, in plain markdown."""
+                      precondition_failure=None, warnings: list = None) -> str:
+        """The morning report: what happened tonight, in plain markdown.
+
+        precondition_failure: a reason string or a list of them; the report
+        then says the run did not run and lists every reason.
+        """
         lines = [f"# Research Run — {run.run_tag}", ""]
 
         if precondition_failure:
+            reasons = (precondition_failure if isinstance(precondition_failure, (list, tuple))
+                       else [precondition_failure])
+            lines += ["**DID NOT RUN**:", ""]
+            lines += [f"- `{r}`" for r in reasons]
             lines += [
-                f"**DID NOT RUN**: `{precondition_failure}`",
                 "",
-                "Fix the precondition and kick off again — the run refused to "
-                "start rather than produce noise (no random-fallback mode).",
+                "Fix these and start again. The run refused to start rather "
+                "than produce scores that measure nothing.",
             ]
+            if warnings:
+                lines += ["", "**Warnings**:", ""] + [f"- {w}" for w in warnings]
             return "\n".join(lines)
 
         try:

@@ -8,6 +8,14 @@ DEFAULT_START_BUDGET_HOURS = 6.0
 autoresearch_bp = Blueprint("autoresearch", __name__, url_prefix="/api/autoresearch")
 
 
+def _kickoff_status(result: dict) -> int:
+    """202 started; 422 refused on a precondition (the reasons are in the
+    body and the run row); 409 another run is in progress."""
+    if result.get("not_run"):
+        return 422
+    return 409 if "error" in result else 202
+
+
 @autoresearch_bp.route("/status", methods=["GET"])
 def get_status():
     svc = get_autoresearch_service()
@@ -30,8 +38,7 @@ def start_loop():
         budget_hours=hours,
         trigger="manual",
     )
-    status = 409 if "error" in result else 202
-    return jsonify(result), status
+    return jsonify(result), _kickoff_status(result)
 
 
 def _set_kill_flag(value: str) -> None:
@@ -292,8 +299,7 @@ def create_run():
         budget_hours=body.get("budget_hours"),
         trigger="manual",
     )
-    status = 409 if "error" in result else 202
-    return jsonify(result), status
+    return jsonify(result), _kickoff_status(result)
 
 
 @autoresearch_bp.route("/runs", methods=["GET"])

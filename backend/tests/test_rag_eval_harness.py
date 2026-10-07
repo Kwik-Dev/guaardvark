@@ -56,17 +56,84 @@ class TestEvalPairGeneration:
         from backend.config import AUTORESEARCH_MIN_CORPUS_SIZE
         with app.app_context():
             for i in range(AUTORESEARCH_MIN_CORPUS_SIZE + 5):
-                db.session.add(Document(filename=f"img_{i}.png", path=f"/x/img_{i}.png", content=None))
+                db.session.add(Document(filename=f"img_{i}.png", path=f"/x/img_{i}.png",
+                                        content=None, index_status="INDEXED"))
             db.session.commit()
             harness = RAGEvalHarness()
             assert harness.text_document_count() == 0
             assert harness.has_sufficient_corpus() is False
             for i in range(AUTORESEARCH_MIN_CORPUS_SIZE):
                 db.session.add(Document(filename=f"doc_{i}.md", path=f"/x/doc_{i}.md",
-                                        content="A paragraph of real text. " * 10))
+                                        content="A paragraph of real text. " * 10,
+                                        index_status="INDEXED"))
             db.session.commit()
             assert harness.text_document_count() == AUTORESEARCH_MIN_CORPUS_SIZE
             assert harness.has_sufficient_corpus() is True
+
+    def test_documents_that_are_not_indexed_are_not_corpus(self, app):
+        """Text that never reached the index cannot be retrieved, so it does
+        not count toward the corpus or feed eval questions."""
+        from backend.models import Document
+        from backend.config import AUTORESEARCH_MIN_CORPUS_SIZE
+        text = "A paragraph of real text about pumps and valves. " * 10
+        with app.app_context():
+            for status in ("PENDING", "INDEXING", "ERROR"):
+                for i in range(AUTORESEARCH_MIN_CORPUS_SIZE):
+                    db.session.add(Document(filename=f"{status}_{i}.md",
+                                            path=f"/x/{status}_{i}.md",
+                                            content=text, index_status=status))
+            db.session.commit()
+            harness = RAGEvalHarness()
+            assert harness.text_document_count() == 0
+            assert harness.has_sufficient_corpus() is False
+            assert harness.generate_eval_set(target_count=5) == []
+
+    def test_eval_set_is_cut_only_from_indexed_documents(self, app):
+        from backend.models import Document
+        from backend.config import AUTORESEARCH_MIN_CORPUS_SIZE
+        text = "A paragraph of real text about pumps and valves. " * 10
+        with app.app_context():
+            indexed_ids = set()
+            for i in range(AUTORESEARCH_MIN_CORPUS_SIZE):
+                d = Document(filename=f"in_{i}.md", path=f"/x/in_{i}.md",
+                             content=text, index_status="INDEXED")
+                db.session.add(d)
+                db.session.flush()
+                indexed_ids.add(d.id)
+            for i in range(AUTORESEARCH_MIN_CORPUS_SIZE):
+                db.session.add(Document(filename=f"pend_{i}.md", path=f"/x/pend_{i}.md",
+                                        content=text, index_status="PENDING"))
+            db.session.commit()
+            harness = RAGEvalHarness()
+            with patch.object(harness, "_chunk_document", side_effect=lambda d: [d.content]), \
+                 patch.object(harness, "generate_eval_pair",
+                              side_effect=lambda *a, **k: {"question": "q", "expected_answer": "a"}):
+                pairs = harness.generate_eval_set(target_count=50)
+            assert pairs
+            assert {p["source_doc_id"] for p in pairs} <= indexed_ids
+
+    def test_eval_source_status_counts_pairs_by_document_state(self, app):
+        from backend.models import Document, EvalPair
+        with app.app_context():
+            indexed = Document(filename="a.md", path="/x/a.md", index_status="INDEXED")
+            pending = Document(filename="b.md", path="/x/b.md", index_status="PENDING")
+            db.session.add_all([indexed, pending])
+            db.session.flush()
+            for _ in range(2):
+                db.session.add(EvalPair(question="q", expected_answer="a",
+                                        source_doc_id=indexed.id, is_active=True))
+            for _ in range(3):
+                db.session.add(EvalPair(question="q", expected_answer="a",
+                                        source_doc_id=pending.id, is_active=True))
+            db.session.add(EvalPair(question="q", expected_answer="a", is_active=True))
+            db.session.add(EvalPair(question="q", expected_answer="a",
+                                    source_doc_id=pending.id, is_active=False))
+            db.session.commit()
+            status = RAGEvalHarness().eval_source_status()
+        assert status == {
+            "active": 6, "indexed": 2, "not_indexed": 4,
+            "by_status": {"INDEXED": 2, "PENDING": 3, "NO_SOURCE": 1},
+        }
 
     def test_raw_binary_content_is_not_text(self):
         """Imported .pdf/.docx rows carry raw bytes in `content`; not corpus."""
@@ -203,6 +270,32 @@ class TestRetrievalScoringMatchesPrefixedChunks:
         retr = RAGEvalHarness()._score_retrieval(pair, [{"text": self.CHUNK, "metadata": {}}])
         assert retr["hit_rate_at_k"] == 1.0
         assert retr["mrr"] == 1.0
+
+
+class TestJudgeIndependence:
+    def _status(self, app, judge, active):
+        from backend.models import Setting
+        with app.app_context():
+            if judge is not None:
+                db.session.add(Setting(key="autoresearch_judge_model", value=judge))
+                db.session.commit()
+            with patch("backend.utils.llm_service.get_saved_active_model_name",
+                       return_value=active):
+                return RAGEvalHarness().judge_status()
+
+    def test_unset_judge_is_not_independent(self, app):
+        st = self._status(app, None, "gemma4:12b")
+        assert st["problem"] == "judge_unset" and st["independent"] is False
+        assert st["answer_model"] == "gemma4:12b"
+
+    def test_judge_naming_the_answer_model_is_not_independent(self, app):
+        st = self._status(app, "gemma4", "gemma4:latest")
+        assert st["problem"] == "judge_same_as_answer_model"
+
+    def test_different_judge_is_independent(self, app):
+        st = self._status(app, "qwen3:14b", "gemma4:12b")
+        assert st["independent"] is True and st["problem"] is None
+        assert st["configured"] == "qwen3:14b"
 
 
 class TestWorkerLLMResolution:
