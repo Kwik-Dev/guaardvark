@@ -550,7 +550,9 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
             consent={tc.consent}
             consentImage={tc.consentImage}
             consentPrompt={tc.consentPrompt}
-            onApproval={(approved) => chatService.sendToolApproval(sessionId, approved)}
+            onApproval={(approved, scope) =>
+              chatService.sendToolApproval(sessionId, approved, scope ? { scope, tools: [tc.tool] } : undefined)
+            }
           />
         ))}
 
