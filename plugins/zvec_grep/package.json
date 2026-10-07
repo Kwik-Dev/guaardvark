@@ -8,6 +8,11 @@
     "@zvec/zvec-grep": "0.2.2"
   },
   "overrides": {
-    "sharp": "^0.35.0"
+    "sharp": "^0.35.5",
+    "simple-git": "^4.0.2",
+    "@modelcontextprotocol/client": "2.3.1",
+    "@modelcontextprotocol/core": "2.3.1",
+    "@modelcontextprotocol/server": "2.3.1",
+    "@modelcontextprotocol/node": "2.1.1"
   }
 }
