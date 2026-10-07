@@ -133,6 +133,66 @@ def rag_entities(
         raise typer.Exit(1)
 
 
+def _score(value) -> str:
+    return f"{value:.3f}" if isinstance(value, (int, float)) else "—"
+
+
+def _autoresearch_lines(st: dict) -> list:
+    """Panel lines for `rag eval`, from GET /api/autoresearch/status.
+
+    Scores are the eval judge's 1-5 composite; health checks (pytest
+    snapshots) are not experiments and "promoted" counts configs put live.
+    """
+    running = bool(st.get("running"))
+    auto = bool(st.get("auto_enabled"))
+    style = "llx.success" if running else "llx.dim"
+    lines = [f"[{style}]{ICON_SUCCESS if running else '  '} "
+             f"{'Running' if running else 'Idle'}[/{style}] · nightly auto-start "
+             f"{'on' if auto else 'off'}"]
+
+    baseline = st.get("baseline_score")
+    if baseline:
+        when = st.get("baseline_measured_at")
+        lines.append(f"[llx.kv.key]Baseline:[/llx.kv.key]       {_score(baseline)} (1-5)"
+                     + (f", measured {when}" if when else ", measurement time not recorded"))
+    else:
+        lines.append("[llx.kv.key]Baseline:[/llx.kv.key]       not measured")
+
+    health = st.get("total_health_checks") or 0
+    lines.append(f"[llx.kv.key]Experiments:[/llx.kv.key]    {st.get('total_experiments', 0)} · "
+                 f"{st.get('total_improvements', 0)} promoted"
+                 + (f" · {health} health checks not counted" if health else ""))
+
+    pairs = st.get("eval_pairs") or {}
+    if pairs:
+        text = f"{pairs.get('active', 0)} active"
+        if pairs.get("not_indexed"):
+            text = f"[llx.warning]{text}, {pairs['not_indexed']} from documents not indexed[/llx.warning]"
+        lines.append(f"[llx.kv.key]Eval pairs:[/llx.kv.key]     {text}")
+
+    judge = st.get("judge") or {}
+    if judge:
+        configured = judge.get("configured") or "not set"
+        if judge.get("independent") is False:
+            lines.append(f"[llx.kv.key]Judge:[/llx.kv.key]          [llx.warning]{ICON_WARNING} {configured}: "
+                         f"{judge.get('answer_model') or 'the chat model'} grades its own answers; "
+                         "nightly runs refuse[/llx.warning]")
+        else:
+            lines.append(f"[llx.kv.key]Judge:[/llx.kv.key]          {configured}")
+
+    run = st.get("last_run") or {}
+    if run:
+        if run.get("status") == "failed_precondition":
+            outcome = f"[llx.warning]not run: {run.get('halt_reason') or 'no reason recorded'}[/llx.warning]"
+        else:
+            outcome = (f"{run.get('status')}, baseline {_score(run.get('baseline_score'))} → latest "
+                       f"{_score(run.get('latest_score'))} (best {_score(run.get('best_tried_score'))})")
+        lines.append(f"[llx.kv.key]Last run:[/llx.kv.key]       {run.get('run_tag')} — {outcome}")
+    else:
+        lines.append("[llx.kv.key]Last run:[/llx.kv.key]       never")
+    return lines
+
+
 @rag_app.command("eval")
 def rag_eval(
     server: str = typer.Option(None, "--server", "-s"),
@@ -151,25 +211,8 @@ def rag_eval(
             output.print_json({"status": "success", "data": status_data})
             return
 
-        enabled = status_data.get("enabled", False)
-        last_run = status_data.get("last_run", "Never")
-        experiments = status_data.get("completed_experiments", 0)
-        best_score = status_data.get("best_score")
-        current_score = status_data.get("current_score")
-
-        lines = []
-        e_style = "llx.success" if enabled else "llx.dim"
-        lines.append(f"[{e_style}]{ICON_SUCCESS if enabled else '  '} Autoresearch {'Enabled' if enabled else 'Disabled'}[/{e_style}]")
-        lines.append(f"[llx.kv.key]Last Run:[/llx.kv.key]       {last_run}")
-        lines.append(f"[llx.kv.key]Experiments:[/llx.kv.key]    {experiments}")
-
-        if current_score is not None:
-            score_color = "llx.success" if current_score > 0.7 else ("llx.warning" if current_score > 0.4 else "llx.error")
-            lines.append(f"[llx.kv.key]Current Score:[/llx.kv.key]  [{score_color}]{current_score:.3f}[/{score_color}]")
-        if best_score is not None:
-            lines.append(f"[llx.kv.key]Best Score:[/llx.kv.key]     {best_score:.3f}")
-
-        console.print(make_panel("\n".join(lines), title="RAG Autoresearch"))
+        console.print(make_panel("\n".join(_autoresearch_lines(status_data)),
+                                 title="RAG Autoresearch"))
 
     except LlxConnectionError as e:
         output.print_error(str(e), code="CONNECTION_ERROR")

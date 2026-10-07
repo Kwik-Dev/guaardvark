@@ -251,13 +251,16 @@ class RAGAutoresearchService:
                 logger.debug(f"timing persist skipped: {e}")
 
     def run_single_experiment(self, run_tag: str = None,
-                              promote_mode: str = "active") -> dict:
+                              promote_mode: str = "active",
+                              on_proposal=None) -> dict:
         """Execute one experiment cycle. Returns result dict.
 
         run_tag stamps the ledger row with the owning ResearchRun (nightly
         runs). promote_mode: "active" promotes winners live immediately
         (legacy /start behavior); "candidate" stores winners inactive for the
-        run-end A/B confirmation to activate.
+        run-end A/B confirmation to activate. on_proposal(proposal) is called
+        once the change to try is chosen, before it is measured; the research
+        run uses it to show the parameter under test from another process.
         """
         config = self._load_config()
         from backend.services.rag_experiment_agent import MAX_PHASE
@@ -292,6 +295,11 @@ class RAGAutoresearchService:
         experiment_id = str(uuid.uuid4())
         self._current_experiment_id = experiment_id
         self._current_parameter = proposal.get("parameter")
+        if on_proposal is not None:
+            try:
+                on_proposal(proposal)
+            except Exception as e:
+                logger.debug(f"on_proposal callback failed: {e}")
 
         param_name = proposal["parameter"]
         old_value = params.get(param_name)
@@ -867,6 +875,14 @@ class RAGAutoresearchService:
         except Exception:
             pass
         running = bool(self._running or active_run)
+        current_parameter = self._current_parameter
+        if current_parameter is None and active_run:
+            # A research run executes in the Celery worker, so this process
+            # only sees its current experiment through the run's metadata.
+            meta = active_run.get("promotions")
+            current = meta.get("current") if isinstance(meta, dict) else None
+            if isinstance(current, dict):
+                current_parameter = current.get("parameter")
         eval_pairs = None
         try:
             sources = self.eval_harness.eval_source_status()
@@ -885,7 +901,7 @@ class RAGAutoresearchService:
             "paused": self._paused,
             "auto_enabled": self._auto_enabled(),
             "current_experiment_id": self._current_experiment_id,
-            "current_parameter": self._current_parameter,
+            "current_parameter": current_parameter,
             "phase": config.get("phase", 1),
             "baseline_score": config.get("baseline_score", 0.0),
             "baseline_measured_at": config.get("baseline_measured_at"),

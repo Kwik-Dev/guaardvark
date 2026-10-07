@@ -247,6 +247,27 @@ class TestLedgerProvenance:
         assert metrics["judged_pairs"] == 10
         assert metrics["active_pairs"] == 11
 
+    def test_on_proposal_hears_the_change_before_it_is_measured(self, app):
+        with app.app_context():
+            svc = RAGAutoresearchService()
+            heard = []
+
+            def evaluate(*a, **k):
+                assert heard, "on_proposal must run before the eval"
+                return {"composite_score": 2.9, "num_pairs": 11, "judged_pairs": 11,
+                        "details": [{}], "parse_fail_crash": False}
+            with patch.object(svc.agent, "propose_experiment", return_value={
+                     "parameter": "top_k", "new_value": 8, "hypothesis": "t", "source": "tpe"}), \
+                 patch.object(svc.eval_harness, "run_retrieval_eval", return_value={"num_scored": 0}), \
+                 patch.object(svc.eval_harness, "run_full_eval", side_effect=evaluate), \
+                 patch.object(svc, "_load_config", return_value={
+                     "params": {"top_k": 5}, "baseline_score": 3.0, "phase": 1,
+                     "phase_plateau_count": 0}), \
+                 patch.object(svc, "_save_config"), \
+                 patch.object(svc, "_log_experiment"):
+                svc.run_single_experiment(on_proposal=heard.append)
+        assert heard[0]["parameter"] == "top_k" and heard[0]["new_value"] == 8
+
     def test_judge_recorded_on_a_crash_too(self, app):
         from backend.services.rag_eval_harness import LLMUnavailableError
         with app.app_context():

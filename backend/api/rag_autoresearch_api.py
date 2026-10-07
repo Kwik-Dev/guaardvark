@@ -243,7 +243,8 @@ def log_experiment():
 
     Arms run as coding agents in worktrees; this is how their results land in
     the same ExperimentRun ledger the RAG-tuning loop uses, so one morning
-    report covers both engines.
+    report covers both engines. The caller supplies its own scores, so every
+    row written here is marked self_reported and never counts as measured.
     """
     body = request.get_json(silent=True) or {}
     if not body.get("parameter") or body.get("status") not in ("keep", "discard", "crash"):
@@ -260,6 +261,7 @@ def log_experiment():
     retr = body.get("retrieval_metrics") if isinstance(body.get("retrieval_metrics"), dict) else {}
     retr = dict(retr)
     retr.setdefault("layer", "code" if source == "code_arm" else source)
+    retr["self_reported"] = True
     pytest_ok = body.get("pytest_passed", True)
     if status == "keep" and source in ("code_arm", "heal"):
         retr_up = (

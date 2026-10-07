@@ -763,6 +763,67 @@ class TestLedgerScores:
         assert run["best_score"] == 3.0  # the stored column is left as it was
 
 
+class TestCurrentExperimentIsVisible:
+    def test_status_reads_the_parameter_under_test_from_the_run(self, app, tmp_path, monkeypatch):
+        monkeypatch.setenv("GUAARDVARK_ROOT", str(tmp_path))
+        with app.app_context():
+            db.session.add(ResearchRun(
+                run_tag="t-current", mode="rag_tuning", status="running",
+                started_at=utcnow(), wall_clock_budget_s=3600,
+                promotions={"current": {"parameter": "hybrid_search_alpha",
+                                        "new_value": "0.5"}}))
+            db.session.commit()
+            with patch("backend.utils.llm_service.get_saved_active_model_name",
+                       return_value="gemma4:12b"):
+                st = RAGAutoresearchService().get_status()
+        assert st["current_parameter"] == "hybrid_search_alpha"
+
+    def test_the_slice_records_and_then_clears_the_current_change(self, app):
+        with app.app_context():
+            run = ResearchRun(run_tag="t-cur2", mode="rag_tuning", status="running",
+                              wall_clock_budget_s=3600, started_at=utcnow())
+            db.session.add(run)
+            db.session.commit()
+            svc_run = ResearchRunService()
+            auto_svc = MagicMock()
+            auto_svc._load_config.return_value = {"params": {}, "phase": 1,
+                                                  "phase_plateau_count": 0}
+            auto_svc.eval_harness.avg_pair_seconds = None
+            auto_svc.eval_harness.run_full_eval.return_value = {
+                "composite_score": 3.0, "num_pairs": 4, "judged_pairs": 4,
+                "parse_fail_crash": False}
+            seen = {}
+
+            def experiment(**kwargs):
+                kwargs["on_proposal"]({"parameter": "top_k", "new_value": 6})
+                seen.update(db.session.get(ResearchRun, run.id).promotions["current"])
+                svc_run._set_kill(True)
+                return {"experiment_id": "x", "parameter": "top_k", "status": "discard",
+                        "composite_score": 2.9, "retrieval_metrics": {"fidelity": 1}}
+            auto_svc.run_single_experiment.side_effect = experiment
+            with patch("backend.services.research_run_service.time.sleep"), \
+                 patch("backend.utils.gpu_check.gpu_busy", return_value=False):
+                svc_run._run_rag_slice(run, auto_svc, time.time(), 3600)
+            assert seen["parameter"] == "top_k" and seen["new_value"] == "6"
+            db.session.refresh(run)
+            assert "current" not in run.promotions
+
+    def test_posted_experiments_are_marked_self_reported(self, app):
+        from backend.models import ExperimentRun
+        from backend.api.rag_autoresearch_api import autoresearch_bp
+        if "autoresearch" not in app.blueprints:
+            app.register_blueprint(autoresearch_bp)
+        with app.test_client() as client:
+            res = client.post("/api/autoresearch/experiments", json={
+                "parameter": "chunker", "new_value": "smarter dedup", "status": "keep",
+                "source": "code_arm", "composite_score": 3.6, "baseline_score": 3.0,
+                "run_tag": "t-self",
+            })
+        assert res.status_code == 201
+        row = db.session.get(ExperimentRun, res.get_json()["id"])
+        assert row.retrieval_metrics["self_reported"] is True
+
+
 class TestExecuteRunRunsOnce:
     def test_a_run_that_is_not_pending_is_left_alone(self, app):
         with app.app_context():

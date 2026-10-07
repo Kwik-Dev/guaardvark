@@ -678,8 +678,10 @@ class ResearchRunService:
             except Exception:
                 pass
 
-            result = svc.run_single_experiment(run_tag=run.run_tag,
-                                               promote_mode="candidate")
+            result = svc.run_single_experiment(
+                run_tag=run.run_tag, promote_mode="candidate",
+                on_proposal=lambda proposal: self._note_current(run, proposal),
+            )
             if isinstance(result.get("retrieval_metrics"), dict):
                 result["retrieval_metrics"].setdefault("layer", "params")
             elif result.get("retrieval_metrics") is None:
@@ -718,7 +720,21 @@ class ResearchRunService:
 
             time.sleep(AUTORESEARCH_MIN_EXPERIMENT_INTERVAL)
 
+        meta = self._meta(run)
+        if meta.pop("current", None) is not None:
+            self._save_meta(run, meta)
         return ledger, candidate_ids, halt_reason, status_at_end
+
+    def _note_current(self, run, proposal: dict) -> None:
+        """Record the change under test in the run metadata, where /status in
+        the web process can read it while the worker measures it."""
+        meta = self._meta(run)
+        meta["current"] = {
+            "parameter": proposal.get("parameter"),
+            "new_value": str(proposal.get("new_value")),
+            "started_at": utcnow().isoformat(),
+        }
+        self._save_meta(run, meta)
 
     def _measure_baseline(self, svc, cfg: dict) -> dict:
         """Score the current params on the full active eval set, now.
