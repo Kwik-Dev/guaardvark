@@ -7,7 +7,9 @@ that ``reproduce`` emits a body equal to what was submitted.
 
 The two generators are faked at the service seam (the sidecar proxy and the ComfyUI
 generator), so nothing spends GPU. The database is the e2e scratch Postgres; the tier
-refuses to boot without it.
+refuses to boot without it. The scratch DB is session-scoped and shared, so a cleanup
+fixture empties the two record tables around each test — the tier must be re-runnable
+without truncating the database by hand.
 """
 from __future__ import annotations
 
@@ -18,6 +20,25 @@ import pytest
 from llx.main import app
 
 pytestmark = pytest.mark.e2e
+
+
+@pytest.fixture(autouse=True)
+def _clean_records(inprocess_backend):
+    from backend.models import AudioGeneration, InfographicGeneration, db
+
+    def wipe():
+        with inprocess_backend.app.app_context():
+            db.session.query(AudioGeneration).delete()
+            db.session.query(InfographicGeneration).delete()
+            db.session.commit()
+
+    wipe()
+    yield
+    wipe()
+
+
+def _find(rows, **inputs):
+    return [r for r in rows if all(r.get("inputs", {}).get(k) == v for k, v in inputs.items())]
 
 
 def test_audio_generation_is_recorded_and_reproduced(inprocess_backend, cli_runner,
@@ -41,11 +62,11 @@ def test_audio_generation_is_recorded_and_reproduced(inprocess_backend, cli_runn
     jobs = cli_runner.invoke(app, ["audio", "jobs", "--json"])
     assert jobs.exit_code == 0, jobs.output
     rows = json.loads(jobs.output)["data"]["generations"]
-    assert len(rows) == 1
-    row = rows[0]
+    matched = _find(rows, style_prompt="lo-fi e2e probe")
+    assert len(matched) == 1, rows
+    row = matched[0]
     assert row["kind"] == "music" and row["status"] == "completed"
     assert row["inputs"] == submitted
-    assert row["inputs"]["style_prompt"] == "lo-fi e2e probe"
     assert inprocess_backend.called("GET", "/api/audio-foundry/generations")
 
     # reproduce rebuilds the same body and sends nothing by default.
@@ -77,10 +98,10 @@ def test_infographic_generation_is_recorded_and_reproduced(inprocess_backend, cl
 
     jobs = cli_runner.invoke(app, ["infographic", "jobs", "--json"])
     rows = json.loads(jobs.output)["data"]["generations"]
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["inputs"]["scene"] == "e2e bees" and row["seed"] == 42
-    assert row["filename"] == "info_e2e.png"
+    matched = _find(rows, scene="e2e bees")
+    assert len(matched) == 1, rows
+    row = matched[0]
+    assert row["seed"] == 42 and row["filename"] == "info_e2e.png"
 
     rep = cli_runner.invoke(app, ["infographic", "reproduce", str(row["id"]), "--json"])
     payload = json.loads(rep.output)
