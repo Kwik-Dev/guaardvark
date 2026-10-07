@@ -836,8 +836,9 @@ PIPER_VOICES = {
 DEFAULT_VOICE = "libritts"
 
 # Supported audio formats
+# ogg: Firefox's MediaRecorder records Ogg/Opus; faster-whisper decodes it like webm.
 SUPPORTED_AUDIO_FORMATS = {
-    "mp3", "mp4", "mpeg", "mpga", "m4a", "wav", "webm"
+    "mp3", "mp4", "mpeg", "mpga", "m4a", "wav", "webm", "ogg"
 }
 
 def allowed_audio_file(filename):
@@ -1100,14 +1101,25 @@ def _transcribe_via_whisper_server(audio_path: str) -> str:
 
 @voice_bp.route("/speech-to-text", methods=["POST"])
 def speech_to_text():
-    """Convert uploaded audio file to text using local Whisper.cpp with performance optimizations."""
+    """Transcribe one uploaded recording on this machine.
+
+    The voice session sends one request per utterance, so every way out of
+    the handler, silence and errors included, gives the rate-limit slot back.
+    """
     logger.info("Voice API: Received speech-to-text request (LOCAL) - PERFORMANCE OPTIMIZED")
-    
+
     # PERFORMANCE OPTIMIZATION: Rate limiting check
     allowed, message = check_rate_limit(request)
     if not allowed:
         return error_response(f"Rate limit exceeded: {message}", 429, "RATE_LIMITED")
-    
+    try:
+        return _speech_to_text_response()
+    finally:
+        release_rate_limit(request)
+
+
+def _speech_to_text_response():
+    """Body of POST /speech-to-text, run while holding a rate-limit slot."""
     # PERFORMANCE OPTIMIZATION: System overload check
     system_status = process_monitor.get_system_status()
     if system_status.get("system_overloaded", False):
@@ -1155,7 +1167,6 @@ def speech_to_text():
                     logger.info(f"Voice API: whisper-server completed in {processing_time:.2f}s")
 
                     if final_text:
-                        release_rate_limit(request)
                         return jsonify({
                             "text": final_text,
                             "transcribed_text": final_text,
@@ -1207,12 +1218,10 @@ def speech_to_text():
                     final_text, processing_time = transcribe_audio_faster(audio_array, model_size=model_id)
                 except SpeechModelMissing as missing:
                     logger.info(f"Voice API: speech model '{missing.model_size}' is not installed")
-                    release_rate_limit(request)
                     return _speech_model_missing_response(missing.model_size)
                 logger.info(f"Voice API: faster-whisper completed in {processing_time:.2f}s")
                 
                 if final_text:
-                    release_rate_limit(request)
                     return jsonify({
                         "text": final_text,
                         "transcribed_text": final_text,

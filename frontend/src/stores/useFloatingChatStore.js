@@ -48,6 +48,13 @@ export const useFloatingChatStore = create(
       isSending: false,
       setIsSending: (val) => set({ isSending: val }),
 
+      // Voice turns from the global mic, sent in order whenever the card is
+      // open and not already waiting on a reply. Not persisted.
+      voiceTurns: [],
+      enqueueVoiceTurn: (turn) => set((s) => ({ voiceTurns: [...s.voiceTurns, turn] })),
+      removeVoiceTurn: (id) =>
+        set((s) => ({ voiceTurns: s.voiceTurns.filter((t) => t.id !== id) })),
+
       error: null,
       setError: (error) => set({ error }),
       clearError: () => set({ error: null }),
