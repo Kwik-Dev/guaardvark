@@ -164,6 +164,32 @@ class TestBudget:
         assert "[BUDGET:" not in llm.calls[0][-1]
 
 
+class TestNativeToolCalling:
+    """A model that takes tools through the API gets neither the list nor the JSON format as text."""
+
+    def _executor(self, agent=None):
+        executor = AgentExecutor(_registry("web_search"), _LLM(), max_iterations=1, agent=agent)
+        executor.coordinator = None
+        executor._native_tools_supported = True
+        return executor
+
+    def test_brain_state_path(self, brain):
+        prompt = self._executor(_agent(["web_search"]))._resolve_system_prompt('Tool: "web_search"')
+        assert "Available Tools" not in prompt
+        assert "RESPONSE FORMAT" not in prompt
+        assert prompt.count(MARKER) == 1
+
+    def test_local_path(self):
+        prompt = self._executor()._resolve_system_prompt('Tool: "web_search"')
+        assert "Available Tools" not in prompt
+        assert "RESPONSE FORMAT" not in prompt
+
+    def test_falling_back_to_the_prompt_path_puts_both_back(self, brain):
+        prompt = self._executor()._resolve_system_prompt('Tool: "web_search"', native=False)
+        assert 'Available Tools:\nTool: "web_search"' in prompt
+        assert "RESPONSE FORMAT" in prompt
+
+
 class TestFactsAndMemories:
     def test_no_empty_facts_line(self, brain):
         llm = _LLM(FINAL)

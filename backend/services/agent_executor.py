@@ -923,6 +923,7 @@ Otherwise, call the next tool needed. Do NOT repeat a tool you already called wi
                     budget=getattr(self, "_budget", None),
                     facts_registry=self.facts_registry,
                     tool_list=tool_schemas,
+                    native=native,
                     agent_name=agent_name,
                     agent_prompt=agent_prompt,
                 )
