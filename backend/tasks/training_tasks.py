@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 
 TRAINING_DIR = Path(os.environ.get('GUAARDVARK_ROOT', '.')) / "training"
 PROCESSED_DIR = TRAINING_DIR / "processed"
+# The transcript parser ships with the training plugin in this checkout.
+PARSER_DIR = Path(__file__).resolve().parents[2] / "plugins" / "training" / "scripts"
 MODELS_DIR = TRAINING_DIR / "models"
 MODELFILES_DIR = Path(os.environ.get('GUAARDVARK_ROOT', '.')) / "data" / "modelfiles"
 
@@ -150,6 +152,15 @@ PIPELINE_PARSE_PROGRESS = (5, 20)
 PIPELINE_TRAIN_PROGRESS = (30, 80)
 
 
+def parsed_datasets_dir() -> Path:
+    """Where parsed transcripts are written, created on first use: the
+    training datasets folder the Add Dataset picker opens in."""
+    from backend.config import STORAGE_DIR
+    path = Path(STORAGE_DIR) / "training" / "datasets"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def _pipeline_emitter(job_id: str, in_pipeline: bool, band: tuple):
     """Progress reporter for a step that also runs inside the full pipeline.
 
@@ -185,10 +196,12 @@ def parse_transcripts_task(self, job_id: str, input_path: str, recursive: bool =
             _update_job_status(job_id, status="running", pipeline_stage="parsing", started_at=utcnow(), celery_task_id=self.request.id)
         emit(0, "Starting transcript parsing...", "start")
 
-        sys.path.insert(0, str(TRAINING_DIR / "scripts"))
+        if str(PARSER_DIR) not in sys.path:
+            sys.path.insert(0, str(PARSER_DIR))
         from transcript_parser import TranscriptParser
-        
-        parser = TranscriptParser(output_dir=str(PROCESSED_DIR))
+
+        out_dir = parsed_datasets_dir()
+        parser = TranscriptParser(output_dir=str(out_dir))
         
         input_path_obj = Path(input_path)
         if not input_path_obj.exists():
@@ -211,7 +224,7 @@ def parse_transcripts_task(self, job_id: str, input_path: str, recursive: bool =
             raise ValueError(f"Invalid input path: {input_path}")
 
         output_filename = f"training_corpus_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
-        output_path = PROCESSED_DIR / output_filename
+        output_path = out_dir / output_filename
 
         emit(90, f"Saving {len(pairs)} training pairs...")
 

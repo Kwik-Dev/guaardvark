@@ -3,7 +3,8 @@ the Training page train on their dataset, and vision runs accept resume.
 
 Seams: the training scripts (finetune_model, finetune_vision, transcript_parser)
 are imported by name at call time, so sys.modules stand-ins reach them; the
-GPU claim is gpu_resource_policy.gpu_session, read at call time."""
+GPU claim is gpu_resource_policy.gpu_session, read at call time; parsed
+transcripts go to parsed_datasets_dir, read at call time."""
 import ast
 import importlib.util
 import json
@@ -34,6 +35,8 @@ def app(tmp_path, monkeypatch):
     db.init_app(app)
     monkeypatch.setattr(tt, "MODELS_DIR", tmp_path / "models")
     monkeypatch.setattr(tt, "PROCESSED_DIR", tmp_path)
+    monkeypatch.setattr(tt, "parsed_datasets_dir", lambda: tmp_path / "datasets")
+    (tmp_path / "datasets").mkdir()
     with app.app_context():
         db.create_all()
         yield app
@@ -191,8 +194,29 @@ def test_on_its_own_the_parser_still_completes_its_job(app, progress, parser, tm
 
     row = _row(job_id)
     assert row.status == "completed"
-    assert json.loads(row.config_json)["pairs_count"] == 60
+    report = json.loads(row.config_json)
+    assert report["pairs_count"] == 60
+    assert Path(report["output_path"]).parent == tmp_path / "datasets"
     assert progress[-1][2] == "complete"
+
+
+def test_the_parser_is_loaded_from_the_training_plugin_where_it_ships(app, progress, tmp_path, monkeypatch):
+    monkeypatch.delitem(sys.modules, "transcript_parser", raising=False)
+    source = _write(tmp_path / "chat.md", [
+        "User: How do plants make their food?",
+        "Assistant: Plants make food by photosynthesis, using light in their leaves.",
+    ])
+    job_id = _job()
+
+    tt.parse_transcripts_task(job_id, source)
+
+    report = json.loads(_row(job_id).config_json)
+    assert _row(job_id).status == "completed"
+    assert report["pairs_count"] == 1
+    rows = [json.loads(line) for line in Path(report["output_path"]).read_text().splitlines()]
+    assert rows[0]["instruction"] == "How do plants make their food?"
+    assert sys.modules["transcript_parser"].__file__.endswith(
+        os.path.join("plugins", "training", "scripts", "transcript_parser.py"))
 
 
 @pytest.fixture
@@ -423,6 +447,24 @@ def test_the_page_refuses_a_dataset_the_trainer_cannot_read(app, client, tmp_pat
     assert response.status_code == 400
     assert says in response.get_json()["error"]["message"]
     assert db.session.query(TrainingJob).count() == 0
+
+
+@pytest.mark.parametrize("sent_name, saved_name", [
+    ("", "Parse: transcripts"), (None, "Parse: transcripts"), ("  Mine ", "Mine"),
+])
+def test_a_parse_job_gets_a_name_from_its_folder_when_none_is_typed(app, client, monkeypatch, sent_name, saved_name):
+    sent = []
+    monkeypatch.setattr(tt, "parse_transcripts_task", SimpleNamespace(
+        apply_async=lambda args=None, **kw: sent.append(args) or SimpleNamespace(id="parse-1")))
+    body = {"input_path": "/data/transcripts/"}
+    if sent_name is not None:
+        body["name"] = sent_name
+
+    response = client.post("/api/training/pipeline/parse", json=body)
+
+    assert response.status_code == 201
+    assert response.get_json()["data"]["name"] == saved_name
+    assert sent[0][1] == "/data/transcripts/"
 
 
 def test_the_page_refuses_an_unknown_dataset(app, client):

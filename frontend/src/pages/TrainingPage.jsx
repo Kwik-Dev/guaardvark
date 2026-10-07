@@ -85,6 +85,9 @@ const AlertSnackbar = React.forwardRef(function Alert(props, ref) {
 
 const LEARN_API = "/api/agent-control/learn";
 
+// ?tab= values the page opens on (TrainingFloater and other links use them).
+const TAB_INDEX = { demonstrations: 0, datasets: 1, jobs: 2, devices: 3 };
+
 /** The steps editor's text for a demonstration as the server holds it. */
 const stepsJson = (steps) =>
   JSON.stringify((steps || []).map(({ _id, ...rest }) => rest), null, 2);
@@ -230,9 +233,7 @@ const TrainingPage = () => {
   const { activeModel, isLoadingModel, modelError } = useStatus();
   const theme = useTheme();
   const [searchParams, setSearchParams] = useSearchParams();
-  const [activeTab, setActiveTab] = useState(() => {
-    return searchParams.get("tab") === "demonstrations" ? 0 : 0;
-  });
+  const [activeTab, setActiveTab] = useState(() => TAB_INDEX[searchParams.get("tab")] ?? 0);
 
   // Demonstrations state
   const [demonstrations, setDemonstrations] = useState([]);
@@ -293,6 +294,9 @@ const TrainingPage = () => {
   const [deviceModalOpen, setDeviceModalOpen] = useState(false);
   const [parseModalOpen, setParseModalOpen] = useState(false);
   const [currentItem, setCurrentItem] = useState(null);
+  // Starting values for a new dataset (a finished parse's output); kept in
+  // state so the jobs list refreshing does not reset the open form.
+  const [datasetPrefill, setDatasetPrefill] = useState(null);
   const [isSaving, setIsSaving] = useState(false);
   const [feedback, setFeedback] = useState({
     open: false,
@@ -401,10 +405,11 @@ const TrainingPage = () => {
 
   // Handle URL params for deep-linking from TrainingFloater
   useEffect(() => {
-    if (searchParams.get("tab") === "demonstrations") {
-      setActiveTab(0);
+    const tab = searchParams.get("tab");
+    if (tab in TAB_INDEX) {
+      setActiveTab(TAB_INDEX[tab]);
       const demoId = searchParams.get("demo");
-      if (demoId) setExpandedDemoId(parseInt(demoId, 10));
+      if (tab === "demonstrations" && demoId) setExpandedDemoId(parseInt(demoId, 10));
       // Clear params after applying
       setSearchParams({}, { replace: true });
     }
@@ -420,15 +425,24 @@ const TrainingPage = () => {
     }
   }, [activeTab, fetchJobs]);
 
-  const handleOpenEditModal = (item = null) => {
+  const handleOpenEditModal = (item = null, prefill = null) => {
     setCurrentItem(item);
+    setDatasetPrefill(prefill);
     setEditModalOpen(true);
   };
 
   const handleCloseEditModal = () => {
     if (isSaving) return;
     setCurrentItem(null);
+    setDatasetPrefill(null);
     setEditModalOpen(false);
+  };
+
+  const handleAddParsedDataset = (job) => {
+    handleOpenEditModal(null, {
+      name: (job.name || "").replace(/^Parse:\s*/, "") || "Parsed transcripts",
+      path: job.config?.output_path || "",
+    });
   };
 
   const handleSave = async (formData) => {
@@ -860,7 +874,9 @@ const TrainingPage = () => {
                           <Box>
                             <Typography variant="h6">{job.name || job.job_id}</Typography>
                             <Typography variant="caption" color="text.secondary">
-                              {job.base_model} → {job.output_model_name || "N/A"}
+                              {job.base_model
+                                ? `${job.base_model} → ${job.output_model_name || "N/A"}`
+                                : job.config?.input_path || ""}
                             </Typography>
                           </Box>
                           <Box display="flex" gap={1} alignItems="center">
@@ -949,6 +965,18 @@ const TrainingPage = () => {
                             <Typography variant="caption" color="text.secondary">
                               {progress}% - {job.pipeline_stage || "processing"}
                             </Typography>
+                          </Box>
+                        )}
+                        {job.pipeline_stage === "parsing" && job.status === "completed" && job.config?.output_path && (
+                          <Box sx={{ mt: 1, display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap" }}>
+                            <Typography variant="body2">
+                              Parsed {job.config.pairs_count ?? 0} pair{job.config.pairs_count === 1 ? "" : "s"}
+                            </Typography>
+                            {job.config.pairs_count > 0 && (
+                              <Button size="small" variant="outlined" startIcon={<AddIcon />} onClick={() => handleAddParsedDataset(job)}>
+                                Add as dataset
+                              </Button>
+                            )}
                           </Box>
                         )}
                         {job.error_message && (
@@ -1079,6 +1107,7 @@ const TrainingPage = () => {
           open={editModalOpen}
           onClose={handleCloseEditModal}
           datasetData={currentItem}
+          prefill={datasetPrefill}
           onSave={handleSave}
           isSaving={isSaving}
         />

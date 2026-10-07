@@ -696,15 +696,20 @@ def base_model_status():
 @ensure_db_session_cleanup
 def start_parse_job():
     try:
-        data = request.get_json()
-        
-        if not data.get("input_path"):
+        data = request.get_json(silent=True) or {}
+
+        input_path = data.get("input_path")
+        if not isinstance(input_path, str) or not input_path.strip():
             return error_response("input_path is required", 400)
-        
+        name = data.get("name")
+        name = name.strip() if isinstance(name, str) else ""
+        if not name:
+            name = f"Parse: {os.path.basename(input_path.rstrip('/')) or input_path}"
+
         job_id = str(uuid.uuid4())
         job = TrainingJob(
             job_id=job_id,
-            name=data.get("name", f"Parse: {data['input_path']}"),
+            name=name,
             pipeline_stage="parsing",
             status="pending",
             config_json=json.dumps({
