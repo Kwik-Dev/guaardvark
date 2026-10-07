@@ -224,6 +224,71 @@ def generate_batch_csv_route():
         return jsonify({"error": "Failed to create batch CSV generation task"}), 500
 
 
+def _fit_generation_context(rag_results, recent_files, system_message: str,
+                            prompt_text: str, window: int):
+    """The file generator's reference block, sized to the model's window.
+
+    What fits after the instructions, the request and a third of the window
+    for the reply: search chunks first, then whole project files, then the
+    opening part of one more, labelled as such. Whole documents can be many
+    times the window, and Ollama refuses such a prompt outright.
+
+    Returns (text, chunks_used, files_used, budget_chars).
+    """
+    from backend.tools.code_tools import PROMPT_CHARS_PER_TOKEN
+    used = int((len(system_message) + len(prompt_text)) / PROMPT_CHARS_PER_TOKEN)
+    budget = max(int((window - window // 3 - used - 64) * PROMPT_CHARS_PER_TOKEN), 0)
+
+    context_parts = ["=== RAG GENERATION CONTEXT ==="]
+    room = budget - len(context_parts[0]) - 40
+
+    def _take(block: str) -> bool:
+        nonlocal room
+        if len(block) + 1 > room:
+            return False
+        context_parts.append(block)
+        room -= len(block) + 1
+        return True
+
+    chunks_used = files_used = 0
+    if rag_results:
+        if _take("VECTOR SEARCH RESULTS:"):
+            for i, result in enumerate(rag_results):
+                if result and result.get('text'):  # search_with_llamaindex returns 'text', not 'content'
+                    if _take(
+                        f"CHUNK {i+1} (Score: {result.get('score', 0.0):.3f}):\n"
+                        f"Source: {result.get('metadata', {}).get('source_filename', 'Unknown')}\n"
+                        f"Content: {result.get('text', '')}\n---"
+                    ):
+                        chunks_used += 1
+    else:
+        logger.info(f"RAG search returned no relevant results for query: {prompt_text[:100]} - this is normal for new content generation")
+        _take("VECTOR SEARCH: No relevant indexed content found for this query. Proceeding with standalone generation.")
+
+    if recent_files and _take("PROJECT FILES:"):
+        for file_doc in recent_files:
+            if not file_doc.content:
+                continue
+            head = (
+                f"FILE: {file_doc.filename}\n"
+                f"TYPE: {file_doc.filename.split('.')[-1] if '.' in file_doc.filename else 'unknown'}\n"
+                f"SIZE: {len(file_doc.content)} characters\n"
+                f"PROJECT_ID: {file_doc.project_id}\n"
+            )
+            if _take(f"{head}COMPLETE FILE CONTENT:\n{file_doc.content}\n---"):
+                files_used += 1
+                continue
+            part = room - len(head) - 80
+            if part >= 1000 and _take(
+                f"{head}FIRST {part} CHARACTERS OF THE FILE:\n{file_doc.content[:part]}\n---"
+            ):
+                files_used += 1
+            break
+
+    context_parts.append("=== END RAG GENERATION CONTEXT ===")
+    return "\n".join(context_parts), chunks_used, files_used, budget
+
+
 @generation_bp.route("/direct_generate_and_save", methods=["POST"])
 def direct_generate_and_save_file_route():
     """Enhanced direct file generation with security and resource management."""
@@ -407,71 +472,13 @@ Generate the complete file content now:"""
                     ).order_by(DBDocument.uploaded_at.desc()).limit(2).all()
                     logger.info(f"RAG GENERATION: Retrieved {len(recent_files)} recent files (no project_id)")
 
-                # Step 3: Build the context within what the model's window
-                # leaves after the instructions, the request and the reply
-                # (a third of the window). Whole documents can be many times
-                # the window, and Ollama refuses such a prompt outright.
+                # Step 3: Build the context within what the model's window leaves.
                 if rag_results or recent_files:
-                    from backend.tools.code_tools import PROMPT_CHARS_PER_TOKEN
                     from backend.utils.ollama_resource_manager import refresh_context_window
                     window = refresh_context_window(llm) or 8192
-                    used = int((len(system_message) + len(prompt_text)) / PROMPT_CHARS_PER_TOKEN)
-                    budget = max(int((window - window // 3 - used - 64) * PROMPT_CHARS_PER_TOKEN), 0)
-
-                    context_parts = ["=== RAG GENERATION CONTEXT ==="]
-                    room = budget - len(context_parts[0]) - 40
-
-                    def _take(block: str) -> bool:
-                        nonlocal room
-                        if len(block) + 1 > room:
-                            return False
-                        context_parts.append(block)
-                        room -= len(block) + 1
-                        return True
-
-                    chunks_used = files_used = 0
-                    if rag_results:
-                        if _take("VECTOR SEARCH RESULTS:"):
-                            for i, result in enumerate(rag_results):
-                                if result and result.get('text'):  # search_with_llamaindex returns 'text', not 'content'
-                                    if _take(
-                                        f"CHUNK {i+1} (Score: {result.get('score', 0.0):.3f}):\n"
-                                        f"Source: {result.get('metadata', {}).get('source_filename', 'Unknown')}\n"
-                                        f"Content: {result.get('text', '')}\n---"
-                                    ):
-                                        chunks_used += 1
-                    else:
-                        logger.info(f"RAG search returned no relevant results for query: {prompt_text[:100]} - this is normal for new content generation")
-                        _take("VECTOR SEARCH: No relevant indexed content found for this query. Proceeding with standalone generation.")
-
-                    # Project files after the search results; one that does not fit
-                    # whole goes in as its opening part, labelled as such.
-                    if recent_files and _take("PROJECT FILES:"):
-                        for file_doc in recent_files:
-                            if not file_doc.content:
-                                continue
-                            head = (
-                                f"FILE: {file_doc.filename}\n"
-                                f"TYPE: {file_doc.filename.split('.')[-1] if '.' in file_doc.filename else 'unknown'}\n"
-                                f"SIZE: {len(file_doc.content)} characters\n"
-                                f"PROJECT_ID: {file_doc.project_id}\n"
-                            )
-                            whole = f"{head}COMPLETE FILE CONTENT:\n{file_doc.content}\n---"
-                            if _take(whole):
-                                files_used += 1
-                                continue
-                            part = room - len(head) - 80
-                            if part < 1000:
-                                break
-                            if _take(
-                                f"{head}FIRST {part} CHARACTERS OF THE FILE:\n"
-                                f"{file_doc.content[:part]}\n---"
-                            ):
-                                files_used += 1
-                            break
-
-                    context_parts.append("=== END RAG GENERATION CONTEXT ===")
-                    uploaded_file_context = "\n".join(context_parts)
+                    uploaded_file_context, chunks_used, files_used, budget = _fit_generation_context(
+                        rag_results, recent_files, system_message, prompt_text, window,
+                    )
                     logger.info(
                         f"RAG GENERATION: context {len(uploaded_file_context)} chars within a "
                         f"{budget}-char budget ({window}-token window): {chunks_used}/{len(rag_results)} "
