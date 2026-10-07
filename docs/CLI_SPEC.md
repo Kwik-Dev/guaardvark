@@ -169,9 +169,9 @@ Commands with no subcommands are marked *(leaf)*.
 ### Generation
 | Command | Subcommands |
 |---|---|
-| `images` | `list, generate, status, models, delete`; **reproducibility:** `generate --dry-run`, `status` shows the recorded settings, `reproduce <batch>` |
-| `videos` | `list, generate, from-image, status, models, delete, download, combine`; **reproducibility:** `generate --dry-run`, `from-image --dry-run`, `status` shows the recorded settings, `reproduce <batch>` |
-| `audio` | `voices, tts, music, sfx, play`; **reproducibility:** `music|sfx|tts --dry-run` (audio generations are not recorded yet, so there is no `reproduce` — issue #8) |
+| `images` | `list, generate, status, models, delete`; **reproducibility:** `generate --dry-run` (and `--style --width/--height --steps --guidance --negative-prompt --auto-enhance/--no-auto-enhance --restore-faces/--no-restore-faces --remove-background/--no-remove-background --director-mode/--no-director-mode`), `status` shows the recorded settings, `reproduce <batch>` |
+| `videos` | `list, generate, from-image, status, models, delete, download, combine`; **reproducibility:** `generate --dry-run` (and `--negative-prompt --prompt-style`), `from-image --dry-run`, `status` shows the recorded settings, `reproduce <batch>` |
+| `audio` | `voices, tts, music, sfx, play, jobs, reproduce`; **reproducibility:** `music|sfx|tts --dry-run`; every generation is recorded in the main DB, `jobs` lists them, `reproduce <id>` replays one (issue #8) |
 | `generate` | `csv, image`; `image --dry-run` |
 | `quality` | `scorecard` |
 
@@ -227,7 +227,7 @@ upstream edit — see §11. Their read-only halves are covered by
 | `approvals` | `list, show` | one read-only queue: publishes, held code, outreach drafts |
 | `cast` | `list, show, samples, plan, generate, cancel, approve, train, train-cancel, make-default, delete, import-lora` | the Cast Library. `train` and `delete` need `--yes`; `approve` is sample selection (§10 note) |
 | `upscale` | `image, video, models, model-download, jobs, status, cancel` | Real-ESRGAN / HAT-L / SwinIR. `cancel` needs `--yes` |
-| `infographic` | `generate, models, model-download, download-status, status` | infographics |
+| `infographic` | `generate, models, model-download, download-status, status, jobs, reproduce`; `generate --seed`, and `reproduce <id>` replays a recorded spec | infographics |
 | `training` | `datasets, dataset, dataset-new, dataset-update, dataset-delete, backends` | training datasets; the run itself is `cast train` |
 | `video-editor` | `health, projects, project, project-new, project-delete, jobs, job, filters, transitions, render, analyze, captions-export, captions-import, shotcut`; **captions:** `captions-burn <video_doc> --srt F` / `--captions-doc ID` (puts the captions **on** the video), `captions-status <job_id>` | editor operations, not timeline authoring. `captions-burn --engine ffmpeg\|mlt\|editor` picks the renderer — see §3.18 |
 | `llm` | `provider, set, models, openai-model, mistral-model, test, cloud on\|off` | the chat provider and the master cloud switch — `cloud on` needs `--yes` |
@@ -237,9 +237,9 @@ upstream edit — see §11. Their read-only halves are covered by
 
 | Group | Added by the fork |
 |---|---|
-| `audio` | `transcribe` (speech-to-text), `models`, `model-download` — added from a fork module without editing `cli/llx/commands/audio.py`; `music`/`sfx`/`tts` gained `--dry-run` |
-| `images` | `generate --dry-run`, `status` (recorded settings), `reproduce` — fork overrides; upstream file untouched |
-| `videos` | `generate`/`from-image --dry-run`, `status` (recorded settings), `reproduce` |
+| `audio` | `transcribe` (speech-to-text), `models`, `model-download`, `jobs`, `reproduce` — added from a fork module without editing `cli/llx/commands/audio.py`; `music`/`sfx`/`tts` gained `--dry-run`, and every generation is recorded in the main DB (`AudioGeneration`) |
+| `images` | `generate --dry-run` + the recorded scalar flags (`--style --width --height --steps --guidance --negative-prompt --auto-enhance --restore-faces --remove-background --director-mode`), `status` (recorded settings), `reproduce` (prefers the named command; `ui_config` still forces the lossless api line) — fork overrides; upstream file untouched |
+| `videos` | `generate`/`from-image --dry-run`, `generate --negative-prompt --prompt-style`, `status` (recorded settings), `reproduce` |
 | `generate` | `image --dry-run` |
 | `music-video` | `list` output path (issue #7), `create` full inputs + `--dry-run`, `status` inputs, `reproduce` |
 | `film-crew` | `create --settings` + `--dry-run`, `status` settings, `reproduce` |
@@ -268,17 +268,24 @@ Generation commands must show what they would send, and be replayable:
 - **Recorded settings** — `images status` / `videos status` show `retry_data` (prompts +
   params), `music-video status` shows cast + treatment + settings, `film-crew status`
   shows `settings_json`. `--json` already carried these; the human views now show them,
-  and the backend `_mv_dict` exposes `subject_ids`, `user_treatment` and `settings`.
+  and the backend `_mv_dict` exposes `subject_ids`, `user_treatment` and `settings`. For
+  the generators the backend had no row for, the fork adds one: `audio jobs` reads the
+  new `AudioGeneration` table (kind, inputs, model, seed, job/output/document) and
+  `infographic jobs` reads `InfographicGeneration` (spec, seed, size, image). Both tables
+  are created by `db.create_all()` on boot.
 - **`reproduce <id>`** rebuilds the create from the record. It prefers the **named**
-  command when that command can carry the whole record (`music-video create`,
-  `film-crew create` — after the flags above), and falls back to a lossless
-  `guaardvark api request <method> <path> --yes --data '<json>'` line when it cannot
-  (`images generate` and `videos generate` expose a subset of the backend's fields;
-  `ui_config` is the standing example). Either way it prints the body, names the fields the
-  named command cannot express, and redacts credential-like keys. It sends nothing unless
+  command when that command can carry the whole record (`images generate` and
+  `videos generate` now expose the recorded scalars; `music-video create`,
+  `film-crew create`, `infographic generate`, `audio music|sfx|tts` likewise), and falls
+  back to a lossless `guaardvark api request <method> <path> --yes --data '<json>'` line
+  when it cannot (`ui_config` and any other opaque Studio control-panel snapshot, a
+  multi-prompt `images`/`videos` batch, a voice clone's `voice_id`/`backend` that
+  `audio tts` cannot express). Either way it prints the body, names the fields the named
+  command cannot express, and redacts credential-like keys. It sends nothing unless
   `--yes`, and `--yes` goes through the **same `_api_guard` gate and audit log** as
   `api request`. Replaying a create never releases an approval gate: a reproduced music
-  video still stops at `awaiting_approval`, a Film Crew production at casting/storyboards.
+  video still stops at `awaiting_approval`, a Film Crew production at casting/storyboards,
+  and a reproduced voice clone still needs its consent record.
 
 ### Generic backend access (D5) — one command, every route
 

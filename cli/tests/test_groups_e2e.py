@@ -70,6 +70,8 @@ _ENVELOPE_CASES = [
     # routes; they are not skipped. (`video-editor health` is not one of them -- see
     # the skip at the bottom of this file.)
     ("infographic models", ["infographic", "models"], ("models",), ("GET", "/api/infographic/models")),
+    ("infographic jobs", ["infographic", "jobs"], ("generations",), ("GET", "/api/infographic/generations")),
+    ("audio jobs", ["audio", "jobs"], ("generations",), ("GET", "/api/audio-foundry/generations")),
     ("video-editor projects", ["video-editor", "projects"], ("projects",), ("GET", "/api/video-editor/projects")),
     ("plugins list", ["plugins", "list"], ("plugins",), ("GET", "/api/plugins")),
 ]

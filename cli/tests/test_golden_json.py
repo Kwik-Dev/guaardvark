@@ -178,11 +178,42 @@ CASES = [
     Case("infographic.download-status", ["infographic", "download-status"], [
         _r("GET", "/api/infographic/models/download-status", {"model": "flux", "state": "idle"}),
     ]),
+    Case("infographic.jobs", ["infographic", "jobs"], [
+        _r("GET", "/api/infographic/generations", {"success": True, "generations": [
+            {"id": 3, "status": "completed", "seed": 42, "width": 1216, "height": 684,
+             "filename": "info_3.png", "image_url": "/api/infographic/view?filename=info_3.png",
+             "subfolder": "", "prompt": "resolved", "prompt_id": "p1", "duration_s": 5.4,
+             "error": None, "inputs": {"scene": "five facts about bees"},
+             "created_at": "2026-10-07T01:00:00", "updated_at": "2026-10-07T01:00:05"},
+        ]}),
+    ]),
+    Case("infographic.reproduce", ["infographic", "reproduce", "3"], [
+        _r("GET", "/api/infographic/generations/3", {"success": True, "generation": {
+            "id": 3, "status": "completed", "seed": 42,
+            "inputs": {"scene": "five facts about bees", "style": "editorial", "aspect": "16:9",
+                       "hashtags": [], "callouts": []},
+        }}),
+    ]),
     # --- audio models (fork extension of the upstream group) ---------------
     Case("audio.models", ["audio", "models"], [
         _r("GET", "/api/audio-foundry/models", {"success": True, "data": {"models": [
             {"id": "ace-step", "installed": True},
         ]}}),
+    ]),
+    Case("audio.jobs", ["audio", "jobs"], [
+        _r("GET", "/api/audio-foundry/generations", {"success": True, "generations": [
+            {"id": 4, "kind": "music", "status": "completed", "model": "acestep", "seed": 42,
+             "inputs": {"style_prompt": "lo-fi piano"}, "job_id": None,
+             "document_id": 9, "output_path": "/out/song.wav", "duration_s": 30.0,
+             "error": None, "created_at": "2026-10-07T01:00:00",
+             "updated_at": "2026-10-07T01:01:00"},
+        ]}),
+    ]),
+    Case("audio.reproduce", ["audio", "reproduce", "4"], [
+        _r("GET", "/api/audio-foundry/generations/4", {"success": True, "generation": {
+            "id": 4, "kind": "music", "status": "completed",
+            "inputs": {"style_prompt": "lo-fi piano", "duration_s": 30.0},
+        }}),
     ]),
     # --- video-editor ------------------------------------------------------
     Case("video-editor.health", ["video-editor", "health"], [
