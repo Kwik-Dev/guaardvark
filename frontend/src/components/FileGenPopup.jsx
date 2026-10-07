@@ -33,13 +33,16 @@ const FileGenPopup = ({ open, fileData, onConfirm, onAlways, onDismiss }) => {
         aria-label="Create a file"
         data-testid="file-gen-card"
         sx={{
+          // Above the chat input bar, which would otherwise draw over the card.
           position: "fixed",
-          bottom: 24,
+          bottom: 112,
           right: 24,
           zIndex: 1500,
-          width: 340,
+          width: 420,
+          maxWidth: "calc(100vw - 48px)",
           p: 1.75,
           borderRadius: 1.5,
+          bgcolor: "background.paper",
           boxShadow: 3,
         }}
       >

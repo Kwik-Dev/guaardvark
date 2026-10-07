@@ -2281,12 +2281,19 @@ class UnifiedChatEngine:
             filename = str(options.get("file_generation_filename") or "").strip()[:120]
             target = f" ({filename})" if filename else ""
             if file_generation == "started":
-                state = f"Guaardvark's file generator is creating this file{target} now."
+                state = (
+                    f"Guaardvark's file generator is creating this file{target} now. "
+                    "Say so in one sentence."
+                )
             else:
-                state = f"Guaardvark has offered to create this file{target}; the person confirms it on a card."
+                state = (
+                    f"A card on screen offers to create this file{target}; it is created only "
+                    "if the person presses Create there. Say that in one sentence, without "
+                    "saying the file is being or will be created."
+                )
             parts.append(
-                f"{state} Acknowledge this in a sentence. Do not write the file's "
-                "content yourself and do not say that you cannot create files."
+                f"{state} Do not write the file's content yourself and do not say that "
+                "you cannot create files."
             )
 
         if not parts:
