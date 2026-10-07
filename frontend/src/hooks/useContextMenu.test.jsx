@@ -1,4 +1,5 @@
 import React from "react";
+import ReactDOM from "react-dom";
 import { describe, it, expect } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import useContextMenu from "./useContextMenu";
@@ -62,5 +63,25 @@ describe("useContextMenu with EntityContextMenu", () => {
     render(<Harness />);
     fireEvent.contextMenu(screen.getByTestId("row"), { clientX: 0, clientY: 0 });
     expect(screen.getByRole("menu")).toBeInTheDocument();
+  });
+
+  it("ignores right-clicks that bubble out of a portal the owner rendered", () => {
+    function PortalOwner() {
+      const menu = useContextMenu();
+      return (
+        <div data-testid="owner" onContextMenu={(e) => menu.open(e, {})}>
+          owner
+          {ReactDOM.createPortal(<span>in dialog</span>, document.body)}
+          <EntityContextMenu
+            anchorPosition={menu.anchorPosition}
+            onClose={menu.close}
+            actions={[{ label: "Open", onClick: () => {} }]}
+          />
+        </div>
+      );
+    }
+    render(<PortalOwner />);
+    expect(fireEvent.contextMenu(screen.getByText("in dialog"), { clientX: 5, clientY: 5 })).toBe(true);
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
 });

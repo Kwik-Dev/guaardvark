@@ -35,6 +35,8 @@ const menuStyles = {
  *   `cond && {...}` inline.
  *
  * Pair it with hooks/useContextMenu, which supplies anchorPosition and onClose.
+ * A right-click inside the open menu closes it; React would otherwise bubble
+ * that event through the portal to the owner's onContextMenu and reopen it.
  */
 const EntityContextMenu = ({ anchorPosition, onClose, actions = [] }) => {
   const open = Boolean(anchorPosition);
@@ -42,10 +44,18 @@ const EntityContextMenu = ({ anchorPosition, onClose, actions = [] }) => {
 
   if (!open || shown.length === 0) return null;
 
+  // One item with an icon or tick gives every item the icon column, so labels line up.
+  const hasIconColumn = shown.some((a) => a.icon || typeof a.checked === 'boolean');
+
   return (
     <Menu
       open={open}
       onClose={onClose}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onClose();
+      }}
       anchorReference="anchorPosition"
       anchorPosition={anchorPosition || { top: 0, left: 0 }}
       sx={menuStyles}
@@ -59,7 +69,7 @@ const EntityContextMenu = ({ anchorPosition, onClose, actions = [] }) => {
 
         items.push(
           <MenuItem
-            key={action.label || index}
+            key={`${index}-${action.label}`}
             onClick={() => {
               action.onClick?.();
               onClose();
@@ -68,14 +78,14 @@ const EntityContextMenu = ({ anchorPosition, onClose, actions = [] }) => {
             selected={action.checked === true}
             sx={action.color ? { color: action.color } : undefined}
           >
-            {(action.icon || typeof action.checked === 'boolean') && (
+            {hasIconColumn && (
               <ListItemIcon sx={action.color ? { color: action.color, minWidth: 32 } : { minWidth: 32 }}>
                 {typeof action.checked === 'boolean'
                   ? action.checked && <CheckIcon fontSize="small" />
                   : action.icon}
               </ListItemIcon>
             )}
-            {action.icon || typeof action.checked === 'boolean' ? (
+            {hasIconColumn ? (
               <ListItemText primaryTypographyProps={{ fontSize: '0.8125rem' }}>
                 {action.label}
               </ListItemText>
