@@ -553,20 +553,22 @@ def _initialize_app_components(app):
             VIDEO_RENDER_STALE_HIGH = 3600  # 60 min at >=95% (long encode still OK)
             VIDEO_RENDER_STALE_MID = 7200   # 120 min mid-render (maxed Wan denoising)
 
-            # A single missed 2 s probe is normal while ComfyUI's HTTP thread
-            # starves behind a pegged GPU; only sustained silence counts as down.
-            COMFYUI_DOWN_GRACE = 30  # seconds of consecutive failed probes
+            # ComfyUI's HTTP handler stops answering for tens of seconds while it
+            # loads a large model or samples on a pegged GPU, but its port still
+            # accepts connections; only a refused connection means it has exited.
+            # A "down" verdict reaps the render and cancels its batch, so a busy
+            # ComfyUI must never count as down. Sustained refusal is still needed.
+            COMFYUI_DOWN_GRACE = 30  # seconds of consecutive refused probes
             comfy_fail_since = {"t": None}
 
             def _comfyui_is_down() -> bool:
+                from backend.utils.comfyui_liveness import DOWN, probe_comfyui
                 try:
                     from backend.config import config as _cfg
-                    import requests as _requests
                     url = getattr(_cfg, "COMFYUI_URL", None) or os.environ.get(
                         "GUAARDVARK_COMFYUI_URL", "http://127.0.0.1:8188"
                     )
-                    resp = _requests.get(url, timeout=2)
-                    failed = resp.status_code != 200
+                    failed = probe_comfyui(url) == DOWN
                 except Exception:
                     failed = True
                 if not failed:
