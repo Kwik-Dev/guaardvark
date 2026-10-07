@@ -46,6 +46,15 @@ import { SOCKET_URL } from "../api/apiClient";
 import { ragAutoresearchService } from "../api/ragAutoresearchService";
 import { selfImprovementService } from "../api/selfImprovementService";
 import AlertSnackbar from "../components/common/AlertSnackbar";
+import EntityContextMenu from "../components/common/EntityContextMenu";
+import useContextMenu from "../hooks/useContextMenu";
+import {
+  describeReasons,
+  evalPairsText,
+  experimentLabel,
+  judgeWarning,
+  runOutcome,
+} from "../utils/autoresearchLabels";
 
 const RUN_STATUS_COLORS = {
   running: "success",
@@ -130,7 +139,6 @@ const AutoresearchPage = () => {
   const [settingDrafts, setSettingDrafts] = useState({});
   const [savedKeys, setSavedKeys] = useState({});
   const [resettingConfig, setResettingConfig] = useState(false);
-  const [evalCount, setEvalCount] = useState(null);
   const [regenerating, setRegenerating] = useState(false);
   const [selectedRun, setSelectedRun] = useState(null);
   const [runDetailLoading, setRunDetailLoading] = useState(false);
@@ -143,6 +151,7 @@ const AutoresearchPage = () => {
   const socketRef = useRef(null);
   const pollRef = useRef(null);
   const savedTimersRef = useRef({});
+  const runMenu = useContextMenu();
 
   const showMessage = useCallback((message, severity = "info") => {
     setSnackbar({ open: true, message, severity });
@@ -179,9 +188,6 @@ const AutoresearchPage = () => {
     try {
       const data = await ragAutoresearchService.getStatus();
       setStatus(data);
-      if (typeof data.eval_pair_count === "number") {
-        setEvalCount(data.eval_pair_count);
-      }
       if (Array.isArray(data.code_keeps)) {
         setCodeKeeps(data.code_keeps);
       }
@@ -200,15 +206,8 @@ const AutoresearchPage = () => {
     }
   }, []);
 
-  const fetchEvalPairs = useCallback(async () => {
-    try {
-      const data = await ragAutoresearchService.getEvalPairs();
-      setEvalCount(data.count ?? (data.pairs || []).length);
-    } catch (e) {
-      /* ignore */
-    }
-  }, []);
-
+  // The eval-pair count comes only from /status (eval_pairs), so the page
+  // shows one number with its unindexed share.
   const fetchAll = useCallback(async () => {
     await Promise.all([
       fetchRuns(),
@@ -216,17 +215,9 @@ const AutoresearchPage = () => {
       fetchMetrics(),
       fetchStatus(),
       fetchSettings(),
-      fetchEvalPairs(),
     ]);
     setLoading(false);
-  }, [
-    fetchRuns,
-    fetchPromotions,
-    fetchMetrics,
-    fetchStatus,
-    fetchSettings,
-    fetchEvalPairs,
-  ]);
+  }, [fetchRuns, fetchPromotions, fetchMetrics, fetchStatus, fetchSettings]);
 
   // Initial load + 30s poll (same cadence as the dashboard card) +
   // Socket.IO push updates, following the GpuStatusCard pattern.
@@ -387,7 +378,6 @@ const AutoresearchPage = () => {
     try {
       const data = await ragAutoresearchService.regenerateEvalPairs();
       showMessage(`Regenerated ${data.count ?? 0} eval pairs`, "success");
-      fetchEvalPairs();
       fetchStatus();
     } catch (e) {
       showMessage(`Failed to regenerate eval pairs: ${e.message}`, "error");
@@ -399,14 +389,28 @@ const AutoresearchPage = () => {
   const handleResearchTonight = async () => {
     setStarting(true);
     try {
-      await ragAutoresearchService.createRun({
+      const result = await ragAutoresearchService.createRun({
         mode: runMode,
         budget_hours: Number(budgetHours) || 6,
       });
-      showMessage("Research run started", "success");
+      const warnings = result?.warnings || [];
+      if (warnings.length) {
+        showMessage(
+          `Research run started. Warning: ${describeReasons(warnings.join("; "))}`,
+          "warning",
+        );
+      } else {
+        showMessage("Research run started", "success");
+      }
       fetchRuns();
+      fetchStatus();
     } catch (e) {
-      if (e.status === 409) {
+      if (e.status === 422) {
+        // Refused before anything was queued; the run row records why.
+        showMessage(`Not run: ${describeReasons(e.message)}`, "warning");
+        fetchRuns();
+        fetchStatus();
+      } else if (e.status === 409) {
         showMessage("A research run is already in progress", "warning");
       } else {
         showMessage(`Failed to start research run: ${e.message}`, "error");
@@ -415,6 +419,18 @@ const AutoresearchPage = () => {
       setStarting(false);
     }
   };
+
+  const downloadLedger = (run) => {
+    const link = document.createElement("a");
+    link.href = ragAutoresearchService.getRunLedgerUrl(run.id);
+    link.download = `${run.run_tag}-ledger.tsv`;
+    link.click();
+  };
+
+  const runMenuActions = (run) => [
+    { label: "View report", onClick: () => handleSelectRun(run.id) },
+    { label: "Download ledger (TSV)", onClick: () => downloadLedger(run) },
+  ];
 
   const handleSelectRun = async (runId) => {
     setRunDetailLoading(true);
@@ -562,7 +578,7 @@ const AutoresearchPage = () => {
           }}
         >
           <Typography variant="body2" color="text.secondary">
-            Eval pairs: {evalCount ?? "—"}
+            Eval pairs: {evalPairsText(status)}
           </Typography>
           <Button
             size="small"
@@ -700,29 +716,39 @@ const AutoresearchPage = () => {
             )}
           </Box>
 
-          {SETTING_FIELDS.map((f) => (
-            <TextField
-              key={f.key}
-              label={f.label}
-              size="small"
-              placeholder={f.placeholder}
-              value={settingFieldValue(f.key)}
-              disabled={resettingConfig}
-              onChange={(e) => handleSettingFieldChange(f.key, e.target.value)}
-              onBlur={() => commitSettingField(f.key, f.label.toLowerCase())}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  e.target.blur();
-                }
-              }}
-              helperText={savedKeys[f.key] ? "Saved" : " "}
-              FormHelperTextProps={{
-                sx: { color: savedKeys[f.key] ? "success.main" : "inherit" },
-              }}
-              sx={{ width: f.width }}
-            />
-          ))}
+          {SETTING_FIELDS.map((f) => {
+            const warning =
+              f.key === "autoresearch_judge_model" ? judgeWarning(status?.judge) : null;
+            return (
+              <TextField
+                key={f.key}
+                label={f.label}
+                size="small"
+                placeholder={f.placeholder}
+                value={settingFieldValue(f.key)}
+                disabled={resettingConfig}
+                onChange={(e) => handleSettingFieldChange(f.key, e.target.value)}
+                onBlur={() => commitSettingField(f.key, f.label.toLowerCase())}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    e.target.blur();
+                  }
+                }}
+                helperText={savedKeys[f.key] ? "Saved" : warning || " "}
+                FormHelperTextProps={{
+                  sx: {
+                    color: savedKeys[f.key]
+                      ? "success.main"
+                      : warning
+                        ? "warning.main"
+                        : "inherit",
+                  },
+                }}
+                sx={{ width: warning ? 320 : f.width }}
+              />
+            );
+          })}
         </Box>
 
         <Box
@@ -844,18 +870,21 @@ const AutoresearchPage = () => {
                   <TableCell>Started</TableCell>
                   <TableCell>Ended</TableCell>
                   <TableCell align="right">Experiments</TableCell>
-                  <TableCell align="right">Baseline → Best</TableCell>
+                  <TableCell align="right">Baseline → latest (best)</TableCell>
                   <TableCell>Halt reason</TableCell>
                   <TableCell align="right">Ledger</TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
-                {runs.map((run) => (
+                {runs.map((run) => {
+                  const outcome = runOutcome(run);
+                  return (
                   <TableRow
                     key={run.id}
                     hover
-                    selected={selectedRun?.id === run.id}
+                    selected={selectedRun?.id === run.id || runMenu.payload?.id === run.id}
                     onClick={() => handleSelectRun(run.id)}
+                    onContextMenu={(e) => runMenu.open(e, run)}
                     sx={{ cursor: "pointer" }}
                   >
                     <TableCell>{run.run_tag}</TableCell>
@@ -877,8 +906,14 @@ const AutoresearchPage = () => {
                         : ""}
                     </TableCell>
                     <TableCell align="right">
-                      {formatScore(run.baseline_score)} →{" "}
-                      {formatScore(run.best_score)}
+                      <Tooltip title={outcome.detail}>
+                        <Box
+                          component="span"
+                          sx={outcome.kind === "not_run" ? { color: "warning.main" } : undefined}
+                        >
+                          {outcome.text}
+                        </Box>
+                      </Tooltip>
                     </TableCell>
                     <TableCell>{run.halt_reason || "—"}</TableCell>
                     <TableCell align="right">
@@ -896,11 +931,17 @@ const AutoresearchPage = () => {
                       </Tooltip>
                     </TableCell>
                   </TableRow>
-                ))}
+                  );
+                })}
               </TableBody>
             </Table>
           </TableContainer>
         )}
+        <EntityContextMenu
+          anchorPosition={runMenu.anchorPosition}
+          onClose={runMenu.close}
+          actions={runMenu.payload ? runMenuActions(runMenu.payload) : []}
+        />
 
         {/* Selected run report */}
         {runDetailLoading && <LinearProgress sx={{ mt: 2, borderRadius: 1 }} />}
@@ -1078,7 +1119,9 @@ const AutoresearchPage = () => {
                 </TableRow>
               </TableHead>
               <TableBody>
-                {metrics.map((exp) => (
+                {metrics.map((exp) => {
+                  const label = experimentLabel(exp);
+                  return (
                   <TableRow key={exp.id} hover>
                     <TableCell>{formatDate(exp.created_at)}</TableCell>
                     <TableCell>
@@ -1089,40 +1132,45 @@ const AutoresearchPage = () => {
                     <TableCell>{exp.new_value}</TableCell>
                     <TableCell>
                       <Chip
-                        label={exp.status}
+                        label={label.status}
                         size="small"
-                        color={
-                          exp.status === "keep"
-                            ? "success"
-                            : exp.status === "crash"
-                              ? "error"
-                              : "default"
-                        }
+                        color={label.tone}
+                        variant={label.kind === "health" ? "outlined" : "filled"}
                         sx={{ height: 20, fontSize: "0.7rem" }}
                       />
                     </TableCell>
                     <TableCell align="right">
-                      {typeof exp.delta === "number"
+                      {label.kind !== "health" && typeof exp.delta === "number"
                         ? `${exp.delta > 0 ? "+" : ""}${exp.delta.toFixed(3)}`
                         : "—"}
                     </TableCell>
                     <TableCell>
                       {exp.proposal_source && (
-                        <Chip
-                          label={exp.proposal_source}
-                          size="small"
-                          color={
-                            exp.proposal_source === "llm"
-                              ? "secondary"
-                              : "default"
+                        <Tooltip
+                          title={
+                            label.selfReported
+                              ? "Posted by a code-tuning arm; not measured by the eval harness"
+                              : ""
                           }
-                          variant={
-                            exp.proposal_source === "llm"
-                              ? "filled"
-                              : "outlined"
-                          }
-                          sx={{ height: 20, fontSize: "0.7rem" }}
-                        />
+                        >
+                          <Chip
+                            label={label.source}
+                            size="small"
+                            color={
+                              exp.proposal_source === "llm"
+                                ? "secondary"
+                                : label.selfReported
+                                  ? "warning"
+                                  : "default"
+                            }
+                            variant={
+                              exp.proposal_source === "llm"
+                                ? "filled"
+                                : "outlined"
+                            }
+                            sx={{ height: 20, fontSize: "0.7rem" }}
+                          />
+                        </Tooltip>
                       )}
                     </TableCell>
                     <TableCell>{exp.judge_model || "—"}</TableCell>
@@ -1136,7 +1184,8 @@ const AutoresearchPage = () => {
                       {formatScore(exp.retrieval_metrics?.ndcg_at_10)}
                     </TableCell>
                   </TableRow>
-                ))}
+                  );
+                })}
               </TableBody>
             </Table>
           </TableContainer>

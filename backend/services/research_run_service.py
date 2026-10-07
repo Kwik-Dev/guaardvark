@@ -27,6 +27,7 @@ from backend.config import (
     AUTORESEARCH_MIN_EXPERIMENT_INTERVAL,
     AUTORESEARCH_PHASE_PLATEAU_THRESHOLD,
 )
+from backend.services.rag_eval_harness import same_model
 from backend.utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,68 @@ to avoid, whether tonight should prefer retrieval knobs or code.
 VALID_MODES = ("unified", "rag_tuning", "code_tuning")
 SWARM_POLL_S = 15
 SI_PREFLIGHT_CAP_S = 600  # 10 min — snapshot_pytest is usually far cheaper
+HALT_REASON_MAX = 200  # ResearchRun.halt_reason column width
+
+
+def _clip(text: str, limit: int) -> str:
+    text = text or ""
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+# ---- ledger reading ------------------------------------------------------
+# Rows in one ExperimentRun ledger are of three kinds: parameter experiments
+# (the RAG loop, measured by the eval harness), health checks (the pytest
+# snapshot, proposal_source "heal") and self-reported rows (code-tuning arms
+# and anything else posted to /experiments, which the harness did not score).
+
+def is_health_check(row: dict) -> bool:
+    return row.get("proposal_source") == "heal"
+
+
+def is_self_reported(row: dict) -> bool:
+    metrics = row.get("retrieval_metrics") or {}
+    return bool(metrics.get("self_reported")) or row.get("proposal_source") == "code_arm"
+
+
+def is_parameter_experiment(row: dict) -> bool:
+    return not is_health_check(row) and not is_self_reported(row)
+
+
+def measured_score(row: dict):
+    """The judged composite of a parameter experiment, or None when the row
+    measured nothing: a crash, a health check, a self-reported row, or an F0
+    screen (which records the baseline as its score without judging)."""
+    if not is_parameter_experiment(row) or row.get("status") == "crash":
+        return None
+    metrics = row.get("retrieval_metrics") or {}
+    fidelity = row.get("fidelity", metrics.get("fidelity"))
+    judged = metrics.get("judged_pairs")
+    if fidelity is None and judged is None:
+        # Rows from before fidelity was recorded: an F0 screen kept no details.
+        if not row.get("eval_details"):
+            return None
+    elif (fidelity is not None and int(fidelity) < 1) or judged == 0:
+        return None
+    score = row.get("composite_score")
+    return float(score) if score is not None else None
+
+
+def summarize_ledger(rows: list) -> dict:
+    """Counts and measured scores for one run's ledger rows, oldest first.
+
+    latest_score is the newest measured experiment and may be below the
+    baseline; best_tried_score is the best measured one. Both are None when
+    nothing was measured.
+    """
+    scores = [s for s in (measured_score(r) for r in rows) if s is not None]
+    return {
+        "experiments": sum(1 for r in rows if is_parameter_experiment(r)),
+        "measured_experiments": len(scores),
+        "latest_score": scores[-1] if scores else None,
+        "best_tried_score": max(scores) if scores else None,
+        "health_checks": sum(1 for r in rows if is_health_check(r)),
+        "self_reported": sum(1 for r in rows if is_self_reported(r)),
+    }
 
 
 class ResearchRunService:
@@ -80,6 +143,12 @@ class ResearchRunService:
         """Create a ResearchRun row and enqueue the Celery owner task.
 
         mode: unified (default) | rag_tuning | code_tuning
+        trigger: manual | nightly. Stored on the row; nightly runs also
+        require an independent judge model.
+
+        Preconditions are checked here, before anything is queued. A refused
+        run is recorded as `failed_precondition` with every reason, and the
+        result carries `not_run: True` (HTTP 422 at the API).
         """
         from backend.models import ResearchRun, db
 
@@ -99,9 +168,12 @@ class ResearchRunService:
             gate = self._code_gate_error()
             # unified degrades (code half skipped later); code-only refuses.
             if gate and mode == "code_tuning":
-                return {"error": gate}
+                return {"error": gate, "not_run": True, "reasons": [gate]}
 
         run_tag = f"{mode}-{utcnow().strftime('%Y%m%d-%H%M%S')}"
+        if ResearchRun.query.filter_by(run_tag=run_tag).first() is not None:
+            # A refused run keeps its row, so a retry in the same second needs its own tag.
+            run_tag = f"{run_tag}-{uuid.uuid4().hex[:4]}"
         run = ResearchRun(
             id=str(uuid.uuid4()),
             run_tag=run_tag,
@@ -109,9 +181,30 @@ class ResearchRunService:
             status="pending",
             wall_clock_budget_s=int(budget_hours * 3600),
             program_snapshot=self._load_program(),
+            promotions={"trigger": trigger},
         )
         db.session.add(run)
         db.session.commit()
+
+        from backend.services.rag_autoresearch_service import get_autoresearch_service
+        reasons, warnings = self._precondition_failures(
+            get_autoresearch_service(), trigger=trigger,
+        )
+        if reasons:
+            self._refuse(run, reasons, warnings)
+            logger.warning(f"Research run {run_tag} not run ({trigger}): "
+                           f"{'; '.join(reasons)}")
+            return {
+                "error": "; ".join(reasons),
+                "not_run": True,
+                "reasons": reasons,
+                "warnings": warnings,
+                "run": run.to_dict(),
+            }
+        if warnings:
+            meta = self._meta(run)
+            meta["warnings"] = warnings
+            self._save_meta(run, meta)
 
         # Clear any stale kill flag from a previous stop.
         self._set_kill(False)
@@ -119,19 +212,34 @@ class ResearchRunService:
         try:
             self._enqueue_execute_run(run.id)
         except Exception as e:
-            run.status = "failed_precondition"
-            run.halt_reason = f"celery_unreachable ({e.__class__.__name__})"
-            run.ended_at = utcnow()
-            run.report_md = self._write_report(
-                run, [], precondition_failure=run.halt_reason,
-            )
-            db.session.commit()
-            logger.error(f"Research run {run_tag}: {run.halt_reason}")
-            return {"error": run.halt_reason, "run": run.to_dict()}
+            reason = f"celery_unreachable ({e.__class__.__name__})"
+            self._refuse(run, [reason], warnings)
+            logger.error(f"Research run {run_tag}: {reason}")
+            return {"error": reason, "not_run": True, "reasons": [reason],
+                    "run": run.to_dict()}
 
         logger.info(f"Research run {run_tag} kicked off ({trigger}, "
                     f"mode {mode}, budget {budget_hours:.1f}h) via celery")
-        return {"status": "started", "run": run.to_dict()}
+        return {"status": "started", "run": run.to_dict(), "warnings": warnings}
+
+    def _refuse(self, run, reasons: list, warnings: list = None) -> None:
+        """Close a run that did not start: every reason in the report, the
+        first ones in halt_reason (the column holds 200 characters)."""
+        from backend.models import db
+        meta = self._meta(run)
+        meta["precondition_reasons"] = list(reasons)
+        if warnings:
+            meta["warnings"] = list(warnings)
+        meta.pop("current", None)
+        run.promotions = meta
+        run.status = "failed_precondition"
+        run.halt_reason = _clip("; ".join(reasons), HALT_REASON_MAX)
+        run.ended_at = utcnow()
+        run.report_md = self._write_report(
+            run, [], precondition_failure=reasons, warnings=warnings,
+        )
+        db.session.commit()
+        self._emit_run_complete(run)
 
     # ---- director / code-tuning -----------------------------------------
 
@@ -245,9 +353,17 @@ class ResearchRunService:
         db.session.commit()
 
     def _log_heal_row(self, run, diagnose: dict) -> None:
+        """Record the pytest snapshot as a health check. Its status is
+        pass/fail/skipped, never keep/discard: it is not an experiment."""
         try:
             from backend.models import ExperimentRun, db
             pytest_info = diagnose.get("pytest") or {}
+            if diagnose.get("tests_red"):
+                status = "fail"
+            elif pytest_info.get("skipped"):
+                status = "skipped"
+            else:
+                status = "pass" if pytest_info.get("ok") else "fail"
             row = ExperimentRun(
                 id=str(uuid.uuid4()),
                 run_tag=run.run_tag,
@@ -259,7 +375,7 @@ class ResearchRunService:
                 composite_score=0.0,
                 baseline_score=run.baseline_score or 0.0,
                 delta=0.0,
-                status="discard" if diagnose.get("tests_red") else "keep",
+                status=status,
                 proposal_source="heal",
                 retrieval_metrics={"layer": "heal", "pytest": pytest_info},
             )
@@ -398,23 +514,34 @@ class ResearchRunService:
         if run is None:
             logger.error(f"Research run {run_id} vanished before start")
             return
+        if run.status != "pending":
+            # A redelivered task (the broker re-sends an unacked task after its
+            # visibility timeout) must not run a finished run a second time.
+            logger.warning(f"Research run {run.run_tag} is {run.status}, not pending; "
+                           "not executing it again")
+            return
         svc = get_autoresearch_service()
         mode = run.mode or "rag_tuning"
+        trigger = self._meta(run).get("trigger") or "manual"
 
-        ok, reason = self._check_preconditions(svc)
+        ok, reason = self._check_preconditions(svc, trigger=trigger)
         if not ok:
-            run.status = "failed_precondition"
-            run.halt_reason = reason
-            run.ended_at = utcnow()
-            run.report_md = self._write_report(run, [], precondition_failure=reason)
-            db.session.commit()
-            self._emit_run_complete(run)
+            self._refuse(run, reason.split("; "))
             logger.error(f"Research run {run.run_tag}: {reason}")
             return
 
-        run.status = "running"
-        run.started_at = utcnow()
+        # Claim the row: of two deliveries racing here, only one moves it on.
+        claimed = (
+            ResearchRun.query
+            .filter_by(id=run_id, status="pending")
+            .update({"status": "running", "started_at": utcnow()},
+                    synchronize_session=False)
+        )
         db.session.commit()
+        if not claimed:
+            logger.warning(f"Research run {run.run_tag} was claimed by another worker")
+            return
+        db.session.refresh(run)
         self._running_run_id = run_id
 
         t0 = time.time()
@@ -503,28 +630,31 @@ class ResearchRunService:
         halt_reason = "budget_exhausted"
         status_at_end = "completed"
 
+        if self._kill_requested():
+            return [], [], "killed", "killed"
+
+        # Resolve judge and answer models from tonight's settings, not from
+        # whatever this worker cached on an earlier run.
+        svc.eval_harness.reset_models()
         cfg = svc._load_config()
-        baseline = cfg.get("baseline_score") or 0.0
         if cfg.get("avg_pair_seconds") and not getattr(svc.eval_harness, "avg_pair_seconds", None):
             svc.eval_harness.avg_pair_seconds = float(cfg["avg_pair_seconds"])
-        if not baseline:
-            try:
-                base_eval = svc.eval_harness.run_full_eval(dict(cfg.get("params", {})))
-                baseline = base_eval.get("composite_score", 0.0)
-                cfg["baseline_score"] = baseline
-                if getattr(svc.eval_harness, "avg_pair_seconds", None):
-                    cfg["avg_pair_seconds"] = round(svc.eval_harness.avg_pair_seconds, 2)
-                svc._save_config(cfg)
-            except Exception as e:
-                run.status = "failed_precondition"
-                run.halt_reason = f"baseline_eval_failed: {e}"
-                run.ended_at = utcnow()
-                run.report_md = self._write_report(run, [], precondition_failure=run.halt_reason)
-                db.session.commit()
-                self._emit_run_complete(run)
-                return [], [], "baseline_eval_failed", "failed_precondition"
+        try:
+            measured = self._measure_baseline(svc, cfg)
+        except Exception as e:
+            self._refuse(run, [_clip(f"baseline_eval_failed: {e}", HALT_REASON_MAX)])
+            return [], [], "baseline_eval_failed", "failed_precondition"
+        baseline = measured["score"]
         run.baseline_score = baseline
-        db.session.commit()
+        meta = self._meta(run)
+        meta["baseline"] = measured
+        try:
+            judge = svc.eval_harness.judge_status()
+            if isinstance(judge, dict):
+                meta["judge"] = judge
+        except Exception:
+            pass
+        self._save_meta(run, meta)
 
         while True:
             elapsed = time.time() - t0
@@ -548,8 +678,10 @@ class ResearchRunService:
             except Exception:
                 pass
 
-            result = svc.run_single_experiment(run_tag=run.run_tag,
-                                               promote_mode="candidate")
+            result = svc.run_single_experiment(
+                run_tag=run.run_tag, promote_mode="candidate",
+                on_proposal=lambda proposal: self._note_current(run, proposal),
+            )
             if isinstance(result.get("retrieval_metrics"), dict):
                 result["retrieval_metrics"].setdefault("layer", "params")
             elif result.get("retrieval_metrics") is None:
@@ -558,11 +690,15 @@ class ResearchRunService:
             if result.get("config_id"):
                 candidate_ids.append(result["config_id"])
             run.experiments_completed = len(ledger)
+            summary = summarize_ledger(ledger)
             meta = self._meta(run)
             meta["candidate_ids"] = list(candidate_ids)
+            meta["latest_score"] = summary["latest_score"]
+            meta["best_tried_score"] = summary["best_tried_score"]
+            meta["measured_experiments"] = summary["measured_experiments"]
             run.promotions = meta
-            best = max((float(r.get("composite_score") or 0.0) for r in ledger), default=0.0)
-            run.best_score = max(best, baseline)
+            # Best measured experiment, or NULL; never the baseline standing in.
+            run.best_score = summary["best_tried_score"]
             db.session.commit()
 
             if result.get("status") == "crash":
@@ -584,7 +720,62 @@ class ResearchRunService:
 
             time.sleep(AUTORESEARCH_MIN_EXPERIMENT_INTERVAL)
 
+        meta = self._meta(run)
+        if meta.pop("current", None) is not None:
+            self._save_meta(run, meta)
         return ledger, candidate_ids, halt_reason, status_at_end
+
+    def _note_current(self, run, proposal: dict) -> None:
+        """Record the change under test in the run metadata, where /status in
+        the web process can read it while the worker measures it."""
+        meta = self._meta(run)
+        meta["current"] = {
+            "parameter": proposal.get("parameter"),
+            "new_value": str(proposal.get("new_value")),
+            "started_at": utcnow().isoformat(),
+        }
+        self._save_meta(run, meta)
+
+    def _measure_baseline(self, svc, cfg: dict) -> dict:
+        """Score the current params on the full active eval set, now.
+
+        Every run measures its own baseline: a stored score may come from
+        another judge, another eval set or another corpus. Saves the score,
+        when it was measured and on which eval generation into the config,
+        and resets the plateau count, since earlier discards were judged
+        against a different number. Raises when nothing was measured.
+        """
+        harness = svc.eval_harness
+        harness.begin_experiment_budget(duration_s=svc._experiment_deadline_seconds(cfg))
+        result = harness.run_full_eval(dict(cfg.get("params") or {}))
+        pairs = int(result.get("num_pairs") or 0)
+        if pairs == 0:
+            raise RuntimeError("no eval pairs were measured")
+        if result.get("parse_fail_crash"):
+            raise RuntimeError(f"judge_parse_fail_ratio={result.get('parse_fail_ratio')}")
+        try:
+            generations = sorted({
+                p.get("eval_generation_id") for p in harness._get_active_eval_pairs()
+                if p.get("eval_generation_id")
+            })
+        except Exception:
+            generations = []
+        measured = {
+            "score": float(result.get("composite_score") or 0.0),
+            "measured_at": utcnow().isoformat(),
+            "eval_generation": ",".join(generations) or None,
+            "pairs": pairs,
+            "judged_pairs": result.get("judged_pairs"),
+        }
+        cfg["baseline_score"] = measured["score"]
+        cfg["baseline_measured_at"] = measured["measured_at"]
+        cfg["baseline_eval_generation"] = measured["eval_generation"]
+        cfg["baseline_pairs"] = pairs
+        cfg["phase_plateau_count"] = 0
+        if getattr(harness, "avg_pair_seconds", None):
+            cfg["avg_pair_seconds"] = round(harness.avg_pair_seconds, 2)
+        svc._save_config(cfg)
+        return measured
 
     # ---- confirmation (B5) --------------------------------------------
 
@@ -626,7 +817,11 @@ class ResearchRunService:
         # Rows hold only the tuned params. Spelled out in full, each eval
         # measures what that row would serve live, not the row on top of the
         # active one.
+        # Each eval gets a fresh budget; the last experiment's may be spent.
+        deadline = svc._experiment_deadline_seconds({})
+        svc.eval_harness.begin_experiment_budget(duration_s=deadline)
         cand_eval = svc.eval_harness.run_full_eval(svc._full_params(dict(best.params)))
+        svc.eval_harness.begin_experiment_budget(duration_s=deadline)
         base_eval = svc.eval_harness.run_full_eval(svc._full_params(active_params))
         cand_score = cand_eval.get("composite_score", 0.0)
         base_score = base_eval.get("composite_score", 0.0)
@@ -659,7 +854,9 @@ class ResearchRunService:
             db.session.commit()
             from backend.utils.experiment_context import invalidate_active_params_cache
             invalidate_active_params_cache()
-            run.promotions = [best.id]
+            meta = self._meta(run)
+            meta["promoted_ids"] = [best.id]
+            run.promotions = meta
             return (f"candidate CONFIRMED and activated: {cand_score:.3f} vs "
                     f"{base_score:.3f} (delta +{delta:.3f})")
         best.status = "rejected"
@@ -669,26 +866,70 @@ class ResearchRunService:
 
     # ---- preconditions / plumbing -------------------------------------
 
-    def _check_preconditions(self, svc) -> tuple:
-        """Fail loudly, never degrade. Returns (ok, reason)."""
+    def _precondition_failures(self, svc, trigger: str = "manual") -> tuple:
+        """Every reason a run cannot start, and warnings that do not stop it.
+
+        Returns (reasons, warnings), each a list of "code — explanation"
+        strings. Fail loudly, never degrade: a run on these conditions only
+        produces noise. The judge check refuses nightly runs and warns on
+        manual ones.
+        """
+        reasons, warnings = [], []
         # 1. Ollama reachable? (The old loop degraded to random.choice noise.)
         try:
             import requests
             from backend.config import OLLAMA_BASE_URL
             resp = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5)
             if resp.status_code != 200:
-                return False, f"ollama_unreachable (HTTP {resp.status_code})"
+                reasons.append(f"ollama_unreachable (HTTP {resp.status_code})")
         except Exception as e:
-            return False, f"ollama_unreachable ({e.__class__.__name__}) — start Ollama and re-kick"
-        # 2. Corpus + eval pairs (same gates as the loop, surfaced with names).
+            reasons.append(f"ollama_unreachable ({e.__class__.__name__}) — start Ollama and re-kick")
+        # 2. Corpus and eval pairs, each surfaced with its own name.
+        harness = svc.eval_harness
         try:
-            if not svc.eval_harness.has_sufficient_corpus():
-                return False, "insufficient_corpus"
-            if not svc.eval_harness._get_active_eval_pairs():
-                return False, "no_eval_pairs — POST /api/autoresearch/eval-pairs/regenerate first"
+            if not harness.has_sufficient_corpus():
+                from backend.config import AUTORESEARCH_MIN_CORPUS_SIZE
+                reasons.append(
+                    f"insufficient_corpus — {harness.text_document_count()} indexed text "
+                    f"documents, {AUTORESEARCH_MIN_CORPUS_SIZE} needed")
         except Exception as e:
-            return False, f"prerequisite_check_failed ({e})"
-        return True, ""
+            reasons.append(f"prerequisite_check_failed ({e})")
+        try:
+            sources = harness.eval_source_status()
+            active = int(sources.get("active") or 0)
+            not_indexed = int(sources.get("not_indexed") or 0)
+            if active == 0:
+                reasons.append("no_eval_pairs — regenerate eval pairs first")
+            elif not_indexed:
+                by_status = ", ".join(
+                    f"{status}: {n}" for status, n in sorted(sources["by_status"].items())
+                    if status != "INDEXED")
+                reasons.append(
+                    f"eval_sources_not_indexed — {not_indexed} of {active} active eval "
+                    f"pairs come from documents that are not indexed ({by_status}) — "
+                    "index them or regenerate")
+        except Exception as e:
+            reasons.append(f"prerequisite_check_failed ({e})")
+        # 3. A model grading its own answers.
+        try:
+            judge = harness.judge_status()
+        except Exception:
+            judge = {}
+        problem = judge.get("problem")
+        if problem:
+            answer = judge.get("answer_model") or "the active model"
+            text = (
+                f"judge_unset — no autoresearch judge model is set, so {answer} grades its own answers"
+                if problem == "judge_unset" else
+                f"judge_same_as_answer_model — the judge model is {answer}, which also writes the answers"
+            )
+            (reasons if trigger == "nightly" else warnings).append(text)
+        return reasons, warnings
+
+    def _check_preconditions(self, svc, trigger: str = "manual") -> tuple:
+        """Returns (ok, reason) with every failing reason joined by '; '."""
+        reasons, _warnings = self._precondition_failures(svc, trigger=trigger)
+        return (not reasons), "; ".join(reasons)
 
     def _enqueue_execute_run(self, run_id: str) -> None:
         from backend.celery_app import celery
@@ -804,17 +1045,26 @@ class ResearchRunService:
     # ---- report --------------------------------------------------------
 
     def _write_report(self, run, ledger: list, promotion_note: str = None,
-                      precondition_failure: str = None) -> str:
-        """The morning report: what happened tonight, in plain markdown."""
+                      precondition_failure=None, warnings: list = None) -> str:
+        """The morning report: what happened tonight, in plain markdown.
+
+        precondition_failure: a reason string or a list of them; the report
+        then says the run did not run and lists every reason.
+        """
         lines = [f"# Research Run — {run.run_tag}", ""]
 
         if precondition_failure:
+            reasons = (precondition_failure if isinstance(precondition_failure, (list, tuple))
+                       else [precondition_failure])
+            lines += ["**DID NOT RUN**:", ""]
+            lines += [f"- `{r}`" for r in reasons]
             lines += [
-                f"**DID NOT RUN**: `{precondition_failure}`",
                 "",
-                "Fix the precondition and kick off again — the run refused to "
-                "start rather than produce noise (no random-fallback mode).",
+                "Fix these and start again. The run refused to start rather "
+                "than produce scores that measure nothing.",
             ]
+            if warnings:
+                lines += ["", "**Warnings**:", ""] + [f"- {w}" for w in warnings]
             return "\n".join(lines)
 
         try:
@@ -831,29 +1081,44 @@ class ResearchRunService:
         except Exception:
             pass
 
-        keeps = [r for r in ledger if r.get("status") == "keep"]
-        discards = [r for r in ledger if r.get("status") == "discard"]
-        crashes = [r for r in ledger if r.get("status") == "crash"]
-        llm_props = [r for r in ledger if r.get("proposal_source") == "llm"]
-        tpe_props = [r for r in ledger if r.get("proposal_source") == "tpe"]
-        code_props = [r for r in ledger if r.get("proposal_source") == "code_arm"]
-        heal_props = [r for r in ledger if r.get("proposal_source") == "heal"]
-        f0 = [r for r in ledger if r.get("fidelity") == 0]
+        param_rows = [r for r in ledger if is_parameter_experiment(r)]
+        code_rows = [r for r in ledger if is_self_reported(r)]
+        heal_rows = [r for r in ledger if is_health_check(r)]
+        keeps = [r for r in param_rows if r.get("status") == "keep"]
+        discards = [r for r in param_rows if r.get("status") == "discard"]
+        crashes = [r for r in param_rows if r.get("status") == "crash"]
+        summary = summarize_ledger(param_rows)
+        meta = self._meta(run)
+        baseline_info = meta.get("baseline") if isinstance(meta.get("baseline"), dict) else {}
 
-        best = run.best_score or 0.0
-        base = run.baseline_score or 0.0
-        lines += [
-            f"**Headline**: baseline {base:.3f} → best {best:.3f} "
-            f"({'+' if best >= base else ''}{best - base:.3f}) over "
-            f"{len(ledger)} experiments ({len(keeps)} keep / {len(discards)} discard / "
-            f"{len(crashes)} crash; {len(code_props)} code-arm / {len(heal_props)} heal). "
-            f"Halt: `{run.halt_reason}`.",
-            "",
-            f"**Promotion**: {promotion_note or 'n/a'}",
-            "",
-        ]
+        base = run.baseline_score
+        latest, best = summary["latest_score"], summary["best_tried_score"]
 
-        meta = self._meta(run) if run is not None else {}
+        def score(x):
+            return "—" if x is None else f"{x:.3f}"
+
+        def change(x):
+            return "" if x is None or base is None else f" ({x - base:+.3f})"
+
+        measured_at = baseline_info.get("measured_at")
+        head = f"**Headline**: baseline {score(base)}" + (
+            f" (measured {measured_at})" if measured_at else " (not measured by this run)")
+        if summary["measured_experiments"]:
+            head += (f" → latest {score(latest)}{change(latest)}; best tried "
+                     f"{score(best)}{change(best)} over {summary['measured_experiments']} "
+                     "measured experiment(s)")
+        else:
+            head += "; no experiment was measured"
+        head += (f" ({len(keeps)} keep / {len(discards)} discard / {len(crashes)} crash "
+                 f"of {len(param_rows)} tried)")
+        if heal_rows:
+            head += f"; {len(heal_rows)} health check(s) not counted"
+        head += f". Halt: `{run.halt_reason}`."
+        lines += [head, "", f"**Promotion**: {promotion_note or 'n/a'}", ""]
+
+        if meta.get("warnings"):
+            lines += ["**Warnings**:", ""] + [f"- {w}" for w in meta["warnings"]] + [""]
+
         diagnose = meta.get("diagnose") or {}
         split = meta.get("split") or {}
         if diagnose or split:
@@ -874,44 +1139,79 @@ class ResearchRunService:
                 "",
             ]
 
-        if ledger:
-            n = len(ledger)
-            tpe_pct = len(tpe_props) / n * 100.0
-            llm_pct = len(llm_props) / n * 100.0
+        judge = meta.get("judge") if isinstance(meta.get("judge"), dict) else {}
+        single = judge.get("independent") is False
+        for r in param_rows:
+            answer = (r.get("retrieval_metrics") or {}).get("answer_model")
+            if same_model(r.get("judge_model"), answer):
+                single = True
+        if single:
+            judged_by = judge.get("configured") or next(
+                (r.get("judge_model") for r in param_rows if r.get("judge_model")), None)
+            lines += [
+                "**⚠ single-model judging**: the model that answered the eval "
+                f"questions also graded them (judge: {judged_by or 'not set'}) — "
+                "scores carry self-confirmation bias. Set `autoresearch_judge_model` "
+                "to a different model; nightly runs refuse without one.",
+                "",
+            ]
+
+        if param_rows:
+            n = len(param_rows)
+            tpe_pct = sum(1 for r in param_rows if r.get("proposal_source") == "tpe") / n * 100.0
+            llm_pct = sum(1 for r in param_rows if r.get("proposal_source") == "llm") / n * 100.0
             rand_pct = 100.0 - tpe_pct - llm_pct
             lines.append(
-                f"**Proposal quality**: {tpe_pct:.0f}% TPE, {llm_pct:.0f}% LLM, "
-                f"{rand_pct:.0f}% random fallback."
+                f"**Proposal quality** (parameter experiments): {tpe_pct:.0f}% TPE, "
+                f"{llm_pct:.0f}% LLM, {rand_pct:.0f}% random fallback."
             )
+            f0 = [r for r in param_rows
+                  if r.get("fidelity", (r.get("retrieval_metrics") or {}).get("fidelity")) == 0]
             if f0:
                 lines.append(
                     f"**Fidelity**: {len(f0)}/{n} discarded at F0 (retrieval screen, "
-                    "no LLM judge)."
+                    "no LLM judge; not counted as measured)."
                 )
-            judge_models = {r.get("judge_model") for r in ledger if r.get("judge_model")}
-            prop_models = {r.get("proposer_model") for r in ledger if r.get("proposer_model")}
-            if judge_models and judge_models == prop_models:
-                lines.append("**⚠ single-model judging**: proposer and judge ran on the "
-                             "same model — scores carry self-confirmation bias. "
-                             "Configure `autoresearch_judge_model` in Settings.")
             lines.append("")
-            lines.append("| # | parameter | change | delta | status | source |")
-            lines.append("|---|-----------|--------|-------|--------|--------|")
-            for i, r in enumerate(ledger, 1):
+            lines.append("| # | parameter | change | score | delta | status | source |")
+            lines.append("|---|-----------|--------|-------|-------|--------|--------|")
+            for i, r in enumerate(param_rows, 1):
                 lines.append(
                     f"| {i} | {r.get('parameter')} | {r.get('old_value')} → "
-                    f"{r.get('new_value')} | {r.get('delta', 0):+.3f} | "
-                    f"{r.get('status')} | {r.get('proposal_source', '?')} |"
+                    f"{r.get('new_value')} | {score(measured_score(r))} | "
+                    f"{(r.get('delta') or 0):+.3f} | {r.get('status')} | "
+                    f"{r.get('proposal_source', '?')} |"
                 )
             lines.append("")
 
-            retr = [r.get("retrieval_metrics") for r in ledger if r.get("retrieval_metrics")]
+            retr = [m for m in ((r.get("retrieval_metrics") or {}) for r in param_rows)
+                    if m.get("hit_rate_at_k") is not None]
             if retr:
-                first_hit = retr[0].get("hit_rate_at_k", 0)
-                last_hit = retr[-1].get("hit_rate_at_k", 0)
-                lines.append(f"**Retrieval**: hit-rate {first_hit:.2f} → {last_hit:.2f} "
-                             f"across the run (per-experiment values in the ledger).")
+                lines.append(
+                    f"**Retrieval**: hit-rate {retr[0]['hit_rate_at_k']:.2f} → "
+                    f"{retr[-1]['hit_rate_at_k']:.2f} across {len(retr)} experiment(s) that "
+                    "scored retrieval. A pair counts as a hit when any returned chunk is "
+                    "its source chunk, so hit-rate rises with top_k on its own.")
                 lines.append("")
+
+        if code_rows:
+            lines += [
+                "**Self-reported** (code arms; scores were posted by the arm, "
+                "not measured by the eval harness):",
+                "",
+            ]
+            for r in code_rows:
+                lines.append(
+                    f"- {r.get('parameter') or r.get('parameter_changed')}: "
+                    f"{r.get('new_value')} — {r.get('status')}, reported "
+                    f"{score(r.get('composite_score'))} ({(r.get('delta') or 0):+.3f})")
+            lines.append("")
+
+        if heal_rows:
+            lines.append("**Health checks** (pytest snapshot, not experiments): "
+                         + ", ".join(f"{r.get('status')} ({r.get('new_value')})"
+                                     for r in heal_rows) + ".")
+            lines.append("")
 
         if crashes:
             lines.append("**Crash log**:")

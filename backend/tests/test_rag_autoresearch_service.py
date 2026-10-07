@@ -209,6 +209,204 @@ class TestPhaseClamp:
             assert saved["phase"] == MAX_PHASE and saved["phase_plateau_count"] <= 1  # was 387483
 
 
+class TestLedgerProvenance:
+    """The judge is resolved during the eval, so it is recorded after it."""
+
+    def _run(self, svc, eval_side_effect):
+        with patch.object(svc.agent, "propose_experiment", return_value={
+                 "parameter": "top_k", "new_value": 8, "hypothesis": "t", "source": "tpe"}), \
+             patch.object(svc.eval_harness, "run_retrieval_eval", return_value={"num_scored": 0}), \
+             patch.object(svc.eval_harness, "_get_active_eval_pairs", return_value=[{}] * 11), \
+             patch.object(svc.eval_harness, "run_full_eval", side_effect=eval_side_effect), \
+             patch.object(svc, "_load_config", return_value={
+                 "params": {"top_k": 5}, "baseline_score": 3.0, "phase": 1,
+                 "phase_plateau_count": 0}), \
+             patch.object(svc, "_save_config"), \
+             patch.object(svc, "_log_experiment") as log:
+            result = svc.run_single_experiment()
+        return result, log.call_args[0][0]
+
+    def _resolve_models(self, svc):
+        svc.eval_harness.judge_model_name = "qwen3:14b"
+        svc.eval_harness.answer_model_name = "gemma4:12b"
+
+    def test_judge_and_answer_model_recorded_after_the_eval(self, app):
+        with app.app_context():
+            svc = RAGAutoresearchService()
+            assert svc.eval_harness.judge_model_name is None
+
+            def evaluate(*a, **k):
+                self._resolve_models(svc)
+                return {"composite_score": 2.9, "num_pairs": 11, "judged_pairs": 10,
+                        "details": [{}], "parse_fail_crash": False}
+            result, logged = self._run(svc, evaluate)
+        assert result["judge_model"] == logged["judge_model"] == "qwen3:14b"
+        metrics = logged["retrieval_metrics"]
+        assert metrics["answer_model"] == "gemma4:12b"
+        assert metrics["fidelity"] == 1
+        assert metrics["judged_pairs"] == 10
+        assert metrics["active_pairs"] == 11
+
+    def test_on_proposal_hears_the_change_before_it_is_measured(self, app):
+        with app.app_context():
+            svc = RAGAutoresearchService()
+            heard = []
+
+            def evaluate(*a, **k):
+                assert heard, "on_proposal must run before the eval"
+                return {"composite_score": 2.9, "num_pairs": 11, "judged_pairs": 11,
+                        "details": [{}], "parse_fail_crash": False}
+            with patch.object(svc.agent, "propose_experiment", return_value={
+                     "parameter": "top_k", "new_value": 8, "hypothesis": "t", "source": "tpe"}), \
+                 patch.object(svc.eval_harness, "run_retrieval_eval", return_value={"num_scored": 0}), \
+                 patch.object(svc.eval_harness, "run_full_eval", side_effect=evaluate), \
+                 patch.object(svc, "_load_config", return_value={
+                     "params": {"top_k": 5}, "baseline_score": 3.0, "phase": 1,
+                     "phase_plateau_count": 0}), \
+                 patch.object(svc, "_save_config"), \
+                 patch.object(svc, "_log_experiment"):
+                svc.run_single_experiment(on_proposal=heard.append)
+        assert heard[0]["parameter"] == "top_k" and heard[0]["new_value"] == 8
+
+    def test_judge_recorded_on_a_crash_too(self, app):
+        from backend.services.rag_eval_harness import LLMUnavailableError
+        with app.app_context():
+            svc = RAGAutoresearchService()
+
+            def evaluate(*a, **k):
+                self._resolve_models(svc)
+                raise LLMUnavailableError("judge went away")
+            result, logged = self._run(svc, evaluate)
+        assert result["status"] == "crash"
+        assert logged["judge_model"] == "qwen3:14b"
+        assert logged["retrieval_metrics"]["judged_pairs"] == 0
+        assert logged["retrieval_metrics"]["answer_model"] == "gemma4:12b"
+
+
+class TestCountsLeaveHealthChecksOut:
+    def _seed(self):
+        from datetime import timedelta
+        from backend.models import ExperimentRun, ResearchConfig
+        from backend.utils.clock import utcnow
+        t = utcnow()
+        rows = [
+            ("e1", "top_k", "discard", "tpe"),
+            ("h1", "pytest_snapshot", "keep", "heal"),     # written before heal rows had their own status
+            ("e2", "top_k", "discard", "tpe"),
+            ("h2", "pytest_snapshot", "pass", "heal"),
+            ("e3", "hybrid_search_alpha", "crash", None),
+        ]
+        for i, (rid, param, status, source) in enumerate(rows):
+            db.session.add(ExperimentRun(
+                id=rid, phase=0 if source == "heal" else 1, parameter_changed=param,
+                new_value="x", status=status, proposal_source=source,
+                composite_score=0.0, created_at=t + timedelta(seconds=i)))
+        db.session.add_all([
+            ResearchConfig(params={"top_k": 8}, source="local", status="promoted",
+                           promoted_at=t, is_active=True),
+            ResearchConfig(params={"top_k": 9}, source="local", status="candidate"),
+            ResearchConfig(params={"top_k": 7}, source="family_broadcast",
+                           status="promoted", promoted_at=t),
+        ])
+        db.session.commit()
+
+    def test_counts(self, app):
+        with app.app_context():
+            self._seed()
+            svc = RAGAutoresearchService()
+            assert svc._count_experiments() == 3
+            assert svc._count_health_checks() == 2
+            assert svc._count_improvements() == 1
+
+    def test_history_has_no_health_checks(self, app):
+        with app.app_context():
+            self._seed()
+            history = RAGAutoresearchService()._get_recent_history()
+            assert [h["id"] for h in history] == ["e1", "e2", "e3"]
+
+    def test_status_reports_the_honest_counts(self, app, tmp_path, monkeypatch):
+        monkeypatch.setenv("GUAARDVARK_ROOT", str(tmp_path))
+        with app.app_context():
+            self._seed()
+            with patch("backend.utils.llm_service.get_saved_active_model_name",
+                       return_value="gemma4:12b"):
+                st = RAGAutoresearchService().get_status()
+        assert st["total_experiments"] == 3
+        assert st["total_health_checks"] == 2
+        assert st["total_improvements"] == 1
+        assert st["judge"] == {"configured": None, "answer_model": "gemma4:12b",
+                               "independent": False, "problem": "judge_unset"}
+        assert st["eval_pairs"] == {"active": 0, "not_indexed": 0, "by_status": {}}
+        assert st["auto_enabled"] is False
+        assert st["last_run"] is None
+
+
+class TestBaselineIsMeasuredEachRun:
+    """A stored baseline may come from another judge or eval set; every run
+    scores its own and starts its plateau count from zero."""
+
+    def _config_file(self, tmp_path, monkeypatch, body):
+        import json
+        monkeypatch.setenv("GUAARDVARK_ROOT", str(tmp_path))
+        (tmp_path / "data").mkdir(exist_ok=True)
+        cfg_file = tmp_path / "data" / "rag_experiment_config.json"
+        cfg_file.write_text(json.dumps(body))
+        return cfg_file
+
+    def test_measuring_the_baseline_resets_the_plateau_count(self, app, tmp_path, monkeypatch):
+        import json
+        from backend.services.research_run_service import ResearchRunService
+        cfg_file = self._config_file(tmp_path, monkeypatch, {
+            "version": 1, "baseline_score": 4.94, "phase": 1,
+            "phase_plateau_count": 14, "tuned": [], "params": {"top_k": 5},
+        })
+        with app.app_context():
+            svc = RAGAutoresearchService()
+            with patch.object(svc.eval_harness, "run_full_eval", return_value={
+                     "composite_score": 2.39, "num_pairs": 11, "judged_pairs": 11,
+                     "details": [], "parse_fail_crash": False}) as full, \
+                 patch.object(svc.eval_harness, "_get_active_eval_pairs",
+                              return_value=[{"eval_generation_id": "gen-a"}] * 11), \
+                 patch.object(svc.eval_harness, "begin_experiment_budget") as budget:
+                measured = ResearchRunService()._measure_baseline(svc, svc._load_config())
+            budget.assert_called_once()
+            full.assert_called_once()
+        saved = json.loads(cfg_file.read_text())
+        assert saved["baseline_score"] == 2.39
+        assert saved["phase_plateau_count"] == 0
+        assert saved["baseline_pairs"] == 11
+        assert saved["baseline_eval_generation"] == "gen-a"
+        assert saved["baseline_measured_at"] == measured["measured_at"]
+
+    def test_nothing_measured_is_an_error_not_a_zero_baseline(self, app, tmp_path, monkeypatch):
+        import json
+        from backend.services.research_run_service import ResearchRunService
+        cfg_file = self._config_file(tmp_path, monkeypatch, {
+            "version": 1, "baseline_score": 4.94, "phase": 1,
+            "phase_plateau_count": 14, "tuned": [], "params": {"top_k": 5},
+        })
+        with app.app_context():
+            svc = RAGAutoresearchService()
+            with patch.object(svc.eval_harness, "run_full_eval", return_value={
+                     "composite_score": 0.0, "num_pairs": 0, "details": []}):
+                with pytest.raises(RuntimeError, match="no eval pairs"):
+                    ResearchRunService()._measure_baseline(svc, svc._load_config())
+        assert json.loads(cfg_file.read_text())["baseline_score"] == 4.94
+
+    def test_clear_baseline_forgets_score_and_plateau(self, app, tmp_path, monkeypatch):
+        import json
+        cfg_file = self._config_file(tmp_path, monkeypatch, {
+            "version": 1, "baseline_score": 2.39, "phase": 1, "phase_plateau_count": 6,
+            "baseline_measured_at": "2026-10-07T05:09:00", "baseline_pairs": 11,
+            "tuned": [], "params": {"top_k": 5},
+        })
+        with app.app_context():
+            RAGAutoresearchService().clear_baseline()
+        saved = json.loads(cfg_file.read_text())
+        assert saved["baseline_score"] == 0.0 and saved["phase_plateau_count"] == 0
+        assert "baseline_measured_at" not in saved and "baseline_pairs" not in saved
+
+
 @pytest.fixture
 def nomic(monkeypatch):
     """Active embedding model nomic-embed-text, with no env threshold override."""
@@ -340,6 +538,28 @@ class TestBaselineDedupIsPerModel:
         assert config["params"]["dedup_threshold"] == 0.9
         assert config["tuned"] == ["dedup_threshold"]
         assert config["baseline_score"] == 3.0
+
+    def test_read_config_does_not_create_a_missing_file(self, app, tmp_path, monkeypatch):
+        monkeypatch.setenv("GUAARDVARK_ROOT", str(tmp_path))
+        with app.app_context():
+            config, changed = RAGAutoresearchService()._read_config()
+        assert changed is True
+        assert config["params"]["dedup_threshold"] == 0.96
+        assert not (tmp_path / "data" / "rag_experiment_config.json").exists()
+
+    def test_read_config_leaves_a_pending_migration_unsaved(self, app, tmp_path, monkeypatch):
+        from backend.config import AUTORESEARCH_DEFAULT_PARAMS
+        cfg_file = self._write(tmp_path, monkeypatch, {
+            "version": 1, "baseline_score": 3.0, "phase": 1, "phase_plateau_count": 0,
+            "params": dict(AUTORESEARCH_DEFAULT_PARAMS, dedup_threshold=0.85),
+        })
+        before = cfg_file.read_bytes()
+        with app.app_context():
+            config, changed = RAGAutoresearchService()._read_config()
+        assert changed is True
+        assert config["params"]["dedup_threshold"] == 0.96
+        assert config["baseline_score"] == 0.0
+        assert cfg_file.read_bytes() == before
 
     def test_experiment_measures_the_model_value_as_baseline(self, app, tmp_path, monkeypatch):
         monkeypatch.setenv("GUAARDVARK_ROOT", str(tmp_path))
