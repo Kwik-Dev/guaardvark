@@ -1,6 +1,7 @@
 """Autoresearch 2.0 tests: the active-config layer, honest eval scoring,
 and the research-run engine (Phases A+B of the 2026-08-10 rebuild)."""
 import hashlib
+import time
 import pytest
 from datetime import timedelta
 from unittest.mock import patch, MagicMock
@@ -259,7 +260,99 @@ class TestResearchRunEngine:
             db.session.refresh(active)
             assert cand.is_active is True and cand.status == "promoted"
             assert active.is_active is False and active.status == "superseded"
-            assert run.promotions == [cand.id]
+            assert run.promotions["promoted_ids"] == [cand.id]
+            # Each confirmation eval starts on a fresh budget.
+            assert auto_svc.eval_harness.begin_experiment_budget.call_count == 2
+
+    def test_run_metadata_survives_promotion(self, app):
+        with app.app_context():
+            svc_run = self._mk_service()
+            cand = ResearchConfig(params={"top_k": 9}, is_active=False,
+                                  status="candidate", composite_score=3.8)
+            db.session.add(cand)
+            db.session.commit()
+            run = ResearchRun(run_tag="t-meta", mode="rag_tuning", promotions={
+                "trigger": "nightly", "candidate_ids": [cand.id],
+                "baseline": {"score": 3.0}, "latest_score": 3.8,
+            })
+            db.session.add(run)
+            db.session.commit()
+            auto_svc = MagicMock()
+            auto_svc.eval_harness.run_full_eval.side_effect = [
+                {"composite_score": 3.8}, {"composite_score": 3.0},
+            ]
+            svc_run._confirm_and_activate(auto_svc, run)
+            db.session.commit()
+            db.session.refresh(run)
+            assert run.promotions["promoted_ids"] == [cand.id]
+            assert run.promotions["trigger"] == "nightly"
+            assert run.promotions["candidate_ids"] == [cand.id]
+            assert run.promotions["baseline"] == {"score": 3.0}
+            assert run.promotions["latest_score"] == 3.8
+
+    def _slice_service(self, stored_baseline=4.94):
+        auto_svc = MagicMock()
+        cfg = {"params": {"top_k": 5}, "baseline_score": stored_baseline, "phase": 1,
+               "phase_plateau_count": 14, "tuned": []}
+        auto_svc._load_config.return_value = cfg
+        auto_svc.eval_harness.avg_pair_seconds = None
+        auto_svc.eval_harness._get_active_eval_pairs.return_value = [
+            {"eval_generation_id": "gen-b"}] * 11
+        auto_svc.eval_harness.run_full_eval.return_value = {
+            "composite_score": 2.39, "num_pairs": 11, "judged_pairs": 11,
+            "details": [], "parse_fail_crash": False,
+        }
+        return auto_svc, cfg
+
+    def test_every_run_measures_its_own_baseline(self, app):
+        with app.app_context():
+            svc_run = self._mk_service()
+            run = ResearchRun(run_tag="t-baseline", mode="rag_tuning", status="running",
+                              wall_clock_budget_s=3600, started_at=utcnow())
+            db.session.add(run)
+            db.session.commit()
+            auto_svc, cfg = self._slice_service(stored_baseline=4.94)
+            order = []
+            auto_svc.eval_harness.begin_experiment_budget.side_effect = \
+                lambda **k: order.append("budget")
+            auto_svc.eval_harness.run_full_eval.side_effect = \
+                lambda *a, **k: order.append("eval") or {
+                    "composite_score": 2.39, "num_pairs": 11, "judged_pairs": 11,
+                    "details": [], "parse_fail_crash": False}
+
+            def one_experiment(**kwargs):
+                svc_run._set_kill(True)
+                return {"experiment_id": "e1", "parameter": "top_k", "status": "discard",
+                        "composite_score": 2.2, "baseline_score": 2.39, "delta": -0.19,
+                        "fidelity": 1, "retrieval_metrics": {"judged_pairs": 11}}
+            auto_svc.run_single_experiment.side_effect = one_experiment
+            with patch("backend.services.research_run_service.time.sleep"), \
+                 patch("backend.utils.gpu_check.gpu_busy", return_value=False):
+                ledger, _ids, halt, status = svc_run._run_rag_slice(
+                    run, auto_svc, time.time(), 3600)
+            assert order[:2] == ["budget", "eval"]
+            assert run.baseline_score == 2.39
+            assert run.promotions["baseline"]["score"] == 2.39
+            assert run.promotions["baseline"]["eval_generation"] == "gen-b"
+            assert cfg["phase_plateau_count"] == 0 and cfg["baseline_score"] == 2.39
+            assert halt == "killed" and len(ledger) == 1
+
+    def test_a_baseline_that_measures_nothing_refuses_the_run(self, app):
+        with app.app_context():
+            svc_run = self._mk_service()
+            run = ResearchRun(run_tag="t-nobase", mode="rag_tuning", status="running",
+                              wall_clock_budget_s=3600, started_at=utcnow())
+            db.session.add(run)
+            db.session.commit()
+            auto_svc, _cfg = self._slice_service()
+            auto_svc.eval_harness.run_full_eval.return_value = {
+                "composite_score": 0.0, "num_pairs": 0, "details": []}
+            _l, _i, halt, status = svc_run._run_rag_slice(run, auto_svc, time.time(), 3600)
+            assert (halt, status) == ("baseline_eval_failed", "failed_precondition")
+            db.session.refresh(run)
+            assert run.status == "failed_precondition"
+            assert run.halt_reason.startswith("baseline_eval_failed: no eval pairs")
+            auto_svc.run_single_experiment.assert_not_called()
 
     def test_report_flags_single_model_judging(self, app):
         with app.app_context():

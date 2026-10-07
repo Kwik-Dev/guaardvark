@@ -175,6 +175,8 @@ def regenerate_eval_pairs():
         pair.is_active = True
         db.session.add(pair)
     db.session.commit()
+    # A baseline scored on the old questions says nothing about the new ones.
+    svc.clear_baseline()
     return jsonify({"status": "regenerated", "count": len(pairs)})
 
 

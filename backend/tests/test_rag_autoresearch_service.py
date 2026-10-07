@@ -209,6 +209,72 @@ class TestPhaseClamp:
             assert saved["phase"] == MAX_PHASE and saved["phase_plateau_count"] <= 1  # was 387483
 
 
+class TestBaselineIsMeasuredEachRun:
+    """A stored baseline may come from another judge or eval set; every run
+    scores its own and starts its plateau count from zero."""
+
+    def _config_file(self, tmp_path, monkeypatch, body):
+        import json
+        monkeypatch.setenv("GUAARDVARK_ROOT", str(tmp_path))
+        (tmp_path / "data").mkdir(exist_ok=True)
+        cfg_file = tmp_path / "data" / "rag_experiment_config.json"
+        cfg_file.write_text(json.dumps(body))
+        return cfg_file
+
+    def test_measuring_the_baseline_resets_the_plateau_count(self, app, tmp_path, monkeypatch):
+        import json
+        from backend.services.research_run_service import ResearchRunService
+        cfg_file = self._config_file(tmp_path, monkeypatch, {
+            "version": 1, "baseline_score": 4.94, "phase": 1,
+            "phase_plateau_count": 14, "tuned": [], "params": {"top_k": 5},
+        })
+        with app.app_context():
+            svc = RAGAutoresearchService()
+            with patch.object(svc.eval_harness, "run_full_eval", return_value={
+                     "composite_score": 2.39, "num_pairs": 11, "judged_pairs": 11,
+                     "details": [], "parse_fail_crash": False}) as full, \
+                 patch.object(svc.eval_harness, "_get_active_eval_pairs",
+                              return_value=[{"eval_generation_id": "gen-a"}] * 11), \
+                 patch.object(svc.eval_harness, "begin_experiment_budget") as budget:
+                measured = ResearchRunService()._measure_baseline(svc, svc._load_config())
+            budget.assert_called_once()
+            full.assert_called_once()
+        saved = json.loads(cfg_file.read_text())
+        assert saved["baseline_score"] == 2.39
+        assert saved["phase_plateau_count"] == 0
+        assert saved["baseline_pairs"] == 11
+        assert saved["baseline_eval_generation"] == "gen-a"
+        assert saved["baseline_measured_at"] == measured["measured_at"]
+
+    def test_nothing_measured_is_an_error_not_a_zero_baseline(self, app, tmp_path, monkeypatch):
+        import json
+        from backend.services.research_run_service import ResearchRunService
+        cfg_file = self._config_file(tmp_path, monkeypatch, {
+            "version": 1, "baseline_score": 4.94, "phase": 1,
+            "phase_plateau_count": 14, "tuned": [], "params": {"top_k": 5},
+        })
+        with app.app_context():
+            svc = RAGAutoresearchService()
+            with patch.object(svc.eval_harness, "run_full_eval", return_value={
+                     "composite_score": 0.0, "num_pairs": 0, "details": []}):
+                with pytest.raises(RuntimeError, match="no eval pairs"):
+                    ResearchRunService()._measure_baseline(svc, svc._load_config())
+        assert json.loads(cfg_file.read_text())["baseline_score"] == 4.94
+
+    def test_clear_baseline_forgets_score_and_plateau(self, app, tmp_path, monkeypatch):
+        import json
+        cfg_file = self._config_file(tmp_path, monkeypatch, {
+            "version": 1, "baseline_score": 2.39, "phase": 1, "phase_plateau_count": 6,
+            "baseline_measured_at": "2026-10-07T05:09:00", "baseline_pairs": 11,
+            "tuned": [], "params": {"top_k": 5},
+        })
+        with app.app_context():
+            RAGAutoresearchService().clear_baseline()
+        saved = json.loads(cfg_file.read_text())
+        assert saved["baseline_score"] == 0.0 and saved["phase_plateau_count"] == 0
+        assert "baseline_measured_at" not in saved and "baseline_pairs" not in saved
+
+
 @pytest.fixture
 def nomic(monkeypatch):
     """Active embedding model nomic-embed-text, with no env threshold override."""

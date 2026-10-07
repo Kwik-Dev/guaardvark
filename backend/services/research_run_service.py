@@ -565,28 +565,22 @@ class ResearchRunService:
         halt_reason = "budget_exhausted"
         status_at_end = "completed"
 
+        if self._kill_requested():
+            return [], [], "killed", "killed"
+
         cfg = svc._load_config()
-        baseline = cfg.get("baseline_score") or 0.0
         if cfg.get("avg_pair_seconds") and not getattr(svc.eval_harness, "avg_pair_seconds", None):
             svc.eval_harness.avg_pair_seconds = float(cfg["avg_pair_seconds"])
-        if not baseline:
-            try:
-                base_eval = svc.eval_harness.run_full_eval(dict(cfg.get("params", {})))
-                baseline = base_eval.get("composite_score", 0.0)
-                cfg["baseline_score"] = baseline
-                if getattr(svc.eval_harness, "avg_pair_seconds", None):
-                    cfg["avg_pair_seconds"] = round(svc.eval_harness.avg_pair_seconds, 2)
-                svc._save_config(cfg)
-            except Exception as e:
-                run.status = "failed_precondition"
-                run.halt_reason = f"baseline_eval_failed: {e}"
-                run.ended_at = utcnow()
-                run.report_md = self._write_report(run, [], precondition_failure=run.halt_reason)
-                db.session.commit()
-                self._emit_run_complete(run)
-                return [], [], "baseline_eval_failed", "failed_precondition"
+        try:
+            measured = self._measure_baseline(svc, cfg)
+        except Exception as e:
+            self._refuse(run, [_clip(f"baseline_eval_failed: {e}", HALT_REASON_MAX)])
+            return [], [], "baseline_eval_failed", "failed_precondition"
+        baseline = measured["score"]
         run.baseline_score = baseline
-        db.session.commit()
+        meta = self._meta(run)
+        meta["baseline"] = measured
+        self._save_meta(run, meta)
 
         while True:
             elapsed = time.time() - t0
@@ -648,6 +642,47 @@ class ResearchRunService:
 
         return ledger, candidate_ids, halt_reason, status_at_end
 
+    def _measure_baseline(self, svc, cfg: dict) -> dict:
+        """Score the current params on the full active eval set, now.
+
+        Every run measures its own baseline: a stored score may come from
+        another judge, another eval set or another corpus. Saves the score,
+        when it was measured and on which eval generation into the config,
+        and resets the plateau count, since earlier discards were judged
+        against a different number. Raises when nothing was measured.
+        """
+        harness = svc.eval_harness
+        harness.begin_experiment_budget(duration_s=svc._experiment_deadline_seconds(cfg))
+        result = harness.run_full_eval(dict(cfg.get("params") or {}))
+        pairs = int(result.get("num_pairs") or 0)
+        if pairs == 0:
+            raise RuntimeError("no eval pairs were measured")
+        if result.get("parse_fail_crash"):
+            raise RuntimeError(f"judge_parse_fail_ratio={result.get('parse_fail_ratio')}")
+        try:
+            generations = sorted({
+                p.get("eval_generation_id") for p in harness._get_active_eval_pairs()
+                if p.get("eval_generation_id")
+            })
+        except Exception:
+            generations = []
+        measured = {
+            "score": float(result.get("composite_score") or 0.0),
+            "measured_at": utcnow().isoformat(),
+            "eval_generation": ",".join(generations) or None,
+            "pairs": pairs,
+            "judged_pairs": result.get("judged_pairs"),
+        }
+        cfg["baseline_score"] = measured["score"]
+        cfg["baseline_measured_at"] = measured["measured_at"]
+        cfg["baseline_eval_generation"] = measured["eval_generation"]
+        cfg["baseline_pairs"] = pairs
+        cfg["phase_plateau_count"] = 0
+        if getattr(harness, "avg_pair_seconds", None):
+            cfg["avg_pair_seconds"] = round(harness.avg_pair_seconds, 2)
+        svc._save_config(cfg)
+        return measured
+
     # ---- confirmation (B5) --------------------------------------------
 
     def _confirm_and_activate(self, svc, run, candidate_ids=None) -> str:
@@ -688,7 +723,11 @@ class ResearchRunService:
         # Rows hold only the tuned params. Spelled out in full, each eval
         # measures what that row would serve live, not the row on top of the
         # active one.
+        # Each eval gets a fresh budget; the last experiment's may be spent.
+        deadline = svc._experiment_deadline_seconds({})
+        svc.eval_harness.begin_experiment_budget(duration_s=deadline)
         cand_eval = svc.eval_harness.run_full_eval(svc._full_params(dict(best.params)))
+        svc.eval_harness.begin_experiment_budget(duration_s=deadline)
         base_eval = svc.eval_harness.run_full_eval(svc._full_params(active_params))
         cand_score = cand_eval.get("composite_score", 0.0)
         base_score = base_eval.get("composite_score", 0.0)
@@ -721,7 +760,9 @@ class ResearchRunService:
             db.session.commit()
             from backend.utils.experiment_context import invalidate_active_params_cache
             invalidate_active_params_cache()
-            run.promotions = [best.id]
+            meta = self._meta(run)
+            meta["promoted_ids"] = [best.id]
+            run.promotions = meta
             return (f"candidate CONFIRMED and activated: {cand_score:.3f} vs "
                     f"{base_score:.3f} (delta +{delta:.3f})")
         best.status = "rejected"

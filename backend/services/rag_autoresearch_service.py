@@ -184,6 +184,17 @@ class RAGAutoresearchService:
             self._save_config(config)
         return config
 
+    def clear_baseline(self) -> dict:
+        """Forget the measured baseline and the plateau count, e.g. after the
+        eval set is replaced; the next run measures both again."""
+        config = self._load_config()
+        config["baseline_score"] = 0.0
+        config["phase_plateau_count"] = 0
+        for key in ("baseline_measured_at", "baseline_eval_generation", "baseline_pairs"):
+            config.pop(key, None)
+        self._save_config(config)
+        return config
+
     def _save_config(self, config: dict):
         """Atomically save config to disk."""
         path = self._config_path()
@@ -429,6 +440,8 @@ class RAGAutoresearchService:
             config["params"][param_name] = new_value
             config["tuned"] = sorted(set(config.get("tuned") or []) | {param_name})
             config["baseline_score"] = new_score
+            config["baseline_measured_at"] = utcnow().isoformat()
+            config["baseline_pairs"] = eval_result.get("num_pairs")
             config["phase_plateau_count"] = 0
             self._save_config(config)
             promoted_id = self._promote_config(
