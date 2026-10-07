@@ -91,12 +91,53 @@ def weights_cache_dir(model_size: str) -> Optional[str]:
     return os.path.join(constants.HF_HUB_CACHE, "models--" + repo_id.replace("/", "--"))
 
 
+def pick_device() -> str:
+    """CUDA only when the card has room to spare; otherwise CPU.
+
+    Speech models load in this process, outside the GPU orchestrator's
+    admission, so they follow the reranker's rule (utils/reranker.py): take
+    the card only above a free-VRAM floor and leave it to image and video jobs
+    otherwise. Decided per load; unload() releases the choice. The
+    GUAARDVARK_WHISPER_DEVICE environment variable ("cpu", "cuda") overrides.
+    """
+    forced = os.environ.get("GUAARDVARK_WHISPER_DEVICE", "").strip().lower()
+    if forced in ("cpu", "cuda"):
+        return forced
+    try:
+        from backend.utils.backend_http import in_mcp_process
+        # Memory held by the MCP process is invisible to the backend's GPU admission.
+        if in_mcp_process():
+            return "cpu"
+    except ImportError:
+        pass
+    # Chosen as a margin, not measured: the tiny.en weights are about 75 MB.
+    floor_mb = int(os.environ.get("GUAARDVARK_WHISPER_MIN_VRAM_MB", "2000"))
+    try:
+        from backend.services.gpu_resource_coordinator import get_available_vram, has_gpu
+        if not has_gpu():
+            return "cpu"
+        info = get_available_vram()
+        if info.get("success") and info.get("available_mb", 0) >= floor_mb:
+            return "cuda"
+        logger.info(
+            "faster-whisper: %s MB free < %s MB floor, loading on CPU",
+            info.get("available_mb"), floor_mb,
+        )
+        return "cpu"
+    except Exception as e:  # noqa: BLE001
+        logger.debug("faster-whisper device probe failed (%s); using CPU", e)
+        return "cpu"
+
+
 def get_faster_whisper_model(
     model_size: str = "tiny.en",
-    device: str = "auto",
+    device: Optional[str] = None,
     compute_type: str = "int8"
 ) -> "WhisperModel":
-    """Get or create a cached faster-whisper model instance."""
+    """Get or create a cached faster-whisper model instance.
+
+    `device` None lets pick_device() choose against the card's free memory.
+    """
     global _whisper_model, _current_model_size
 
     if not FASTER_WHISPER_AVAILABLE:
@@ -108,6 +149,8 @@ def get_faster_whisper_model(
     if local_model_path(model_size) is None:
         raise SpeechModelMissing(model_size)
 
+    if device is None:
+        device = pick_device()
     logger.info(f"Loading faster-whisper model '{model_size}' (device={device}, compute_type={compute_type})")
     start = time.time()
 
@@ -135,10 +178,9 @@ def is_loaded() -> bool:
 def unload() -> bool:
     """Release the cached model. Returns True if something was released.
 
-    device="auto" resolves to CUDA wherever CTranslate2 can see the card, so a
-    single voice message leaves an encoder/decoder and a cuBLAS workspace resident
-    for the life of the process. Only a request for a *different* model_size ever
-    replaced it, and only "tiny.en" is ever asked for. Never raises.
+    A model loaded on CUDA keeps an encoder/decoder and a cuBLAS workspace on
+    the card until this runs; the GPU orchestrator calls it when a render needs
+    the memory, and the next transcription re-decides the device. Never raises.
     """
     global _whisper_model, _current_model_size
     if _whisper_model is None:
