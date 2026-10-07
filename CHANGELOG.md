@@ -2,6 +2,65 @@
 
 ## Unreleased
 
+## 3.0.0 — An inbound guard, agents that act on what they see, and an install that works on a fresh machine
+
+Guaardvark 3.0 reads code before it lands, keeps every outbound path behind your say-so, and
+makes the agents act instead of narrate: they run tools from a request for them, claim done only
+when the screen shows it, and ask before anything public. Docker and native installs were walked
+through on a freshly installed Ubuntu and fixed where a new user would have stopped.
+
+### Upgrading
+
+- **Docker:** run `./start-docker.sh` (add `--gpu` for NVIDIA) again. It rebuilds the images, gives
+  Redis a password, keeps an existing database's password, and the containers now restart after a
+  reboot. `--gpu` needs NVIDIA Container Toolkit; INSTALL.md has the steps.
+- **API key:** running tools, automation, backups and restarts from another device needs the
+  install's API key (Settings → API key). The Guaardvark machine itself needs nothing.
+- **Agent recipes** that leave their safety bounds are not loaded (see below). The stock library
+  is inside them.
+- **AutoResearch** nightly runs need an independent judge model and refuse without one.
+- **Code Search (zvec-grep):** press its Install again to pick up the patched dependencies.
+- **Contributors:** agent instructions, recipes, rule and lesson bundles are maintainer-written;
+  a pull request from a fork that changes them fails the inbound check. Open an issue instead.
+
+### New since the notes below
+
+- **Docker installs on a fresh Ubuntu.** A clean clone builds again; `./start-docker.sh` says
+  which prerequisite is missing (Docker, Compose, the `docker` group, NVIDIA Container Toolkit)
+  before it builds anything; `--gpu` builds PyTorch for your card, GTX 10 series and newer; the
+  backend reaches Ollama inside Docker; the health check reports the real version.
+- **Agent recipes have safety bounds.** A recipe runs before any model reads the request, so one
+  that claims everyday messages, types fixed text other than an address, presses terminal or
+  developer-tools keys, or clicks something that spends, deletes or grants is refused at load.
+- **Browser recipes:** next and previous tab, zoom in and out, and bookmark this page (thanks
+  @bibhacodex, #252). Recipe clicks point with the task's own vision model, "go to the … page"
+  opens this install's web UI port, and the agent's browser starts on a blank page.
+- **Agents act.** An agent run's first message asks for action, not a plan; agents get their
+  instructions once and the right tools, ask before gated tools, and the screen agent claims done
+  only when the screen shows it.
+- **Chat goes where you meant.** Ordinary questions stay in chat; images, video, Film Crew and photo
+  tools start only from a request for them; a reply that merely names a tool no longer runs it.
+  Current-information questions get a **Search the web for this** offer instead of a silent search.
+- **Remembering carries across chats.** "remember …", "from now on …" and "for future reference …"
+  apply to every chat, not only the one they were said in.
+- **Training runs end to end.** Add Dataset works, a training job runs from the page, the result is
+  measured against its base and held if it is worse (you can still export it), and the training
+  libraries install from Settings on a click.
+- **AutoResearch reports what it measured** and refuses runs it cannot measure.
+- **The self-check** every six hours tries, verifies and stages fixes for your review; it never
+  applies one on its own.
+- **Outreach has one stop** for all public posting, needs a second check that actually ran, and
+  counts a post only when the page shows it.
+- **Right-click menus** across the app, Settings explanations in hover help, and **Esc** stops a
+  running reply in the web chat and the CLI.
+- **Cast:** import LoRAs trained elsewhere (thanks @Carol-zolet, #253, #303) and keep one per
+  base model (#300); the identity score is earned from the images. Z-Image through ComfyUI is an
+  opt-in route (thanks @kwiksher, #197).
+- **Code Search (zvec-grep):** patched simple-git, MCP SDK and sharp under zvec-grep 0.2.2.
+- **Image model stays loaded between batches** if you switch it on.
+
+### Earlier in this cycle
+
 - **Docker installs get their own database and queue passwords.** The first `./start-docker.sh`
   writes random `GUAARDVARK_POSTGRES_PASSWORD` and `GUAARDVARK_REDIS_PASSWORD` into `.env`, and
   Redis now requires its password. A database created before this keeps its password; INSTALL.md
