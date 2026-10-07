@@ -1204,8 +1204,8 @@ class AgentControlService:
                     # Persistent cross-session knowledge rides the system slot,
                     # not the user prompt — keeps the per-step prompt small
                     # enough to hold the model in instructed mode while still
-                    # carrying URL routes, Firefox button location, recipe
-                    # index, etc. into every decision.
+                    # carrying the compact knowledge (URL routes, browser
+                    # tactics) and distilled lessons into every decision.
                     persistent_system = self._build_persistent_knowledge_system()
                     if persistent_system:
                         logger.debug(
@@ -4830,6 +4830,17 @@ Reply ONLY with JSON:
         )
 
     @staticmethod
+    def _fill_knowledge_placeholders(text: str) -> str:
+        """Put this install's values into a knowledge file's {VITE_PORT} placeholders.
+
+        A plain replace: the files also hold literal braces (JSON examples).
+        """
+        if "{VITE_PORT}" not in text:
+            return text
+        from backend.utils.cors_policy import vite_port
+        return text.replace("{VITE_PORT}", vite_port())
+
+    @staticmethod
     def _load_self_knowledge() -> str:
         """Load the Guaardvark self-knowledge map for agent context."""
         import os
@@ -4838,7 +4849,8 @@ Reply ONLY with JSON:
         try:
             if os.path.exists(path):
                 with open(path, "r") as f:
-                    return f.read().strip() + "\n\n"
+                    text = f.read().strip()
+                return AgentControlService._fill_knowledge_placeholders(text) + "\n\n"
         except Exception as e:
             logger.warning(f"Failed to load self-knowledge: {e}")
         return ""
@@ -4856,7 +4868,7 @@ Reply ONLY with JSON:
         try:
             if os.path.exists(path):
                 with open(path, "r") as f:
-                    return f.read().strip()
+                    return AgentControlService._fill_knowledge_placeholders(f.read().strip())
         except Exception as e:
             logger.warning(f"Failed to load compact self-knowledge: {e}")
         return ""
