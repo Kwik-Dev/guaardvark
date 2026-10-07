@@ -76,6 +76,7 @@ import ProgressFooterBar from "./components/layout/ProgressFooterBar";
 import { StatusProvider } from "./contexts/StatusContext";
 import { HealthProvider } from "./contexts/HealthContext";
 import BackendOfflineBanner from "./components/common/BackendOfflineBanner";
+import UpdateAppliedBanner from "./components/common/UpdateAppliedBanner";
 import ApiKeyRefusalNotice from "./components/common/ApiKeyRefusalNotice";
 import { SnackbarProvider } from "./components/common/SnackbarProvider";
 import { ErrorProvider } from "./components/common/ErrorProvider";
@@ -237,6 +238,8 @@ const AppContainer = () => {
         <Router
           future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
         >
+          {/* Inside the Router: the restart modal's API-key advice links to Settings. */}
+          <UpdateAppliedBanner />
           <UnifiedProgressProvider>
             <LayoutProvider>
               <VoiceProvider>

@@ -286,7 +286,9 @@ const SettingsPage = () => {
         } else {
           const data = response?.data || response || {};
           showMessage?.(
-            `Updated ${data.applied || 0} files (${data.created || 0} new, ${data.updated || 0} modified)`,
+            `Updated ${data.applied || 0} files (${data.created || 0} new, ${data.updated || 0} modified)${
+              data.restart_required ? ". Restart Guaardvark to finish the update." : ""
+            }`,
             "success",
           );
           // Clear the banner; a follow-up checkForUpdates will repopulate if more remain.
