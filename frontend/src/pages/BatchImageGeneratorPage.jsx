@@ -76,8 +76,9 @@ import {
   resolveQualityPreset,
   stripCopyCounter,
 } from '../utils/batchImageSettings';
+import lazyWithReload from '../utils/lazyWithReload';
 
-const ImageModelsModal = React.lazy(() => import('../components/modals/ImageModelsModal'));
+const ImageModelsModal = lazyWithReload(() => import('../components/modals/ImageModelsModal'));
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
 

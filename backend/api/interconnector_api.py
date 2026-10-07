@@ -49,6 +49,7 @@ from backend.utils.response_utils import (
     not_found_response,
 )
 from backend.utils.path_guard import PathEscapesRoot, contained, contained_path
+from backend.utils import update_state
 
 # Try to import psutil for system capabilities detection
 try:
@@ -74,6 +75,25 @@ def _classify_with_local_resolution(file_sync_service, master_files, local_looku
 
 def _master_core_registry(project_root) -> MasterCoreFilesRegistry:
     return MasterCoreFilesRegistry(project_root)
+
+
+def _restart_flags(apply_result, project_root) -> Dict[str, Any]:
+    """What the apply leaves pending: a page reload, a restart, or nothing."""
+    state = (apply_result or {}).get("update_state")
+    if not state:
+        try:
+            state = update_state.restart_state(project_root)
+        except Exception as e:
+            logger.debug(f"[UPDATES] restart state unavailable: {e}")
+            state = {}
+    update = state.get("update") or {}
+    return {
+        "restart_required": bool(state.get("restart_required")),
+        "restart_reason": state.get("restart_reason"),
+        "backend_changed": bool(update.get("backend_changed")),
+        "frontend_changed": bool(update.get("frontend_changed")),
+        "deps_changed": bool(update.get("deps_changed")),
+    }
 
 
 def _client_last_apply_summary(project_root) -> Dict[str, Any]:
@@ -3901,6 +3921,7 @@ def apply_updates():
             },
             "timestamp": datetime.now().isoformat(),
             "history_recorded": True,  # signals that the sync was marked
+            **_restart_flags(apply_result, file_sync_service.get_project_root()),
         }, f"Successfully applied {files_written} updates "
            f"({summary['total_created']} new, {summary['total_updated']} modified, "
            f"{summary['total_skipped']} skipped)")

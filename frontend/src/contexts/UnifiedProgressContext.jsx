@@ -17,6 +17,7 @@ import { io } from "socket.io-client";
 import { useTheme } from "@mui/material/styles";
 import { BASE_URL as API_BASE, SOCKET_URL } from "../api/apiClient";
 import { debugLog } from "../utils/debugLog";
+import { UPDATE_APPLIED_EVENT } from "./HealthContext";
 import {
   applyPreviewFrame,
   clearAllPreviews,
@@ -361,6 +362,11 @@ export const UnifiedProgressProvider = ({ children }) => {
           } catch (error) {
             console.error("UnifiedProgressContext: Error handling job_preview:", error);
           }
+        });
+
+        // HealthProvider sits above this socket; hand the event over as a window event.
+        socket.on("system:update_applied", (data) => {
+          window.dispatchEvent(new CustomEvent(UPDATE_APPLIED_EVENT, { detail: data }));
         });
 
         socket.on("disconnect", () => {

@@ -3,6 +3,9 @@ import { getCeleryHealth, getBackendHealth, getDbHealth, getRedisHealth } from '
 
 const HealthContext = createContext();
 
+/** Window event that makes the health poll run now (an update was just applied). */
+export const UPDATE_APPLIED_EVENT = 'guaardvark:update-applied';
+
 export const useHealth = () => {
   const context = useContext(HealthContext);
   if (!context) {
@@ -81,7 +84,13 @@ export const HealthProvider = ({ children }) => {
   useEffect(() => {
     updateRef.current(true); // prime immediately on mount
     const id = setInterval(() => updateRef.current(true), 10000);
-    return () => clearInterval(id);
+    // The socket relays the backend's system:update_applied as this window event.
+    const onUpdateApplied = () => updateRef.current(true);
+    window.addEventListener(UPDATE_APPLIED_EVENT, onUpdateApplied);
+    return () => {
+      clearInterval(id);
+      window.removeEventListener(UPDATE_APPLIED_EVENT, onUpdateApplied);
+    };
   }, []);
 
   // Subscribe/unsubscribe mechanism for components

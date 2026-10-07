@@ -154,6 +154,8 @@ import numpy as _np
 import backend.config as config
 from backend import rule_utils
 from backend.utils.project_config import load_config
+# Imported at startup so its boot id, boot time and version describe this process.
+from backend.utils import update_state
 
 from packaging import version
 if version.parse(_np.__version__) < version.parse("1.26.0"):
@@ -1946,6 +1948,10 @@ def health_check():
     }
     if started_by:
         payload["started_by"] = started_by
+    try:
+        payload.update(update_state.restart_state(project_root, __version__))
+    except Exception:
+        app.logger.debug("restart state unavailable for /health", exc_info=True)
     return jsonify(payload), 200
 
 @app.route("/api/health/db")

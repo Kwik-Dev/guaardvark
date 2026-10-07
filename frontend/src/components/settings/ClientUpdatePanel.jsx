@@ -213,7 +213,9 @@ const ClientUpdatePanel = ({ masterUrl, _masterApiKey, isEnabled }) => {
         setLastUpdateResult({ success: false, error: response.error });
       } else {
         const data = response.data || response;
-        const message = `Updated ${data.applied || 0} files (${data.created || 0} new, ${data.updated || 0} modified)`;
+        const message = `Updated ${data.applied || 0} files (${data.created || 0} new, ${data.updated || 0} modified)${
+          data.restart_required ? ". Restart Guaardvark to finish the update." : ""
+        }`;
         showMessage(message, "success");
         setLastUpdateResult({
           success: true,
