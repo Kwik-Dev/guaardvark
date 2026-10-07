@@ -7,6 +7,7 @@ import {
   filterCatalog,
   buildNavCatalog,
   pathIsActive,
+  longestActivePath,
   matchCatalogItem,
   hrefForItem,
   navChromeWidth,
@@ -151,6 +152,15 @@ describe("pathIsActive and matchCatalogItem", () => {
     ];
     expect(matchCatalogItem(catalog, "/documents/alerts").id).toBe("files");
     expect(pinnedItems(catalog).map((item) => item.id)).toEqual(["settings", "alerts"]);
+  });
+
+  it("lights only the longest listed path, so a parent stays dark on its child page", () => {
+    const paths = ["/agents", "/agents/memory", "/documents", "/documents/bulk-import"];
+    expect(longestActivePath(paths, "/agents/memory")).toBe("/agents/memory");
+    expect(longestActivePath(paths, "/agents")).toBe("/agents");
+    expect(longestActivePath(paths, "/agents/mcp")).toBe("/agents");
+    expect(longestActivePath(paths, "/documents/bulk-import")).toBe("/documents/bulk-import");
+    expect(longestActivePath(paths, "/settings")).toBe(null);
   });
 
   it("treats /dashboard as the dashboard item", () => {

@@ -311,7 +311,7 @@ const SoftwareNav = () => {
             }}
           >
             {stripTools.map((item) => {
-              const active = pathIsActive(item.path, location.pathname);
+              const active = item.id === currentItem?.id;
               const accent = theme.palette.moduleAccents?.[item.path];
               const count = item.badge ? badgeCounts[item.badge] || 0 : 0;
               return (

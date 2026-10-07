@@ -567,6 +567,20 @@ export function pathIsActive(itemPath, pathname) {
 }
 
 /**
+ * The single path among `paths` that should be lit for `pathname`: the
+ * longest one that is active, so `/agents` stays dark on `/agents/memory`
+ * when both are listed. Returns null when none matches.
+ */
+export function longestActivePath(paths, pathname) {
+  let best = null;
+  for (const path of paths) {
+    if (!path || !pathIsActive(path, pathname)) continue;
+    if (best === null || path.length > best.length) best = path;
+  }
+  return best;
+}
+
+/**
  * Longest matching page in the catalog for `pathname`. Pages without a
  * `workspace` (a pure pin such as a notifications button) do not drive the
  * workspace bar, so their route keeps the enclosing workspace highlighted.

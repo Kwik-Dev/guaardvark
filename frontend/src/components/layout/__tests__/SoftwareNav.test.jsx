@@ -94,6 +94,23 @@ describe("SoftwareNav", () => {
     expect(screen.getByRole("button", { name: "Library" })).toHaveAttribute("aria-current", "page");
   });
 
+  it("lights only the child tab on a nested page", () => {
+    renderNav("/agents/memory");
+    expect(screen.getByRole("tab", { name: /Agent Memory/ })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: /^Agents$/ })).toHaveAttribute("aria-selected", "false");
+  });
+
+  it("lights only Bulk Import on the bulk import page", () => {
+    renderNav("/documents/bulk-import");
+    expect(screen.getByRole("tab", { name: /Bulk Import/ })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: /^Files$/ })).toHaveAttribute("aria-selected", "false");
+  });
+
+  it("keeps the parent tab lit on a sub-route with no tab of its own", () => {
+    renderNav("/agents/mcp");
+    expect(screen.getByRole("tab", { name: /^Agents$/ })).toHaveAttribute("aria-selected", "true");
+  });
+
   it("surfaces pages the sidebar does not list", () => {
     renderNav("/chat");
     expect(screen.getByRole("tab", { name: /Voice Chat/ })).toBeInTheDocument();
