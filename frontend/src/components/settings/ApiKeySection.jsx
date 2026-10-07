@@ -269,9 +269,22 @@ export default function ApiKeySection() {
     <SettingsPanel
       id={API_KEY_SECTION_ID}
       title="API key"
-      description="Lets other devices and scripts run protected actions."
+      help={
+        <>
+          Lets other devices and scripts run protected actions. Without a key they work only on the Guaardvark
+          machine itself.
+          {status?.protected?.length > 0 && (
+            <Box component="span" sx={{ display: "block", mt: 0.75 }}>
+              Protected: {status.protected.join(" · ")}.
+            </Box>
+          )}
+        </>
+      }
     >
-      <Cluster label="This browser" note="signs in with the key; the key itself is not kept">
+      <Cluster
+        label="This browser"
+        help="Sign this browser in with the install's key. The browser keeps a sign-in, not the key."
+      >
         <Line>
           <TextField
             className="grow"
@@ -343,12 +356,11 @@ export default function ApiKeySection() {
         )}
       </Cluster>
 
-      <Cluster label="This install" note={status ? (status.key_required ? "has a key" : "no key yet") : undefined}>
-        <Hint>
-          Once this install has a key, every device, this machine included, needs it: each browser signs
-          in here once, and command-line and API clients send it in the X-API-Key header
-          (GUAARDVARK_API_KEY). Replacing or removing the key signs every browser out.
-        </Hint>
+      <Cluster
+        label="This install"
+        help="Once this install has a key, every device needs it, this machine included: browsers sign in here once, and scripts send it in the X-API-Key header. Replacing or removing the key signs every browser out."
+        note={status ? (status.key_required ? "has a key" : "no key yet") : undefined}
+      >
         {status?.can_manage_key && (
           <Line>
             {!status.key_required ? (
@@ -376,11 +388,6 @@ export default function ApiKeySection() {
           <Alert severity="error" sx={{ py: 0.25 }} onClose={() => setActionError(null)}>
             {actionError}
           </Alert>
-        )}
-        {status?.protected?.length > 0 && (
-          <Box>
-            <Hint>Needs the Guaardvark machine or the key: {status.protected.join(" · ")}.</Hint>
-          </Box>
         )}
       </Cluster>
 

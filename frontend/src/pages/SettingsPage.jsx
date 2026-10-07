@@ -2392,6 +2392,7 @@ const SettingsPage = () => {
     <DashboardStrip>
       <DashboardTile
         label="Chat model"
+        help="The model answering in chat right now. Click to change it."
         tone={isLoadingModel ? "warn" : activeModel ? "ok" : "off"}
         value={activeModel || "none"}
         sub={
@@ -2407,6 +2408,7 @@ const SettingsPage = () => {
       />
       <DashboardTile
         label="Embedding"
+        help="The model that indexes your documents so chat can search them."
         tone={
           embeddingModel &&
           embeddingModel !== "Not Set" &&
@@ -2424,6 +2426,7 @@ const SettingsPage = () => {
       {gpu?.total_mb > 0 && (
         <DashboardTile
           label="VRAM"
+          help="Graphics card memory in use by everything on this machine, out of the total."
           value={`${(gpu.used_mb / 1024).toFixed(1)} / ${(gpu.total_mb / 1024).toFixed(1)} GB`}
           progress={gpu.utilization_pct}
         />
@@ -2431,6 +2434,7 @@ const SettingsPage = () => {
       {gpuResources && (
         <DashboardTile
           label="Loaded in VRAM"
+          help="Models Ollama is holding in memory right now. Image and video models are not listed here."
           tone={gpuResources?.loaded_models?.length ? "ok" : "off"}
           value={
             gpuResources?.loaded_models?.length
@@ -2442,6 +2446,7 @@ const SettingsPage = () => {
       )}
       <DashboardTile
         label="Index"
+        help="How much of your documents is indexed for search, and how many index profiles are on. Click for the index settings."
         tone={indexTotals.rows > 0 ? "ok" : "off"}
         value={
           indexTotals.rows > 0
@@ -2457,6 +2462,7 @@ const SettingsPage = () => {
       />
       <DashboardTile
         label="Image generation"
+        help="Whether images can be made right now. When they cannot, the line below says why."
         tone={
           imageGenAvailable
             ? "ok"
@@ -2478,6 +2484,7 @@ const SettingsPage = () => {
       {interconnectorEnabled && (
         <DashboardTile
           label="Interconnector"
+          help="Sync with your other Guaardvark machines. Click to open its settings."
           tone={
             interconnectorPendingCount > 0 ||
             interconnectorUpdateStatus?.summary?.total > 0
@@ -2501,7 +2508,7 @@ const SettingsPage = () => {
     <SettingsPanel
       id="settings-general"
       title="General"
-      description="Identity, appearance, paths."
+      help="Your name, picture and theme, how pages are listed, the music folder and the product profile."
     >
       <input
         type="file"
@@ -2586,7 +2593,10 @@ const SettingsPage = () => {
           Theme
         </ActionButton>
       </Line>
-      <Cluster label="Navigation" note="how pages are listed">
+      <Cluster
+        label="Navigation"
+        help="How pages are listed: every page in one sidebar, or grouped by workspace in the top bar."
+      >
         <Line>
           <ChoiceChips
             ariaLabel="Navigation mode"
@@ -2609,7 +2619,7 @@ const SettingsPage = () => {
       </Cluster>
       <Cluster
         label="Media library"
-        note="where Audio Studio and Music Video look for tracks"
+        help="The music folder the assistant searches when you ask it to play music. Left empty, it uses ~/Music."
       >
         <Line nowrap>
           <TextField
@@ -2640,11 +2650,11 @@ const SettingsPage = () => {
     <SettingsPanel
       id="settings-models"
       title="Models"
-      description="Which models answer chat and index documents."
+      help="The models that answer chat and index your documents."
     >
       <Cluster
         label="Chat"
-        note={chatSizes.length > 1 ? "filter by size" : undefined}
+        help="The model that writes chat replies. Pick one, then press Set active."
       >
         {chatSizes.length > 1 && (
           <ChoiceChips
@@ -2751,7 +2761,7 @@ const SettingsPage = () => {
 
       <Cluster
         label="Embedding"
-        note={embedDims.length > 1 ? "filter by width" : undefined}
+        help="The model that turns your documents into a search index. Chat uses it to find passages that match your question."
       >
         {embedDims.length > 1 && (
           <ChoiceChips
@@ -2825,9 +2835,12 @@ const SettingsPage = () => {
     <SettingsPanel
       id="settings-chat"
       title="Chat"
-      description="What every conversation can do by default."
+      help="What every conversation can do by default."
     >
-      <Cluster label="Capabilities" note="gear opens that feature's settings">
+      <Cluster
+        label="Capabilities"
+        help="Features every chat can use. The gear on a chip opens that feature's settings."
+      >
         <Line>
           <SettingChip
             label="Rules"
@@ -2857,7 +2870,10 @@ const SettingsPage = () => {
           />
         </Line>
       </Cluster>
-      <Cluster label="Retrieval" note="how answers use your documents">
+      <Cluster
+        label="Retrieval"
+        help="How chat answers use your documents, and what the assistant learns from you."
+      >
         <Line>
           <SettingChip
             label="Enhanced context"
@@ -2886,9 +2902,12 @@ const SettingsPage = () => {
     <SettingsPanel
       id="settings-generation"
       title="Generation"
-      description="Defaults for images, video and voice."
+      help="Default models and settings for images and video, and the model downloads for each studio."
     >
-      <Cluster label="Prompts">
+      <Cluster
+        label="Prompts"
+        help="How your image and video prompts reach the model."
+      >
         <Line>
           <SettingChip
             label="Verbatim prompts"
@@ -2906,7 +2925,7 @@ const SettingsPage = () => {
       </Cluster>
       <Cluster
         label="Stills models"
-        note="Z-Image Turbo by default; FLUX for max quality; the train base must match the LoRA family"
+        help="The image models Guaardvark defaults to. Cast LoRA base is the model new character LoRAs are trained on; a LoRA only works with models of the same family."
       >
         <Line>
           <FormControl size="small" className="grow">
@@ -2985,7 +3004,7 @@ const SettingsPage = () => {
       </Cluster>
       <Cluster
         label="Between batches"
-        note="keeping the model loaded skips the reload when the next batch uses the same model"
+        help="What happens to the image model when a batch ends. Keeping it loaded skips the reload if the next batch uses the same model."
       >
         <Line>
           <ChoiceChips
@@ -3013,7 +3032,7 @@ const SettingsPage = () => {
       </Cluster>
       <Cluster
         label="Character LoRA strength"
-        note="for stills and keyframes; video motion models keep the identity baked into the still"
+        help="How strongly a Cast character's look is applied to stills and keyframes, per model family (0 to 1.5). Video models carry the look over from the still."
       >
         <Line>
           {[
@@ -3084,7 +3103,7 @@ const SettingsPage = () => {
       </Cluster>
       <Cluster
         label="Model libraries"
-        note="download and manage the models behind each studio"
+        help="Download and manage the models behind each studio."
       >
         <Line>
           <StatusPill
@@ -3138,11 +3157,11 @@ const SettingsPage = () => {
     <SettingsPanel
       id="settings-knowledge"
       title="Knowledge"
-      description="Index profiles, indexing, nightly research."
+      help="How your documents are indexed and searched, and the overnight search tuning."
     >
       <Cluster
         label="Index profiles"
-        note="one corpus, several projections; lit = built and queried"
+        help="Different ways of indexing the same documents. A lit profile is kept up to date and used when chat searches; the gear edits it."
       >
         <IndexProfileChips
           onLoaded={setIndexProfiles}
@@ -3151,7 +3170,10 @@ const SettingsPage = () => {
           onEdit={setEditProfile}
         />
       </Cluster>
-      <Cluster label="Indexing">
+      <Cluster
+        label="Indexing"
+        help="The queue that turns your uploaded documents into searchable data."
+      >
         <Line>
           <SettingChip
             label="Indexing paused"
@@ -3220,7 +3242,7 @@ const SettingsPage = () => {
       </Cluster>
       <Cluster
         label="Autoresearch"
-        note="overnight retrieval tuning; parameters and history on its own page"
+        help="Overnight tests that tune how chat searches your documents. Its settings and history are on the Autoresearch page."
       >
         <Line>
           <SettingChip
@@ -3260,13 +3282,13 @@ const SettingsPage = () => {
     <SettingsPanel
       id="settings-agents"
       title="Agents"
-      description="The mentor, what it remembers, where it can see."
+      help="The mentor, the code guard, what the agent remembers, and what it can reach."
     >
       <UncleClaudeSection />
       <InboundGuardSection />
       <Cluster
         label="Memory"
-        note="facts, preferences and lessons the agent has learned"
+        help="Facts, preferences and lessons the agent has learned from your chats."
       >
         <Line>
           <StatusPill
@@ -3278,7 +3300,10 @@ const SettingsPage = () => {
           </ActionButton>
         </Line>
       </Cluster>
-      <Cluster label="File access" note="where system_command and codegen may read">
+      <Cluster
+        label="File access"
+        help="Which folders the assistant's command and code tools may read."
+      >
         <Line>
           <SettingChip
             label="Project folder only"
@@ -3288,7 +3313,10 @@ const SettingsPage = () => {
           />
         </Line>
       </Cluster>
-      <Cluster label="MCP servers" note="local programs that give the agent more tools">
+      <Cluster
+        label="MCP servers"
+        help="Programs on this machine that give the agent more tools."
+      >
         <Line>
           <StatusPill
             tone={
@@ -3324,9 +3352,11 @@ const SettingsPage = () => {
             </ActionButton>
           )}
         </Line>
-        {mcpStatus?.refused && <Hint>{mcpStatus.refused}</Hint>}
       </Cluster>
-      <Cluster label="Display" note="the virtual screen agents act on">
+      <Cluster
+        label="Display"
+        help="A virtual screen where agents open apps and click, separate from your own desktop."
+      >
         <AgentDisplaySection showMessage={showMessage} />
       </Cluster>
     </SettingsPanel>
@@ -3336,7 +3366,7 @@ const SettingsPage = () => {
     <SettingsPanel
       id="settings-sync"
       title="Sync"
-      description="Other Guaardvark machines on your network."
+      help="Keep rules, memories and code in step with your other Guaardvark machines."
     >
       <Line>
         <SettingChip
@@ -3379,9 +3409,12 @@ const SettingsPage = () => {
     <SettingsPanel
       id="settings-data"
       title="Data"
-      description="Backups, exports and imports."
+      help="Backups, chat exports, and moving rules in and out."
     >
-      <Cluster label="Backups">
+      <Cluster
+        label="Backups"
+        help="Save a copy of your data, restore one, or remove old copies. Export Chats writes every chat to files."
+      >
         <Line>
           <ActionButton
             onClick={openCreateBackup}
@@ -3406,7 +3439,10 @@ const SettingsPage = () => {
           <ExportChatsButton showMessage={showMessage} disabled={isLoading} />
         </Line>
       </Cluster>
-      <Cluster label="Rules">
+      <Cluster
+        label="Rules"
+        help="Save your rules to a file, or load rules from one. Import adds new rules and updates those with the same name."
+      >
         <Line>
           <ActionButton
             onClick={handleExportRulesClick}
@@ -3448,7 +3484,7 @@ const SettingsPage = () => {
     <SettingsPanel
       id="settings-danger"
       title="Danger zone"
-      description="Each asks first and says what it removes."
+      help="Actions that delete data, restart Guaardvark or stop running models. Each one asks first and says what it does."
       danger
     >
       <Line>
@@ -3519,7 +3555,7 @@ const SettingsPage = () => {
     <SettingsPanel
       id="settings-developer"
       title="Developer"
-      description="Logging and diagnostics."
+      help="Extra logging and diagnostics for troubleshooting."
     >
       <Line>
         <SettingChip
@@ -3557,11 +3593,10 @@ const SettingsPage = () => {
     <SettingsPanel
       id="settings-about"
       title="About"
-      description={appVersion ? `Guaardvark v${appVersion}` : "Guaardvark"}
     >
       <Cluster
         label="Support the project"
-        note="built with love by a solo developer"
+        help="Built with love by a solo developer. Each link opens in a new tab."
       >
         <Line>
           <ActionButton
