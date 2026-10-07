@@ -62,6 +62,8 @@ data/plugin_config.json
 data/social_outreach/
 # Interconnector runtime state (master core_files_registry.json + client last_core_sync.json)
 data/interconnector/
+# Half of an atomic synced-file write, left only if the process died mid-write
+*.sync-tmp
 data/outreach/
 data/docstore.json
 data/index_store.json

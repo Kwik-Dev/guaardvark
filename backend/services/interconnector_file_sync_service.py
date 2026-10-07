@@ -5,6 +5,8 @@ import os
 import re
 import hashlib
 import shutil
+from stat import S_IMODE
+import uuid
 import fnmatch
 import gzip
 import base64
@@ -40,6 +42,21 @@ PORTABLE_ENV_KEYS = frozenset({
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SENTINEL_DIR = _REPO_ROOT / "data" / "dep_reconciler"
 _SENTINEL_FILE = _SENTINEL_DIR / ".sync_in_progress"
+
+# Suffix no file watcher or bundler treats as source, for the temporary half of
+# an atomic write.
+SYNC_TEMP_SUFFIX = ".sync-tmp"
+
+# Applied last: rewriting it restarts the Vite dev server, which reloads open pages.
+_WRITE_LAST = "frontend/vite.config.js"
+
+
+def _apply_order(file_data: Dict) -> int:
+    """Sort key: everything else, then frontend/ in one burst, then the Vite config."""
+    path = (file_data.get("path") or "").replace("\\", "/")
+    if path == _WRITE_LAST:
+        return 2
+    return 1 if path.startswith("frontend/") else 0
 
 
 @contextmanager
@@ -189,6 +206,8 @@ class InterconnectorFileSyncService:
             # deps, install_deps.sh skips the pip install there and the nodes
             # fail at runtime with no error anywhere.
             ".custom_nodes_installed",
+            # Temporary file of an atomic write (_write_file) left by a killed process.
+            f"*{SYNC_TEMP_SUFFIX}",
         ]
 
     def get_file_hash(self, file_path: str) -> Optional[str]:
@@ -823,6 +842,10 @@ class InterconnectorFileSyncService:
         if not valid_files:
             result["summary"]["total_errors"] = len(invalid_files) if invalid_files else 1
             return False, result
+
+        # Stable sort: shortens the window in which a dev server serves a mix of
+        # old and new frontend files.
+        valid_files = sorted(valid_files, key=_apply_order)
         
         project_root = self.get_project_root()
         backups: List[Tuple[Path, Path]] = []
@@ -1052,17 +1075,42 @@ class InterconnectorFileSyncService:
             logger.warning(f"[FILE_SYNC] Error clearing pycache: {e}")
 
     def _write_file(self, file_path: Path, content):
+        """Replace ``file_path`` atomically: a reader sees the old file or the new one.
+
+        The content goes to a temporary dotfile beside the target (same
+        filesystem, a suffix no watcher treats as source), is fsynced, then
+        renamed over the target. An existing file keeps its permission bits; a
+        new one gets the umask default, as a plain ``open()`` would give it.
+        """
+        file_path = Path(file_path)
+        tmp_path = file_path.with_name(
+            f".{file_path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}{SYNC_TEMP_SUFFIX}"
+        )
         try:
             logger.debug(f"[FILE_SYNC] Writing file: {file_path} ({len(content)} bytes)")
+            try:
+                keep_mode = S_IMODE(file_path.stat().st_mode)
+            except FileNotFoundError:
+                keep_mode = None
+            fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
             if isinstance(content, bytes):
-                with open(file_path, 'wb') as f:
-                    f.write(content)
+                handle = os.fdopen(fd, 'wb')
             else:
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write(content)
+                handle = os.fdopen(fd, 'w', encoding='utf-8')
+            with handle as f:
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+            if keep_mode is not None:
+                os.chmod(tmp_path, keep_mode)
+            os.replace(tmp_path, file_path)
             logger.info(f"[FILE_SYNC] Successfully wrote file: {file_path}")
         except Exception as e:
             logger.error(f"[FILE_SYNC] Error writing file {file_path}: {e}", exc_info=True)
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
             raise
 
     def _create_backup(self, file_path: Path):
