@@ -283,7 +283,7 @@ def _is_running(plugin_id: str) -> bool:
 def _count_active_video_render_jobs(max_age_s: float = 1800.0) -> int:
     """Non-terminal video_render progress jobs updated within max_age_s."""
     try:
-        from backend.config import config
+        import backend.config as config
 
         progress_dir = Path(config.OUTPUT_DIR) / ".progress_jobs"
         if not progress_dir.is_dir():

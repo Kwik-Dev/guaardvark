@@ -564,11 +564,8 @@ def _initialize_app_components(app):
             def _comfyui_is_down() -> bool:
                 from backend.utils.comfyui_liveness import DOWN, probe_comfyui
                 try:
-                    from backend.config import config as _cfg
-                    url = getattr(_cfg, "COMFYUI_URL", None) or os.environ.get(
-                        "GUAARDVARK_COMFYUI_URL", "http://127.0.0.1:8188"
-                    )
-                    failed = probe_comfyui(url) == DOWN
+                    from backend.config import COMFYUI_URL
+                    failed = probe_comfyui(COMFYUI_URL) == DOWN
                 except Exception:
                     failed = True
                 if not failed:
