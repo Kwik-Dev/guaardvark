@@ -476,6 +476,13 @@ point, not a ceiling: switch in Settings → Product Profile, or `./start.sh --p
 Details in [`backend/profiles/README.md`](backend/profiles/README.md); building a distribution of
 your own is [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md).
 
+### Find your way around
+
+Much of the interface is one right-click, drag or key away: menus on dashboard cards and
+most lists, cards you move and resize, files dropped straight into Files or an image
+into chat, a floating chat that knows which page you are on, hands-free voice, and `?` for the
+keyboard shortcuts. **[docs/interface.md](docs/interface.md)** walks through all of it.
+
 ### Install via PyPI
 
 ```bash
