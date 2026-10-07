@@ -54,9 +54,9 @@ def test_a_process_from_another_checkout_does_not(tmp_path):
 
 
 def test_a_sibling_whose_name_starts_with_the_root_does_not(tmp_path):
-    root = tmp_path / "GX1"
+    root = tmp_path / "guaardvark"
     (root / "plugins").mkdir(parents=True)
-    sibling = tmp_path / "GX1-own"
+    sibling = tmp_path / "guaardvark-own"
     sibling.mkdir()
     p = _sleeper(sibling)
     try:

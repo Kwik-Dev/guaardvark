@@ -21,7 +21,7 @@ def _jsonl(path, rows):
     return path
 
 
-ALPACA = {"instruction": "Name a colour.", "output": "Blue."}
+ALPACA_ROW = {"instruction": "Name a colour.", "output": "Blue."}
 MESSAGES = {"messages": [{"role": "system", "content": "Be brief."},
                          {"role": "user", "content": "Hi?"},
                          {"role": "assistant", "content": "Hello."}]}
@@ -33,10 +33,10 @@ TEXT = {"text": "A plain paragraph of text."}
 # ---- which files ---------------------------------------------------------------
 
 def test_a_folder_is_searched_recursively_and_hidden_entries_are_skipped(tmp_path):
-    _jsonl(tmp_path / "set" / "b.jsonl", [ALPACA])
+    _jsonl(tmp_path / "set" / "b.jsonl", [ALPACA_ROW])
     _jsonl(tmp_path / "set" / "a" / "deep.json", [])
-    _jsonl(tmp_path / "set" / ".hidden.jsonl", [ALPACA])
-    _jsonl(tmp_path / "set" / ".cache" / "x.jsonl", [ALPACA])
+    _jsonl(tmp_path / "set" / ".hidden.jsonl", [ALPACA_ROW])
+    _jsonl(tmp_path / "set" / ".cache" / "x.jsonl", [ALPACA_ROW])
     (tmp_path / "set" / "notes.txt").write_text("not data")
 
     files, reason = df.list_files(str(tmp_path / "set"))
@@ -65,19 +65,19 @@ def test_a_missing_path_an_empty_folder_and_a_wrong_file_type_say_why(tmp_path):
 
 def test_a_home_relative_path_is_followed(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
-    data = _jsonl(tmp_path / "sets" / "d.jsonl", [ALPACA])
+    data = _jsonl(tmp_path / "sets" / "d.jsonl", [ALPACA_ROW])
     assert df.list_files("~/sets/d.jsonl") == ([str(data)], None)
 
 
 # ---- reading rows --------------------------------------------------------------
 
 def test_blank_lines_are_skipped_and_broken_lines_are_named_not_quoted(tmp_path):
-    path = _jsonl(tmp_path / "d.jsonl", [ALPACA, "", "   ", '{"instruction": "cut', '["a list"]', ALPACA])
+    path = _jsonl(tmp_path / "d.jsonl", [ALPACA_ROW, "", "   ", '{"instruction": "cut', '["a list"]', ALPACA_ROW])
     errors = []
 
     rows = list(df.iter_rows(str(path), errors))
 
-    assert rows == [ALPACA, ALPACA]
+    assert rows == [ALPACA_ROW, ALPACA_ROW]
     assert errors == ["d.jsonl line 4: not valid JSON", "d.jsonl line 5: not a JSON object"]
     assert not any("cut" in e for e in errors)
 
@@ -99,7 +99,7 @@ def test_a_json_file_must_hold_a_list(tmp_path):
 
 @pytest.mark.parametrize("row, fmt", [
     (MESSAGES, "messages"), (SHAREGPT, "sharegpt"), (PROMPT_COMPLETION, "prompt_completion"),
-    (ALPACA, "alpaca"), (TEXT, "text"), ({"question": "?"}, None), ([1], None),
+    (ALPACA_ROW, "alpaca"), (TEXT, "text"), ({"question": "?"}, None), ([1], None),
 ])
 def test_each_shape_is_detected(row, fmt):
     assert df.detect_format(row) == fmt
@@ -134,7 +134,7 @@ def test_content_given_as_text_parts_is_joined():
 # ---- inspect -------------------------------------------------------------------
 
 def test_inspect_counts_rows_formats_and_problems_across_a_folder(tmp_path):
-    _jsonl(tmp_path / "set" / "a.jsonl", [ALPACA, MESSAGES, "", "{broken"])
+    _jsonl(tmp_path / "set" / "a.jsonl", [ALPACA_ROW, MESSAGES, "", "{broken"])
     _jsonl(tmp_path / "set" / "sub" / "b.jsonl", [SHAREGPT, {"instruction": "x", "output": ""}, TEXT])
 
     report = df.inspect(str(tmp_path / "set"), samples=2)

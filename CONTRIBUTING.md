@@ -286,6 +286,8 @@ worktree is removed.
 Identifiers specific to your own machine belong in the untracked
 `scripts/.portable-local-patterns`, one `pattern<TAB>explanation` per line. The guard
 picks them up automatically, and your machine names stay out of the public script.
+They apply to every file, the allowlisted ones included: a machine name has no
+legitimate place in a test or the README.
 
 Whole files that must never be committed — private notes, local planning documents,
 anything that is yours rather than the project's — go in the untracked
