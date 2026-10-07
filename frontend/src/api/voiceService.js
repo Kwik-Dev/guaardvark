@@ -29,10 +29,17 @@ class VoiceService {
     this.ttsAudioElement = null;
     this.ttsAnalyzer = null;
     
-    // WebSocket for audio streaming
+    // Incremented by stopPlayback() so a speak() still fetching its audio
+    // knows it was cancelled before it began playing.
+    this.playbackEpoch = 0;
+    this.settlePlayback = null;
+
+    // WebSocket for audio streaming. Each stream's transcript callback is
+    // keyed by the id it was started with: the server answers after the next
+    // stream may already have begun.
     this.socket = null;
     this.streamSessionId = null;
-    this.onTranscriptCallback = null;
+    this.transcriptCallbacks = new Map();
   }
 
   /**
@@ -50,13 +57,15 @@ class VoiceService {
       });
       
       this.socket.on('voice:final_transcript', (data) => {
-        if (this.onTranscriptCallback && data.session_id === this.streamSessionId) {
-          this.onTranscriptCallback(data.text);
-        }
+        const callback = this.transcriptCallbacks.get(data?.session_id);
+        if (!callback) return;
+        this.transcriptCallbacks.delete(data.session_id);
+        callback(data.text);
       });
       
       this.socket.on('voice:error', (error) => {
         console.error('VoiceService: WebSocket error:', error);
+        if (error?.session_id) this.transcriptCallbacks.delete(error.session_id);
         if (this.onErrorCallback) {
           this.onErrorCallback(new Error(error.message || 'Streaming error'));
         }
@@ -70,8 +79,8 @@ class VoiceService {
    */
   startVoiceStream(sessionId, onTranscript) {
     this.initSocket();
-    this.streamSessionId = `${sessionId || 'voice'}_${Date.now()}`;
-    this.onTranscriptCallback = onTranscript;
+    this.streamSessionId = `${sessionId || 'voice'}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    if (onTranscript) this.transcriptCallbacks.set(this.streamSessionId, onTranscript);
     
     this.socket.emit('voice:stream_start', { session_id: this.streamSessionId });
     return this.streamSessionId;
@@ -90,11 +99,12 @@ class VoiceService {
   }
 
   /**
-   * End the current voice streaming session
+   * End a voice stream (the current one when no id is given). Its transcript
+   * still reaches the callback it was started with.
    */
-  stopVoiceStream() {
-    if (this.socket && this.socket.connected && this.streamSessionId) {
-      this.socket.emit('voice:stream_end', { session_id: this.streamSessionId });
+  stopVoiceStream(streamId = this.streamSessionId) {
+    if (this.socket && this.socket.connected && streamId) {
+      this.socket.emit('voice:stream_end', { session_id: streamId });
     }
   }
 
@@ -281,6 +291,27 @@ class VoiceService {
       console.error('Failed to convert text to speech:', error);
       throw error;
     }
+  }
+
+  /**
+   * Transcribe one recorded utterance for the voice session.
+   * Resolves to {text}; rejects with error.status set (400 no speech, 409
+   * speech model missing, 429 rate limited). Quiet: silence is not an error
+   * worth a console line.
+   * @param {Blob} audioBlob
+   * @param {{signal?: AbortSignal}} [options]
+   */
+  async transcribeUtterance(audioBlob, options = {}) {
+    const type = audioBlob?.type || '';
+    const extension = type.includes('mp4') ? 'mp4' : type.includes('ogg') ? 'ogg' : 'webm';
+    const formData = new FormData();
+    formData.append('audio', audioBlob, `utterance.${extension}`);
+    const response = await fetch(`${BASE_URL}/voice/speech-to-text`, {
+      method: 'POST',
+      body: formData,
+      signal: options.signal,
+    });
+    return handleResponse(response, { quiet: true });
   }
 
   /**
@@ -556,6 +587,12 @@ class VoiceService {
     return new Promise((resolve, reject) => {
       const audio = new Audio(audioUrl);
       audio.crossOrigin = 'anonymous'; // Required for Web Audio API analysis
+      // stopPlayback() pauses the element, which fires no 'ended'; settle here
+      // so whoever awaits this (VoiceContext.speak) knows playback is over.
+      this.settlePlayback = () => {
+        this.settlePlayback = null;
+        resolve();
+      };
 
       audio.onload = () => {
         debugLog('Audio loaded successfully');
@@ -567,6 +604,7 @@ class VoiceService {
 
       audio.onended = () => {
         debugLog('Audio playback ended');
+        this.settlePlayback = null;
         this.isTTSPlaying = false;
         this.ttsAudioElement = null;
         // Clean up TTS analyzer
@@ -583,6 +621,7 @@ class VoiceService {
 
       audio.onerror = (error) => {
         console.error('Audio playback error:', error);
+        this.settlePlayback = null;
         this.isTTSPlaying = false;
         this.ttsAudioElement = null;
         reject(error);
@@ -608,6 +647,7 @@ class VoiceService {
 
       // Play the audio
       audio.play().catch((err) => {
+        this.settlePlayback = null;
         this.isTTSPlaying = false;
         this.ttsAudioElement = null;
         reject(err);
@@ -719,6 +759,7 @@ class VoiceService {
    * while the AI is still talking, silence the AI instantly.
    */
   stopPlayback() {
+    this.playbackEpoch += 1;
     if (this.ttsAudioElement) {
       try {
         this.ttsAudioElement.pause();
@@ -731,6 +772,7 @@ class VoiceService {
       this.ttsAudioElement = null;
       this.isTTSPlaying = false;
     }
+    if (this.settlePlayback) this.settlePlayback();
   }
 
   /**

@@ -82,6 +82,7 @@ import ErrorBoundary from "./components/common/ErrorBoundary";
 import { LayoutProvider } from "./contexts/LayoutContext";
 import { UnifiedProgressProvider } from './contexts/UnifiedProgressContext';
 import { VoiceProvider } from "./contexts/VoiceContext";
+import { VoiceSessionProvider } from "./contexts/VoiceSessionContext";
 import FloatingChatProvider from "./components/chat/FloatingChatProvider";
 import KeyboardShortcutsOverlay from "./components/common/KeyboardShortcutsOverlay";
 import useUncleNotifications from "./hooks/useUncleNotifications";
@@ -234,6 +235,7 @@ const AppContainer = () => {
           <UnifiedProgressProvider>
             <LayoutProvider>
               <VoiceProvider>
+              <VoiceSessionProvider>
                 <SnackbarProvider>
                   <UncleNotificationListener />
                   <ApiKeyRefusalNotice />
@@ -730,6 +732,7 @@ const AppContainer = () => {
                     <KeyboardShortcutsOverlay />
                   </ErrorProvider>
                 </SnackbarProvider>
+              </VoiceSessionProvider>
               </VoiceProvider>
             </LayoutProvider>
           </UnifiedProgressProvider>
