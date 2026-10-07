@@ -381,10 +381,11 @@ def execute_agent():
 
         # Execute using agent executor
         try:
+            from backend.services.agent_config import llm_for_agent
             from backend.services.agent_executor import AgentExecutor
             from backend.utils.llm_service import get_default_llm
 
-            llm = get_default_llm()
+            llm = llm_for_agent(agent) or get_default_llm()
             executor = AgentExecutor(
                 agent_tool_registry, llm, max_iterations=agent.max_iterations, agent=agent
             )

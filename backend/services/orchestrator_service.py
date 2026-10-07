@@ -17,7 +17,7 @@ from typing import Dict, List, Any, Optional, Tuple, Set
 from dataclasses import dataclass, field
 import json
 
-from backend.services.agent_config import get_agent_config_manager
+from backend.services.agent_config import get_agent_config_manager, llm_for_agent
 from backend.services.agent_executor import AgentExecutor
 from backend.utils.llm_service import get_default_llm, ChatMessage, MessageRole, _safe_content
 
@@ -587,7 +587,8 @@ RULES:
             session_context = "\n".join(session_parts)
 
             executor = AgentExecutor(
-                agent_tools, self.llm, max_iterations=agent.max_iterations, agent=agent
+                agent_tools, llm_for_agent(agent, self.llm),
+                max_iterations=agent.max_iterations, agent=agent,
             )
             result = executor.execute(prompt, session_context=session_context)
 

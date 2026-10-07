@@ -718,6 +718,25 @@ def agent_readiness(agent: AgentConfig) -> Optional[str]:
     return None
 
 
+def llm_for_agent(agent: Optional[AgentConfig], default=None):
+    """The LLM an agent runs on: its pinned model, else ``default``.
+
+    ``default`` is the caller's active chat model (None lets the caller load it).
+    Raises RuntimeError when the pinned model cannot be set up, rather than
+    running the agent on a model other than the one it is pinned to.
+    """
+    if agent is None or not agent.model:
+        return default
+    from backend.utils.llm_service import get_llm_instance
+    llm = get_llm_instance(model=agent.model)
+    if llm is None:
+        raise RuntimeError(
+            f"{agent.name} is set to run on the model '{agent.model}', which could not be loaded; "
+            "pick another model or the active chat model on the Agents page"
+        )
+    return llm
+
+
 _config_manager: Optional[AgentConfigManager] = None
 
 

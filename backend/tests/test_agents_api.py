@@ -177,3 +177,88 @@ class TestExecute:
         client.post("/api/agents/execute", json={"agent_id": "research_agent", "message": "find x",
                                                  "context": {"client": "Acme"}})
         assert made[0]["context"] == 'User context: {"client": "Acme"}'
+
+
+class TestModelPin:
+    """An agent with a model set runs on it at every entry point; unset means the active model."""
+
+    @pytest.fixture
+    def made(self, monkeypatch):
+        made = []
+
+        class FakeExecutor:
+            def __init__(self, registry, llm, max_iterations=10, agent=None):
+                made.append({"llm": llm, "agent": agent})
+
+            def execute(self, message, session_context=""):
+                return SimpleNamespace(final_answer="done", iterations=1, success=True, error=None,
+                                       steps=[], verified=None)
+
+        built = []
+
+        def get_llm_instance(model=None, **kwargs):
+            built.append(model)
+            return None if model == "missing:latest" else f"llm:{model}"
+
+        monkeypatch.setattr("backend.services.agent_executor.AgentExecutor", FakeExecutor)
+        monkeypatch.setattr("backend.services.orchestrator_service.AgentExecutor", FakeExecutor)
+        monkeypatch.setattr("backend.utils.llm_service.get_default_llm", lambda: "active-llm")
+        monkeypatch.setattr("backend.utils.llm_service.get_llm_instance", get_llm_instance)
+        return SimpleNamespace(runs=made, built=built)
+
+    def test_execute_endpoint(self, client, manager, made):
+        manager.update_agent("research_agent", {"model": "small:latest"})
+        client.post("/api/agents/execute", json={"agent_id": "research_agent", "message": "find x"})
+        assert made.runs[0]["llm"] == "llm:small:latest"
+        assert made.built == ["small:latest"]
+
+    def test_unset_uses_the_active_model(self, client, made):
+        client.post("/api/agents/execute", json={"agent_id": "research_agent", "message": "find x"})
+        assert made.runs[0]["llm"] == "active-llm"
+        assert made.built == []
+
+    def test_a_pinned_model_that_will_not_load_is_an_error_not_a_swap(self, client, manager, made):
+        manager.update_agent("research_agent", {"model": "missing:latest"})
+        resp = client.post("/api/agents/execute", json={"agent_id": "research_agent", "message": "find x"})
+        assert resp.status_code == 500
+        assert "missing:latest" in resp.get_json()["error"]
+        assert made.runs == []
+
+    def test_router_agent_loop(self, manager, registry, made, monkeypatch):
+        from backend.services.agent_router import AgentRouter, RouteDecision, RouteType
+        manager.update_agent("research_agent", {"model": "small:latest"})
+        monkeypatch.setattr("backend.services.agent_config.get_agent_config_manager", lambda: manager)
+        router = AgentRouter()
+        router._tool_registry = registry
+        router._llm = "active-llm"
+
+        out = router._execute_agent_loop(RouteDecision(route_type=RouteType.AGENT_LOOP), "research llm boxes", {})
+
+        assert out["agent_used"] == "research_agent"
+        assert made.runs[0]["llm"] == "llm:small:latest"
+
+    def test_router_without_general_assistant(self, manager, registry, made, monkeypatch):
+        from backend.services.agent_router import AgentRouter, RouteDecision, RouteType
+        manager.get_agent("general_assistant").enabled = False
+        monkeypatch.setattr("backend.services.agent_config.get_agent_config_manager", lambda: manager)
+        router = AgentRouter()
+        router._tool_registry = registry
+        router._llm = "active-llm"
+
+        out = router._execute_agent_loop(RouteDecision(route_type=RouteType.AGENT_LOOP), "summarize this", {})
+
+        assert out == {"type": "error", "error": NO_AGENT_MATCHES}
+        assert made.runs == []
+
+    def test_orchestrator_step(self, manager, registry, made):
+        from backend.services.orchestrator_service import OrchestratorService
+        manager.update_agent("research_agent", {"model": "small:latest"})
+        service = OrchestratorService.__new__(OrchestratorService)
+        service.agent_config_manager = manager
+        service.llm = "active-llm"
+        service._all_tools = registry
+
+        service._delegate_to_agent("research_agent", "find x", {})
+        service._delegate_to_agent("code_assistant", "read a.py", {})
+
+        assert [run["llm"] for run in made.runs] == ["llm:small:latest", "active-llm"]

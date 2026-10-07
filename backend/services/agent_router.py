@@ -705,9 +705,9 @@ class AgentRouter:
                 # Wrap as a decision to reuse _execute_orchestrator signature
                 return self._execute_orchestrator(decision, message, context)
 
-            # Get tool registry
+            from backend.services.agent_config import llm_for_agent
             registry = self._get_tool_registry()
-            llm = self._get_llm()
+            llm = llm_for_agent(agent) or self._get_llm()
 
             if not registry or not llm:
                 return {
