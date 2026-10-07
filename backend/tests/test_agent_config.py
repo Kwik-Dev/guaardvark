@@ -144,3 +144,102 @@ class TestReadiness:
 
     def test_no_needs(self, manager):
         assert agent_config.agent_readiness(manager.get_agent("code_assistant")) is None
+
+
+class TestUpdateValidation:
+    @pytest.mark.parametrize("updates,message", [
+        ({"max_iterations": 0}, "from 1 to 50"),
+        ({"max_iterations": 51}, "from 1 to 50"),
+        ({"max_iterations": True}, "from 1 to 50"),
+        ({"max_iterations": "10"}, "from 1 to 50"),
+        ({"enabled": "yes"}, "true or false"),
+        ({"system_prompt": "   "}, "Reset to default"),
+        ({"system_prompt": "x" * 20001}, "20,000"),
+        ({"model": "m" * 201}, "200"),
+        ({"tools": ["execute_python"]}, "'tools' cannot be changed"),
+        ({"trigger_patterns": [".*"]}, "editable: enabled, max_iterations, system_prompt, model"),
+    ])
+    def test_rejects(self, manager, state_file, updates, message):
+        before = manager.get_agent("research_agent").to_dict()
+        with pytest.raises(ValueError, match=re.escape(message)):
+            manager.update_agent("research_agent", updates)
+        assert manager.get_agent("research_agent").to_dict() == before
+        assert not state_file.exists()
+
+    def test_a_bad_field_changes_nothing_else_in_the_request(self, manager):
+        with pytest.raises(ValueError):
+            manager.update_agent("research_agent", {"max_iterations": 4, "tools": []})
+        assert manager.get_agent("research_agent").max_iterations == DEFAULT_AGENTS["research_agent"].max_iterations
+
+    def test_accepts_and_saves(self, manager, state_file):
+        assert manager.update_agent("research_agent", {"max_iterations": 50, "model": "  small:latest ",
+                                                       "system_prompt": "Search well."}) is True
+        agent = manager.get_agent("research_agent")
+        assert (agent.max_iterations, agent.model, agent.system_prompt) == (50, "small:latest", "Search well.")
+        saved = json.loads(state_file.read_text())["research_agent"]
+        assert saved == {"max_iterations": 50, "system_prompt": "Search well.", "model": "small:latest"}
+
+    def test_empty_model_means_the_active_model(self, manager):
+        manager.update_agent("research_agent", {"model": "small:latest"})
+        manager.update_agent("research_agent", {"model": ""})
+        assert manager.get_agent("research_agent").model is None
+
+    def test_orchestrator_only_switches(self, manager):
+        with pytest.raises(ValueError, match="editable: enabled"):
+            manager.update_agent("orchestrator_agent", {"system_prompt": "plan harder"})
+        assert manager.update_agent("orchestrator_agent", {"enabled": False}) is True
+
+    def test_unknown_agent(self, manager):
+        assert manager.update_agent("no_such_agent", {"enabled": False}) is False
+
+
+class TestReset:
+    def test_default_fields_keep_the_switch(self, manager, state_file):
+        manager.update_agent("research_agent", {"enabled": False, "max_iterations": 3,
+                                                "system_prompt": "edited", "model": "small:latest"})
+        assert manager.reset_agent("research_agent") is True
+        agent, default = manager.get_agent("research_agent"), DEFAULT_AGENTS["research_agent"]
+        assert agent.system_prompt == default.system_prompt
+        assert agent.max_iterations == default.max_iterations
+        assert agent.model is None
+        assert agent.enabled is False
+        assert json.loads(state_file.read_text()) == {"research_agent": {"enabled": False}}
+
+    def test_named_fields_only(self, manager):
+        manager.update_agent("research_agent", {"max_iterations": 3, "system_prompt": "edited"})
+        manager.reset_agent("research_agent", ["max_iterations"])
+        agent = manager.get_agent("research_agent")
+        assert agent.max_iterations == DEFAULT_AGENTS["research_agent"].max_iterations
+        assert agent.system_prompt == "edited"
+
+    def test_rejects_fields_that_are_not_editable(self, manager):
+        with pytest.raises(ValueError, match="Cannot reset system_prompt"):
+            manager.reset_agent("orchestrator_agent", ["system_prompt"])
+
+    def test_orchestrator_default_reset_touches_nothing(self, manager):
+        manager.update_agent("orchestrator_agent", {"enabled": False})
+        assert manager.reset_agent("orchestrator_agent") is True
+        assert manager.get_agent("orchestrator_agent").enabled is False
+
+
+class TestDescribe:
+    def test_list_fields(self, manager, monkeypatch):
+        from backend.services.agent_tools import ToolRegistry
+        monkeypatch.setattr("backend.utils.settings_utils.get_web_access", lambda: True)
+        agent = manager.get_agent("research_agent")
+        manager.update_agent("research_agent", {"max_iterations": 3})
+        data = manager.describe(agent, ToolRegistry())
+        assert data["group"] == "web"
+        assert data["summary"] == "Searches and reads the web"
+        assert data["overridden"] == ["max_iterations"]
+        assert data["editable"] == ["enabled", "max_iterations", "system_prompt", "model"]
+        assert data["tools_missing"] == ["web_search", "fetch_url", "analyze_website"]
+        assert data["unavailable_reason"] == "None of its tools are available"
+        assert "tools_detail" not in data
+
+    def test_orchestrator_tool_is_not_missing(self, manager):
+        from backend.services.agent_tools import ToolRegistry
+        data = manager.describe(manager.get_agent("orchestrator_agent"), ToolRegistry(), detail=True)
+        assert data["tools_missing"] == []
+        assert data["unavailable_reason"] is None
+        assert data["tools_detail"][0]["installed"] is True

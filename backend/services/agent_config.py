@@ -4,6 +4,7 @@ import copy
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, field
@@ -16,6 +17,11 @@ logger = logging.getLogger(__name__)
 AGENT_STATE_FILE = Path(os.environ.get("GUAARDVARK_ROOT", ".")) / "data" / "agent_state.json"
 
 EDITABLE_FIELDS: Tuple[str, ...] = ("enabled", "max_iterations", "system_prompt", "model")
+# Reset to default with no fields named puts these back; the on/off switch stays.
+RESET_FIELDS: Tuple[str, ...] = ("system_prompt", "max_iterations", "model")
+MAX_ITERATIONS_LIMIT = 50
+MAX_PROMPT_CHARS = 20000
+MAX_MODEL_CHARS = 200
 
 # get_agent_for_message returns None only when General Assistant, the catch-all, is off.
 NO_AGENT_MATCHES = "No enabled agent matches this request; General Assistant is off on the Agents page"
@@ -515,26 +521,77 @@ class AgentConfigManager:
         return [a for a in self.list_agents() if a.enabled]
 
     def update_agent(self, agent_id: str, updates: Dict[str, Any]) -> bool:
+        """Change an agent's editable fields. False when the agent does not exist.
+
+        Raises ValueError, naming the problem, for a field that is not
+        editable on this agent or a value out of range; nothing is changed then.
+        """
         agent = self._agents.get(agent_id)
         if not agent:
             return False
 
-        for key, value in updates.items():
-            if hasattr(agent, key):
-                if key == "agent_type" and isinstance(value, str):
-                    value = AgentType(value)
-                setattr(agent, key, value)
+        for key, value in _validated_updates(agent, updates).items():
+            setattr(agent, key, value)
 
         logger.info(f"Updated agent: {agent_id}")
         self._save_state()
         return True
 
+    def reset_agent(self, agent_id: str, fields: Optional[List[str]] = None) -> bool:
+        """Put fields back to the built-in default. False when the agent does not exist.
+
+        With no fields: the instructions, iteration limit and model, never the
+        on/off switch. Raises ValueError for a field that is not editable.
+        """
+        agent = self._agents.get(agent_id)
+        default = DEFAULT_AGENTS.get(agent_id)
+        if not agent or default is None:
+            return False
+        if fields is None:
+            fields = [key for key in RESET_FIELDS if key in agent.editable]
+        bad = [key for key in fields if key not in agent.editable]
+        if bad:
+            raise ValueError(
+                f"Cannot reset {', '.join(bad)} on {agent.name}; editable: {', '.join(agent.editable)}"
+            )
+        for key in fields:
+            setattr(agent, key, copy.deepcopy(getattr(default, key)))
+        logger.info(f"Reset agent {agent_id}: {', '.join(fields) or 'nothing'}")
+        self._save_state()
+        return True
+
+    def describe(self, agent: AgentConfig, registry=None, detail: bool = False) -> Dict[str, Any]:
+        """The agent as the Agents page shows it.
+
+        Adds to to_dict(): editable, overridden, group, summary, tools_missing
+        (names the registry lacks) and unavailable_reason; with detail, also
+        tools_detail [{name, description, requires_approval, installed}].
+        """
+        data = agent.to_dict()
+        meta = agent.metadata or {}
+        is_orchestrator = agent.agent_type == AgentType.ORCHESTRATOR
+        missing: List[str] = []
+        if registry is not None and not is_orchestrator:
+            _, missing = registry.subset(agent.tools)
+        reason = agent_readiness(agent)
+        if not reason and agent.tools and len(missing) == len(agent.tools):
+            reason = "None of its tools are available"
+        data.update({
+            "editable": list(agent.editable),
+            "overridden": overridden_fields(agent),
+            "group": meta.get("group"),
+            "summary": meta.get("summary", ""),
+            "tools_missing": missing,
+            "unavailable_reason": reason,
+        })
+        if detail:
+            data["tools_detail"] = _tools_detail(agent, registry, is_orchestrator)
+        return data
+
     def set_agent_enabled(self, agent_id: str, enabled: bool) -> bool:
         return self.update_agent(agent_id, {"enabled": enabled})
 
     def get_agent_for_message(self, message: str) -> Optional[AgentConfig]:
-        import re
-
         message_lower = message.lower()
 
         for agent in self.get_enabled_agents():
@@ -555,6 +612,67 @@ class AgentConfigManager:
             agent_id: agent.to_dict()
             for agent_id, agent in self._agents.items()
         }
+
+
+def _validated_updates(agent: AgentConfig, updates: Any) -> Dict[str, Any]:
+    """The updates as they will be stored; ValueError for anything not allowed."""
+    if not isinstance(updates, dict):
+        raise ValueError("Send a JSON object of the fields to change")
+    editable = ", ".join(agent.editable)
+    clean: Dict[str, Any] = {}
+    for key, value in updates.items():
+        if key not in agent.editable:
+            raise ValueError(f"'{key}' cannot be changed on {agent.name}; editable: {editable}")
+        if key == "enabled":
+            if not isinstance(value, bool):
+                raise ValueError("enabled must be true or false")
+        elif key == "max_iterations":
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_ITERATIONS_LIMIT:
+                raise ValueError(f"max_iterations must be a whole number from 1 to {MAX_ITERATIONS_LIMIT}")
+        elif key == "system_prompt":
+            if not isinstance(value, str):
+                raise ValueError("system_prompt must be text")
+            if not value.strip():
+                raise ValueError("Instructions cannot be empty; use Reset to default to restore the built-in text")
+            if len(value) > MAX_PROMPT_CHARS:
+                raise ValueError(f"Instructions are limited to {MAX_PROMPT_CHARS:,} characters")
+        elif key == "model":
+            if value is None or (isinstance(value, str) and not value.strip()):
+                value = None
+            elif not isinstance(value, str) or len(value.strip()) > MAX_MODEL_CHARS:
+                raise ValueError(f"model must be a model name of at most {MAX_MODEL_CHARS} characters, or empty")
+            else:
+                value = value.strip()
+        clean[key] = value
+    return clean
+
+
+def _short_description(text: str, limit: int = 200) -> str:
+    """The first sentence of a tool description, for a one-line listing."""
+    text = " ".join((text or "").split())
+    match = re.search(r"(?<=[.!?])\s", text)
+    first = text[:match.start()] if match else text
+    return first if len(first) <= limit else first[: limit - 1].rstrip() + "…"
+
+
+def _tools_detail(agent: AgentConfig, registry, is_orchestrator: bool) -> List[Dict[str, Any]]:
+    if is_orchestrator:
+        return [{
+            "name": name,
+            "description": "Hands each planned step to another enabled agent.",
+            "requires_approval": False,
+            "installed": True,
+        } for name in agent.tools]
+    details = []
+    for name in agent.tools:
+        tool = registry.get_tool(name) if registry is not None else None
+        details.append({
+            "name": name,
+            "description": _short_description(getattr(tool, "description", "")) if tool else "",
+            "requires_approval": bool(getattr(tool, "requires_approval", False)),
+            "installed": tool is not None,
+        })
+    return details
 
 
 def overridden_fields(agent: AgentConfig) -> List[str]:
