@@ -45,8 +45,9 @@ import VoiceConsentDialog from "../components/audio/VoiceConsentDialog";
 import VoiceClipManager from "../components/audio/VoiceClipManager";
 import { confirmVoiceClipConsent, voiceClipAudioUrl } from "../api/audioFoundryService";
 import SettingsIcon from "@mui/icons-material/Settings";
+import lazyWithReload from "../utils/lazyWithReload";
 
-const AudioFoundryModelsModal = React.lazy(() => import("../components/modals/AudioFoundryModelsModal"));
+const AudioFoundryModelsModal = lazyWithReload(() => import("../components/modals/AudioFoundryModelsModal"));
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 

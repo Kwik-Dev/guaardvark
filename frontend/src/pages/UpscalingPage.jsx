@@ -46,8 +46,9 @@ import {
 import { useNavigate } from "react-router-dom";
 import * as upscalingService from "../api/upscalingService";
 import { listPlugins } from "../api/pluginsService";
+import lazyWithReload from "../utils/lazyWithReload";
 
-const UpscalingModelsModal = React.lazy(() =>
+const UpscalingModelsModal = lazyWithReload(() =>
   import("../components/modals/UpscalingModelsModal")
 );
 

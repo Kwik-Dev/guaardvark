@@ -101,6 +101,7 @@ import {
 import { formatUiError } from "../utils/uiError";
 import EntityContextMenu from "../components/common/EntityContextMenu";
 import useContextMenu from "../hooks/useContextMenu";
+import lazyWithReload from "../utils/lazyWithReload";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 
@@ -124,7 +125,7 @@ const formatVideoDate = (isoStr) => {
 };
 
 // Lazy import for VideoModelsModal
-const VideoModelsModal = React.lazy(() => import("../components/modals/VideoModelsModal"));
+const VideoModelsModal = lazyWithReload(() => import("../components/modals/VideoModelsModal"));
 
 const VideoGeneratorPage = ({ embedded = false }) => {
   const [inputMode, setInputMode] = useState("text");

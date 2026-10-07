@@ -10,6 +10,7 @@ import {
 } from "@mui/material";
 import { RefreshOutlined } from "@mui/icons-material";
 import { BrandLogo } from "../branding";
+import { reloadOnceForStaleModule } from "../../utils/lazyWithReload";
 
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -25,7 +26,10 @@ class ErrorBoundary extends React.Component {
   componentDidCatch(error, errorInfo) {
     // Log error details
     console.error("Error Boundary caught an error:", error, errorInfo);
-    
+
+    // Code replaced on disk under this tab: one reload loads the new version.
+    reloadOnceForStaleModule(error);
+
     // Update state with error details
     this.setState({
       error: error,
