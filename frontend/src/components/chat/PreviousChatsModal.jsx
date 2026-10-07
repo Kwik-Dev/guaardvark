@@ -17,10 +17,13 @@ import {
 } from "@mui/material";
 import CloseIcon from "@mui/icons-material/Close";
 import { listChatSessions, deleteChatSession } from "../../api/chatService";
+import EntityContextMenu from "../common/EntityContextMenu";
+import useContextMenu from "../../hooks/useContextMenu";
 
 const PreviousChatsModal = ({ open, onClose, projectId, currentSessionId, onSelectSession }) => {
   const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(false);
+  const rowMenu = useContextMenu();
   useEffect(() => {
     if (open) {
       loadSessions();
@@ -40,7 +43,7 @@ const PreviousChatsModal = ({ open, onClose, projectId, currentSessionId, onSele
   };
 
   const handleDelete = async (sessionId, e) => {
-    e.stopPropagation();
+    e?.stopPropagation();
     try {
       await deleteChatSession(sessionId);
       setSessions((prev) => prev.filter((s) => s.session_id !== sessionId));
@@ -89,6 +92,7 @@ const PreviousChatsModal = ({ open, onClose, projectId, currentSessionId, onSele
               <ListItem
                 key={session.session_id}
                 disablePadding
+                onContextMenu={(e) => rowMenu.open(e, session)}
                 secondaryAction={
                   <IconButton
                     edge="end"
@@ -130,6 +134,29 @@ const PreviousChatsModal = ({ open, onClose, projectId, currentSessionId, onSele
             ))}
           </List>
         )}
+        <EntityContextMenu
+          anchorPosition={rowMenu.anchorPosition}
+          onClose={rowMenu.close}
+          actions={
+            rowMenu.payload
+              ? [
+                  {
+                    label: "Open",
+                    onClick: () => {
+                      onSelectSession(rowMenu.payload.session_id);
+                      onClose();
+                    },
+                  },
+                  {
+                    label: "Delete",
+                    onClick: () => handleDelete(rowMenu.payload.session_id),
+                    color: "error.main",
+                    dividerBefore: true,
+                  },
+                ]
+              : []
+          }
+        />
       </DialogContent>
       <DialogActions>
         <Button onClick={onClose}>Close</Button>
