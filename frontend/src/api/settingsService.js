@@ -45,6 +45,30 @@ export const setProfile = async (name) => {
 };
 
 /**
+ * Tools chat runs without asking: no approval card, no file card.
+ * @returns {Promise<string[]>}
+ */
+export const getAlwaysApprovedTools = async () => {
+  const response = await fetch(`${BASE_URL}/settings/chat_tools_always_approved`);
+  const data = await handleResponse(response, { quiet: true });
+  return data?.data?.tools || [];
+};
+
+/**
+ * @param {{add?: string[], remove?: string[]}} change
+ * @returns {Promise<string[]>} the stored list after the change
+ */
+export const updateAlwaysApprovedTools = async (change) => {
+  const response = await fetch(`${BASE_URL}/settings/chat_tools_always_approved`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(change),
+  });
+  const data = await handleResponse(response);
+  return data?.data?.tools || [];
+};
+
+/**
  * How the start/stop scripts treat Ollama, as recorded in .env.
  * @returns {Promise<{keep_running: boolean, external: boolean, env_writable: boolean}>}
  */

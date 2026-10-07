@@ -36,6 +36,7 @@ import PageLayout from "../components/layout/PageLayout";
 import RejectPublishDialog from "../components/connections/RejectPublishDialog";
 import HeldChangesPanel from "../components/approvals/HeldChangesPanel";
 import OutreachDraftsPanel from "../components/approvals/OutreachDraftsPanel";
+import AlwaysApprovedToolsPanel from "../components/approvals/AlwaysApprovedToolsPanel";
 import { useSnackbar } from "../components/common/SnackbarProvider";
 import {
   approvePublish,
@@ -435,9 +436,12 @@ const ApprovalsPage = () => {
             value="code"
             label={held.length ? `Code changes (${held.length})` : "Code changes"}
           />
+          <Tab value="chat_tools" label="Chat tools" />
           <Tab value="history" label="History" />
         </Tabs>
-        {tab === "code" ? (
+        {tab === "chat_tools" ? (
+          <AlwaysApprovedToolsPanel showMessage={showMessage} />
+        ) : tab === "code" ? (
           <HeldChangesPanel
             held={held}
             loading={heldLoading}
