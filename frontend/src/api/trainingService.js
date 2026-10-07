@@ -78,6 +78,26 @@ export const deleteTrainingDataset = async (id) => {
   }
 };
 
+/**
+ * What a dataset path holds, read the way the trainer reads it: files, rows,
+ * usable rows, formats, a few clipped samples, the first problems and
+ * whether it can be trained on.
+ */
+export const inspectTrainingDataset = async (path) => {
+  const response = await fetch(
+    `${BASE_URL}/training/datasets/inspect?path=${encodeURIComponent(path)}`,
+  );
+  const data = await handleResponse(response, { quiet: true });
+  return data.data || data;
+};
+
+/** Where the dataset picker opens: { locations: [...], default: path }. */
+export const getTrainingDatasetLocations = async () => {
+  const response = await fetch(`${BASE_URL}/training/datasets/locations`);
+  const data = await handleResponse(response, { quiet: true });
+  return data.data || data;
+};
+
 // Training Jobs API
 export const getTrainingJobs = async (filters = {}) => {
   try {
