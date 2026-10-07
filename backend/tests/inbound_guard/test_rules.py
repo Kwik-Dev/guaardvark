@@ -36,6 +36,16 @@ def test_reordering_characters_are_refused_and_shell_is_held():
     assert _verdict(_case("torch.load with weights_only")).verdict == "allow"
 
 
+def test_agent_behaviour_from_a_fork_is_refused_and_held_otherwise():
+    change = change_from_texts("data/agent/recipes.json", "{}\n", '{"zoom_in": {}}\n')
+    fork = scan([change], source="pr-fork", subject="x", mode="observe")
+    own = scan([change], source="ci", subject="x", mode="observe")
+    assert fork.verdict == "block"
+    assert "steer.outside-contribution" in {f.rule for f in fork.findings}
+    assert own.verdict == "hold"
+    assert "steer.outside-contribution" not in {f.rule for f in own.findings}
+
+
 def test_excerpts_show_control_characters_as_escapes():
     finding = next(f for f in _verdict(_case("bidi control")).findings if f.rule == "trojan.bidi")
     assert "\\u202e" in finding.excerpt

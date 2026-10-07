@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "_doc": "Rules for code coming in. Paths are fnmatch globs against the repo-relative path, where * also crosses '/'; '@name' refers to a group. Line rules read added lines only unless \"on\" is \"removed\". Severity maps to a verdict through policy: hold_at and above is held for approval, block_at and above is refused.",
+  "_doc": "Rules for code coming in. Paths are fnmatch globs against the repo-relative path, where * also crosses '/'; '@name' refers to a group. Line rules read added lines only unless \"on\" is \"removed\". Severity maps to a verdict through policy: hold_at and above is held for approval, block_at and above is refused. A rule with \"sources\" applies only to scans from those sources (pr-fork: a pull request from another repository).",
 
   "policy": {
     "hold_at": "medium",
@@ -52,6 +52,8 @@
      "why": "CI workflow edited"},
     {"id": "steer.instructions", "pack": "agent-steering", "severity": "medium", "paths": ["@steering"],
      "why": "changes what agents are told or which programs they start; read it as instructions, not as prose"},
+    {"id": "steer.outside-contribution", "pack": "agent-steering", "severity": "critical", "paths": ["@steering"], "sources": ["pr-fork"],
+     "why": "agent instructions and recipes are written by maintainers only: a recipe sends keys and text to a browser holding the user's sessions before any model reads the request"},
     {"id": "supply.custom-nodes", "pack": "supply-chain", "severity": "medium", "paths": ["*/custom_nodes.manifest"],
      "why": "changes which ComfyUI custom nodes are installed; ComfyUI imports each as Python at start"}
   ],
