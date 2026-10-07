@@ -87,6 +87,7 @@ import { VoiceProvider } from "./contexts/VoiceContext";
 import { VoiceSessionProvider } from "./contexts/VoiceSessionContext";
 import FloatingChatProvider from "./components/chat/FloatingChatProvider";
 import KeyboardShortcutsOverlay from "./components/common/KeyboardShortcutsOverlay";
+import DidYouKnowTip from "./components/common/DidYouKnowTip";
 import useUncleNotifications from "./hooks/useUncleNotifications";
 
 function UncleNotificationListener() {
@@ -739,6 +740,7 @@ const AppContainer = () => {
                     <FloatingChatProvider />
                     <GlobalTrainer />
                     <KeyboardShortcutsOverlay />
+                    <DidYouKnowTip />
                   </ErrorProvider>
                 </SnackbarProvider>
               </VoiceSessionProvider>

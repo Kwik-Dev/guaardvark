@@ -4,6 +4,7 @@ import CloseIcon from "@mui/icons-material/Close";
 import { useHealth } from "../../contexts/HealthContext";
 import RebootProgressModal from "../modals/RebootProgressModal";
 import { ConfirmActionDialog } from "../settings/ui";
+import { useAppStore } from "../../stores/useAppStore";
 
 const DISMISSED_KEY = "guaardvark:update-banner-dismissed";
 
@@ -83,7 +84,13 @@ const UpdateAppliedBanner = () => {
   }, [baseline, health]);
 
   const notice = describeUpdate(health, baseline);
-  const visible = notice && notice.key !== dismissed;
+  const visible = Boolean(notice && notice.key !== dismissed);
+
+  const setUpdateNoticeVisible = useAppStore((s) => s.setUpdateNoticeVisible);
+  useEffect(() => {
+    setUpdateNoticeVisible(visible);
+  }, [visible, setUpdateNoticeVisible]);
+  useEffect(() => () => setUpdateNoticeVisible(false), [setUpdateNoticeVisible]);
 
   return (
     <>
