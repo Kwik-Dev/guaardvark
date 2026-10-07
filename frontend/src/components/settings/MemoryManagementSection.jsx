@@ -358,7 +358,7 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
       </Box>
 
       <Box sx={{ display: "flex", gap: 1.5, mb: 2, flexWrap: "wrap" }}>
-        <TextField select size="small" label="Type" value={filterType} onChange={(e) => setFilterType(e.target.value)} SelectProps={{ native: true }} sx={{ minWidth: 130 }}>
+        <TextField select size="small" label="Type" value={filterType} onChange={(e) => setFilterType(e.target.value)} SelectProps={{ native: true }} InputLabelProps={{ shrink: true }} sx={{ minWidth: 130 }}>
           <option value="">All types</option>
           <option value="fact">Fact</option>
           <option value="preference">Preference</option>
@@ -367,7 +367,7 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
           <option value="belief_update">Belief update</option>
           <option value="snippet">Snippet</option>
         </TextField>
-        <TextField select size="small" label="Source" value={filterSource} onChange={(e) => setFilterSource(e.target.value)} SelectProps={{ native: true }} sx={{ minWidth: 150 }}>
+        <TextField select size="small" label="Source" value={filterSource} onChange={(e) => setFilterSource(e.target.value)} SelectProps={{ native: true }} InputLabelProps={{ shrink: true }} sx={{ minWidth: 150 }}>
           <option value="">All sources</option>
           <option value="manual">Manual</option>
           <option value="chat">Chat</option>

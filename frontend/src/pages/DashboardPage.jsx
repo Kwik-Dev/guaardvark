@@ -784,7 +784,10 @@ const DashboardPage = () => {
 
   // Right-click on the grid's empty space; cards open their own menus.
   const handleBackgroundContextMenu = (e) => {
-    if (e.target?.closest?.("[data-card-id]")) return;
+    // A minimized card's grid cell is taller than its title bar; a right-click
+    // on that empty part of the cell (the cell itself) counts as background.
+    const cell = e.target?.closest?.("[data-card-id]");
+    if (cell && cell !== e.target) return;
     backgroundMenu.open(e);
   };
 
