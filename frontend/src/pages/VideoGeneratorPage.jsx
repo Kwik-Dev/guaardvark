@@ -78,6 +78,7 @@ import ColourMatchPill from "../components/videogen/ColourMatchPill";
 import ClipReviewHold, { ReviewStatePill } from "../components/videogen/ClipReviewHold";
 import RenderFailureNote from "../components/videogen/RenderFailureNote";
 import { refusalText } from "../utils/renderFailure";
+import { applicableAdapters as applicableAdapterModels } from "../utils/videoAdapters";
 import VideoGenEffectiveSettings from "../components/videogen/VideoGenEffectiveSettings";
 import LiveLatentPreview from "../components/videogen/LiveLatentPreview";
 import { videoGenStageLabel } from "../components/videogen/stageLabels";
@@ -689,20 +690,10 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     return { width, height };
   }, [aspectRatio, videoSize, model, modelMeta]);
 
-  // A speed profile's LoRAs are trained for that profile's steps, cfg and shift, and
-  // Wan's pair is split per expert; offered here they would stack on both experts at
-  // the base settings. The profile picker is the only way to use them.
-  const applicableAdapters = useMemo(() => {
-    const owned = new Set();
-    Object.values(modelCaps?.speed_profiles || {}).forEach((spec) => {
-      if (spec?.lora) owned.add(spec.lora);
-      Object.values(spec?.loras || {}).forEach((id) => owned.add(id));
-    });
-    return (adapterModels || []).filter((m) => {
-      const applies = m.applies_to || [];
-      return (applies.length === 0 || applies.includes(model)) && !owned.has(m.id);
-    });
-  }, [adapterModels, model, modelCaps]);
+  const applicableAdapters = useMemo(
+    () => applicableAdapterModels(adapterModels, model, modelCaps?.speed_profiles),
+    [adapterModels, model, modelCaps],
+  );
   const applicableEncoders = useMemo(
     () => (encoderModels || []).filter((m) => (m.applies_to || []).includes(model)),
     [encoderModels, model],

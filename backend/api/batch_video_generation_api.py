@@ -1067,8 +1067,10 @@ def list_video_models():
                 "capabilities": caps,
                 "tier_defaults": tier_defaults_for(model_id, total_vram_mb) if caps else {},
                 "license": info.get("license"),
-                # LoRA companions name the generation entries they apply to.
+                # LoRA companions name the generation entries they apply to;
+                # adapter False marks one no picker may offer.
                 "applies_to": info.get("applies_to", []),
+                "adapter": info.get("adapter"),
                 "active": model_id in {active_t2v, active_i2v} and bool(model_id),
                 "user": bool(info.get("user")) or is_user_model_id(model_id),
                 "like": info.get("like"),

@@ -623,8 +623,8 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
             entry = VIDEO_MODEL_REGISTRY.get(aid) or {}
             if entry.get("type") != "lora":
                 return None, f"'{aid}' is not a LoRA"
-            applies = entry.get("applies_to") or []
-            if applies and model_key not in applies:
+            # A LoRA names the models it was trained for; an empty list matches none.
+            if entry.get("adapter") is False or model_key not in (entry.get("applies_to") or []):
                 return None, f"{entry.get('name') or aid} does not apply to this model"
             from backend.services.video_model_registry import speed_profile_loras
             owner = speed_profile_loras(model_key).get(aid)
