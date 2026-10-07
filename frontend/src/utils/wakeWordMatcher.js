@@ -1,179 +1,128 @@
 /**
- * Wake word detection utility for ContinuousVoiceChat.
+ * Wake phrase detection for hands-free voice ("Hey <system name>").
  *
- * Checks Whisper transcription text for wake phrases like "Hey Guaardvark".
- * Uses fuzzy matching to handle common Whisper mis-transcriptions of
- * unusual proper nouns (e.g. "guard vark", "guad vark", "guardvark").
+ * Works on Whisper transcripts, so it tolerates the ways Whisper spells an
+ * unusual name ("guard vark", "guardvark") with a Levenshtein comparison over
+ * whole words. The name is whatever the install is branded as. Names of five
+ * letters or fewer need a greeting in front ("hey", "ok", ...) and a closer
+ * match, because a short bare word turns up in ordinary speech.
  */
 
-/**
- * Compute Levenshtein distance between two strings.
- */
+const PUNCTUATION = /[,.:;!?'"()[\]{}]/g;
+const GREETINGS = ["hey", "ok", "okay", "hi", "hello"];
+const SHORT_NAME_LENGTH = 5;
+const LONG_NAME_SIMILARITY = 0.7;
+const SHORT_NAME_SIMILARITY = 0.8;
+// A wake phrase is said near the start; this bounds the work on a long transcript.
+const MAX_WORDS_SCANNED = 60;
+
 function levenshteinDistance(a, b) {
   const m = a.length;
   const n = b.length;
-  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
-
-  for (let i = 0; i <= m; i++) dp[i][0] = i;
-  for (let j = 0; j <= n; j++) dp[0][j] = j;
-
+  let prev = new Array(n + 1);
+  let curr = new Array(n + 1);
+  for (let j = 0; j <= n; j++) prev[j] = j;
   for (let i = 1; i <= m; i++) {
+    curr[0] = i;
     for (let j = 1; j <= n; j++) {
-      if (a[i - 1] === b[j - 1]) {
-        dp[i][j] = dp[i - 1][j - 1];
-      } else {
-        dp[i][j] = 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
-      }
+      curr[j] =
+        a[i - 1] === b[j - 1]
+          ? prev[j - 1]
+          : 1 + Math.min(prev[j], curr[j - 1], prev[j - 1]);
     }
+    [prev, curr] = [curr, prev];
   }
-
-  return dp[m][n];
+  return prev[n];
 }
 
-/**
- * Generate common Whisper mis-transcription variants for a name.
- */
-function generateFuzzyVariants(name) {
+const normalize = (text) =>
+  String(text || "")
+    .toLowerCase()
+    .replace(PUNCTUATION, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+/** Spellings Whisper is known to produce for a name, plus generic splits. */
+function nameVariants(name) {
   const variants = new Set([name]);
-
-  // Known variants for "guaardvark"
-  if (name === 'guaardvark') {
-    variants.add('guard vark');
-    variants.add('guardvark');
-    variants.add('guad vark');
-    variants.add('guaard vark');
-    variants.add('guard bark');
-    variants.add('guard dark');
-    variants.add('guar dark');
-    variants.add('guadvark');
-    variants.add('gard vark');
-    variants.add('godvark');
-    variants.add('god vark');
+  if (name === "guaardvark") {
+    [
+      "guard vark", "guardvark", "guad vark", "guaard vark", "guard bark",
+      "guard dark", "guar dark", "guadvark", "gard vark", "godvark", "god vark",
+    ].forEach((v) => variants.add(v));
   }
-
-  // Generic: collapse doubled letters
-  const noDoubles = name.replace(/(.)\1/g, '$1');
-  if (noDoubles !== name) {
-    variants.add(noDoubles);
-  }
-
-  // Split at mid-point (common for compound-looking words)
-  if (name.length > 5) {
+  const noDoubles = name.replace(/(.)\1/g, "$1");
+  if (noDoubles !== name) variants.add(noDoubles);
+  if (!name.includes(" ") && name.length > 5) {
     const mid = Math.floor(name.length / 2);
-    variants.add(name.slice(0, mid) + ' ' + name.slice(mid));
+    variants.add(`${name.slice(0, mid)} ${name.slice(mid)}`);
   }
-
-  // Remove spaces (if name has them)
-  const noSpaces = name.replace(/\s+/g, '');
-  if (noSpaces !== name) {
-    variants.add(noSpaces);
-  }
-
+  const noSpaces = name.replace(/\s+/g, "");
+  if (noSpaces !== name) variants.add(noSpaces);
   return Array.from(variants);
 }
 
 /**
- * Check if a text window fuzzy-matches a phrase using Levenshtein similarity.
- * Returns the best match position or -1.
+ * Look for the wake phrase in a transcript.
+ *
+ * @param {string} transcription Whisper output, punctuation and case as given.
+ * @param {string} systemName The install's name ("Guaardvark" unless branded).
+ * @returns {{detected: boolean, remainder: string, matchedPhrase?: string}}
+ *   `remainder` is what was said after the wake phrase, in the transcript's own
+ *   spelling, so it can be sent as the message; the whole transcript when not detected.
  */
-function fuzzyIndexOf(text, phrase, threshold) {
-  const phraseLen = phrase.length;
-  if (phraseLen === 0) return -1;
+export function checkForWakeWord(transcription, systemName) {
+  const original = String(transcription || "").trim();
+  const name = normalize(systemName);
+  if (!original || !name) return { detected: false, remainder: original };
 
-  let bestPos = -1;
-  let bestSimilarity = 0;
+  const originalTokens = original.split(/\s+/);
+  // Each normalized word remembers which original token it came from.
+  const words = [];
+  originalTokens.slice(0, MAX_WORDS_SCANNED).forEach((token, index) => {
+    const word = normalize(token);
+    if (word) words.push({ word, index });
+  });
+  if (words.length === 0) return { detected: false, remainder: original };
 
-  // Slide a window across the text, checking windows of phraseLen +/- 2 chars
-  for (let windowSize = Math.max(1, phraseLen - 2); windowSize <= phraseLen + 2; windowSize++) {
-    for (let i = 0; i <= text.length - windowSize; i++) {
-      const window = text.slice(i, i + windowSize);
-      const distance = levenshteinDistance(window, phrase);
-      const similarity = 1 - (distance / Math.max(window.length, phraseLen));
-      if (similarity >= threshold && similarity > bestSimilarity) {
-        bestSimilarity = similarity;
-        bestPos = i;
+  const isShort = name.replace(/\s+/g, "").length <= SHORT_NAME_LENGTH;
+  const minSimilarity = isShort ? SHORT_NAME_SIMILARITY : LONG_NAME_SIMILARITY;
+  const variants = nameVariants(name);
+  const phrases = [];
+  for (const variant of variants) {
+    for (const greeting of GREETINGS) phrases.push(`${greeting} ${variant}`);
+    if (!isShort) phrases.push(variant);
+  }
+  const maxPhraseWords = Math.max(...phrases.map((p) => p.split(" ").length));
+
+  let best = null;
+  for (let start = 0; start < words.length; start++) {
+    let span = "";
+    for (let end = start; end < words.length && end - start < maxPhraseWords + 1; end++) {
+      span = span ? `${span} ${words[end].word}` : words[end].word;
+      for (const phrase of phrases) {
+        if (Math.abs(span.length - phrase.length) > 3) continue;
+        const distance = span === phrase ? 0 : levenshteinDistance(span, phrase);
+        const similarity = 1 - distance / Math.max(span.length, phrase.length);
+        if (similarity < minSimilarity) continue;
+        const better =
+          !best ||
+          similarity > best.similarity ||
+          (similarity === best.similarity && start < best.start) ||
+          (similarity === best.similarity && start === best.start && phrase.length > best.phrase.length);
+        if (better) best = { similarity, start, end, phrase };
       }
     }
   }
 
-  return bestPos;
-}
-
-/**
- * Check if transcription contains a wake phrase.
- *
- * @param {string} transcription - The Whisper transcription text
- * @param {string} systemName - The configured system name (e.g. "Guaardvark")
- * @returns {{ detected: boolean, remainder: string, matchedPhrase?: string }}
- */
-export function checkForWakeWord(transcription, systemName) {
-  if (!transcription || !systemName) {
-    return { detected: false, remainder: transcription || '' };
-  }
-
-  // Strip common Whisper punctuation that breaks phrase matching
-  // e.g. "Hey, Ducky." → "hey ducky", "Hey Ducky!" → "hey ducky"
-  const text = transcription
-    .toLowerCase()
-    .replace(/[,.:;!?'"()[\]{}]/g, '')
-    .replace(/\s+/g, ' ')
+  if (!best) return { detected: false, remainder: original };
+  const afterIndex = words[best.end].index + 1;
+  const remainder = originalTokens
+    .slice(afterIndex)
+    .join(" ")
+    .replace(/^[\s,.:;!?-]+/, "")
     .trim();
-  const name = systemName.toLowerCase().trim();
-
-  if (!text || !name) {
-    return { detected: false, remainder: transcription };
-  }
-
-  // Build all wake phrases to check
-  const prefixes = ['hey', 'ok', 'hi', 'hello'];
-  const nameVariants = generateFuzzyVariants(name);
-
-  // Build prefixed phrases (always included)
-  const prefixedPhrases = [];
-  for (const variant of nameVariants) {
-    for (const prefix of prefixes) {
-      prefixedPhrases.push(`${prefix} ${variant}`);
-    }
-  }
-
-  // For short names (<=5 chars), bare name matching causes too many false positives
-  // (e.g., "ducky" in "rubber ducky"). Require a prefix for short names.
-  const barePhrases = [];
-  if (name.length > 5) {
-    for (const variant of nameVariants) {
-      barePhrases.push(variant);
-    }
-  }
-
-  const allPhrases = [...prefixedPhrases, ...barePhrases];
-
-  // Sort by length descending to match longest (most specific) first
-  allPhrases.sort((a, b) => b.length - a.length);
-
-  // Phase 1: Exact substring match
-  for (const phrase of allPhrases) {
-    const idx = text.indexOf(phrase);
-    if (idx !== -1) {
-      const remainder = text.slice(idx + phrase.length).trim();
-      return { detected: true, remainder, matchedPhrase: phrase };
-    }
-  }
-
-  // Phase 2: Fuzzy match with Levenshtein (0.7 threshold)
-  for (const phrase of allPhrases) {
-    // Only fuzzy-match phrases of 4+ chars to avoid false positives
-    if (phrase.length < 4) continue;
-
-    const pos = fuzzyIndexOf(text, phrase, 0.7);
-    if (pos !== -1) {
-      // Estimate the end of the matched region
-      const matchEnd = Math.min(text.length, pos + phrase.length + 2);
-      const remainder = text.slice(matchEnd).trim();
-      return { detected: true, remainder, matchedPhrase: phrase };
-    }
-  }
-
-  return { detected: false, remainder: text };
+  return { detected: true, remainder, matchedPhrase: best.phrase };
 }
 
 export default checkForWakeWord;

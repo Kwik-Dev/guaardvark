@@ -1,32 +1,28 @@
 import { useState, useEffect } from 'react';
-
-const VOICE_SETTINGS_KEY = 'guaardvark_voiceSettings';
+import {
+  VOICE_SETTINGS_EVENT,
+  VOICE_SETTINGS_KEY,
+  readVoiceSettings,
+} from '../config/voiceDefaults';
 
 /**
- * Shared hook for reactive voice settings from localStorage.
- * Re-reads when 'voiceSettingsChanged' window event fires.
+ * Voice settings with defaults filled in, re-read whenever a writer in this
+ * tab (VOICE_SETTINGS_EVENT) or another tab (storage) changes them.
  */
 export function useVoiceSettings() {
-  const [settings, setSettings] = useState(() => {
-    try {
-      const stored = localStorage.getItem(VOICE_SETTINGS_KEY);
-      return stored ? JSON.parse(stored) : {};
-    } catch {
-      return {};
-    }
-  });
+  const [settings, setSettings] = useState(readVoiceSettings);
 
   useEffect(() => {
-    const handleChange = () => {
-      try {
-        const stored = localStorage.getItem(VOICE_SETTINGS_KEY);
-        setSettings(stored ? JSON.parse(stored) : {});
-      } catch {
-        setSettings({});
-      }
+    const handleChange = () => setSettings(readVoiceSettings());
+    const handleStorage = (e) => {
+      if (!e.key || e.key === VOICE_SETTINGS_KEY) handleChange();
     };
-    window.addEventListener('voiceSettingsChanged', handleChange);
-    return () => window.removeEventListener('voiceSettingsChanged', handleChange);
+    window.addEventListener(VOICE_SETTINGS_EVENT, handleChange);
+    window.addEventListener('storage', handleStorage);
+    return () => {
+      window.removeEventListener(VOICE_SETTINGS_EVENT, handleChange);
+      window.removeEventListener('storage', handleStorage);
+    };
   }, []);
 
   return settings;
