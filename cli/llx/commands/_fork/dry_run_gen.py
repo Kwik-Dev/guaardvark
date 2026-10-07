@@ -344,8 +344,8 @@ def audio_music(
             | _explicit(duration_s=seconds if seconds != 30.0 else None,
                         instrumental_only=instrumental),
             json_out=json_out,
-            notes=("audio generations are not recorded by the backend yet (issue #8), so there is "
-                   "nothing to reproduce from afterwards",))
+            notes=("audio generations are recorded in the main database: `guaardvark audio jobs` "
+                   "lists them and `audio reproduce <id>` replays one",))
 
 
 @audio_app.command("sfx")
@@ -363,8 +363,8 @@ def audio_sfx(
             inputs=("prompt",),
             explicit={"prompt"},
             json_out=json_out,
-            notes=("audio generations are not recorded by the backend yet (issue #8), so there is "
-                   "nothing to reproduce from afterwards",))
+            notes=("audio generations are recorded in the main database: `guaardvark audio jobs` "
+                   "lists them and `audio reproduce <id>` replays one",))
 
 
 @audio_app.command("tts")
