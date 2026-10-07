@@ -256,6 +256,31 @@ def set_approval_response(
 # decline. Tests shorten it.
 APPROVAL_TIMEOUT_S = 300
 
+# Chat templates that accept a system message only as the first message (the
+# Qwen3.5 Jinja template raises this). The engine adds system lines later in a
+# turn (code-search nudge, retries), so such a model is learned from its first
+# refusal and sent the same conversation in a shape its template takes.
+_SYSTEM_FIRST_ERROR = "System message must be at the beginning"
+_SYSTEM_FIRST_MODELS: set = set()
+
+
+def _system_first(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The leading system messages as one; any later system message as a user turn."""
+    lead = 0
+    while lead < len(messages) and messages[lead].get("role") == "system":
+        lead += 1
+    out: List[Dict[str, Any]] = []
+    if lead:
+        joined = "\n\n".join(m.get("content") or "" for m in messages[:lead] if m.get("content"))
+        out.append({**messages[0], "content": joined})
+    for m in messages[lead:]:
+        out.append({**m, "role": "user"} if m.get("role") == "system" else m)
+    return out
+
+
+def _template_safe(model_name: str, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return _system_first(messages) if model_name in _SYSTEM_FIRST_MODELS else messages
+
 
 def _served_output_url(path: Optional[str]) -> Optional[str]:
     """URL the UI can load for a file under outputs/edit_inputs or generated_images, else None."""
@@ -4767,6 +4792,7 @@ class UnifiedChatEngine:
             call_messages = messages
             if is_thinking_model:
                 call_messages = self._sanitize_messages_for_thinking_model(messages)
+            call_messages = _template_safe(model_name, call_messages)
 
             # Native tool-calling path (feature-flagged via GUAARDVARK_NATIVE_TOOLCALLS,
             # gated additionally on model 'tools' capability — see _run_chat). When
@@ -4915,9 +4941,9 @@ class UnifiedChatEngine:
                 )
                 retry_kwargs = dict(_chat_kwargs)
                 retry_kwargs["think"] = False
-                retry_kwargs["messages"] = list(call_messages) + [
+                retry_kwargs["messages"] = _template_safe(model_name, list(call_messages) + [
                     {"role": "system", "content": _ANSWER_AFTER_REASONING_NUDGE},
-                ]
+                ])
                 retry_kwargs["options"] = sampling_profiles.profile_options(
                     sampling_profiles.DEFAULT_PROFILE,
                     num_ctx=ctx_window,
@@ -4948,12 +4974,25 @@ class UnifiedChatEngine:
 
         except Exception as e:
             error_str = str(e)
+            if (_SYSTEM_FIRST_ERROR in error_str and model_name not in _SYSTEM_FIRST_MODELS
+                    and not accumulated and not is_aborted(session_id)):
+                _SYSTEM_FIRST_MODELS.add(model_name)
+                logger.warning(
+                    f"{model_name} takes a system message only first; resending with "
+                    "later system lines as user turns"
+                )
+                return self._call_llm_streaming(
+                    messages, emit_fn, session_id, emit_tokens=emit_tokens,
+                    max_tokens=max_tokens, iteration=iteration,
+                )
             # Ollama serialization crash: thinking model output contains XML
             # that breaks Go's JSON encoder.  Retry with sanitized messages.
             if "invalid character" in error_str and is_thinking_model:
                 logger.warning(f"Thinking model serialization error, retrying with sanitized prompt: {error_str}")
                 try:
-                    sanitized = self._sanitize_messages_for_thinking_model(messages, aggressive=True)
+                    sanitized = _template_safe(
+                        model_name, self._sanitize_messages_for_thinking_model(messages, aggressive=True),
+                    )
                     # The retry keeps the turn's thinking choice; rebuilding the
                     # kwargs without it would hand the model its own default (on).
                     _sanitized_kwargs = dict(
