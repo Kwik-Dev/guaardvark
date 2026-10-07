@@ -200,6 +200,16 @@ The optional web terminal (`scripts/terminal_server.sh start`, ttyd on port 7682
   `--reserve-vram` it needs (H3 5.0, Wan 2.2 14B 1.0) and Guaardvark relaunches ComfyUI when the
   running value differs. Remove `GUAARDVARK_COMFYUI_RESERVE_VRAM` from `.env` if it is set: an
   explicit value overrides every model's own, and H3 runs out of memory at 1.0.
+- **A video model renders cleanly on one machine and garbled on another**: the Interconnector
+  syncs Guaardvark's code, but not ComfyUI and its custom nodes, the model files, `.env`, the
+  PyTorch build or the Studio's own settings (Low VRAM, quality tier). On each machine run
+  `backend/venv/bin/python scripts/video_box_fingerprint.py --out fingerprint-<machine>.json`
+  (`--no-hash` skips hashing the multi-gigabyte model files), copy one file across and run
+  `backend/venv/bin/python scripts/video_box_fingerprint.py --diff fingerprint-a.json fingerprint-b.json`.
+  To see how one clip was rendered, run it with `--only graph,mp4 --mp4 path/to/clip.mp4`: a clip
+  saved by ComfyUI's video node carries the graph that made it, and the `checks` list names any
+  setting that differs from the graph the checkout builds today. `scripts/video_smoke.py --models wan22-5b --mode t2v
+  --width 1280 --height 704 --frames 121` renders the same clip on both machines.
 
 ## Data
 
