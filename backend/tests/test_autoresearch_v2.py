@@ -332,6 +332,30 @@ class TestResearchRunEngine:
             assert result["status"] == "started"
             assert result["run"]["run_tag"] != "old-dead"
 
+    def test_status_and_config_gets_leave_the_config_file_alone(self, app, tmp_path, monkeypatch):
+        import json
+        from backend.api.rag_autoresearch_api import autoresearch_bp
+        from backend.config import AUTORESEARCH_DEFAULT_PARAMS
+        monkeypatch.setenv("GUAARDVARK_ROOT", str(tmp_path))
+        (tmp_path / "data").mkdir()
+        cfg_file = tmp_path / "data" / "rag_experiment_config.json"
+        # No "tuned" record: a load would infer it and rewrite the file.
+        cfg_file.write_text(json.dumps({
+            "version": 1, "baseline_score": 4.94, "phase": 1,
+            "phase_plateau_count": 14,
+            "params": dict(AUTORESEARCH_DEFAULT_PARAMS, dedup_threshold=0.85),
+        }))
+        before = cfg_file.read_bytes()
+        if "autoresearch" not in app.blueprints:
+            app.register_blueprint(autoresearch_bp)
+        with app.test_client() as client:
+            first = client.get("/api/autoresearch/status")
+            second = client.get("/api/autoresearch/status")
+            cfg = client.get("/api/autoresearch/config")
+        assert first.status_code == second.status_code == cfg.status_code == 200
+        assert first.get_json()["config_migration_pending"] is True
+        assert cfg_file.read_bytes() == before
+
     def test_status_running_when_research_run_active(self, app):
         with app.app_context():
             db.session.add(ResearchRun(

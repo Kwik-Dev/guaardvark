@@ -74,8 +74,10 @@ def get_history():
 
 @autoresearch_bp.route("/config", methods=["GET"])
 def get_config():
+    """The experiment config as the next run would load it. Read-only: any
+    pending migration is applied in memory and saved by the next run."""
     svc = get_autoresearch_service()
-    config = svc._load_config()
+    config, _changed = svc._read_config()
     return jsonify(config)
 
 

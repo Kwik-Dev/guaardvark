@@ -140,34 +140,46 @@ class RAGAutoresearchService:
         config["params"] = params
         return True
 
-    def _load_config(self) -> dict:
-        """Load current experiment config from disk.
+    def _default_config(self) -> dict:
+        return {
+            "version": 1,
+            "baseline_score": 0.0,
+            "params": self._baseline_params(),
+            "tuned": [],
+            "phase": 1,
+            "phase_plateau_count": 0,
+        }
+
+    def _read_config(self) -> tuple:
+        """The experiment config as a run would see it, without touching disk.
+
+        Returns (config, changed): `changed` is True when the file is missing,
+        unreadable, or needs the migrations _load_config would save. Status
+        and other GET paths use this so reading never rewrites the file.
 
         "tuned" lists the params a kept experiment changed; only those are
         promoted (see _promote_config), and every other param is re-resolved
-        from the baseline on load.
+        from the baseline.
         """
         path = self._config_path()
         try:
             with open(path, "r") as f:
                 config = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
-            config = {
-                "version": 1,
-                "baseline_score": 0.0,
-                "params": self._baseline_params(),
-                "tuned": [],
-                "phase": 1,
-                "phase_plateau_count": 0,
-            }
-            self._save_config(config)
-            return config
+            return self._default_config(), True
         changed = False
         if not isinstance(config.get("tuned"), list):
             config["tuned"] = self._infer_tuned(config.get("params") or {})
             changed = True
         if self._rebase_params(config):
             changed = True
+        return config, changed
+
+    def _load_config(self) -> dict:
+        """Load the experiment config for a run, saving any migration
+        _read_config applied. Only run, reset and eval-regenerate paths call
+        this; everything that just reports state calls _read_config."""
+        config, changed = self._read_config()
         if changed:
             self._save_config(config)
         return config
@@ -760,9 +772,10 @@ class RAGAutoresearchService:
 
         `running` is true if THIS process's loop is active OR a ResearchRun
         row is pending/running — the overnight engine no longer sets
-        `_running` on this singleton.
+        `_running` on this singleton. Never writes the config file;
+        `config_migration_pending` says the next run will rewrite it.
         """
-        config = self._load_config()
+        config, migration_pending = self._read_config()
         active_run = None
         eval_pair_count = 0
         try:
@@ -815,6 +828,7 @@ class RAGAutoresearchService:
             "active_run": active_run,
             "code_keeps": code_keeps,
             "eval_pair_count": eval_pair_count,
+            "config_migration_pending": migration_pending,
         }
 
     def _count_experiments(self) -> int:

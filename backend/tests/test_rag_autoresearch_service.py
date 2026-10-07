@@ -341,6 +341,28 @@ class TestBaselineDedupIsPerModel:
         assert config["tuned"] == ["dedup_threshold"]
         assert config["baseline_score"] == 3.0
 
+    def test_read_config_does_not_create_a_missing_file(self, app, tmp_path, monkeypatch):
+        monkeypatch.setenv("GUAARDVARK_ROOT", str(tmp_path))
+        with app.app_context():
+            config, changed = RAGAutoresearchService()._read_config()
+        assert changed is True
+        assert config["params"]["dedup_threshold"] == 0.96
+        assert not (tmp_path / "data" / "rag_experiment_config.json").exists()
+
+    def test_read_config_leaves_a_pending_migration_unsaved(self, app, tmp_path, monkeypatch):
+        from backend.config import AUTORESEARCH_DEFAULT_PARAMS
+        cfg_file = self._write(tmp_path, monkeypatch, {
+            "version": 1, "baseline_score": 3.0, "phase": 1, "phase_plateau_count": 0,
+            "params": dict(AUTORESEARCH_DEFAULT_PARAMS, dedup_threshold=0.85),
+        })
+        before = cfg_file.read_bytes()
+        with app.app_context():
+            config, changed = RAGAutoresearchService()._read_config()
+        assert changed is True
+        assert config["params"]["dedup_threshold"] == 0.96
+        assert config["baseline_score"] == 0.0
+        assert cfg_file.read_bytes() == before
+
     def test_experiment_measures_the_model_value_as_baseline(self, app, tmp_path, monkeypatch):
         monkeypatch.setenv("GUAARDVARK_ROOT", str(tmp_path))
         with app.app_context():
