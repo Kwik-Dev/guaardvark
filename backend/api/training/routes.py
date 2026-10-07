@@ -34,6 +34,57 @@ def _not_started(job, what: str, exc: Exception):
     return error_response(f"Failed to start {what}: {exc}", 500)
 
 
+# Fine-tunes run on the training worker: its Celery process waits for the GPU
+# and supervises the trainer subprocess, which claims the card through the
+# cross-process lease, so the main worker stays free.
+TRAINING_QUEUE = "training"
+
+
+def _dispatch_finetune(job, *, resume: bool = False):
+    """Queue the job's fine-tune on the training worker and mark it running.
+    Raises TaskNotStarted when the queue does not take it."""
+    from backend.tasks.training_tasks import finetune_model_task
+    config = json.loads(job.config_json) if job.config_json else {}
+    task = finetune_model_task.apply_async(
+        args=[job.job_id, config], kwargs={"resume": resume}, queue=TRAINING_QUEUE)
+    job.celery_task_id = task.id
+    job.status = "running"
+    job.pipeline_stage = "training"
+    job.error_message = None
+    db.session.commit()
+    return task
+
+
+def _cancel(job) -> bool:
+    """Mark the job cancelled first (so its task, reading the status, ends it
+    as cancelled), then stop its trainer and drop its queued task. Returns
+    whether a trainer process was signalled."""
+    job.status = "cancelled"
+    job.error_message = "Cancelled by user"
+    pid, job.pid = job.pid, None
+    db.session.commit()
+    pid_terminated = False
+    if pid:
+        from backend.services.training_runner import stop_trainer
+        pid_terminated = stop_trainer(pid)
+    if job.celery_task_id:
+        try:
+            from celery import current_app as celery_app
+            # No terminate: a running task notices the cancel itself and
+            # releases the GPU; killing the pool process would strand its lease.
+            celery_app.control.revoke(job.celery_task_id)
+        except Exception as e:
+            logger.warning(f"Could not revoke Celery task: {e}")
+    return pid_terminated
+
+
+def _job_dict(job) -> dict:
+    """The job as the Training page reads it, with whether its base model's
+    export to Ollama has been verified (the page offers Export only then)."""
+    from backend.services import training_base_models
+    return {**job.to_dict(), "export_verified": training_base_models.export_verified(job.base_model)}
+
+
 def _put_back(job, before, what: str, exc: Exception):
     """Answer for a step started on an existing job (export, import, resume)
     whose task was not queued: nothing ran, so the job returns to the status
@@ -58,8 +109,8 @@ def list_jobs():
             query = query.filter(TrainingJob.dataset_id == dataset_id)
         
         jobs = query.order_by(TrainingJob.created_at.desc()).all()
-        
-        return success_response([job.to_dict() for job in jobs])
+
+        return success_response([_job_dict(job) for job in jobs])
     except Exception as e:
         logger.error(f"Error listing training jobs: {e}", exc_info=True)
         return error_response(str(e), 500)
@@ -313,14 +364,7 @@ def create_job():
                     )
         
         job_id = str(uuid.uuid4())
-        
-        queue = "training"
-        if device_profile:
-            if device_profile.device_type == "gpu":
-                queue = "training_gpu"
-            else:
-                queue = "training"
-        
+
         job = TrainingJob(
             job_id=job_id,
             name=data["name"],
@@ -338,20 +382,13 @@ def create_job():
         
         if data.get("start_immediately", False):
             from backend.celery_dispatch import TaskNotStarted
-            from backend.tasks.training_tasks import finetune_model_task
             try:
-                task = finetune_model_task.apply_async(
-                    args=[job_id, json.loads(job.config_json)],
-                    queue=queue
-                )
+                _dispatch_finetune(job)
             except TaskNotStarted as e:
                 return _not_started(job, "training", e)
-            job.celery_task_id = task.id
-            job.status = "running"
-            db.session.commit()
-        
-        logger.info(f"Created training job: {job_id} - {job.name} (queue: {queue})")
-        return success_response(job.to_dict(), status_code=201)
+
+        logger.info(f"Created training job: {job_id} - {job.name}")
+        return success_response(_job_dict(job), status_code=201)
     except SQLAlchemyError as e:
         db.session.rollback()
         logger.error(f"Database error creating training job: {e}", exc_info=True)
@@ -368,8 +405,8 @@ def get_job(job_id):
         job = db.session.get(TrainingJob, job_id)
         if not job:
             return error_response("Job not found", 404)
-        
-        return success_response(job.to_dict())
+
+        return success_response(_job_dict(job))
     except Exception as e:
         logger.error(f"Error getting training job {job_id}: {e}", exc_info=True)
         return error_response(str(e), 500)
@@ -383,14 +420,9 @@ def delete_job(job_id):
         if not job:
             return error_response("Job not found", 404)
         
-        if job.status == "running":
-            try:
-                from celery import current_app as celery_app
-                if job.celery_task_id:
-                    celery_app.control.revoke(job.celery_task_id, terminate=True)
-            except Exception as e:
-                logger.warning(f"Could not cancel Celery task: {e}")
-        
+        if job.status in ("pending", "running"):
+            _cancel(job)
+
         db.session.delete(job)
         db.session.commit()
         
@@ -408,10 +440,9 @@ def delete_job(job_id):
 @training_bp.route("/jobs/<int:job_id>/cancel", methods=["POST"])
 @ensure_db_session_cleanup
 def cancel_job(job_id):
-    import os
-    import signal
-    import time
-
+    """Cancel a pending or running job: it is marked cancelled, its trainer
+    process (the job's pid) is stopped, and its task ends as cancelled,
+    releasing the GPU."""
     try:
         job = db.session.get(TrainingJob, job_id)
         if not job:
@@ -420,51 +451,11 @@ def cancel_job(job_id):
         if job.status not in ["pending", "running"]:
             return error_response(f"Job cannot be cancelled (status: {job.status})", 400)
 
-        pid_terminated = False
-
-        if job.pid:
-            try:
-                logger.info(f"Sending SIGTERM to PID {job.pid}")
-                os.kill(job.pid, signal.SIGTERM)
-                pid_terminated = True
-
-                time.sleep(2)
-
-                try:
-                    os.kill(job.pid, 0)
-                    logger.info(f"Process {job.pid} still running, sending SIGKILL")
-                    time.sleep(3)
-                    try:
-                        os.kill(job.pid, 0)
-                        os.kill(job.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                except ProcessLookupError:
-                    logger.info(f"Process {job.pid} terminated gracefully")
-
-            except ProcessLookupError:
-                logger.info(f"Process {job.pid} already terminated")
-            except PermissionError:
-                logger.warning(f"Permission denied to terminate PID {job.pid}")
-            except Exception as e:
-                logger.warning(f"Error terminating process: {e}")
-
-        if job.celery_task_id:
-            try:
-                from celery import current_app as celery_app
-                celery_app.control.revoke(job.celery_task_id, terminate=True)
-                logger.info(f"Revoked Celery task: {job.celery_task_id}")
-            except Exception as e:
-                logger.warning(f"Could not revoke Celery task: {e}")
-
-        job.status = "cancelled"
-        job.error_message = "Cancelled by user"
-        job.pid = None
-        db.session.commit()
+        pid_terminated = _cancel(job)
 
         logger.info(f"Cancelled training job: {job_id} (pid_terminated={pid_terminated})")
         return success_response({
-            **job.to_dict(),
+            **_job_dict(job),
             "pid_terminated": pid_terminated
         })
     except SQLAlchemyError as e:
@@ -501,34 +492,18 @@ def resume_job(job_id):
         job.pid = None
         db.session.commit()
 
-        job_config = {}
-        if job.config_json:
-            import json
-            job_config = json.loads(job.config_json)
-
         from backend.celery_dispatch import TaskNotStarted
         try:
-            from backend.tasks.training_tasks import finetune_model_task
-
             try:
-                task = finetune_model_task.apply_async(
-                    args=[job.job_id, job_config],
-                    kwargs={"resume": True},
-                    queue="training_gpu"
-                )
+                task = _dispatch_finetune(job, resume=True)
             except TaskNotStarted as e:
                 # Back to failed or cancelled, so Resume stays available.
                 job.error_message = str(e)
                 return _put_back(job, before, "resume", e)
 
-            job.celery_task_id = task.id
-            job.status = "running"
-            job.pipeline_stage = "training"
-            db.session.commit()
-
             logger.info(f"Resumed training job: {job_id} with task {task.id}")
             return success_response({
-                **job.to_dict(),
+                **_job_dict(job),
                 "celery_task_id": task.id,
                 "resumed_from_checkpoint": job.checkpoint_path
             })
@@ -941,6 +916,11 @@ def export_job_to_gguf(job_id):
         if not lora_path.exists():
             return error_response(f"LoRA adapter path not found: {job.lora_path}", 400)
 
+        from backend.tasks.training_tasks import export_refusal
+        refusal = export_refusal(job.base_model, job.lora_path)
+        if refusal:
+            return error_response(refusal, 409, "EXPORT_NOT_VERIFIED")
+
         data = request.get_json() or {}
         quantization = data.get("quantization", "q4_k_m")
 
@@ -1084,6 +1064,11 @@ def export_to_ollama(job_id):
         lora_path = Path(job.lora_path)
         if not lora_path.exists():
             return error_response(f"LoRA adapter path not found: {job.lora_path}", 400)
+
+        from backend.tasks.training_tasks import export_refusal
+        refusal = export_refusal(job.base_model, job.lora_path)
+        if refusal:
+            return error_response(refusal, 409, "EXPORT_NOT_VERIFIED")
 
         before = (job.status, job.pipeline_stage)
         job.pipeline_stage = "exporting"

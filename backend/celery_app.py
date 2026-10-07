@@ -88,12 +88,14 @@ def create_celery_app():
             'backend.tasks.task_scheduler_celery.recover_stuck_tasks': {'queue': 'default'},
             'backend.tasks.task_scheduler_celery.scheduler_health_check': {'queue': 'health'},
             'indexing.resume_pending_tick': {'queue': 'indexing'},
-            'training.finetune_model': {'queue': 'training_gpu'},
-            'training.export_gguf': {'queue': 'training_gpu'},
+            # The training worker supervises fine-tunes; the trainer itself is a
+            # subprocess holding the cross-process GPU lease (training_runner).
+            'training.finetune_model': {'queue': 'training'},
+            'training.export_gguf': {'queue': 'training'},
             'training.parse_transcripts': {'queue': 'training'},
             'training.filter_dataset': {'queue': 'training'},
             'training.import_ollama': {'queue': 'training'},
-            'training.full_pipeline': {'queue': 'training_gpu'},
+            'training.full_pipeline': {'queue': 'training'},
             'training.*': {'queue': 'training'},
             'maintenance.daily_backup': {'queue': 'default'},
             'backend.celery_tasks_isolated.*': {'queue': 'default'},

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from celery import shared_task
 from celery.exceptions import Retry
+from sqlalchemy import or_
 
 from backend.services.training.scripts import dataset_formats
 from backend.utils.clock import utcnow
@@ -581,6 +582,94 @@ def _dataset_data_path(dataset_name: str, dataset_path: str, combined_path: Path
     return _combine_training_files(files, combined_path)
 
 
+# One optimiser step sees batch_size * this many rows.
+GRADIENT_ACCUMULATION_STEPS = 4
+
+# A job that leaves "steps" out trains for about this many passes over its
+# training rows: the usual range for a LoRA fine-tune of a chat model on a
+# small instruction set (TRL's and Unsloth's examples train one to three).
+# The cap keeps a large dataset to hours rather than days. Not yet measured
+# against runs here.
+DEFAULT_STEPS = {"epochs": 3, "min": 10, "max": 1000}
+
+# How long a fine-tune waits behind other GPU work (a video render can hold
+# the card for hours) before it fails with the reason.
+GPU_WAIT_SECONDS = 4 * 3600
+# The trainer is stopped this long before the task's own soft time limit
+# (24 h), so the task still records why.
+TRAINER_TIME_LIMIT_SECONDS = 23 * 3600
+
+
+def default_max_steps(rows: int, batch_size: int) -> int:
+    """Steps for DEFAULT_STEPS["epochs"] passes over ``rows``, within its bounds."""
+    per_step = max(1, int(batch_size) * GRADIENT_ACCUMULATION_STEPS)
+    steps = math.ceil(max(0, int(rows)) * DEFAULT_STEPS["epochs"] / per_step)
+    return max(DEFAULT_STEPS["min"], min(DEFAULT_STEPS["max"], steps))
+
+
+class TrainingCancelled(Exception):
+    """The job was cancelled or deleted before its trainer started."""
+
+
+def _job_stop_check(job_id: str):
+    """should_stop for the GPU wait and the trainer: True once the job is
+    cancelled or deleted. Reads the database in its own app context, so the
+    trainer's watcher thread can call it."""
+    from flask import current_app
+    app = current_app._get_current_object()
+
+    def stopped() -> bool:
+        with app.app_context():
+            try:
+                row = db.session.query(TrainingJob.status).filter(TrainingJob.job_id == job_id).first()
+                return row is None or row[0] == "cancelled"
+            except Exception:
+                logger.warning(f"Could not read job {job_id}'s status", exc_info=True)
+                return False
+            finally:
+                db.session.remove()
+
+    return stopped
+
+
+def _claim_job(job_id: str, **fields) -> bool:
+    """Write fields to the job unless it was cancelled or deleted; False then,
+    so a cancel that lands before the task starts is not overwritten."""
+    from flask import current_app
+    with current_app.app_context():
+        try:
+            claimed = db.session.query(TrainingJob).filter(
+                TrainingJob.job_id == job_id,
+                or_(TrainingJob.status.is_(None), TrainingJob.status != "cancelled"),
+            ).update(fields, synchronize_session=False)
+            db.session.commit()
+            return claimed > 0
+        except Exception:
+            db.session.rollback()
+            raise
+
+
+def _latest_checkpoint(model_dir: Path):
+    checkpoint_dir = Path(model_dir) / "checkpoints"
+    if not checkpoint_dir.exists():
+        return None
+    checkpoints = list(checkpoint_dir.glob("checkpoint-*"))
+    if not checkpoints:
+        return None
+    checkpoints.sort(key=lambda x: int(x.name.split("-")[1]) if x.name.split("-")[1].isdigit() else 0)
+    return str(checkpoints[-1])
+
+
+def _run_text_trainer(spec: dict, *, workdir: Path, on_event, on_start, should_stop) -> str:
+    """Run the text trainer for one job and return its output folder. The
+    trainer is a separate, offline process (training_runner); tests replace
+    this function."""
+    from backend.services import training_runner
+    result = training_runner.run("run", spec, workdir=workdir, on_event=on_event, on_start=on_start,
+                                 should_stop=should_stop, time_limit_s=TRAINER_TIME_LIMIT_SECONDS)
+    return result["model_dir"]
+
+
 @shared_task(bind=True, name='training.finetune_model',
              soft_time_limit=86400, time_limit=172800)
 def finetune_model_task(self, job_id: str, config: dict, resume: bool = False,
@@ -588,30 +677,38 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False,
     """Fine-tune the job's base model on its dataset and record the result.
 
     A job without data_path in its config trains on its dataset (dataset_id),
-    resolved by dataset_training_files.
+    resolved by dataset_training_files. Without "steps" it trains for
+    default_max_steps of its rows. The base model is the declared entry's
+    snapshot on this machine (training_base_models); nothing is downloaded.
+
+    The GPU is claimed with gpu_session_when_free (Ollama and ComfyUI give
+    way when the run's declared VRAM does not fit, and the run waits behind
+    other GPU work); the text trainer then runs as its own process, whose pid
+    is the job's pid. A cancel (or delete) stops the wait or the trainer and
+    the job stays cancelled.
 
     in_pipeline: called by full_training_pipeline_task, which owns the job's
     status, timestamps and Celery task id and goes on to export. Training then
     reports its stage and progress inside the pipeline's band and leaves the
     job running; a run the export gate holds still ends the job."""
+    from backend.services.gpu_resource_policy import GpuWaitStopped, gpu_session_when_free
+    from backend.services.job_types import JobKind
+    from backend.services.training_runner import TrainerFailed, TrainerStopped
+
     logger.info(f"Starting finetune_model_task for job {job_id} (resume={resume})")
 
-    current_pid = os.getpid()
     emit = _pipeline_emitter(job_id, in_pipeline, PIPELINE_TRAIN_PROGRESS)
     trained_name = None
+    stopped = _job_stop_check(job_id)
 
     try:
         if in_pipeline:
-            _update_job_status(job_id, pipeline_stage="training", pid=current_pid)
+            started = _claim_job(job_id, pipeline_stage="training", pid=None)
         else:
-            _update_job_status(
-                job_id,
-                status="running",
-                pipeline_stage="training",
-                started_at=utcnow(),
-                celery_task_id=self.request.id,
-                pid=current_pid
-            )
+            started = _claim_job(job_id, status="running", pipeline_stage="training",
+                                 started_at=utcnow(), celery_task_id=self.request.id, pid=None)
+        if not started:
+            raise TrainingCancelled()
         emit(0, "Starting model fine-tuning...", "start")
 
         from flask import current_app
@@ -632,18 +729,19 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False,
                 row = db.session.get(TrainingDataset, job.dataset_id)
                 if row:
                     dataset = (row.name, row.path)
+            base_model = job.base_model
+            output_name = job.output_model_name or f"guaardvark-{base_model.replace('/', '-').replace(':', '-')}"
 
-        base_model = job.base_model
-        output_name = job.output_model_name or f"guaardvark-{base_model.replace('/', '-').replace(':', '-')}"
+        trained_name = output_name
+        output_dir = MODELS_DIR / output_name
         # The declared model's snapshot on this machine; the trainer never downloads.
         from backend.services import training_base_models
-        _, base_model_path = training_base_models.resolve_for_training(base_model)
-        trained_name = output_name
+        entry, base_model_path = training_base_models.resolve_for_training(base_model)
         data_path = job_config.get("data_path") or job_config.get("dataset_path")
         images_path = job_config.get("images_path")
 
         if not data_path and dataset:
-            data_path = _dataset_data_path(*dataset, MODELS_DIR / output_name / "dataset.jsonl", job_config)
+            data_path = _dataset_data_path(*dataset, output_dir / "dataset.jsonl", job_config)
             job_config["data_path"] = data_path
             _update_job_status(job_id, config_json=json.dumps(job_config))
             emit(2, f"Training on dataset '{dataset[0]}': {data_path}")
@@ -651,13 +749,10 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False,
         if not data_path:
             raise ValueError("data_path not found in job config")
 
-        max_steps = job_config.get("steps", 500)
         learning_rate = job_config.get("lr", 2e-4)
         batch_size = job_config.get("batch_size", device_profile.max_batch_size if device_profile else 2)
         lora_rank = job_config.get("rank", 16)
         max_seq_length = job_config.get("seq_length", device_profile.max_seq_length if device_profile else 2048)
-
-        _update_job_status(job_id, total_steps=max_steps)
 
         gate_margin = float(job_config.get("eval_gate_margin", EVAL_GATE["margin"]))
         if gate_margin < 0:
@@ -672,13 +767,23 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False,
             if not 0 <= fraction < 1:
                 raise ValueError(f"eval_fraction must be at least 0 and below 1 (got {fraction})")
             train_path, eval_path, split = _hold_out_split(
-                data_path, MODELS_DIR / output_name / "heldout", fraction)
+                data_path, output_dir / "heldout", fraction)
             eval_report.update(split)
         if eval_path:
             emit(3, f"Held out {eval_report['eval_rows']} of {eval_report['total_rows']} rows "
                     f"to measure the trained model on")
         else:
             emit(3, _heldout_summary(eval_report))
+
+        max_steps = job_config.get("steps")
+        if not max_steps:
+            rows = sum(1 for _ in dataset_formats.iter_rows(str(train_path)))
+            max_steps = default_max_steps(rows, batch_size)
+            job_config["steps_auto"] = {"rows": rows, "epochs": DEFAULT_STEPS["epochs"],
+                                        "rows_per_step": batch_size * GRADIENT_ACCUMULATION_STEPS,
+                                        "steps": max_steps}
+            emit(4, f"{max_steps} steps: about {DEFAULT_STEPS['epochs']} passes over {rows} rows")
+        _update_job_status(job_id, total_steps=max_steps, config_json=json.dumps(job_config))
 
         def progress_callback(step, total_steps, loss, metrics):
             progress = int((step / total_steps) * 100) if total_steps > 0 else 0
@@ -691,30 +796,29 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False,
                              current_step=step,
                              progress=job_progress,
                              metrics_json=json.dumps(metrics))
-            emit(progress, f"Training step {step}/{total_steps} (loss: {loss:.4f})", "processing", metrics)
+            loss_text = f"{loss:.4f}" if _finite(loss) else "n/a"
+            emit(progress, f"Training step {step}/{total_steps} (loss: {loss_text})", "processing", metrics)
 
-        emit(5, f"Loading model {base_model}...")
-        
-        sys.path.insert(0, str(Path(os.environ.get('GUAARDVARK_ROOT', '.')) / "backend" / "services" / "training" / "scripts"))
+        emit(5, f"Waiting for the GPU to load {entry.get('name', base_model)}...")
 
-        # Claim the GPU exclusively for the actual finetune() call — model
-        # finetune is a full GPU load on the shared 16GB card. Claim at EXACTLY
-        # this level: full_training_pipeline_task calls finetune_model_task as a
-        # plain in-process function, so wrapping here covers the pipeline entry
-        # point too WITHOUT a double-claim/double-release. On contention,
-        # GpuBusyError propagates to the except-block below (marks job failed,
-        # re-raises) rather than double-loading the GPU.
-        from backend.services.gpu_resource_policy import gpu_session
-        from backend.services.job_types import JobKind
-        with gpu_session(JobKind.TRAINING, str(job_id), cross_process=True,
-                         lease_seconds=4 * 3600):
+        def waiting(reason):
+            emit(5, f"Waiting for the GPU: {reason}")
+
+        with gpu_session_when_free(JobKind.TRAINING, str(job_id), wait_s=GPU_WAIT_SECONDS,
+                                   on_wait=waiting, should_stop=stopped,
+                                   evict_ollama=True, free_comfyui=True,
+                                   vram_estimate_mb=entry.get("vram_mb"), require_fit=True,
+                                   cross_process=True, lease_seconds=4 * 3600):
             if images_path:
-                 emit(8, f"Detected vision task. Using vision trainer with images from {images_path}")
-                 from finetune_vision import finetune
+                emit(8, f"Detected vision task. Using vision trainer with images from {images_path}")
+                scripts = str(Path(__file__).resolve().parents[1] / "services" / "training" / "scripts")
+                if scripts not in sys.path:
+                    sys.path.insert(0, scripts)
+                from finetune_vision import finetune
 
-                 resume_msg = " (resuming from checkpoint)" if resume else ""
-                 emit(10, f"Starting vision training loop{resume_msg}...")
-                 model_dir = finetune(
+                resume_msg = " (resuming from checkpoint)" if resume else ""
+                emit(10, f"Starting vision training loop{resume_msg}...")
+                model_dir = finetune(
                     base_model=base_model_path,
                     data_path=data_path,
                     image_folder=images_path,
@@ -728,24 +832,44 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False,
                     resume=resume
                 )
             else:
-                 from finetune_model import finetune
+                train_report = {}
 
-                 resume_msg = " (resuming from checkpoint)" if resume else ""
-                 emit(10, f"Starting text training loop{resume_msg}...")
-                 model_dir = finetune(
-                    base_model=base_model_path,
-                    data_path=train_path,
-                    output_name=output_name,
-                    max_steps=max_steps,
-                    learning_rate=learning_rate,
-                    batch_size=batch_size,
-                    lora_rank=lora_rank,
-                    max_seq_length=max_seq_length,
-                    progress_callback=progress_callback,
-                    resume=resume,
-                    eval_data_path=eval_path,
-                    eval_callback=lambda result: _record_heldout_losses(eval_report, result)
-                )
+                def on_event(event):
+                    kind = event.get("event")
+                    if kind == "progress":
+                        progress_callback(event.get("step") or 0, event.get("total") or max_steps,
+                                          event.get("loss"), event.get("metrics") or {})
+                    elif kind == "eval":
+                        _record_heldout_losses(eval_report, {k: v for k, v in event.items() if k != "event"})
+                    elif kind == "dataset":
+                        train_report.update({k: v for k, v in event.items() if k != "event"})
+                        emit(9, f"Training on {event.get('trained')} rows (loss on {event.get('loss_on')})")
+
+                spec = {
+                    "base_model": base_model_path,
+                    "base_model_id": base_model,
+                    "data_path": train_path,
+                    "eval_data_path": eval_path,
+                    "output_dir": str(output_dir),
+                    "max_steps": max_steps,
+                    "learning_rate": learning_rate,
+                    "batch_size": batch_size,
+                    "gradient_accumulation_steps": GRADIENT_ACCUMULATION_STEPS,
+                    "lora_rank": lora_rank,
+                    "max_seq_length": max_seq_length,
+                    "resume": bool(resume),
+                    "load_in_4bit": bool(entry.get("load_in_4bit")),
+                    "response_markers": entry.get("response_markers"),
+                    "parent_pid": os.getpid(),
+                }
+                resume_msg = " (resuming from checkpoint)" if resume else ""
+                emit(10, f"Starting text training{resume_msg}...")
+                model_dir = _run_text_trainer(
+                    spec, workdir=output_dir, on_event=on_event,
+                    on_start=lambda pid: _update_job_status(job_id, pid=pid),
+                    should_stop=stopped)
+                if train_report:
+                    job_config["train_report"] = train_report
 
         lora_path = str(Path(model_dir) / "lora")
         heldout = _heldout_summary(eval_report)
@@ -755,17 +879,15 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False,
         job_config["eval"] = eval_report
         logger.info(f"Job {job_id}: {heldout}. {gate_note}")
 
-        checkpoint_dir = Path(model_dir) / "checkpoints"
-        checkpoint_path = None
-        if checkpoint_dir.exists():
-            checkpoints = list(checkpoint_dir.glob("checkpoint-*"))
-            if checkpoints:
-                checkpoints.sort(key=lambda x: int(x.name.split("-")[1]) if "-" in x.name else 0)
-                checkpoint_path = str(checkpoints[-1])
-
+        checkpoint_path = _latest_checkpoint(model_dir)
         trained = {"lora_path": lora_path, "checkpoint_path": checkpoint_path,
                    "is_resumable": bool(checkpoint_path), "pid": None,
                    "config_json": json.dumps(job_config)}
+        if stopped():
+            # Cancelled as the run ended: keep the adapter, leave the status.
+            _update_job_status(job_id, **trained)
+            emit(100, "Training cancelled", "cancelled")
+            return {"cancelled": True, "model_dir": model_dir, "lora_path": lora_path}
         if in_pipeline and export_allowed:
             # The pipeline goes on to export; the job stays running.
             _update_job_status(job_id, pipeline_stage="training",
@@ -791,40 +913,66 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False,
                 "export_allowed": export_allowed}
 
     except Exception as e:
-        logger.error(f"Error in finetune_model_task: {e}", exc_info=True)
-
+        cancelled = isinstance(e, (TrainingCancelled, TrainerStopped, GpuWaitStopped)) or stopped()
         checkpoint_path = None
-        is_resumable = False
         try:
             # The name the run trained under when it got that far; the task
             # arguments carry it only for some callers.
             output_name = trained_name or config.get("output_name") or f"guaardvark-{config.get('base_model', 'model').replace('/', '-')}"
-            checkpoint_dir = MODELS_DIR / output_name / "checkpoints"
-            if checkpoint_dir.exists():
-                checkpoints = list(checkpoint_dir.glob("checkpoint-*"))
-                if checkpoints:
-                    checkpoints.sort(key=lambda x: int(x.name.split("-")[1]) if "-" in x.name else 0)
-                    checkpoint_path = str(checkpoints[-1])
-                    is_resumable = True
+            checkpoint_path = _latest_checkpoint(MODELS_DIR / output_name)
         except Exception:
             pass
 
+        if cancelled:
+            logger.info(f"Training job {job_id} cancelled ({type(e).__name__})")
+            _update_job_status(job_id, checkpoint_path=checkpoint_path,
+                               is_resumable=bool(checkpoint_path), pid=None)
+            _emit_progress(job_id, 0, "Training cancelled", "cancelled")
+            return {"cancelled": True}
+
+        logger.error(f"Error in finetune_model_task: {e}", exc_info=True)
+        message = str(e)
+        if isinstance(e, TrainerFailed) and trained_name:
+            message += f" Full log: {MODELS_DIR / trained_name / 'train.log'}"
         _update_job_status(
             job_id,
             status="failed",
-            error_message=str(e),
+            error_message=message,
             checkpoint_path=checkpoint_path,
-            is_resumable=is_resumable,
+            is_resumable=bool(checkpoint_path),
             pid=None
         )
-        _emit_progress(job_id, 0, f"Error: {str(e)}", "error")
+        _emit_progress(job_id, 0, f"Error: {message}", "error")
         raise
+
+
+class ExportNotVerified(RuntimeError):
+    """Export to Ollama has not been verified for the job's base model."""
+
+
+def export_refusal(base_model: str, lora_path: str = None):
+    """Why a job's adapter may not be exported yet, or None. Export stays off
+    for a base model until it has been run live and its entry says verified."""
+    from backend.services import training_base_models
+    if training_base_models.export_verified(base_model):
+        return None
+    where = f" The trained adapter stays at {lora_path}." if lora_path else ""
+    return f"Export to Ollama is not verified for {base_model} yet.{where}"
 
 
 @shared_task(bind=True, name='training.export_gguf')
 def export_gguf_task(self, job_id: str, model_dir: str, quantization: str = 'q4_k_m'):
     logger.info(f"Starting export_gguf_task for job {job_id}")
-    
+
+    from flask import current_app
+    with current_app.app_context():
+        job = db.session.query(TrainingJob).filter(TrainingJob.job_id == job_id).first()
+        base_model = job.base_model if job else None
+    refusal = export_refusal(base_model, str(Path(model_dir) / "lora"))
+    if refusal:
+        # Before the job is touched, so it keeps its completed status.
+        raise ExportNotVerified(refusal)
+
     try:
         _update_job_status(job_id, status="running", pipeline_stage="exporting", started_at=utcnow(), celery_task_id=self.request.id)
         _emit_progress(job_id, 0, "Starting GGUF export...", "start")
@@ -1047,6 +1195,8 @@ def full_training_pipeline_task(self, job_id: str, config: dict):
         
         train_result = finetune_model_task(job_id, job_config, in_pipeline=True)
         model_dir = train_result.get("model_dir")
+        if train_result.get("cancelled"):
+            return {"cancelled": True, "model_dir": model_dir}
 
         # Refused by the export gate: finetune_model_task has already set the
         # job's status and error_message with the losses, and kept the adapter.
@@ -1060,6 +1210,22 @@ def full_training_pipeline_task(self, job_id: str, config: dict):
                 "gguf_path": None,
                 "ollama_model_name": None,
                 "eval": train_result.get("eval")
+            }
+
+        not_exported = export_refusal(job.base_model, train_result.get("lora_path"))
+        if not_exported:
+            heldout = _heldout_summary(train_result.get("eval") or {})
+            _update_job_status(job_id, status="completed", pipeline_stage="training",
+                               completed_at=utcnow(), progress=100)
+            _emit_progress(job_id, 100, f"Training complete. {heldout}. {not_exported}", "complete")
+            return {
+                "parse_output": parse_output_path,
+                "filter_output": filter_output_path if job_config.get("min_score") is not None else None,
+                "model_dir": model_dir,
+                "gguf_path": None,
+                "ollama_model_name": None,
+                "eval": train_result.get("eval"),
+                "export": not_exported,
             }
 
         _update_job_status(job_id, pipeline_stage="exporting")

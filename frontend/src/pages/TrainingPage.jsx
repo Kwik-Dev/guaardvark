@@ -891,8 +891,8 @@ const TrainingPage = () => {
                                 size="small"
                               />
                             )}
-                            {/* Export to Ollama button - show when completed with lora_path */}
-                            {job.status === "completed" && job.lora_path && !job.ollama_model_name && (
+                            {/* Export is offered only once it has been verified for the job's base model. */}
+                            {job.export_verified && job.status === "completed" && job.lora_path && !job.ollama_model_name && (
                               <Tooltip title="Export to Ollama">
                                 <IconButton
                                   size="small"
@@ -909,7 +909,7 @@ const TrainingPage = () => {
                               </Tooltip>
                             )}
                             {/* Re-quantize button - show for completed exports */}
-                            {job.status === "completed" && job.lora_path && job.ollama_model_name && (
+                            {job.export_verified && job.status === "completed" && job.lora_path && job.ollama_model_name && (
                               <Tooltip title="Re-quantize (change quantization level)">
                                 <IconButton
                                   size="small"
@@ -925,7 +925,7 @@ const TrainingPage = () => {
                                 </IconButton>
                               </Tooltip>
                             )}
-                            {job.status === "failed: worse than base" && job.lora_path && (
+                            {job.export_verified && job.status === "failed: worse than base" && job.lora_path && (
                               <Tooltip title="Export anyway (the run measured worse than its base model)">
                                 <IconButton
                                   size="small"

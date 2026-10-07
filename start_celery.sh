@@ -238,7 +238,9 @@ vader_info "Starting workers..."
 # JobOperationGate (a 1-slot mutex that can't arbitrate across worker PIDs) is authoritative.
 # Previously `generation`/`default` (video renders) ran on main while `training_gpu` (LoRA)
 # ran on the training worker — two separate PIDs could each launch a GPU task and OOM the
-# 16GB card. training_gpu now rides on main; the training worker keeps CPU-only `training`.
+# 16GB card. training_gpu now rides on main. The training worker's `training` queue takes the
+# CPU pipeline steps and the LLM fine-tunes, whose trainer runs as a subprocess holding the
+# cross-process GPU lease (backend/services/training_runner.py), so it waits for main's GPU work.
 # main's max-memory-per-child bumped to 4GB since it now carries the heavy GPU/LoRA work.
 start_worker "main" "health,default,indexing,generation,training_gpu" 1 4096000
 

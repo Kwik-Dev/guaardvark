@@ -1,10 +1,13 @@
 """Training jobs keep an honest status through the full pipeline, jobs made on
-the Training page train on their dataset, and vision runs accept resume.
+the Training page train on their dataset, a cancel stays a cancel, and vision
+runs accept resume.
 
-Seams: the training scripts (finetune_model, finetune_vision, transcript_parser)
-are imported by name at call time, so sys.modules stand-ins reach them; the
-GPU claim is gpu_resource_policy.gpu_session, read at call time; parsed
-transcripts go to parsed_datasets_dir, read at call time."""
+Seams: the text trainer process is tt._run_text_trainer; finetune_vision and
+transcript_parser are imported by name at call time, so sys.modules stand-ins
+reach them; the GPU claim is gpu_resource_policy.gpu_session (called by
+gpu_session_when_free), read at call time; parsed transcripts go to
+parsed_datasets_dir, read at call time; Celery dispatch is each task's
+apply_async and the trainer stop is training_runner.stop_trainer."""
 import ast
 import importlib.util
 import json
@@ -68,11 +71,22 @@ def base_model_on_disk(monkeypatch, tmp_path):
 
 @pytest.fixture(autouse=True)
 def no_gpu_claim(monkeypatch):
+    """Records each GPU claim's arguments; claims nothing."""
+    claims = []
+
     @contextmanager
     def no_gpu_session(*args, **kwargs):
+        claims.append(kwargs)
         yield True
 
     monkeypatch.setattr("backend.services.gpu_resource_policy.gpu_session", no_gpu_session)
+    return claims
+
+
+@pytest.fixture(autouse=True)
+def export_verified(monkeypatch):
+    """The pipeline exports only for a base model whose export is verified."""
+    monkeypatch.setattr("backend.services.training_base_models.export_verified", lambda model_id: True)
 
 
 @pytest.fixture
@@ -94,38 +108,58 @@ def _script_params(name):
     return {a.arg for a in fn.args.args}
 
 
+def _spec_keys():
+    """finetune_model.SPEC_KEYS, the keys `run --spec` accepts, read from its source."""
+    tree = ast.parse((SCRIPTS_DIR / "finetune_model.py").read_text())
+    node = next(n for n in tree.body if isinstance(n, ast.Assign)
+                and any(getattr(t, "id", None) == "SPEC_KEYS" for t in n.targets))
+    return set(ast.literal_eval(node.value))
+
+
 @pytest.fixture
 def trainer(monkeypatch, tmp_path):
-    """Stands in for both training scripts. Each call must use only parameters
-    the real script's finetune() declares, which is what a vision run broke."""
-    state = SimpleNamespace(calls=[], fail_after_checkpoint=False)
+    """Stands in for the text trainer process and the vision script. A text
+    spec may hold only the keys finetune_model.py's `run --spec` accepts, and
+    a vision call only the parameters finetune_vision.finetune() declares
+    (a mismatch is what broke vision runs). `during` runs inside the trainer,
+    `fail_after_checkpoint` makes it die after two checkpoints."""
+    state = SimpleNamespace(calls=[], fail_after_checkpoint=False, during=None, pid=4242)
+    spec_keys = _spec_keys()
 
-    def make(script):
-        params = _script_params(script)
+    def finish(call, model_dir, on_event=None):
+        call["train_rows"] = Path(call["data_path"]).read_text().splitlines()
+        state.calls.append(call)
+        (model_dir / "lora").mkdir(parents=True, exist_ok=True)
+        if state.fail_after_checkpoint:
+            (model_dir / "checkpoints" / "checkpoint-100").mkdir(parents=True, exist_ok=True)
+            (model_dir / "checkpoints" / "checkpoint-200").mkdir(parents=True, exist_ok=True)
+            from backend.services.training_runner import TrainerFailed
+            raise TrainerFailed("The trainer exited with code 1: CUDA out of memory")
+        if on_event and call.get("eval_data_path"):
+            on_event({"event": "eval", "adapter_loss": 1.2, "base_loss": 1.5, "rows": 1})
+        return str(model_dir)
 
-        def finetune(**kwargs):
-            unknown = set(kwargs) - params
-            if unknown:
-                raise TypeError(f"{script}.finetune() got unexpected keyword arguments {sorted(unknown)}")
-            call = dict(kwargs, script=script)
-            call["train_rows"] = Path(kwargs["data_path"]).read_text().splitlines()
-            state.calls.append(call)
-            model_dir = tmp_path / "models" / kwargs["output_name"]
-            (model_dir / "lora").mkdir(parents=True, exist_ok=True)
-            if state.fail_after_checkpoint:
-                (model_dir / "checkpoints" / "checkpoint-100").mkdir(parents=True, exist_ok=True)
-                (model_dir / "checkpoints" / "checkpoint-200").mkdir(parents=True, exist_ok=True)
-                raise RuntimeError("CUDA out of memory")
-            if kwargs.get("eval_data_path") and kwargs.get("eval_callback"):
-                kwargs["eval_callback"]({"adapter_loss": 1.2, "base_loss": 1.5, "rows": 1})
-            return str(model_dir)
+    def run_text_trainer(spec, *, workdir, on_event, on_start, should_stop):
+        unknown = set(spec) - spec_keys
+        if unknown:
+            raise TypeError(f"finetune_model.py run --spec got unknown keys {sorted(unknown)}")
+        on_start(state.pid)
+        if state.during:
+            state.during(should_stop)
+        return finish(dict(spec, script="finetune_model", workdir=str(workdir)), Path(spec["output_dir"]), on_event)
 
-        module = types.ModuleType(script)
-        module.finetune = finetune
-        monkeypatch.setitem(sys.modules, script, module)
+    vision_params = _script_params("finetune_vision")
 
-    make("finetune_model")
-    make("finetune_vision")
+    def vision_finetune(**kwargs):
+        unknown = set(kwargs) - vision_params
+        if unknown:
+            raise TypeError(f"finetune_vision.finetune() got unexpected keyword arguments {sorted(unknown)}")
+        return finish(dict(kwargs, script="finetune_vision"), tmp_path / "models" / kwargs["output_name"])
+
+    monkeypatch.setattr(tt, "_run_text_trainer", run_text_trainer)
+    module = types.ModuleType("finetune_vision")
+    module.finetune = vision_finetune
+    monkeypatch.setitem(sys.modules, "finetune_vision", module)
     return state
 
 
@@ -484,3 +518,191 @@ def test_the_page_refuses_an_unknown_dataset(app, client):
 
     assert response.status_code == 400
     assert db.session.query(TrainingJob).count() == 0
+
+
+# ---- the run: snapshot, steps, GPU claim, trainer pid -------------------------
+
+
+def test_the_trainer_gets_the_snapshot_offline_and_its_pid_is_the_jobs(
+        app, progress, trainer, base_model_on_disk, no_gpu_claim, tmp_path):
+    data = _write(tmp_path / "data.jsonl", _rows(20))
+    job_id = _job(data_path=data)
+    seen = {}
+    trainer.during = lambda should_stop: seen.update(pid=_row(job_id).pid, stop=should_stop())
+
+    tt.finetune_model_task(job_id, {})
+
+    call = trainer.calls[0]
+    assert call["base_model"] == base_model_on_disk
+    assert call["parent_pid"] == os.getpid()
+    assert call["workdir"] == str(tmp_path / "models" / "test-out")
+    assert seen == {"pid": 4242, "stop": False}
+    assert _row(job_id).pid is None and _row(job_id).status == "completed"
+    (claim,) = no_gpu_claim
+    assert claim["evict_ollama"] is True and claim["free_comfyui"] is True
+    assert claim["require_fit"] is True and claim["cross_process"] is True
+
+
+def test_steps_left_out_come_from_the_dataset_size(app, progress, trainer, tmp_path):
+    data = _write(tmp_path / "data.jsonl", _rows(200))
+    job = TrainingJob(job_id="auto", name="auto", base_model="org/base-model", output_model_name="test-out",
+                      status="pending", config_json=json.dumps({"data_path": data, "batch_size": 2}))
+    db.session.add(job)
+    db.session.commit()
+
+    tt.finetune_model_task("auto", {})
+
+    # 180 rows trained on (20 held out), 3 passes, 2 x 4 rows a step.
+    assert trainer.calls[0]["max_steps"] == 68 == tt.default_max_steps(180, 2)
+    assert _row("auto").total_steps == 68
+    assert json.loads(_row("auto").config_json)["steps_auto"]["rows"] == 180
+
+
+@pytest.mark.parametrize("rows, batch, steps", [(5, 2, 10), (180, 2, 68), (100000, 4, 1000)])
+def test_default_steps_stay_within_their_bounds(rows, batch, steps):
+    assert tt.default_max_steps(rows, batch) == steps
+
+
+# ---- cancel stays cancelled -----------------------------------------------------
+
+
+def _cancel_in_db(job_id):
+    from backend.models import db as _db
+    row = _row(job_id)
+    row.status = "cancelled"
+    _db.session.commit()
+
+
+def test_a_cancel_while_training_stops_the_trainer_and_stays_cancelled(app, progress, trainer, tmp_path):
+    from backend.services.training_runner import TrainerStopped
+
+    data = _write(tmp_path / "data.jsonl", _rows(20))
+    job_id = _job(data_path=data)
+
+    def cancelled_mid_run(should_stop):
+        _cancel_in_db(job_id)
+        assert should_stop() is True
+        (tmp_path / "models" / "test-out" / "checkpoints" / "checkpoint-10").mkdir(parents=True)
+        raise TrainerStopped("The trainer was stopped on request.")
+
+    trainer.during = cancelled_mid_run
+
+    result = tt.finetune_model_task(job_id, {})
+
+    row = _row(job_id)
+    assert result == {"cancelled": True}
+    assert row.status == "cancelled" and row.pid is None
+    assert row.is_resumable is True and row.checkpoint_path.endswith("checkpoint-10")
+    assert progress[-1][2] == "cancelled"
+
+
+def test_a_cancel_before_the_task_starts_is_not_overwritten(app, progress, trainer, tmp_path):
+    data = _write(tmp_path / "data.jsonl", _rows(20))
+    job_id = _job(data_path=data)
+    _cancel_in_db(job_id)
+
+    assert tt.finetune_model_task(job_id, {}) == {"cancelled": True}
+    assert _row(job_id).status == "cancelled"
+    assert trainer.calls == []
+
+
+def test_a_cancel_while_waiting_for_the_gpu_ends_the_wait(app, progress, trainer, tmp_path, monkeypatch):
+    from backend.services.job_operation_gate import GpuBusyError
+
+    data = _write(tmp_path / "data.jsonl", _rows(20))
+    job_id = _job(data_path=data)
+    waits = []
+
+    @contextmanager
+    def busy(*args, **kwargs):
+        waits.append(1)
+        if len(waits) == 1:
+            _cancel_in_db(job_id)
+        raise GpuBusyError("a video render holds the GPU")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr("backend.services.gpu_resource_policy.gpu_session", busy)
+    monkeypatch.setattr("backend.services.gpu_resource_policy.time.sleep", lambda s: None)
+
+    assert tt.finetune_model_task(job_id, {}) == {"cancelled": True}
+    assert _row(job_id).status == "cancelled"
+    assert trainer.calls == []
+    assert any("Waiting for the GPU: a video render holds the GPU" in m for _, m, _ in progress)
+
+
+def test_a_failed_trainer_names_its_log(app, progress, trainer, tmp_path):
+    trainer.fail_after_checkpoint = True
+    data = _write(tmp_path / "data.jsonl", _rows(20))
+    job_id = _job(data_path=data)
+
+    with pytest.raises(RuntimeError):
+        tt.finetune_model_task(job_id, {})
+
+    message = _row(job_id).error_message
+    assert "CUDA out of memory" in message
+    assert str(tmp_path / "models" / "test-out" / "train.log") in message
+
+
+# ---- routes: one dispatch on the training queue, cancel, delete -----------------
+
+
+@pytest.fixture
+def dispatched(monkeypatch):
+    sent = []
+
+    def apply_async(args=None, kwargs=None, **options):
+        sent.append({"args": args, "kwargs": kwargs, **options})
+        return SimpleNamespace(id=f"task-{len(sent)}")
+
+    monkeypatch.setattr(tt, "finetune_model_task", SimpleNamespace(apply_async=apply_async))
+    return sent
+
+
+@pytest.fixture
+def stops(monkeypatch):
+    stopped, revoked = [], []
+    monkeypatch.setattr("backend.services.training_runner.stop_trainer",
+                        lambda pid, grace_s=10.0: stopped.append(pid) or True)
+    import celery
+    monkeypatch.setattr(celery.current_app.control, "revoke",
+                        lambda task_id, **kw: revoked.append((task_id, kw)))
+    return SimpleNamespace(stopped=stopped, revoked=revoked)
+
+
+def test_start_immediately_queues_the_finetune_on_the_training_worker(app, client, dispatched, tmp_path):
+    data = _write(tmp_path / "sets" / "notes.jsonl", _rows(20))
+    response = _create(client, _dataset(data), start_immediately=True)
+
+    assert response.status_code == 201
+    (sent,) = dispatched
+    assert sent["queue"] == "training" and sent["kwargs"] == {"resume": False}
+    assert response.get_json()["data"]["status"] == "running"
+    assert response.get_json()["data"]["export_verified"] is True
+
+
+def test_cancel_marks_the_job_stops_its_trainer_and_never_kills_the_worker(app, client, stops):
+    job_id = _job(celery_task_id="celery-1")
+    row = _row(job_id)
+    row.status, row.pid = "running", 4242
+    db.session.commit()
+
+    response = client.post(f"/api/training/jobs/{row.id}/cancel")
+
+    assert response.status_code == 200
+    assert response.get_json()["data"]["pid_terminated"] is True
+    assert stops.stopped == [4242]
+    assert stops.revoked == [("celery-1", {})]
+    after = _row(job_id)
+    assert after.status == "cancelled" and after.pid is None
+
+
+def test_delete_cancels_a_running_job_first(app, client, stops):
+    job_id = _job(celery_task_id="celery-2")
+    row = _row(job_id)
+    row.status, row.pid = "running", 777
+    db.session.commit()
+
+    assert client.delete(f"/api/training/jobs/{row.id}").status_code == 200
+    assert stops.stopped == [777]
+    assert db.session.query(TrainingJob).count() == 0
+

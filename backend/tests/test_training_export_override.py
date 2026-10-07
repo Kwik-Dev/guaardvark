@@ -1,9 +1,11 @@
 """A run the export gate held can be exported on a person's explicit choice,
-the choice is recorded on the job, and the export routes hand the export and
-import tasks the training output folder.
+the choice is recorded on the job, the export routes hand the export and
+import tasks the training output folder, and no export starts for a base
+model whose export to Ollama has not been verified.
 
 Seams: celery.chain and each task's apply_async, read by the routes at call
-time; nothing is sent to a worker."""
+time; training_base_models.export_verified, read at call time; nothing is
+sent to a worker."""
 import json
 import os
 import sys
@@ -38,6 +40,15 @@ def client(tmp_path):
         yield app.test_client()
         db.session.remove()
         db.drop_all()
+
+
+@pytest.fixture(autouse=True)
+def verified(monkeypatch):
+    """Export counts as verified for the job's base model unless a test says not."""
+    state = {"verified": True}
+    monkeypatch.setattr("backend.services.training_base_models.export_verified",
+                        lambda model_id: state["verified"])
+    return state
 
 
 @pytest.fixture
@@ -193,3 +204,28 @@ def test_the_import_routes_hand_over_the_folder_holding_the_gguf(client, dispatc
     assert client.post(f"/api/training/jobs/{pk}/export-to-ollama", json={"model_name": "mine"}).status_code == 202
 
     assert [args for _, args, _ in dispatched.tasks] == [["held-job", str(model_dir), "mine"]] * 2
+
+
+def test_no_export_starts_for_a_base_model_not_verified(client, dispatched, tmp_path, verified):
+    verified["verified"] = False
+    pk, _ = _held_job(tmp_path, status="completed")
+
+    for path in (f"/api/training/jobs/{pk}/export", f"/api/training/jobs/{pk}/export-to-ollama"):
+        response = client.post(path, json={"model_name": "mine"})
+        assert response.status_code == 409, path
+        assert response.get_json()["error"]["code"] == "EXPORT_NOT_VERIFIED"
+        assert "not verified for org/base-model" in response.get_json()["error"]["message"]
+    assert dispatched.chains == [] and dispatched.tasks == []
+    assert _row(pk).status == "completed"
+
+
+def test_the_export_task_refuses_before_touching_the_job(client, tmp_path, verified):
+    verified["verified"] = False
+    pk, model_dir = _held_job(tmp_path, status="completed")
+
+    with pytest.raises(tt.ExportNotVerified):
+        tt.export_gguf_task.run("held-job", str(model_dir), "q4_k_m")
+
+    row = _row(pk)
+    assert row.status == "completed" and row.pipeline_stage == "training"
+
