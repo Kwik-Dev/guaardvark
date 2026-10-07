@@ -111,7 +111,6 @@ const ImageGenerationCard = React.forwardRef(
         contextMenuActions={[
           { label: "New Images", onClick: () => navigate("/images") },
           { label: "Batch Mode", onClick: () => navigate("/images?mode=batch") },
-          { label: "Refresh", onClick: fetchRecentGenerations },
         ]}
       >
         {isLoading && (

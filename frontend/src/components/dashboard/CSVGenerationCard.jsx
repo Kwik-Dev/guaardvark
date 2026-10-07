@@ -96,7 +96,6 @@ const CSVGenerationCard = React.forwardRef(
         {...props}
         contextMenuActions={[
           { label: "New CSV", onClick: () => navigate("/file-generation") },
-          { label: "Refresh", onClick: fetchRecentGenerations },
         ]}
       >
         {isLoading && (

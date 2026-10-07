@@ -125,7 +125,6 @@ const CodeGenerationCard = React.forwardRef(
         {...props}
         contextMenuActions={[
           { label: "New Code", onClick: () => navigate("/code-editor") },
-          { label: "Refresh", onClick: fetchRecentGenerations },
         ]}
       >
         {isLoading && (
