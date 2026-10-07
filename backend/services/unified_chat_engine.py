@@ -2393,7 +2393,11 @@ class UnifiedChatEngine:
         selection_text = f"{accepted_offer}\n{message}" if accepted_offer else message
         model_name = getattr(self.llm, "model", "unknown")
         self._prov_note("model", model_name)
-        _skip_tools = bool(getattr(self, "_skip_tools", False) or options.get("skip_tools"))
+        from backend.services.agent_router import declines_tools
+        _skip_tools = bool(
+            getattr(self, "_skip_tools", False) or options.get("skip_tools")
+            or declines_tools(message)
+        )
 
         if _skip_tools:
             selected_tools = []
