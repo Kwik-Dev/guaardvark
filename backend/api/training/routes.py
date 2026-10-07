@@ -294,11 +294,70 @@ def _job_refusal(base_model, job_config: dict):
     return None
 
 
+def _start_refusal(base_model, dataset_id, job_config, device_profile_id):
+    """Why a fine-tune with these settings may not be created or started, as
+    an error response, or None. Creating a job and starting a pending one
+    apply the same checks."""
+    missing_libraries = _libraries_missing_response()
+    if missing_libraries:
+        return missing_libraries
+
+    if not isinstance(job_config, dict):
+        return error_response("config must be an object", 400)
+    refusal = _job_refusal(base_model, job_config)
+    if refusal:
+        return refusal
+
+    # The trainer reads the dataset's file when the config names none, so a
+    # dataset it cannot read is refused here rather than failing the run.
+    dataset = db.session.get(TrainingDataset, dataset_id)
+    if not dataset:
+        return error_response("Dataset not found", 400)
+    if not (job_config.get("data_path") or job_config.get("dataset_path")):
+        from backend.tasks.training_tasks import dataset_training_files
+        _, reason = dataset_training_files(dataset.path)
+        if reason:
+            return error_response(f"Dataset '{dataset.name}' cannot be trained on: {reason}", 400)
+
+    if device_profile_id:
+        device_profile = db.session.get(DeviceProfile, device_profile_id)
+        if not device_profile:
+            return error_response("Device profile not found", 400)
+        if not device_profile.is_active:
+            return error_response("Device profile is not active", 400)
+
+        batch_size = job_config.get("batch_size", device_profile.max_batch_size)
+        seq_length = job_config.get("seq_length", device_profile.max_seq_length)
+
+        if batch_size > device_profile.max_batch_size:
+            return error_response(
+                f"Batch size {batch_size} exceeds device profile maximum {device_profile.max_batch_size}",
+                400
+            )
+
+        if seq_length > device_profile.max_seq_length:
+            return error_response(
+                f"Sequence length {seq_length} exceeds device profile maximum {device_profile.max_seq_length}",
+                400
+            )
+
+        from backend.services import training_base_models
+        entry = training_base_models.get(base_model)
+        if entry and device_profile.device_type == "gpu" and device_profile.gpu_vram_mb:
+            if entry["vram_mb"] > device_profile.gpu_vram_mb:
+                return error_response(
+                    f"{entry['name']} is budgeted {entry['vram_mb']} MB of GPU memory "
+                    f"({entry['vram_measured']}); this device profile has {device_profile.gpu_vram_mb} MB",
+                    400
+                )
+    return None
+
+
 @training_bp.route("/jobs", methods=["POST"])
 @ensure_db_session_cleanup
 def create_job():
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
 
         if not data.get("name"):
             return error_response("Job name is required", 400)
@@ -307,62 +366,12 @@ def create_job():
         if not data.get("dataset_id"):
             return error_response("Dataset ID is required", 400)
 
-        missing_libraries = _libraries_missing_response()
-        if missing_libraries:
-            return missing_libraries
-
-        job_config = data.get("config") or {}
-        if not isinstance(job_config, dict):
-            return error_response("config must be an object", 400)
-        refusal = _job_refusal(data["base_model"], job_config)
+        device_profile_id = data.get("device_profile_id")
+        refusal = _start_refusal(data["base_model"], data["dataset_id"], data.get("config") or {},
+                                 device_profile_id)
         if refusal:
             return refusal
 
-        # The trainer reads the dataset's file when the config names none, so a
-        # dataset it cannot read is refused here rather than failing the run.
-        dataset = db.session.get(TrainingDataset, data["dataset_id"])
-        if not dataset:
-            return error_response("Dataset not found", 400)
-        if not (job_config.get("data_path") or job_config.get("dataset_path")):
-            from backend.tasks.training_tasks import dataset_training_files
-            _, reason = dataset_training_files(dataset.path)
-            if reason:
-                return error_response(f"Dataset '{dataset.name}' cannot be trained on: {reason}", 400)
-
-        device_profile_id = data.get("device_profile_id")
-        device_profile = None
-        if device_profile_id:
-            device_profile = db.session.get(DeviceProfile, device_profile_id)
-            if not device_profile:
-                return error_response("Device profile not found", 400)
-            if not device_profile.is_active:
-                return error_response("Device profile is not active", 400)
-
-            batch_size = job_config.get("batch_size", device_profile.max_batch_size)
-            seq_length = job_config.get("seq_length", device_profile.max_seq_length)
-
-            if batch_size > device_profile.max_batch_size:
-                return error_response(
-                    f"Batch size {batch_size} exceeds device profile maximum {device_profile.max_batch_size}",
-                    400
-                )
-
-            if seq_length > device_profile.max_seq_length:
-                return error_response(
-                    f"Sequence length {seq_length} exceeds device profile maximum {device_profile.max_seq_length}",
-                    400
-                )
-
-            from backend.services import training_base_models
-            entry = training_base_models.get(data["base_model"])
-            if entry and device_profile.device_type == "gpu" and device_profile.gpu_vram_mb:
-                if entry["vram_mb"] > device_profile.gpu_vram_mb:
-                    return error_response(
-                        f"{entry['name']} is budgeted {entry['vram_mb']} MB of GPU memory "
-                        f"({entry['vram_measured']}); this device profile has {device_profile.gpu_vram_mb} MB",
-                        400
-                    )
-        
         job_id = str(uuid.uuid4())
 
         job = TrainingJob(
@@ -371,7 +380,7 @@ def create_job():
             base_model=data["base_model"],
             output_model_name=data.get("output_model_name"),
             dataset_id=data["dataset_id"],
-            config_json=json.dumps(data.get("config", {})),
+            config_json=json.dumps(data.get("config") or {}),
             device_profile_id=device_profile_id,
             status="pending",
             pipeline_stage="pending"
@@ -464,6 +473,45 @@ def cancel_job(job_id):
         return error_response(f"Database error: {str(e)}", 500)
     except Exception as e:
         logger.error(f"Error cancelling training job: {e}", exc_info=True)
+        return error_response(str(e), 500)
+
+
+@training_bp.route("/jobs/<int:job_id>/start", methods=["POST"])
+@ensure_db_session_cleanup
+def start_job(job_id):
+    """Start a fine-tune that was created without starting (pending, never
+    queued), after the same checks as creating it."""
+    try:
+        job = db.session.get(TrainingJob, job_id)
+        if not job:
+            return error_response("Job not found", 404)
+        if job.status != "pending" or job.celery_task_id or job.pipeline_stage not in (None, "pending"):
+            return error_response(
+                f"Only a training job that has not started can be started (status: {job.status}, "
+                f"stage: {job.pipeline_stage}). Use Resume for a failed or cancelled run.", 400)
+        if not job.base_model or not job.dataset_id:
+            return error_response("This job has no base model or dataset to train on.", 400)
+
+        config = json.loads(job.config_json) if job.config_json else {}
+        refusal = _start_refusal(job.base_model, job.dataset_id, config, job.device_profile_id)
+        if refusal:
+            return refusal
+
+        from backend.celery_dispatch import TaskNotStarted
+        before = (job.status, job.pipeline_stage)
+        try:
+            _dispatch_finetune(job)
+        except TaskNotStarted as e:
+            return _put_back(job, before, "training", e)
+
+        logger.info(f"Started training job: {job_id} with task {job.celery_task_id}")
+        return success_response(_job_dict(job))
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        logger.error(f"Database error starting training job: {e}", exc_info=True)
+        return error_response(f"Database error: {str(e)}", 500)
+    except Exception as e:
+        logger.error(f"Error starting training job {job_id}: {e}", exc_info=True)
         return error_response(str(e), 500)
 
 

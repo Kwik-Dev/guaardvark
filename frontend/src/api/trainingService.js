@@ -158,6 +158,13 @@ export const cancelTrainingJob = async (id) => {
   }
 };
 
+/** Start a job that was created without starting; the backend checks it as it did at creation. */
+export const startTrainingJob = async (id) => {
+  const response = await fetch(`${BASE_URL}/training/jobs/${id}/start`, { method: "POST" });
+  const data = await handleResponse(response);
+  return data.data || data;
+};
+
 export const resumeTrainingJob = async (id) => {
   try {
     const response = await fetch(`${BASE_URL}/training/jobs/${id}/resume`, {
