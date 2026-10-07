@@ -286,6 +286,28 @@ def test_load_refusal_names_the_system_not_vram(monkeypatch):
     assert gpu_wait_message(GpuBusyError("held"), 4096, 12288) == "Waiting for VRAM — 4.0GB free, need ~12.0GB"
 
 
+def test_wait_message_names_the_job_holding_the_gpu():
+    from backend.services.job_operation_gate import (
+        GpuBusyError, JobOperationGate, gpu_holder_label, gpu_wait_message,
+    )
+    from backend.services.job_types import JobKind
+
+    gate = JobOperationGate()
+    assert gate.try_claim_gpu_exclusive(JobKind.VIDEO_RENDER, "VideoBatch_10-07-2026_001")[0]
+    ok, reason = gate.try_claim_gpu_exclusive(JobKind.VIDEO_RENDER, "ImageBatch_10-07-2026_002")
+    assert not ok
+    # The gate's own refusal text is what the batch loops catch and pass on.
+    assert gpu_wait_message(GpuBusyError(reason), 2662, 11981) == (
+        "Queued behind Video Gen — needs ~11.7 GB, 2.6 GB free"
+    )
+    assert gpu_holder_label(GpuBusyError("GPU is held by video_render:ImageBatch_x — wait")) == "Image Gen"
+    assert gpu_holder_label(GpuBusyError("GPU is held by video_render:editor_42 — wait")) == "a video render"
+    assert gpu_holder_label(GpuBusyError("GPU is held by lora_train:7 — wait")) == "LoRA training"
+    assert gpu_holder_label(GpuBusyError("GPU is held by another process (busy).")) == "another process"
+    assert gpu_holder_label(None) is None
+    assert gpu_wait_message(None, 1024, 2048) == "Waiting for VRAM — 1.0GB free, need ~2.0GB"
+
+
 def test_load_gate_reserved_ram_accounting(monkeypatch):
     """Admitting one job reserves its RAM; a second admit sees less headroom."""
     from backend.services.system_load_gate import GlobalLoadGate, JobWeight, LoadGateTimeout

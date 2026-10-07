@@ -1294,6 +1294,8 @@ class BatchVideoGenerator:
                     try:
                         meta = dict(item.metadata or {})
                         meta.setdefault("item_id", item.id)
+                        # The ComfyUI progress bridge tags the clip's video_render events with it.
+                        meta.setdefault("batch_id", batch_request.batch_id)
                         meta["batch_controlled"] = True
                         if cast_lora_paths or cast_keyframe_image or getattr(batch_request, "subject_ids", None):
                             meta["cast"] = True
@@ -2047,6 +2049,9 @@ class BatchVideoGenerator:
             "metadata": metadata,
             "display_name": metadata.get("display_name"),
             "is_running": is_running,
+            "stage": getattr(status, "stage", None),
+            "progress_pct": getattr(status, "progress_pct", None),
+            "current_item": getattr(status, "current_item", None),
         }
 
     def cancel_all_active(self, reason: str = "Cancelled by system shutdown") -> List[str]:

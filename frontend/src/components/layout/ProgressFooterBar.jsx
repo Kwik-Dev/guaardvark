@@ -1,204 +1,145 @@
 // frontend/src/components/layout/ProgressFooterBar.jsx
-// Version 3.0: Fixed premature clearing, added grace period, improved all-process-type support
+// The bar and main line follow the first running job; every other job in flight
+// shows as a compact chip, and hovering or clicking lists them all.
 
-import React, { useState, useRef, useEffect } from 'react';
-import { Box, LinearProgress, Typography, Divider, useTheme } from '@mui/material';
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import { Box, LinearProgress, Popover, Typography, Divider, useTheme } from '@mui/material';
 import { useUnifiedProgress } from '../../contexts/UnifiedProgressContext';
 import TaskQueueIndicator from './TaskQueueIndicator';
 import { useAppStore } from '../../stores/useAppStore';
 import { navChromeWidth } from '../../config/navCatalog';
+import { listActiveJobs } from '../../api/jobsService';
+import {
+    activeVideoJobs,
+    buildFooterEntries,
+    footerView,
+    processType,
+    statusLine,
+    typeLabel,
+} from './progressFooterModel';
 
-// Friendly labels for process types
-const PROCESS_TYPE_LABELS = {
-    production: 'Production',
-    lora_train: 'Training Subject',
-    indexing: 'Indexing',
-    image_generation: 'Image Gen',
-    csv_processing: 'CSV Gen',
-    file_generation: 'File Gen',
-    analysis: 'Analysis',
-    upload: 'Upload',
-    llm_processing: 'LLM',
-    web_scraping: 'Web Scrape',
-    backup: 'Backup',
-    training: 'Training',
-    task_processing: 'Task',
-    voice_processing: 'Voice',
-    document_processing: 'Documents',
-    wordpress_pull: 'WP Pull',
-    wordpress_push: 'WP Push',
-    wordpress_processing: 'WordPress',
-    outreach: 'Outreach',
-    processing: 'Processing',
-    unknown: 'Working',
-};
+const VIDEO_SEED_REFRESH_MS = 30000;
+
+/**
+ * Video batches in flight from /api/jobs/active: read on connect so a batch that
+ * started before this page loaded shows, and re-read while one is shown so a
+ * batch whose finishing job:event was missed drops out.
+ */
+function useVideoJobSeed(connectionState, refreshWhile) {
+    const [seed, setSeed] = useState(null);
+    const load = useCallback(async () => {
+        const fetchedAt = Date.now();
+        try {
+            const data = await listActiveJobs({ kinds: ['video_gen'], limit: 50 });
+            setSeed({ fetchedAt, jobs: data?.jobs || [] });
+        } catch {
+            // The socket feed still drives the footer; the next read retries.
+        }
+    }, []);
+    useEffect(() => {
+        if (connectionState === 'connected') load();
+    }, [connectionState, load]);
+    useEffect(() => {
+        if (!refreshWhile) return undefined;
+        const id = setInterval(load, VIDEO_SEED_REFRESH_MS);
+        return () => clearInterval(id);
+    }, [refreshWhile, load]);
+    return seed;
+}
 
 const ProgressFooterBar = () => {
     const theme = useTheme();
-    const { globalProgress, activeProcesses } = useUnifiedProgress();
+    const { activeProcesses, unifiedJobs, connectionState } = useUnifiedProgress();
 
-    // UI state
-    const [visible, setVisible] = useState(false);
-    const [progress, setProgress] = useState(0);
-    const [statusText, setStatusText] = useState('Idle');
-    const [itemCount, setItemCount] = useState(null); // e.g., "3 of 10"
-    const [failed, setFailed] = useState(false); // last transition ended in an error
+    const [videoSeedWanted, setVideoSeedWanted] = useState(false);
+    const seed = useVideoJobSeed(connectionState, videoSeedWanted);
+    const videoJobs = useMemo(() => activeVideoJobs(unifiedJobs, seed), [unifiedJobs, seed]);
+    useEffect(() => setVideoSeedWanted(videoJobs.length > 0), [videoJobs.length]);
 
-    // Refs for tracking
-    const lastProcessIdRef = useRef(null);
+    const entries = useMemo(
+        () => buildFooterEntries(activeProcesses.values(), videoJobs),
+        [activeProcesses, videoJobs],
+    );
+    const view = footerView(entries);
+
+    // After the last job ends, its outcome stays on the bar for a grace period.
+    const [lingering, setLingering] = useState(null); // { progress, text, failed }
     const hideTimerRef = useRef(null);
-    const lastActiveRef = useRef(false);
-    // Mirrors globalProgress.active so the 3s-grace setTimeout below can read
-    // a fresh value at fire time. Without this, the timer captured the stale
-    // closure value and could hide the bar while a new process was already
-    // running, or fail to hide it when a process actually completed.
-    const globalActiveRef = useRef(false);
+    const wasActiveRef = useRef(false);
+    // Read by the grace timer at fire time, not from the closure that set it.
+    const activeRef = useRef(false);
+    const lastViewRef = useRef(null);
 
-    // Core effect: sync footer state from unified progress
     useEffect(() => {
-        const hasActive = globalProgress.active && globalProgress.activeCount > 0;
-        globalActiveRef.current = !!globalProgress.active;
-
-        // Cancel any pending hide timer when new activity arrives
-        if (hasActive && hideTimerRef.current) {
-            clearTimeout(hideTimerRef.current);
-            hideTimerRef.current = null;
-        }
-
-        if (hasActive) {
-            lastActiveRef.current = true;
-            setVisible(true);
-            setFailed(false);
-
-            // Get all non-terminal processes sorted by priority then recency
-            const processes = Array.from(activeProcesses.values()).filter(
-                p => p && p.status !== 'complete' && p.status !== 'end' && p.status !== 'error' && p.status !== 'cancelled'
-            );
-
-            if (processes.length === 0) return;
-
-            // Priority order for selecting which process to display
-            const priorityOrder = [
-                'production', 'indexing', 'image_generation', 'csv_processing', 'file_generation',
-                'analysis', 'upload', 'llm_processing', 'web_scraping', 'outreach', 'backup',
-                'training', 'lora_train', 'task_processing', 'voice_processing', 'document_processing',
-                'wordpress_pull', 'wordpress_push', 'wordpress_processing', 'processing',
-            ];
-
-            let current = null;
-            for (const pt of priorityOrder) {
-                current = processes.find(p =>
-                    (p.processType === pt || p.process_type === pt)
-                );
-                if (current) break;
-            }
-
-            // Fallback: most recent process
-            if (!current) {
-                current = processes.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))[0];
-            }
-
-            if (!current) return;
-
-            // Track process switch
-            if (current.job_id !== lastProcessIdRef.current) {
-                lastProcessIdRef.current = current.job_id;
-            }
-
-            // Progress value
-            const pct = typeof current.progress === 'number' ? Math.max(0, Math.min(100, current.progress)) : 0;
-            setProgress(pct);
-
-            // Item counts from additional_data
-            const ad = current.additional_data || {};
-            if (ad.generated_count != null && ad.target_count != null) {
-                setItemCount({ current: ad.generated_count, total: ad.target_count });
-            } else {
-                setItemCount(null);
-            }
-
-            // Status text: use the process message, prefix with type label if not already present
-            const typeKey = current.processType || current.process_type || 'processing';
-            const label = PROCESS_TYPE_LABELS[typeKey] || typeKey;
-            const msg = current.message || 'Processing...';
-            // Only prefix if the message doesn't already mention the type
-            const msgLower = msg.toLowerCase();
-            const needsPrefix = !msgLower.includes(typeKey.replace('_', ' ')) &&
-                                !msgLower.includes(label.toLowerCase());
-            setStatusText(needsPrefix ? `${label}: ${msg}` : msg);
-
-        } else if (lastActiveRef.current) {
-            // Was active, now transitioning to idle
-            // Show completion state briefly, then hide with a grace period
-            lastActiveRef.current = false;
-
-            // A failure outranks a completion: the reason has to be seen, not a 0 % bar.
-            const erroredProcess = Array.from(activeProcesses.values())
-                .filter(p => p && p.status === 'error')
-                .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))[0];
-            const completedProcess = Array.from(activeProcesses.values()).find(
-                p => p && (p.status === 'complete' || p.status === 'end')
-            );
-
-            let grace = 3000;
-            if (erroredProcess) {
-                setProgress(0);
-                setFailed(true);
-                const typeKey = erroredProcess.processType || erroredProcess.process_type || 'processing';
-                const label = PROCESS_TYPE_LABELS[typeKey] || typeKey;
-                setStatusText(`${label}: Failed — ${erroredProcess.message || 'no reason given'}`);
-                grace = 15000;
-            } else if (completedProcess) {
-                setProgress(100);
-                const typeKey = completedProcess.processType || completedProcess.process_type || 'processing';
-                const label = PROCESS_TYPE_LABELS[typeKey] || typeKey;
-                setStatusText(`${label}: Complete`);
-            }
-
-            // Grace period: keep the bar visible for 3 seconds after last activity
-            // This prevents flicker from brief state transitions. Read activity
-            // state through the ref — the closure-captured `globalProgress` is
-            // stale by the time this fires (3s later), so a new process that
-            // arrived during the grace window was being missed.
-            if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
-            hideTimerRef.current = setTimeout(() => {
-                if (!globalActiveRef.current) {
-                    setVisible(false);
-                    setProgress(0);
-                    setStatusText('Idle');
-                    setItemCount(null);
-                    setFailed(false);
-                    lastProcessIdRef.current = null;
-                }
-                hideTimerRef.current = null;
-            }, grace);
-
-        } else if (!visible) {
-            // Fully idle state — nothing to do
-        }
-    }, [globalProgress, activeProcesses]);
-
-    // Cleanup on unmount
-    useEffect(() => {
-        return () => {
+        const active = entries.length > 0;
+        activeRef.current = active;
+        if (active) {
+            wasActiveRef.current = true;
+            lastViewRef.current = footerView(entries);
             if (hideTimerRef.current) {
                 clearTimeout(hideTimerRef.current);
                 hideTimerRef.current = null;
             }
-        };
+            setLingering(null);
+            return;
+        }
+        if (!wasActiveRef.current) return;
+        wasActiveRef.current = false;
+
+        // A failure outranks a completion: the reason has to be seen, not a 0 % bar.
+        const finished = Array.from(activeProcesses.values());
+        const errored = finished
+            .filter((p) => p && p.status === 'error')
+            .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))[0];
+        const completed = finished.find((p) => p && (p.status === 'complete' || p.status === 'end'));
+
+        let grace = 3000;
+        const last = lastViewRef.current;
+        let next = { progress: last?.progress ?? 0, text: last?.statusText || 'Idle', failed: false };
+        if (errored) {
+            next = {
+                progress: 0,
+                failed: true,
+                text: `${typeLabel(processType(errored))}: Failed — ${errored.message || 'no reason given'}`,
+            };
+            grace = 15000;
+        } else if (completed) {
+            next = { progress: 100, failed: false, text: `${typeLabel(processType(completed))}: Complete` };
+        }
+        setLingering(next);
+
+        if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
+        hideTimerRef.current = setTimeout(() => {
+            if (!activeRef.current) setLingering(null);
+            hideTimerRef.current = null;
+        }, grace);
+    }, [entries, activeProcesses]);
+
+    useEffect(() => () => {
+        if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
     }, []);
+
+    // Hover shows every job in flight; a click keeps the list open until dismissed.
+    const [listAnchor, setListAnchor] = useState(null);
+    const [listPinned, setListPinned] = useState(false);
+    const closeList = () => {
+        setListPinned(false);
+        setListAnchor(null);
+    };
 
     const sidebarExpanded = useAppStore((state) => state.sidebarExpanded);
     const navChrome = useAppStore((state) => state.navChrome);
     const drawerWidth = navChromeWidth(navChrome, sidebarExpanded);
 
-    // Truly hide when there's nothing to show. Previously the footer rendered
-    // at opacity 0.2 with pointer-events disabled — a 24 px ghost bar that
-    // sat on every page even when idle. Returning null when not visible
-    // removes that visual noise entirely.
-    if (!visible) {
+    if (!view && !lingering) {
         return null;
     }
+
+    const failed = !view && Boolean(lingering?.failed);
+    const progress = view ? view.progress : lingering.progress;
+    const statusText = view ? view.statusText : lingering.text;
+    const itemCount = view ? view.itemCount : null;
+    const chips = view ? view.chips : [];
 
     try {
         return (
@@ -232,53 +173,106 @@ const ProgressFooterBar = () => {
                         '& .MuiLinearProgress-bar': { borderRadius: '2px' },
                     }}
                 />
-                {itemCount ? (
-                    <Typography
-                        variant="caption"
-                        sx={{
-                            color: failed ? 'error.main' : 'info.main',
-                            fontSize: '0.65rem',
-                            fontWeight: 500,
-                            mr: 1,
-                            minWidth: '60px',
-                            textAlign: 'right',
-                        }}
-                    >
-                        {itemCount.current} of {itemCount.total} ({Math.round(progress)}%)
-                    </Typography>
-                ) : (
-                    <Typography
-                        variant="caption"
-                        sx={{
-                            color: failed ? 'error.main' : 'info.main',
-                            fontSize: '0.65rem',
-                            fontWeight: 500,
-                            mr: 1,
-                            minWidth: '30px',
-                            textAlign: 'right',
-                        }}
-                    >
-                        {Math.round(progress)}%
-                    </Typography>
-                )}
                 <Typography
                     variant="caption"
                     sx={{
-                        color: failed ? 'error.main' : 'text.secondary',
-                        whiteSpace: 'nowrap',
-                        fontSize: '0.7rem',
-                        fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
-                        fontWeight: 400,
-                        letterSpacing: '0.02em',
-                        flexGrow: 0,
+                        color: failed ? 'error.main' : 'info.main',
+                        fontSize: '0.65rem',
+                        fontWeight: 500,
                         mr: 1,
+                        minWidth: itemCount ? '60px' : '30px',
+                        textAlign: 'right',
                     }}
                 >
-                    {statusText}
+                    {itemCount
+                        ? `${itemCount.current} of ${itemCount.total} (${Math.round(progress)}%)`
+                        : `${Math.round(progress)}%`}
                 </Typography>
+                <Box
+                    data-testid="footer-jobs"
+                    role={view ? 'button' : undefined}
+                    tabIndex={view ? 0 : undefined}
+                    aria-label={view ? 'Show every job in progress' : undefined}
+                    onMouseEnter={(e) => { if (view) setListAnchor(e.currentTarget); }}
+                    onMouseLeave={() => { if (!listPinned) setListAnchor(null); }}
+                    onClick={(e) => {
+                        if (!view) return;
+                        setListAnchor(e.currentTarget);
+                        setListPinned((p) => !p);
+                    }}
+                    sx={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 1,
+                        minWidth: 0,
+                        cursor: view ? 'pointer' : 'default',
+                    }}
+                >
+                    <Typography
+                        variant="caption"
+                        sx={{
+                            color: failed ? 'error.main' : 'text.secondary',
+                            whiteSpace: 'nowrap',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            fontSize: '0.7rem',
+                            fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
+                            fontWeight: 400,
+                            letterSpacing: '0.02em',
+                            minWidth: 0,
+                        }}
+                    >
+                        {statusText}
+                    </Typography>
+                    {chips.map((chip) => (
+                        <Typography
+                            key={chip.key}
+                            variant="caption"
+                            sx={{
+                                flexShrink: 0,
+                                whiteSpace: 'nowrap',
+                                fontSize: '0.65rem',
+                                px: 0.75,
+                                borderRadius: 1,
+                                border: `1px solid ${theme.palette.divider}`,
+                                color: chip.waiting ? 'text.disabled' : 'text.secondary',
+                            }}
+                        >
+                            {chip.text}
+                        </Typography>
+                    ))}
+                </Box>
 
                 <Divider orientation="vertical" flexItem sx={{ mx: 1, height: 16, alignSelf: 'center' }} />
                 <TaskQueueIndicator compact={true} />
+
+                <Popover
+                    open={Boolean(view && listAnchor)}
+                    anchorEl={listAnchor}
+                    onClose={closeList}
+                    anchorOrigin={{ vertical: 'top', horizontal: 'left' }}
+                    transformOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+                    disableRestoreFocus
+                    disableAutoFocus
+                    disableEnforceFocus
+                    disableScrollLock
+                    sx={{ zIndex: 10000, pointerEvents: listPinned ? 'auto' : 'none' }}
+                >
+                    <Box sx={{ p: 1.5, maxWidth: 420 }}>
+                        {(view?.entries || []).map((entry) => (
+                            <Box key={entry.key} sx={{ mb: 1, '&:last-child': { mb: 0 } }}>
+                                <Typography variant="caption" sx={{ fontWeight: 600, display: 'block' }}>
+                                    {typeLabel(entry.type)}{entry.name ? ` · ${entry.name}` : ''}
+                                    {entry.waiting ? ' — waiting' : ''}
+                                </Typography>
+                                <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                                    {statusLine(entry)}
+                                    {!entry.waiting && entry.progress != null ? ` (${Math.round(entry.progress)}%)` : ''}
+                                </Typography>
+                            </Box>
+                        ))}
+                    </Box>
+                </Popover>
             </Box>
         );
     } catch (error) {
