@@ -195,6 +195,123 @@ def _proxy_delete(path: str, timeout: int = QUICK_TIMEOUT):
         return jsonify({"error": str(e)}), 500
 
 
+# ---------- generation records (issue #8) -----------------------------------
+#
+# The sidecar's job history is in-memory and dies with the process, so a generation
+# that was not screenshotted cannot be rebuilt. Every accepted /generate request is
+# therefore mirrored into the main DB before it is answered, which is what
+# `guaardvark audio jobs` / `audio reproduce` read. Recording is best-effort: a DB
+# failure must never turn a successful generation into an error response.
+
+_TERMINAL_JOB_STATUS = {"done": "completed", "error": "error", "cancelled": "cancelled"}
+
+
+def _json_body(body):
+    """The JSON payload of a proxied response, whether it is a Response or a plain dict.
+
+    Routes normally hand back a Flask Response, but tests (and a future direct-call path)
+    may hand a dict; both must record the same way.
+    """
+    if hasattr(body, "get_json"):
+        return body.get_json(silent=True)
+    return body if isinstance(body, dict) else None
+
+
+def _apply_audio_result(row, result: dict) -> None:
+    """Copy what a generate response already knows into the record.
+
+    An async accept carries a job id and no output; a synchronous render carries the
+    path/document id and is already complete.
+    """
+    if result.get("job_id"):
+        row.job_id = str(result["job_id"])
+        row.status = str(result.get("status") or "queued")
+    if result.get("path"):
+        row.output_path = str(result["path"])
+        row.duration_s = result.get("duration_s")
+        row.status = "completed"
+    if result.get("document_id") is not None:
+        row.document_id = result.get("document_id")
+    if result.get("model"):
+        row.model = str(result["model"])
+    if result.get("error"):
+        row.error = str(result["error"])[:4000]
+        row.status = "error"
+
+
+def _record_audio_generation(kind: str, inputs: dict, body, status_code: int):
+    """Persist an accepted request and add its id to the JSON response.
+
+    Returns the original response untouched when the request was refused (>= 400),
+    when the body is not JSON, or when recording fails for any reason.
+    """
+    if status_code >= 400:
+        return body, status_code
+    result = _json_body(body)
+    if not isinstance(result, dict):
+        return body, status_code
+    try:
+        from backend.models import AudioGeneration, db
+
+        stored = {k: v for k, v in dict(inputs or {}).items()
+                  if k not in ("progress_cb", "cancel_event")}
+        row = AudioGeneration(
+            kind=kind,
+            status="queued",
+            model=str(stored["model"]) if stored.get("model") else None,
+            seed=stored.get("seed"),
+            inputs=stored,
+        )
+        _apply_audio_result(row, result)
+        db.session.add(row)
+        db.session.commit()
+        result["generation_id"] = row.id
+    except Exception:  # noqa: BLE001 - never fail the generation over bookkeeping
+        logger.exception("Failed to record audio generation (%s)", kind)
+        try:
+            from backend.models import db
+            db.session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return body, status_code
+    return jsonify(result), status_code
+
+
+def _update_audio_generation_from_job(job_id: str, job: dict) -> None:
+    """Move a queued record to its terminal state when the job is polled."""
+    if not isinstance(job, dict):
+        return
+    try:
+        from backend.models import AudioGeneration, db
+
+        row = (AudioGeneration.query.filter_by(job_id=str(job_id))
+               .order_by(AudioGeneration.id.desc()).first())
+        if row is None:
+            return
+        result = job.get("result") if isinstance(job.get("result"), dict) else None
+        if result:
+            if result.get("path"):
+                row.output_path = str(result["path"])
+            if result.get("duration_s") is not None:
+                row.duration_s = result.get("duration_s")
+            if result.get("document_id") is not None:
+                row.document_id = result.get("document_id")
+            if result.get("model"):
+                row.model = str(result["model"])
+        if job.get("error"):
+            row.error = str(job["error"])[:4000]
+        status = job.get("status")
+        row.status = _TERMINAL_JOB_STATUS.get(status, status or row.status)
+        db.session.commit()
+    except Exception:  # noqa: BLE001 - polling must not fail on bookkeeping
+        logger.exception("Failed to update audio generation from job %s", job_id)
+        try:
+            from backend.models import db
+            db.session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 @audio_foundry_bp.route("/health", methods=["GET"])
 def health():
     body, status = _proxy_get("/health")
@@ -285,7 +402,7 @@ def generate_voice():
         # otherwise be read against the sidecar's working directory.
         data = {**data, "reference_clip_path": str(clip)}
     body, status_code = _proxy_generate("/generate/voice", data)
-    return body, status_code
+    return _record_audio_generation("voice", data, body, status_code)
 
 
 @audio_foundry_bp.route("/generate/music", methods=["POST"])
@@ -314,10 +431,12 @@ def generate_music():
             lyrics="" if payload.get("instrumental_only") else (payload.get("lyrics") or ""),
             seconds=seconds, seed=payload.get("seed"), steps=payload.get("steps"), model_id=model,
         )
-        return jsonify({"success": True, "job_id": job_id, "model": model, "status": "queued",
-                        "attribution": "MiniMax-Music3"}), 202
+        return _record_audio_generation(
+            "music", payload,
+            jsonify({"success": True, "job_id": job_id, "model": model, "status": "queued",
+                     "attribution": "MiniMax-Music3"}), 202)
     body, status_code = _proxy_generate("/generate/music", payload)
-    return body, status_code
+    return _record_audio_generation("music", payload, body, status_code)
 
 
 @audio_foundry_bp.route("/generate/music/status/<job_id>", methods=["GET"])
@@ -390,8 +509,9 @@ def rewrite_music_prompt():
 
 @audio_foundry_bp.route("/generate/fx", methods=["POST"])
 def generate_fx():
-    body, status_code = _proxy_generate("/generate/fx", flask_request.get_json(silent=True) or {})
-    return body, status_code
+    payload = flask_request.get_json(silent=True) or {}
+    body, status_code = _proxy_generate("/generate/fx", payload)
+    return _record_audio_generation("sfx", payload, body, status_code)
 
 
 # ---------- Async job lifecycle ---------------------------------------------
@@ -418,9 +538,13 @@ def job_status(job_id):
                 "duration_s": job.get("seconds"), "model": job.get("model"),
                 "attribution": job.get("attribution"), "seed": job.get("seed"),
             }
+        _update_audio_generation_from_job(job_id, {"status": status, "error": job.get("error"),
+                                                   "result": result})
         return jsonify({"id": job_id, "status": status, "error": job.get("error"),
                         "progress": {"current": 0, "total": 0}, "result": result}), 200
     body, status_code = _proxy_get(f"/jobs/{job_id}")
+    if status_code < 400:
+        _update_audio_generation_from_job(job_id, _json_body(body) or {})
     return body, status_code
 
 
@@ -428,6 +552,38 @@ def job_status(job_id):
 def jobs_list():
     body, status_code = _proxy_get("/jobs")
     return body, status_code
+
+
+@audio_foundry_bp.route("/generations", methods=["GET"])
+def list_generations():
+    """Recorded audio generations, newest first (issue #8).
+
+    ``?kind=music|sfx|voice`` narrows the list; ``?limit=`` caps it (default 50, max 500).
+    """
+    from backend.models import AudioGeneration
+
+    kind = (flask_request.args.get("kind") or "").strip()
+    try:
+        limit = int(flask_request.args.get("limit") or 50)
+    except (TypeError, ValueError):
+        limit = 50
+    limit = max(1, min(limit, 500))
+    query = AudioGeneration.query
+    if kind:
+        query = query.filter_by(kind=kind)
+    rows = query.order_by(AudioGeneration.created_at.desc(), AudioGeneration.id.desc()).limit(limit).all()
+    return jsonify({"success": True, "generations": [r.to_dict() for r in rows]}), 200
+
+
+@audio_foundry_bp.route("/generations/<int:generation_id>", methods=["GET"])
+def get_generation(generation_id: int):
+    """One recorded audio generation, by id."""
+    from backend.models import AudioGeneration
+
+    row = AudioGeneration.query.get(generation_id)
+    if row is None:
+        return jsonify({"success": False, "error": "generation not found"}), 404
+    return jsonify({"success": True, "generation": row.to_dict()}), 200
 
 
 @audio_foundry_bp.route("/jobs/<job_id>/cancel", methods=["POST"])

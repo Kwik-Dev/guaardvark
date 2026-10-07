@@ -256,7 +256,70 @@ def generate():
         logger.exception("Infographic generation failed")
         return jsonify({"success": False, "error": str(e)}), 500
 
-    return jsonify({"success": True, **result})
+    # Issue #8: keep the spec and the result so the render can be found and rebuilt.
+    # Recording is best-effort — a DB failure must not turn a finished PNG into an error.
+    record_id = None
+    try:
+        from backend.models import InfographicGeneration, db
+
+        row = InfographicGeneration(
+            status="completed",
+            inputs={"scene": spec.scene, "raw_prompt": spec.raw_prompt,
+                    "title": spec.title, "footer": spec.footer, "style": spec.style,
+                    "aspect": spec.aspect, "hashtags": list(spec.hashtags),
+                    "callouts": list(spec.callouts)},
+            seed=result.get("seed"),
+            prompt=result.get("prompt"),
+            width=result.get("width"),
+            height=result.get("height"),
+            filename=result.get("filename"),
+            subfolder=result.get("subfolder"),
+            image_url=result.get("image_url"),
+            prompt_id=result.get("prompt_id"),
+            duration_s=result.get("duration_s"),
+        )
+        db.session.add(row)
+        db.session.commit()
+        record_id = row.id
+    except Exception:  # noqa: BLE001 - keep serving the image it already made
+        logger.exception("Failed to record infographic generation")
+        try:
+            from backend.models import db
+            db.session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+
+    payload = {"success": True, **result}
+    if record_id is not None:
+        payload["generation_id"] = record_id
+    return jsonify(payload)
+
+
+@infographic_bp.route("/generations", methods=["GET"])
+def list_generations():
+    """Recorded infographic renders, newest first (issue #8)."""
+    from backend.models import InfographicGeneration
+
+    try:
+        limit = int(request.args.get("limit") or 50)
+    except (TypeError, ValueError):
+        limit = 50
+    limit = max(1, min(limit, 500))
+    rows = (InfographicGeneration.query
+            .order_by(InfographicGeneration.created_at.desc(), InfographicGeneration.id.desc())
+            .limit(limit).all())
+    return jsonify({"success": True, "generations": [r.to_dict() for r in rows]}), 200
+
+
+@infographic_bp.route("/generations/<int:generation_id>", methods=["GET"])
+def get_generation(generation_id: int):
+    """One recorded infographic render, by id."""
+    from backend.models import InfographicGeneration
+
+    row = InfographicGeneration.query.get(generation_id)
+    if row is None:
+        return jsonify({"success": False, "error": "generation not found"}), 404
+    return jsonify({"success": True, "generation": row.to_dict()}), 200
 
 
 @infographic_bp.route("/view", methods=["GET"])

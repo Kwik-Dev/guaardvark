@@ -3108,6 +3108,105 @@ class JobHistory(db.Model):
         }
 
 
+class AudioGeneration(db.Model):
+    """One Audio Foundry generation: the request that was sent and its outcome.
+
+    Written by ``backend/api/audio_foundry_api`` when a ``/generate/...`` request is
+    accepted, so ``guaardvark audio jobs`` / ``audio reproduce`` can rebuild the exact
+    request later (issue #8). The Audio Foundry sidecar keeps only an ephemeral in-memory
+    job history that is gone when the sidecar restarts, which is why this record lives in
+    the main database. ``inputs`` is the submitted request body (redaction happens at the
+    API boundary, not here); ``job_id`` links an async sidecar/ComfyUI job, and the result
+    columns are filled when that job finishes. The table is created by ``db.create_all()``
+    on boot, so no ALTER migration is needed.
+    """
+    __tablename__ = "audio_generations"
+
+    id = db.Column(db.Integer, primary_key=True)
+    kind = db.Column(db.String(16), nullable=False, index=True)  # music | sfx | voice
+    status = db.Column(db.String(32), nullable=False, default="queued", index=True)
+    model = db.Column(db.String(255), nullable=True)
+    seed = db.Column(db.Integer, nullable=True)
+    inputs = db.Column(db.JSON, nullable=False, default=dict)
+    job_id = db.Column(db.String(64), nullable=True, index=True)
+    document_id = db.Column(db.Integer, nullable=True)
+    output_path = db.Column(db.Text, nullable=True)
+    duration_s = db.Column(db.Float, nullable=True)
+    error = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(), nullable=False)
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(),
+                           onupdate=lambda: datetime.now())
+
+    __table_args__ = (
+        db.Index("ix_audio_generations_kind_created", "kind", "created_at"),
+    )
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "status": self.status,
+            "model": self.model,
+            "seed": self.seed,
+            "inputs": self.inputs or {},
+            "job_id": self.job_id,
+            "document_id": self.document_id,
+            "output_path": self.output_path,
+            "duration_s": self.duration_s,
+            "error": self.error,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class InfographicGeneration(db.Model):
+    """One infographic render: the spec that was sent and the PNG it produced.
+
+    ``/api/infographic/generate`` is synchronous and keeps nothing; this row is the
+    durable record ``guaardvark infographic jobs`` / ``infographic reproduce`` read
+    (issue #8). ``inputs`` is the spec (scene/raw_prompt/title/footer/style/aspect/
+    hashtags/callouts) and the result columns mirror the generator's return dict.
+    Created by ``db.create_all()`` on boot, so no ALTER migration is needed.
+    """
+    __tablename__ = "infographic_generations"
+
+    id = db.Column(db.Integer, primary_key=True)
+    status = db.Column(db.String(32), nullable=False, default="completed", index=True)
+    inputs = db.Column(db.JSON, nullable=False, default=dict)
+    seed = db.Column(db.Integer, nullable=True)
+    prompt = db.Column(db.Text, nullable=True)
+    width = db.Column(db.Integer, nullable=True)
+    height = db.Column(db.Integer, nullable=True)
+    filename = db.Column(db.String(512), nullable=True)
+    subfolder = db.Column(db.String(512), nullable=True)
+    image_url = db.Column(db.Text, nullable=True)
+    prompt_id = db.Column(db.String(128), nullable=True)
+    duration_s = db.Column(db.Float, nullable=True)
+    error = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(), nullable=False)
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(),
+                           onupdate=lambda: datetime.now())
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "status": self.status,
+            "inputs": self.inputs or {},
+            "seed": self.seed,
+            "prompt": self.prompt,
+            "width": self.width,
+            "height": self.height,
+            "filename": self.filename,
+            "subfolder": self.subfolder,
+            "image_url": self.image_url,
+            "prompt_id": self.prompt_id,
+            "duration_s": self.duration_s,
+            "error": self.error,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
 class VideoProjectLifecycleMixin:
     """The lifecycle spine every video-project kind shares (Production, MusicVideo, …).
 
