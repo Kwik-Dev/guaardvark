@@ -91,17 +91,22 @@ const UpdateAppliedBanner = () => {
         <Box
           role="status"
           sx={{
+            // A floating notice above the footer bar: across the top it would
+            // cover the navigation and its buttons for as long as it shows.
             position: "fixed",
-            top: 0,
-            left: 0,
-            right: 0,
+            bottom: 36,
+            left: "50%",
+            transform: "translateX(-50%)",
+            maxWidth: "calc(100% - 32px)",
+            borderRadius: "8px",
             zIndex: (theme) => theme.zIndex.snackbar,
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
             gap: 1.5,
             py: 0.5,
-            px: 2,
+            pl: 2,
+            pr: 1,
             bgcolor: notice.kind === "restart" ? "warning.dark" : "info.dark",
             color: notice.kind === "restart" ? "warning.contrastText" : "info.contrastText",
             boxShadow: 3,
