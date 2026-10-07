@@ -30,6 +30,7 @@ import { useNavBadgeCounts } from "../../config/navBadges";
 import { usePendingApprovals } from "../../hooks/usePendingApprovals";
 import SystemMetricsModal from "../modals/SystemMetricsModal";
 import AgentScreenViewer from "../agent/AgentScreenViewer";
+import GlobalMicButton from "../voice/GlobalMicButton";
 
 const square = { borderRadius: 0 };
 
@@ -100,6 +101,7 @@ const SoftwareNav = () => {
   const metricsAction = byId("system-metrics");
   const agentScreenAction = byId("agent-screen");
   const chatAction = byId("floating-chat");
+  const voiceAction = byId("voice-mic");
   const pins = pinnedItems(catalog);
 
   const chatOpen = useFloatingChatStore((state) => state.isOpen);
@@ -272,6 +274,7 @@ const SoftwareNav = () => {
                 </Tooltip>
               );
             })}
+            {voiceAction && <GlobalMicButton variant="bar" label={voiceAction.label} primary />}
             {chatAction && (
               <Tooltip title={chatUnavailable ? "This page has its own chat" : chatAction.label}>
                 <span>

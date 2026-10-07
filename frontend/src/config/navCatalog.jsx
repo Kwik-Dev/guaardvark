@@ -40,6 +40,7 @@ import VideoCameraBackIcon from "@mui/icons-material/VideoCameraBack";
 import InsertChartOutlinedIcon from "@mui/icons-material/InsertChartOutlined";
 import AutoFixHighIcon from "@mui/icons-material/AutoFixHigh";
 import RecordVoiceOverIcon from "@mui/icons-material/RecordVoiceOver";
+import MicNoneIcon from "@mui/icons-material/MicNone";
 import SchoolIcon from "@mui/icons-material/School";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import DriveFolderUploadIcon from "@mui/icons-material/DriveFolderUpload";
@@ -448,7 +449,7 @@ export const CORE_NAV_CATALOG = Object.freeze([
   softwarePage({
     id: "voice-chat",
     path: "/voice-chat",
-    label: "Voice Chat",
+    label: "Voice",
     icon: <RecordVoiceOverIcon />,
     sidebarGroup: "Main",
     menu: "Chat",
@@ -526,6 +527,13 @@ export const CORE_NAV_CATALOG = Object.freeze([
     id: "agent-screen",
     label: "Agent Screen",
     icon: <DesktopWindowsIcon />,
+    menu: "View",
+  }),
+  // The global microphone, just left of the floating chat it talks to.
+  action({
+    id: "voice-mic",
+    label: "Voice",
+    icon: <MicNoneIcon />,
     menu: "View",
   }),
   // Opens the floating chat from the workspace bar, after the pinned pages.

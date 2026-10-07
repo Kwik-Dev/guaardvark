@@ -35,6 +35,7 @@ import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 
 import SystemMetricsModal from "../modals/SystemMetricsModal";
 import AgentScreenViewer from "../agent/AgentScreenViewer";
+import GlobalMicButton from "../voice/GlobalMicButton";
 
 const COLLAPSED_WIDTH = spacing.sidebarCollapsed;
 const EXPANDED_WIDTH = spacing.sidebarExpanded;
@@ -340,6 +341,8 @@ const Sidebar = () => {
                 )}
               </IconButton>
             </Tooltip>
+
+            <GlobalMicButton variant="rail" expanded={isExpanded} label="Voice" primary />
 
             {}
             <IconButton

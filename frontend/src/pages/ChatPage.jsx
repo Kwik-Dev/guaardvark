@@ -47,6 +47,7 @@ import StreamingMessage from "../components/chat/StreamingMessage";
 import { webSearchSend } from "../components/chat/webSearchOffer";
 import { useUnifiedProgress } from "../contexts/UnifiedProgressContext";
 import extractSpeakableText from "../utils/extractSpeakableText";
+import useVoiceSink from "../hooks/useVoiceSink";
 import { chatErrorMessage } from "../utils/chatAttachment";
 
 import { createPlan } from "../api/orchestratorService";
@@ -1293,6 +1294,14 @@ const ChatPage = () => {
     },
     [sessionId, projectId, messageQueueId, isSending]
   );
+
+  // While this page is open, global-mic transcripts come here instead of the
+  // floating chat. A turn spoken while a reply streams waits for it.
+  const sendVoiceTurn = useCallback(
+    (text) => handleSendMessage(text, null, { isVoiceMessage: true }),
+    [handleSendMessage]
+  );
+  useVoiceSink({ id: "chat-page", priority: 10, busy: isSending, send: sendVoiceTurn });
 
   // A reply's "Search the web for this" offer. Returns false while a turn is
   // running (handleSendMessage would drop the send), so the offer stays open.

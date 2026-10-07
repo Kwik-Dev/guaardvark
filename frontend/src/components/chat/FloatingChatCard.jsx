@@ -17,17 +17,17 @@ import MinimizeIcon from "@mui/icons-material/Remove";
 import AddIcon from "@mui/icons-material/Add";
 import AttachFileIcon from "@mui/icons-material/AttachFile";
 import ChatBubbleOutlineIcon from "@mui/icons-material/ChatBubbleOutline";
-import HearingIcon from "@mui/icons-material/Hearing";
 import Tooltip from "@mui/material/Tooltip";
 import { useFloatingChatStore } from "../../stores/useFloatingChatStore";
 import UnifiedChatService, { steerAgent } from "../../api/unifiedChatService";
 import StreamingMessage from "./StreamingMessage";
 import FloatingChatMessage from "./FloatingChatMessage";
 import { useUnifiedProgress } from "../../contexts/UnifiedProgressContext";
-import VoiceChatButton from "../voice/VoiceChatButton";
-import ContinuousVoiceChat from "../voice/ContinuousVoiceChat";
+import GlobalMicButton from "../voice/GlobalMicButton";
 import { useAppStore } from "../../stores/useAppStore";
-import { useVoiceSettings } from "../../hooks/useVoiceSettings";
+import { useVoice } from "../../contexts/VoiceContext";
+import { useVoiceSession, useVoiceSessionState } from "../../contexts/VoiceSessionContext";
+import extractSpeakableText from "../../utils/extractSpeakableText";
 import useSlashCommands from "../../hooks/useSlashCommands";
 import SlashCommandPopup from "./SlashCommandPopup";
 import { debugLog } from "../../utils/debugLog";
@@ -98,12 +98,14 @@ const FloatingChatCard = () => {
   const pageContext = useFloatingChatStore((s) => s.pageContext);
   const entityLabel = useFloatingChatStore((s) => s.entityLabel);
 
-  // Listener mode state
-  const listenerModeEnabled = useAppStore((s) => s.listenerModeEnabled);
-  const toggleListenerMode = useAppStore((s) => s.toggleListenerMode);
-  const systemName = useAppStore((s) => s.systemName);
-  const voiceSettings = useVoiceSettings();
-  const wakeWordEnabled = voiceSettings.wakeWordEnabled !== false;  // Default ON
+  // Voice: turns from the global mic arrive in voiceTurns (FloatingChatVoiceSink).
+  const voiceTurns = useFloatingChatStore((s) => s.voiceTurns);
+  const removeVoiceTurn = useFloatingChatStore((s) => s.removeVoiceTurn);
+  const voiceSession = useVoiceSession();
+  const voiceActive = useVoiceSessionState((s) => Boolean(s.session));
+  const { speak, ttsEnabled } = useVoice() || {};
+  // True while the reply being streamed answers a voice turn: it is spoken.
+  const voiceReplyPendingRef = useRef(false);
 
   // Unified Chat Service (Socket.IO streaming)
   const { socketRef } = useUnifiedProgress();
@@ -323,10 +325,19 @@ const FloatingChatCard = () => {
     }
   }, [clearError, setError]);
 
-  // Send message handler — uses UnifiedChatService (Socket.IO streaming)
-  const handleSendMessage = useCallback(async (overrideText) => {
+  // A voice turn's reply is finished (spoken or not): the mic may listen again.
+  const finishVoiceReply = useCallback(() => {
+    if (!voiceReplyPendingRef.current) return;
+    voiceReplyPendingRef.current = false;
+    voiceSession.replyFinished();
+  }, [voiceSession]);
+
+  // Send message handler — uses UnifiedChatService (Socket.IO streaming).
+  // Arguments follow ChatPage's (text, file, options) so slash commands can call either.
+  const handleSendMessage = useCallback(async (overrideText, _file, sendOptions) => {
+    const isVoice = Boolean(sendOptions?.isVoiceMessage);
     const text = overrideText || inputText;
-    const pending = attachment;
+    const pending = isVoice ? null : attachment;
     if ((!text.trim() && !pending) || isSending) return;
 
     if (pending && attachmentExceedsLimit(pending.byteLength, attachmentMaxBytes)) {
@@ -334,7 +345,7 @@ const FloatingChatCard = () => {
       return;
     }
 
-    pushHistory(text);
+    if (!isVoice) pushHistory(text);
 
     const content = text.trim() || (pending ? `Describe this image: ${pending.file.name}` : "");
     const userMessage = {
@@ -343,11 +354,13 @@ const FloatingChatCard = () => {
       content,
       imageUrl: pending?.preview,
       imageFileName: pending?.file?.name,
+      voice: isVoice || undefined,
       timestamp: new Date().toISOString(),
     };
     addMessage(userMessage);
     if (!overrideText) setInputText("");
-    setAttachment(null);
+    if (!isVoice) setAttachment(null);
+    voiceReplyPendingRef.current = isVoice;
 
     setIsSending(true);
     clearError();
@@ -366,11 +379,12 @@ const FloatingChatCard = () => {
         await unifiedChatService.sendMessage(sessionId, content, {
           use_rag: true,
           page_context: pageContext,
-        }, imageBase64);
+        }, imageBase64, isVoice);
       } catch (err) {
         console.error("FloatingChat: Unified send failed:", err);
         setIsStreamingMessage(false);
         setIsSending(false);
+        finishVoiceReply();
         const errorText = err.message || "Failed to send message";
         addMessage({
           id: `err_${Date.now()}`,
@@ -383,6 +397,7 @@ const FloatingChatCard = () => {
     } else {
       // Fallback: no socket connection — show error
       setIsSending(false);
+      finishVoiceReply();
       const errorText = "Chat service not connected. Please wait for connection.";
       addMessage({
         id: `err_${Date.now()}`,
@@ -392,7 +407,16 @@ const FloatingChatCard = () => {
       });
       setError(errorText);
     }
-  }, [inputText, attachment, attachmentMaxBytes, isSending, sessionId, pageContext, addMessage, setIsSending, clearError, setError, unifiedChatService, pushHistory]);
+  }, [inputText, attachment, attachmentMaxBytes, isSending, sessionId, pageContext, addMessage, setIsSending, clearError, setError, unifiedChatService, pushHistory, finishVoiceReply]);
+
+  // Send queued voice turns one at a time, each with the session current at
+  // that moment, once the card is connected and not waiting on a reply.
+  useEffect(() => {
+    if (voiceTurns.length === 0 || isSending || !unifiedChatService) return;
+    const turn = voiceTurns[0];
+    removeVoiceTurn(turn.id);
+    handleSendMessage(turn.text, null, { isVoiceMessage: true });
+  }, [voiceTurns, isSending, unifiedChatService, removeVoiceTurn, handleSendMessage]);
 
   // The input is disabled while a reply streams, which makes the browser drop
   // focus. Restore it when sending finishes so the user can keep typing without
@@ -419,6 +443,7 @@ const FloatingChatCard = () => {
       projectId: null,
       clearMessages,
       onPlanCreated: () => {}, // no-op — floating chat doesn't support plan view
+      voiceContext: { toggleVoice: voiceSession.toggleHandsFree, isVoiceActive: voiceActive },
     },
   });
 
@@ -426,6 +451,15 @@ const FloatingChatCard = () => {
   const handleStreamingComplete = useCallback((result) => {
     setIsStreamingMessage(false);
     setIsSending(false);
+
+    if (voiceReplyPendingRef.current && ttsEnabled && speak && result.content?.trim()) {
+      try {
+        speak(extractSpeakableText(result.content, result.generatedImages));
+      } catch (ttsError) {
+        console.warn("FloatingChat: speaking the reply failed:", ttsError);
+      }
+    }
+    finishVoiceReply();
 
     if (result.content || result.thinking) {
       addMessage({
@@ -446,7 +480,7 @@ const FloatingChatCard = () => {
       newService.joinSession(sessionId);
       setUnifiedChatService(newService);
     }
-  }, [addMessage, setIsSending, sessionId, socketRef]);
+  }, [addMessage, setIsSending, sessionId, socketRef, ttsEnabled, speak, finishVoiceReply]);
 
   const handleStop = useCallback(() => {
     // Salvage whatever streamed so far. Floating card renders only
@@ -491,7 +525,8 @@ const FloatingChatCard = () => {
 
     setIsStreamingMessage(false);
     setIsSending(false);
-  }, [unifiedChatService, sessionId, setIsSending, addMessage]);
+    finishVoiceReply();
+  }, [unifiedChatService, sessionId, setIsSending, addMessage, finishVoiceReply]);
 
   const handleKeyDown = (e) => {
     // Slash command popup navigation intercepts first
@@ -558,52 +593,6 @@ const FloatingChatCard = () => {
     }
     handleSendMessage();
   };
-
-  // Voice transcription handler
-  const handleTranscriptionReceived = useCallback(({ userMessage, aiResponse }) => {
-    if (!userMessage) return;
-
-    if (aiResponse) {
-      // Voice stream returned both transcription and response — add directly
-      addMessage({
-        id: `user_${Date.now()}`,
-        role: "user",
-        content: userMessage,
-        timestamp: new Date().toISOString(),
-      });
-      addMessage({
-        id: `asst_${Date.now() + 1}`,
-        role: "assistant",
-        content: aiResponse,
-        timestamp: new Date().toISOString(),
-      });
-    } else {
-      // No AI response — send through normal chat pipeline for streaming
-      handleSendMessage(userMessage);
-    }
-  }, [addMessage, handleSendMessage]);
-
-  // Bridge ContinuousVoiceChat's onMessageReceived to floating chat
-  const handleContinuousVoiceMessage = useCallback(({ transcription, response }) => {
-    if (!transcription || !transcription.trim()) return;
-
-    if (response) {
-      addMessage({
-        id: `user_${Date.now()}`,
-        role: "user",
-        content: transcription.trim(),
-        timestamp: new Date().toISOString(),
-      });
-      addMessage({
-        id: `asst_${Date.now() + 1}`,
-        role: "assistant",
-        content: response,
-        timestamp: new Date().toISOString(),
-      });
-    } else {
-      handleSendMessage(transcription.trim());
-    }
-  }, [addMessage, handleSendMessage]);
 
   // Drag: double-click to collapse, single-click+drag to move
   const handleHeaderMouseDown = useCallback(
@@ -825,6 +814,17 @@ const FloatingChatCard = () => {
               <div ref={messagesEndRef} />
             </Box>
 
+            {voiceTurns.length > 0 && isSending && (
+              <Typography
+                variant="caption"
+                sx={{ color: "text.secondary", px: 1.5, fontSize: "0.72rem" }}
+              >
+                {voiceTurns.length === 1
+                  ? "1 voice message waits for this reply"
+                  : `${voiceTurns.length} voice messages wait for this reply`}
+              </Typography>
+            )}
+
             {/* Error */}
             {error && (
               <Typography
@@ -883,47 +883,10 @@ const FloatingChatCard = () => {
               }}
               onMouseDown={(e) => e.stopPropagation()}
             >
-              {/* Listener mode toggle */}
-              <Tooltip title={listenerModeEnabled ? "Push-to-talk" : "Listener mode"}>
-                <IconButton
-                  className="floating-chat-btn"
-                  onClick={toggleListenerMode}
-                  size="small"
-                  sx={{
-                    p: 0.25,
-                    width: 24,
-                    height: 24,
-                    border: 1,
-                    borderColor: listenerModeEnabled ? 'success.main' : 'transparent',
-                    color: listenerModeEnabled ? 'success.main' : 'text.secondary',
-                  }}
-                >
-                  <HearingIcon sx={{ fontSize: 14 }} />
-                </IconButton>
-              </Tooltip>
-
-              {/* Voice input: push-to-talk or continuous listener */}
-              {listenerModeEnabled ? (
-                <Box sx={{ maxWidth: 120, overflow: 'hidden', display: 'flex', alignItems: 'center' }}>
-                  <ContinuousVoiceChat
-                    sessionId={sessionId}
-                    onMessageReceived={handleContinuousVoiceMessage}
-                    onError={(err) => setError(err?.message || "Voice error")}
-                    compact={true}
-                    wakeWordEnabled={wakeWordEnabled}
-                    systemName={systemName || 'Guaardvark'}
-                    onWakeWordDetected={() => {}}
-                  />
-                </Box>
-              ) : (
-                <VoiceChatButton
-                  onTranscriptionReceived={handleTranscriptionReceived}
-                  onError={(err) => setError(err?.message || "Voice error")}
-                  disabled={isSending}
-                  sessionId={sessionId}
-                  size="small"
-                />
-              )}
+              {/* The global mic: same state and microphone as the top-bar button */}
+              <Box className="floating-chat-btn" sx={{ display: "flex", alignItems: "center" }}>
+                <GlobalMicButton variant="compact" label="Voice" />
+              </Box>
               <SlashCommandPopup
                 commands={slashCmds.filteredCommands}
                 selectedIndex={slashCmds.selectedIndex}

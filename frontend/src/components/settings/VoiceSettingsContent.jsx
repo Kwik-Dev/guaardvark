@@ -1,78 +1,17 @@
-import React, { useState, useEffect, useRef } from "react";
+import React from "react";
 import {
   Typography,
   Box,
   Button,
   CircularProgress,
   Grid,
-  Slider,
   Chip,
-  Switch,
-  FormControlLabel,
   Tooltip,
 } from "@mui/material";
 import MuiAlert from "@mui/material/Alert";
 import FileDownloadIcon from "@mui/icons-material/FileDownload";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
-import voiceService from "../../api/voiceService";
-
-const LiveVolumeMeter = ({ threshold }) => {
-  const [volume, setVolume] = useState(0);
-  const [isTesting, setIsTesting] = useState(false);
-  const [startedByUs, setStartedByUs] = useState(false);
-  const animationRef = useRef(null);
-
-  const startTest = async () => {
-    try {
-      if (!voiceService.getIsRecording()) {
-        await voiceService.startRecording({ timeslice: 1000 });
-        setStartedByUs(true);
-      } else {
-        setStartedByUs(false);
-      }
-      setIsTesting(true);
-      
-      const updateVolume = () => {
-        setVolume(voiceService.calculateVolume());
-        animationRef.current = requestAnimationFrame(updateVolume);
-      };
-      updateVolume();
-    } catch (e) {
-      console.error("Failed to start mic test", e);
-    }
-  };
-
-  const stopTest = async () => {
-    setIsTesting(false);
-    if (animationRef.current) cancelAnimationFrame(animationRef.current);
-    if (startedByUs && voiceService.getIsRecording()) {
-      await voiceService.stopRecording();
-    }
-    setStartedByUs(false);
-    setVolume(0);
-  };
-
-  useEffect(() => {
-    return () => {
-      if (isTesting) stopTest();
-    };
-  }, [isTesting]);
-
-  return (
-    <Box sx={{ mt: 1, mb: 2 }}>
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1, alignItems: 'center' }}>
-        <Typography variant="caption" color="text.secondary">Live Microphone Volume</Typography>
-        <Button size="small" variant="outlined" onClick={isTesting ? stopTest : startTest}>
-          {isTesting ? "Stop Test" : "Test Mic"}
-        </Button>
-      </Box>
-      <Box sx={{ position: 'relative', height: 20, bgcolor: 'background.paper', borderRadius: 1, border: '1px solid', borderColor: 'divider', overflow: 'hidden' }}>
-        <Box sx={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: `${Math.min(100, volume * 100)}%`, bgcolor: volume > threshold ? 'success.main' : 'primary.main', transition: 'width 0.1s linear, background-color 0.2s' }} />
-        <Box sx={{ position: 'absolute', left: `${Math.min(100, threshold * 100)}%`, top: 0, bottom: 0, width: 2, bgcolor: 'error.main', zIndex: 1 }} />
-      </Box>
-    </Box>
-  );
-};
+import VoiceListeningSettings from "../voice/VoiceListeningSettings";
 
 const VoiceSettingsContent = ({
   voiceSettings,
@@ -413,131 +352,12 @@ const VoiceSettingsContent = ({
             </Grid>
           </Grid>
 
-          {/* Continuous Listening Settings */}
-          <Typography variant="subtitle2" sx={{ mb: 1, fontSize: '0.85rem' }}>
-            Voice Activity Detection (VAD)
-          </Typography>
-
-          <Grid container spacing={2}>
-            <Grid item xs={12}>
-              <Typography variant="body2" color="text.secondary" sx={{ fontSize: '0.75rem', mb: 0.5 }}>
-                Silence Threshold (Sensitivity): {(voiceSettings.silenceThreshold || 0.05).toFixed(2)}
-              </Typography>
-              <Slider
-                value={voiceSettings.silenceThreshold || 0.05}
-                onChange={(e, value) => handleVoiceSettingChange('silenceThreshold', value)}
-                min={0.01}
-                max={0.2}
-                step={0.01}
-                valueLabelDisplay="auto"
-                valueLabelFormat={(value) => value.toFixed(2)}
-                size="small"
-              />
-              <LiveVolumeMeter threshold={voiceSettings.silenceThreshold || 0.05} />
-            </Grid>
-
-            <Grid item xs={12} sm={6}>
-              <Typography variant="body2" color="text.secondary" sx={{ fontSize: '0.75rem', mb: 0.5 }}>
-                Silence Timeout: {((voiceSettings.silenceTimeout || 2000) / 1000).toFixed(1)}s
-              </Typography>
-              <Slider
-                value={voiceSettings.silenceTimeout || 2000}
-                onChange={(e, value) => handleVoiceSettingChange('silenceTimeout', value)}
-                min={1000}
-                max={5000}
-                step={500}
-                valueLabelDisplay="auto"
-                valueLabelFormat={(value) => `${(value / 1000).toFixed(1)}s`}
-                size="small"
-              />
-            </Grid>
-
-            <Grid item xs={12}>
-              <Typography variant="body2" color="text.secondary" sx={{ fontSize: '0.75rem', mb: 0.5 }}>
-                Segment: {((voiceSettings.maxSegmentDuration || 30000) / 1000).toFixed(0)}s
-              </Typography>
-              <Slider
-                value={voiceSettings.maxSegmentDuration || 30000}
-                onChange={(e, value) => handleVoiceSettingChange('maxSegmentDuration', value)}
-                min={10000}
-                max={60000}
-                step={5000}
-                valueLabelDisplay="auto"
-                valueLabelFormat={(value) => `${(value / 1000).toFixed(0)}s`}
-                size="small"
-                marks={[
-                  { value: 10000, label: '10s' },
-                  { value: 30000, label: '30s' },
-                  { value: 60000, label: '60s' }
-                ]}
-              />
-            </Grid>
-          </Grid>
-
-          {/* Wake Word Settings */}
-          <Typography variant="subtitle2" sx={{ mt: 3, mb: 1, fontSize: '0.85rem' }}>
-            Wake Word
-          </Typography>
-
-          <Box sx={{ mb: 2 }}>
-            <FormControlLabel
-              control={
-                <Switch
-                  checked={voiceSettings.wakeWordEnabled || false}
-                  onChange={(e) => handleVoiceSettingChange('wakeWordEnabled', e.target.checked)}
-                  size="small"
-                />
-              }
-              label={
-                <Typography variant="body2" color="text.secondary" sx={{ fontSize: '0.8rem' }}>
-                  Enable wake word detection
-                </Typography>
-              }
-            />
-            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', ml: 4.5, mt: -0.5 }}>
-              Say &quot;Hey {systemName || 'Guaardvark'}&quot; to activate listening in Listener mode
-            </Typography>
-          </Box>
-
-          {voiceSettings.wakeWordEnabled && (
-            <Grid container spacing={2}>
-              <Grid item xs={12} sm={6}>
-                <Typography variant="body2" color="text.secondary" sx={{ fontSize: '0.75rem', mb: 0.5 }}>
-                  Active duration: {((voiceSettings.activeListeningDuration || 30000) / 1000).toFixed(0)}s
-                </Typography>
-                <Slider
-                  value={voiceSettings.activeListeningDuration || 30000}
-                  onChange={(e, value) => handleVoiceSettingChange('activeListeningDuration', value)}
-                  min={10000}
-                  max={120000}
-                  step={5000}
-                  valueLabelDisplay="auto"
-                  valueLabelFormat={(value) => `${(value / 1000).toFixed(0)}s`}
-                  size="small"
-                  marks={[
-                    { value: 10000, label: '10s' },
-                    { value: 30000, label: '30s' },
-                    { value: 60000, label: '60s' },
-                    { value: 120000, label: '120s' }
-                  ]}
-                />
-              </Grid>
-              <Grid item xs={12} sm={6}>
-                <Typography variant="body2" color="text.secondary" sx={{ fontSize: '0.75rem', mb: 0.5 }}>
-                  System name
-                </Typography>
-                <Chip
-                  label={systemName || 'Guaardvark'}
-                  size="small"
-                  variant="outlined"
-                  color="primary"
-                />
-                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
-                  Change in Settings &rarr; Branding
-                </Typography>
-              </Grid>
-            </Grid>
-          )}
+          {/* Listening: mic button mode, speech detection, wake phrase (shared with the Voice page) */}
+          <VoiceListeningSettings
+            settings={voiceSettings}
+            onChange={handleVoiceSettingChange}
+            systemName={systemName}
+          />
         </>
       )}
     </>

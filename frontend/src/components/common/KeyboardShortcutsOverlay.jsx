@@ -25,6 +25,8 @@ const SHORTCUT_GROUPS = [
     items: [
       { keys: ["?"], desc: "Show this keyboard shortcuts reference" },
       { keys: ["Ctrl", "Shift", "C"], desc: "Toggle the floating chat panel" },
+      // VoiceSessionProvider (contexts/VoiceSessionContext.jsx)
+      { keys: ["Ctrl", "Shift", "Space"], desc: "Voice: tap to start or stop the mic, hold to talk" },
     ],
   },
   {

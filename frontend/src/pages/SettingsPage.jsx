@@ -82,6 +82,11 @@ import * as interconnectorApi from "../api/interconnectorService";
 import { useVoice } from "../contexts/VoiceContext";
 import * as apiService from "../api";
 import voiceService from "../api/voiceService";
+import {
+  VOICE_SETTINGS_EVENT,
+  normalizeVoiceSettings,
+  readVoiceSettings,
+} from "../config/voiceDefaults";
 import { ragAutoresearchService } from "../api/ragAutoresearchService";
 import { getMcpStatus } from "../api/mcpService";
 import { NAV_CHROME } from "../config/navCatalog";
@@ -410,47 +415,25 @@ const SettingsPage = () => {
         localStorage.removeItem(oldKey);
       }
 
-      const saved = localStorage.getItem(VOICE_SETTINGS_KEY);
-      return saved
-        ? JSON.parse(saved)
-        : {
-            voice: "libritts",
-            recordingQuality: "medium",
-            recordingVolume: 1.0,
-            autoGainControl: true,
-            noiseSuppression: true,
-            echoCancellation: true,
-            playbackVolume: 1.0,
-            playbackSpeed: 1.0,
-            maxRecordingDuration: 60,
-            ttsEnabled: true,
-            micEnabled: true,
-            // Continuous listening mode settings
-            silenceThreshold: 0.05,
-            silenceTimeout: 2000,
-            maxSegmentDuration: 30000,
-          };
+      return readVoiceSettings();
     } catch (error) {
       console.warn("Failed to load voice settings from localStorage:", error);
-      return {
-        voice: "libritts",
-        recordingQuality: "medium",
-        recordingVolume: 1.0,
-        autoGainControl: true,
-        noiseSuppression: true,
-        echoCancellation: true,
-        playbackVolume: 1.0,
-        playbackSpeed: 1.0,
-        maxRecordingDuration: 60,
-        ttsEnabled: true,
-        micEnabled: true,
-        // Continuous listening mode settings
-        silenceThreshold: 0.05,
-        silenceTimeout: 2000,
-        maxSegmentDuration: 30000,
-      };
+      return normalizeVoiceSettings({});
     }
   });
+
+  // The mic popover and the Voice page write the same settings; take their
+  // changes so this page's next save does not put the old values back.
+  useEffect(() => {
+    const takeExternalChange = () => {
+      const next = readVoiceSettings();
+      setVoiceSettings((prev) =>
+        JSON.stringify(normalizeVoiceSettings(prev)) === JSON.stringify(next) ? prev : next
+      );
+    };
+    window.addEventListener(VOICE_SETTINGS_EVENT, takeExternalChange);
+    return () => window.removeEventListener(VOICE_SETTINGS_EVENT, takeExternalChange);
+  }, []);
 
   const [availableVoices, setAvailableVoices] = useState([]);
   const [voiceStatus, setVoiceStatus] = useState(null);
@@ -2277,8 +2260,13 @@ const SettingsPage = () => {
   useEffect(() => {
     const id = decodeURIComponent((location.hash || "").replace(/^#/, ""));
     if (!id) return undefined;
+    // Voice settings live in a dialog off the Chat panel; the mic popover links here.
+    const isVoice = id === "settings-voice";
+    if (isVoice) setVoiceSettingsModalOpen(true);
     const timer = window.setTimeout(() => {
-      document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+      document
+        .getElementById(isVoice ? "settings-chat" : id)
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
     }, 150);
     return () => window.clearTimeout(timer);
   }, [location.hash]);

@@ -3,6 +3,7 @@ import { persist, createJSONStorage, subscribeWithSelector, devtools } from "zus
 import brand from "../config/brand";
 import { DEFAULT_PROFILE } from "../config/profile";
 import { extensionStoreSlices } from "../extensions";
+import { DEFAULT_ACTIVATION_MODE, isActivationMode } from "../config/voiceDefaults";
 
 // Extensions may add state (extensions/<id>/frontend/index.jsx storeSlice);
 // their persisted keys join partialize below.
@@ -28,8 +29,13 @@ const createUISlice = (set, get) => ({
     set({ navChrome: chrome });
   },
 
-  listenerModeEnabled: false,
-  toggleListenerMode: () => set((state) => ({ listenerModeEnabled: !state.listenerModeEnabled })),
+  // What a click on a mic button does: "push" | "toggle" | "handsfree"
+  // (config/voiceDefaults.js). Wake word and VAD live in the voice settings.
+  voiceActivationMode: DEFAULT_ACTIVATION_MODE,
+  setVoiceActivationMode: (mode) => {
+    if (!isActivationMode(mode)) return;
+    set({ voiceActivationMode: mode });
+  },
 
   trainerOpen: false,
   setTrainerOpen: (open) => set({ trainerOpen: open }),
@@ -170,6 +176,21 @@ const createDataSlice = (set, get) => ({
   },
 });
 
+/**
+ * Persisted state over the defaults. A browser that saved the old Listener
+ * toggle on (listenerModeEnabled) opens in Hands-free; an explicit
+ * voiceActivationMode wins, and the old key is not carried forward.
+ */
+export function mergePersistedAppState(persistedState, currentState) {
+  const { listenerModeEnabled, ...persisted } = persistedState || {};
+  const merged = { ...currentState, ...persisted };
+  if (!isActivationMode(persisted.voiceActivationMode)) {
+    merged.voiceActivationMode =
+      listenerModeEnabled === true ? "handsfree" : currentState.voiceActivationMode;
+  }
+  return merged;
+}
+
 export const useAppStore = create(
   subscribeWithSelector(
     devtools(
@@ -187,17 +208,14 @@ export const useAppStore = create(
             dashboardLayout: state.dashboardLayout,
             sidebarExpanded: state.sidebarExpanded,
             navChrome: state.navChrome,
-            listenerModeEnabled: state.listenerModeEnabled,
+            voiceActivationMode: state.voiceActivationMode,
             activeModel: state.activeModel,
             activeProjectId: state.activeProjectId,
             systemName: state.systemName,
             systemLogo: state.systemLogo,
             ...Object.fromEntries(extensionPersistedKeys.map((k) => [k, state[k]])),
           }),
-          merge: (persistedState, currentState) => ({
-            ...currentState,
-            ...persistedState,
-          }),
+          merge: mergePersistedAppState,
         },
       ),
       {
