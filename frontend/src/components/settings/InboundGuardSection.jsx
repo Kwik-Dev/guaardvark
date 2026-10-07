@@ -244,7 +244,10 @@ export default function InboundGuardSection() {
   const scanners = state?.providers?.scanners || [];
 
   return (
-    <Cluster label="Inbound guard" note="reads code before it lands in this checkout">
+    <Cluster
+      label="Inbound guard"
+      help="Reads code changes before they land in this install. In Enforce, risky changes wait here for your approval."
+    >
       <Line>
         <ChoiceChips options={MODES} value={state?.mode || "off"} onChange={changeMode} ariaLabel="Inbound guard mode" />
         <StatusPill

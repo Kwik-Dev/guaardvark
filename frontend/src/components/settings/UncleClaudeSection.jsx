@@ -137,7 +137,10 @@ export default function UncleClaudeSection() {
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: 1.25 }}>
-      <Cluster label="Uncle Claude" note="mentor API">
+      <Cluster
+        label="Uncle Claude"
+        help="An optional mentor: Guaardvark asks Anthropic's Claude for help over the internet. It needs your own Anthropic API key, and every request counts against the monthly token budget below."
+      >
         <Line>
           <StatusPill tone={connection.tone} label={connection.label} />
           {status?.model && <Hint>{status.model}</Hint>}
@@ -198,7 +201,10 @@ export default function UncleClaudeSection() {
         </Line>
       </Cluster>
 
-      <Cluster label="Self-improvement">
+      <Cluster
+        label="Self-improvement"
+        help="Guaardvark checks its own code and proposes fixes for you to review. Codebase locked blocks every automatic edit."
+      >
         <Line>
           <SettingChip
             label="Self-improvement"
