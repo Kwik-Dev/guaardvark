@@ -430,6 +430,8 @@ The sections above cover the experience and differentiators. The rest of this RE
 > default — `./start.sh` installs 3.12 automatically (deadsnakes or uv). Manual
 > installs: use a 3.12 interpreter only.
 
+A fresh Ubuntu desktop has no `curl` or `git`; run `sudo apt install -y curl git` first.
+
 ```bash
 curl -fsSL https://guaardvark.com/install.sh | bash
 ```
