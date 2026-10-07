@@ -89,6 +89,41 @@ def list_image_folders():
         return error_response(str(e), 500)
 
 
+@training_bp.route("/datasets/inspect", methods=["GET"])
+def inspect_dataset():
+    """What a dataset path holds: files, rows, usable rows, formats, a few
+    clipped sample rows and the first problems (file and line, never text).
+    ?path= a .jsonl or .json file or a folder on this machine; ~ is followed."""
+    from backend.services.training.scripts import dataset_formats
+    try:
+        return success_response(dataset_formats.inspect(request.args.get("path", "")))
+    except Exception as e:
+        logger.error(f"Error inspecting dataset path: {e}", exc_info=True)
+        return error_response(f"Could not read the dataset: {type(e).__name__}", 500)
+
+
+def training_datasets_dir() -> Path:
+    """Where parsed transcripts are written and the dataset picker opens."""
+    from backend.config import STORAGE_DIR
+    return Path(STORAGE_DIR) / "training" / "datasets"
+
+
+@training_bp.route("/datasets/locations", methods=["GET"])
+def dataset_locations():
+    """Starting folders for the dataset picker: Guaardvark's training datasets
+    folder and the home folder, each with whether it exists, and the one the
+    picker opens in."""
+    datasets_dir = training_datasets_dir()
+    home = Path(os.path.expanduser("~"))
+    locations = [
+        {"id": "datasets", "label": "Training datasets", "path": str(datasets_dir),
+         "exists": datasets_dir.is_dir()},
+        {"id": "home", "label": "Home", "path": str(home), "exists": home.is_dir()},
+    ]
+    default = next((loc["path"] for loc in locations if loc["exists"]), "~")
+    return success_response({"locations": locations, "default": default})
+
+
 @training_bp.route("/hardware", methods=["GET"])
 @ensure_db_session_cleanup
 def get_hardware_capabilities():

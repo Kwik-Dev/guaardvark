@@ -109,6 +109,8 @@ PROTECTED_FILE_PREFIXES = (
     '/api/files/mkdir',
     '/api/files/rename',
     '/api/files/browse-server',
+    # Reads files anywhere on the server to describe a training dataset.
+    '/api/training/datasets/',
 )
 
 # Endpoints protected only on DELETE
