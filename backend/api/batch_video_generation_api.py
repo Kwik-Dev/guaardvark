@@ -15,13 +15,13 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
+from urllib.parse import quote
 
 from flask import Blueprint, request, send_file
-from werkzeug.utils import secure_filename
 
 from backend.utils.response_utils import success_response, error_response
 from backend.utils.path_guard import PathEscapesRoot, contained
-from backend.services.batch_video_generator import get_batch_video_generator
+from backend.services.batch_video_generator import VideoRenameError, get_batch_video_generator
 from backend.services.job_types import RenderErrorKind, batch_failure, describe_failure, failure_kind
 from backend.services.video_consistency_metrics import NEEDS_REVIEW
 # Single source of truth for video-model file layout (download dst == install
@@ -577,34 +577,11 @@ def delete_video(batch_id: str, video_name: str):
     try:
         generator = get_batch_video_generator()
         try:
-            batch_dir = contained(generator.base_output_dir, batch_id)
-            target_path = contained(batch_dir, video_name)
+            deleted = generator.delete_video(batch_id, video_name)
         except PathEscapesRoot:
             return error_response("Invalid video path", 400)
-
-        if not target_path.exists():
+        if not deleted:
             return error_response("Video not found", 404)
-
-        target_path.unlink(missing_ok=True)
-
-        # Update metadata if present
-        metadata_file = batch_dir / "batch_metadata.json"
-        if metadata_file.exists():
-            try:
-                with open(metadata_file, "r") as f:
-                    data = json.load(f)
-                changed = False
-                for res in data.get("results", []):
-                    rel = res.get("video_path", "")
-                    if rel and (rel == str(Path(video_name)) or rel.endswith(video_name)):
-                        res["video_path"] = None
-                        changed = True
-                if changed:
-                    with open(metadata_file, "w") as f:
-                        json.dump(data, f, indent=2)
-            except Exception as e:
-                logger.warning(f"Failed to update metadata after delete: {e}")
-
         return success_response({"batch_id": batch_id, "deleted": video_name})
     except Exception as e:
         logger.error(f"Failed to delete video: {e}")
@@ -613,48 +590,32 @@ def delete_video(batch_id: str, video_name: str):
 
 @batch_video_bp.route("/video/<batch_id>/<path:video_name>/rename", methods=["PUT"])
 def rename_video(batch_id: str, video_name: str):
+    """Rename one clip. Body {"new_name": "<file name>"}; the extension is kept.
+
+    Answers with the clip's new paths (relative to the batch) and the URL that
+    serves it, so a page can repoint its player without reloading the batch.
+    """
     try:
         data = request.get_json(silent=True) or {}
-        new_name = data.get("new_name", "").strip()
-        if not new_name:
-            return error_response("New name cannot be empty", 400)
-
+        new_name = str(data.get("new_name") or "")
         generator = get_batch_video_generator()
         try:
-            batch_dir = contained(generator.base_output_dir, batch_id)
-            src_path = contained(batch_dir, video_name)
+            renamed = generator.rename_video(batch_id, video_name, new_name)
         except PathEscapesRoot:
             return error_response("Invalid video path", 400)
+        except VideoRenameError as e:
+            return error_response(str(e), e.status)
 
-        if not src_path.exists():
-            return error_response("Video not found", 404)
-
-        new_safe = secure_filename(new_name)
-        dst_path = src_path.with_name(new_safe)
-        if dst_path.exists():
-            return error_response("A file with the new name already exists", 409)
-
-        src_path.rename(dst_path)
-
-        # Update metadata if present
-        metadata_file = batch_dir / "batch_metadata.json"
-        if metadata_file.exists():
-            try:
-                with open(metadata_file, "r") as f:
-                    meta = json.load(f)
-                updated = False
-                for res in meta.get("results", []):
-                    rel = res.get("video_path", "")
-                    if rel and (rel == str(Path(video_name)) or rel.endswith(video_name)):
-                        res["video_path"] = str(dst_path.relative_to(batch_dir))
-                        updated = True
-                if updated:
-                    with open(metadata_file, "w") as f:
-                        json.dump(meta, f, indent=2)
-            except Exception as e:
-                logger.warning(f"Failed to update metadata after rename: {e}")
-
-        return success_response({"batch_id": batch_id, "old_name": video_name, "new_name": new_safe})
+        video_path = renamed["video_path"]
+        return success_response({
+            "batch_id": batch_id,
+            "old_name": video_name,
+            "new_name": Path(video_path).name,
+            "old_video_path": renamed["old_video_path"],
+            "video_path": video_path,
+            "thumbnail_path": renamed["thumbnail_path"],
+            "url": f"{batch_video_bp.url_prefix}/video/{quote(batch_id)}/{quote(Path(video_path).as_posix())}",
+        })
     except Exception as e:
         logger.error(f"Failed to rename video: {e}")
         return error_response(str(e), 500)

@@ -233,6 +233,30 @@ class BatchVideoStatus:
     error_kind: Optional[str] = None
 
 
+class VideoRenameError(ValueError):
+    """A clip rename the caller has to change; ``status`` is the HTTP code for it."""
+
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
+
+
+# A rename may not switch a clip between these: the container stays what was rendered.
+_VIDEO_SUFFIXES = (".mp4", ".webm", ".avi", ".mov", ".mkv", ".gif")
+
+
+def _result_get(result, key):
+    """Field of a batch result held as a BatchVideoResult or as its JSON dict."""
+    return result.get(key) if isinstance(result, dict) else getattr(result, key, None)
+
+
+def _result_set(result, key, value) -> None:
+    if isinstance(result, dict):
+        result[key] = value
+    else:
+        setattr(result, key, value)
+
+
 AUTO_RETRY_ENV = "GUAARDVARK_VIDEO_AUTO_RETRY"
 
 
@@ -2209,18 +2233,247 @@ class BatchVideoGenerator:
         batch_dir = self._get_batch_dir(batch_id)
         if not batch_dir.exists():
             return False
-        metadata_file = batch_dir / "batch_metadata.json"
+
+        def _edit(_results, metadata):
+            metadata["display_name"] = new_name
+            return True
+
         try:
-            if metadata_file.exists():
-                with open(metadata_file, "r") as f:
-                    data = json.load(f)
-                data.setdefault("metadata", {})["display_name"] = new_name
-                with open(metadata_file, "w") as f:
-                    json.dump(data, f, indent=2)
+            self._edit_batch_record(batch_id, _edit)
             return True
         except Exception as e:  # pragma: no cover
             logger.error(f"Failed to rename batch {batch_id}: {e}")
             return False
+
+    def _edit_batch_record(self, batch_id: str, edit) -> bool:
+        """Apply ``edit(results, metadata) -> changed`` to a batch's record.
+
+        The in-memory record is what /status serves and what every later
+        _save_metadata writes back, so a batch held in memory is edited there
+        (under batch_lock) and then saved; a batch known only from disk has its
+        batch_metadata.json edited. ``results`` holds BatchVideoResult objects
+        in the first case and dicts in the second. Returns ``changed``.
+        """
+        with self.batch_lock:
+            status = self.active_batches.get(batch_id)
+            if status is not None:
+                if status.metadata is None:
+                    status.metadata = {}
+                changed = bool(edit(status.results, status.metadata))
+        if status is not None:
+            if changed:
+                self._save_metadata(status)
+            return changed
+        metadata_file = self._get_batch_dir(batch_id) / "batch_metadata.json"
+        if not metadata_file.exists():
+            return False
+        with open(metadata_file, "r") as f:
+            data = json.load(f)
+        if not isinstance(data.get("metadata"), dict):
+            data["metadata"] = {}
+        changed = bool(edit(data.setdefault("results", []), data["metadata"]))
+        if changed:
+            with open(metadata_file, "w") as f:
+                json.dump(data, f, indent=2)
+        return changed
+
+    @staticmethod
+    def _points_at(path_value, batch_dir: Path, target: Path) -> bool:
+        """Whether a result path (relative to the batch dir, or absolute) is ``target``."""
+        if not path_value:
+            return False
+        p = Path(path_value)
+        if not p.is_absolute():
+            p = batch_dir / p
+        return os.path.abspath(p) == os.path.abspath(target)
+
+    def delete_video(self, batch_id: str, video_rel: str) -> bool:
+        """Delete one clip and clear it from the batch record. False when absent.
+
+        Raises PathEscapesRoot for a path outside the batch directory.
+        """
+        batch_dir = self._get_batch_dir(batch_id)
+        target = contained(batch_dir, video_rel)
+        if not target.is_file():
+            return False
+        target.unlink()
+
+        def _edit(results, _metadata):
+            changed = False
+            for r in results:
+                if self._points_at(_result_get(r, "video_path"), batch_dir, target):
+                    _result_set(r, "video_path", None)
+                    changed = True
+            return changed
+
+        try:
+            self._edit_batch_record(batch_id, _edit)
+        except Exception as e:
+            logger.warning(f"Deleted {target.name} but could not update batch {batch_id}: {e}")
+        return True
+
+    @staticmethod
+    def _clip_rename_target(current: str, requested: str) -> str:
+        """The file name a clip rename writes; the clip keeps its extension.
+
+        Raises VideoRenameError for an empty name, a path, a different video
+        extension, or a name with no usable characters.
+        """
+        from werkzeug.utils import secure_filename
+
+        name = (requested or "").strip()
+        if not name:
+            raise VideoRenameError("Enter a new name.")
+        if "/" in name or "\\" in name:
+            raise VideoRenameError("Enter a file name only, without folders.")
+        ext = Path(current).suffix
+        given = Path(name).suffix
+        if ext and given.lower() != ext.lower():
+            if given.lower() in _VIDEO_SUFFIXES:
+                raise VideoRenameError(f"The video stays {ext}; keep that extension.")
+            name += ext
+        safe = secure_filename(name)
+        if not safe or (ext and (safe.lower() == ext.lower() or not safe.lower().endswith(ext.lower()))):
+            raise VideoRenameError("That name has no usable characters; use letters or digits.")
+        return safe
+
+    def rename_video(self, batch_id: str, video_rel: str, new_name: str) -> Dict:
+        """Rename one clip and everything that points at it.
+
+        ``video_rel`` is the clip's path relative to the batch directory, as
+        its result carries it; ``new_name`` is a bare file name, and the clip's
+        extension is added when it is left off. The thumbnail and the
+        .metrics.json sidecar follow the clip, and the batch record (in memory
+        and on disk) and the clip's Documents row are repointed. Returns
+        {"video_path", "thumbnail_path", "old_video_path"}, the result's paths
+        after and before. Raises VideoRenameError (with an HTTP status) for a
+        rename the caller has to change, PathEscapesRoot for a path outside
+        the batch.
+        """
+        batch_dir = self._get_batch_dir(batch_id)
+        src = contained(batch_dir, video_rel)
+        if not src.is_file():
+            raise VideoRenameError("Video not found.", 404)
+        dst = src.with_name(self._clip_rename_target(src.name, new_name))
+        old_rel = os.path.relpath(src, batch_dir)
+        out = {
+            "video_path": os.path.relpath(dst, batch_dir),
+            "thumbnail_path": None,
+            "old_video_path": old_rel,
+        }
+        if dst == src:
+            out["video_path"] = old_rel
+            return out
+        if dst.exists():
+            raise VideoRenameError(f"A file named {dst.name} already exists in this batch.", 409)
+
+        moved = []  # (from, to) renames to undo if the record cannot be saved
+        src.rename(dst)
+        moved.append((src, dst))
+
+        def _edit(results, _metadata):
+            changed = False
+            for r in results:
+                old_value = _result_get(r, "video_path")
+                if not self._points_at(old_value, batch_dir, src):
+                    continue
+                new_value = str(dst) if Path(old_value).is_absolute() else str(Path(old_value).with_name(dst.name))
+                _result_set(r, "video_path", new_value)
+                frames = _result_get(r, "frame_paths") or []
+                if any(self._points_at(fp, batch_dir, src) for fp in frames):
+                    _result_set(r, "frame_paths", [
+                        new_value if self._points_at(fp, batch_dir, src) else fp for fp in frames
+                    ])
+                thumb_value = _result_get(r, "thumbnail_path")
+                if thumb_value:
+                    new_thumb_value = self._move_clip_thumbnail(thumb_value, batch_dir, src, dst, moved)
+                    _result_set(r, "thumbnail_path", new_thumb_value)
+                    thumb_value = new_thumb_value
+                if not changed:
+                    out["video_path"], out["thumbnail_path"] = new_value, thumb_value
+                changed = True
+            return changed
+
+        try:
+            self._edit_batch_record(batch_id, _edit)
+        except Exception:
+            for a, b in reversed(moved):
+                try:
+                    b.rename(a)
+                except OSError as undo_err:
+                    logger.error(f"Could not undo rename {b} -> {a}: {undo_err}")
+            raise
+
+        sidecar = src.with_name(src.name + ".metrics.json")
+        new_sidecar = dst.with_name(dst.name + ".metrics.json")
+        if sidecar.exists() and not new_sidecar.exists():
+            try:
+                sidecar.rename(new_sidecar)
+            except OSError as e:
+                logger.warning(f"Could not move metrics sidecar for {dst.name}: {e}")
+        self._repoint_document(src, dst)
+        return out
+
+    @staticmethod
+    def _move_clip_thumbnail(thumb_value: str, batch_dir: Path, src: Path, dst: Path, moved: list) -> str:
+        """Rename a clip's ``<stem>_thumb.jpg`` to match the new clip name.
+
+        Returns the result's new thumbnail path, or ``thumb_value`` unchanged
+        when the thumbnail has another name, is missing, or the target exists.
+        """
+        thumb = Path(thumb_value)
+        thumb_abs = thumb if thumb.is_absolute() else batch_dir / thumb
+        if thumb.name != f"{src.stem}_thumb.jpg" or not thumb_abs.is_file():
+            return thumb_value
+        new_abs = thumb_abs.with_name(f"{dst.stem}_thumb.jpg")
+        if new_abs.exists():
+            return thumb_value
+        thumb_abs.rename(new_abs)
+        moved.append((thumb_abs, new_abs))
+        return str(new_abs) if thumb.is_absolute() else str(thumb.with_name(new_abs.name))
+
+    @staticmethod
+    def _repoint_document(old_path: Path, new_path: Path) -> None:
+        """Point the clip's Documents row at its new file name. Never raises.
+
+        The row's path is the file's location relative to UPLOAD_DIR, the way
+        output_registration.register_file wrote it.
+        """
+        try:
+            base = os.path.abspath(UPLOAD_DIR)
+            old_db_path = os.path.relpath(os.path.abspath(old_path), base)
+            new_db_path = os.path.relpath(os.path.abspath(new_path), base)
+            if old_db_path.startswith(".."):
+                return
+            from flask import has_app_context
+            from backend.models import Document, db
+            from backend.utils.filename_resolver import resolve_filename
+
+            def _apply():
+                try:
+                    doc = Document.query.filter_by(path=old_db_path).first()
+                    if doc is None:
+                        return
+                    doc.path = new_db_path
+                    doc.filename = resolve_filename(
+                        doc.folder_id, new_path.name, db.session, Document, exclude_id=doc.id,
+                    )
+                    db.session.commit()
+                except Exception:
+                    db.session.rollback()
+                    raise
+
+            if has_app_context():
+                _apply()
+            else:
+                from backend.app import get_or_create_app
+                with get_or_create_app().app_context():
+                    try:
+                        _apply()
+                    finally:
+                        db.session.remove()
+        except Exception as e:
+            logger.error(f"Clip renamed to {new_path.name} but its Documents row was not updated: {e}")
 
     def get_preview_thumbnail(self, batch_id: str) -> Optional[Path]:
         batch_dir = self._get_batch_dir(batch_id)
