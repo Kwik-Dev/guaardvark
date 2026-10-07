@@ -55,6 +55,15 @@ _EXPRESSIBLE = {
                "generate_frames_only"},
 }
 
+# The scalar knobs the named image/video commands now accept (issue #8). `ui_config` and
+# any other opaque Studio control-panel snapshot is deliberately not here: it stays
+# inexpressible and forces the lossless `api request` line, which keeps it.
+_IMAGES_KNOBS = {"model", "style", "width", "height", "steps", "guidance", "negative_prompt",
+                 "auto_enhance", "restore_faces", "remove_background", "director_mode"}
+_VIDEOS_KNOBS = {"model", "duration_frames", "fps", "width", "height", "num_inference_steps",
+                 "guidance_scale", "motion_strength", "seed", "generate_frames_only",
+                 "negative_prompt", "prompt_style"}
+
 
 def _fetch(endpoint: str, server) -> dict:
     try:
@@ -94,7 +103,79 @@ def _named_command(group: str, body: Any):
         return _music_video_command(body)
     if group == "film-crew":
         return _film_crew_command(body)
+    if group == "images":
+        return _images_command(body)
+    if group == "videos":
+        return _videos_command(body)
     return None, sorted(set(body) - _EXPRESSIBLE[group])
+
+
+def _single_prompt_parts(group: str, body: dict, verb: str):
+    """Shared head of the image/video named line; a multi-prompt batch cannot be named.
+
+    `images generate` / `videos generate` take one prompt repeated by `--count`, so a
+    batch of distinct prompts has no named form (only the generic `api request` line
+    keeps them). Returns (parts, inexpressible).
+    """
+    prompts = body.get("prompts") or []
+    if not prompts:
+        return None, ["prompts"]
+    parts = ["guaardvark", group, verb, shlex.quote(str(prompts[0]))]
+    if len(prompts) > 1:
+        parts += ["--count", str(len(prompts))]
+    inexpressible = [] if len(set(prompts)) == 1 else ["prompts"]
+    return parts, inexpressible
+
+
+def _images_command(body: dict):
+    parts, inexpressible = _single_prompt_parts("images", body, "generate")
+    if parts is None:
+        return None, inexpressible
+    if body.get("model"):
+        parts += ["--model", shlex.quote(str(body["model"]))]
+    if body.get("style"):
+        parts += ["--style", shlex.quote(str(body["style"]))]
+    for flag, key in (("--width", "width"), ("--height", "height"),
+                      ("--steps", "steps"), ("--guidance", "guidance")):
+        if body.get(key) is not None:
+            parts += [flag, str(body[key])]
+    if body.get("negative_prompt"):
+        parts += ["--negative-prompt", shlex.quote(str(body["negative_prompt"]))]
+    for key, on, off in (("auto_enhance", "--auto-enhance", "--no-auto-enhance"),
+                         ("restore_faces", "--restore-faces", "--no-restore-faces"),
+                         ("remove_background", "--remove-background", "--no-remove-background"),
+                         ("director_mode", "--director-mode", "--no-director-mode")):
+        if body.get(key) is not None:
+            parts.append(on if body[key] else off)
+    inexpressible += sorted(set(body) - {"prompts", "batch_size"} - _IMAGES_KNOBS)
+    return (" ".join(parts) if not inexpressible else None), sorted(set(inexpressible))
+
+
+def _videos_command(body: dict):
+    if body.get("image_paths"):
+        # image-to-video is a different command (`videos from-image`), which has no
+        # --prompt flag: name the fields `videos generate` cannot express and let the
+        # generic api line carry the record.
+        return None, sorted(set(body) - _EXPRESSIBLE["videos"])
+    parts, inexpressible = _single_prompt_parts("videos", body, "generate")
+    if parts is None:
+        return None, inexpressible
+    for flag, key in (("--duration", "duration_frames"), ("--fps", "fps"), ("--width", "width"),
+                      ("--height", "height"), ("--steps", "num_inference_steps"),
+                      ("--guidance", "guidance_scale"), ("--motion", "motion_strength"),
+                      ("--seed", "seed")):
+        if body.get(key) is not None:
+            parts += [flag, str(body[key])]
+    if body.get("model"):
+        parts += ["--model", shlex.quote(str(body["model"]))]
+    if body.get("negative_prompt"):
+        parts += ["--negative-prompt", shlex.quote(str(body["negative_prompt"]))]
+    if body.get("prompt_style"):
+        parts += ["--prompt-style", shlex.quote(str(body["prompt_style"]))]
+    if body.get("generate_frames_only"):
+        parts.append("--frames-only")
+    inexpressible += sorted(set(body) - {"prompts"} - _VIDEOS_KNOBS)
+    return (" ".join(parts) if not inexpressible else None), sorted(set(inexpressible))
 
 
 def _music_video_command(body: dict):
@@ -146,12 +227,17 @@ def _film_crew_command(body: dict):
 
 
 def _emit(group: str, source: str, method: str, path: str, body: Any, *,
-          dry_run: bool, yes: bool, server, json_out: bool, notes=()) -> None:
+          dry_run: bool, yes: bool, server, json_out: bool, notes=(),
+          named: Any = None, inexpressible: list | None = None) -> None:
     as_json = bool(json_out or get_global_json() or output.is_pipe())
     output.set_json_mode(as_json)
     redacted: list = []
     clean = _scrub(body, redacted)
-    named, inexpressible = _named_command(group, clean)
+    # A caller that knows its own named command (audio, infographic) passes both; the
+    # generic groups derive them from the recorded body shape.
+    if named is None and inexpressible is None:
+        named, inexpressible = _named_command(group, clean)
+    inexpressible = inexpressible or []
     # Prefer the curated command; the generic one is the lossless fallback and is always
     # shown so a caller can see both without re-deriving anything.
     command_line = named or _api_command_line(method, path, clean)

@@ -56,23 +56,85 @@ def images_generate(
                                    help="Text file with one prompt per line; all go in one batch"),
     count: int = typer.Option(1, "--count", "-n", help="Number of images"),
     model: str = typer.Option(None, "--model", "-m", help="Model override"),
+    style: str = typer.Option(None, "--style", help="Style preset (e.g. realistic, cinematic)"),
+    width: int = typer.Option(None, "--width", "-W", help="Image width (default: model native)"),
+    height: int = typer.Option(None, "--height", "-H", help="Image height (default: model native)"),
+    steps: int = typer.Option(None, "--steps", help="Inference steps (default: model floor)"),
+    guidance: float = typer.Option(None, "--guidance", help="Guidance scale"),
+    negative_prompt: str = typer.Option(None, "--negative-prompt", help="What to avoid"),
+    auto_enhance: bool = typer.Option(None, "--auto-enhance/--no-auto-enhance",
+                                      help="Prompt auto-enhancement"),
+    restore_faces: bool = typer.Option(None, "--restore-faces/--no-restore-faces"),
+    remove_background: bool = typer.Option(None, "--remove-background/--no-remove-background"),
+    director_mode: bool = typer.Option(None, "--director-mode/--no-director-mode"),
     dry_run: bool = _DRY,
     server: str = typer.Option(None, "--server", "-s"),
     json_out: bool = typer.Option(False, "--json", "-j"),
 ):
-    """Generate images from a prompt."""
+    """Generate images from a prompt.
+
+    The extra flags (style/size/steps/guidance/negative-prompt/auto-enhance/restore-faces/
+    remove-background/director-mode) are what the Studio records in `retry_data.params`;
+    exposing them is what lets `images reproduce` use the named command instead of the
+    generic `api request` line (issue #8).
+    """
+    from llx.client import LlxConnectionError, LlxError
+
+    def _body() -> dict:
+        if from_file:
+            prompts = [ln.strip() for ln in from_file.read_text(encoding="utf-8").splitlines()
+                       if ln.strip() and not ln.lstrip().startswith("#")]
+        elif prompt:
+            prompts = [prompt] * count
+        else:
+            _images.output.print_error(
+                "Give a prompt, or --from-file with one prompt per line", code="USAGE")
+            raise typer.Exit(2)
+        body: dict = {"prompts": prompts, "batch_size": len(prompts)}
+        for key, value in (("model", model), ("style", style), ("width", width),
+                           ("height", height), ("steps", steps), ("guidance", guidance),
+                           ("negative_prompt", negative_prompt), ("auto_enhance", auto_enhance),
+                           ("restore_faces", restore_faces),
+                           ("remove_background", remove_background),
+                           ("director_mode", director_mode)):
+            if value is not None:
+                body[key] = value
+        return body
+
+    def _run():
+        body = _body()
+        resolved = server or _images.get_global_server()
+        json_mode = json_out or _images.get_global_json()
+        _images.output.set_json_mode(json_mode)
+        try:
+            client = _images.get_client(resolved)
+            data = client.post("/api/batch-image/generate/prompts", json=body)
+            result = data.get("data", data)
+            if json_mode or _images.output.is_pipe():
+                _images.output.print_json({"status": "success", "data": result})
+            else:
+                job_id = result.get("job_id", result.get("batch_id", ""))
+                n = body["batch_size"]
+                _images.output.print_success(
+                    f"Image generation started ({n} image{'s' if n > 1 else ''})")
+                if job_id:
+                    _images.console.print(f"  Track with: [llx.accent]guaardvark jobs watch {job_id}[/llx.accent]")
+        except (LlxConnectionError, LlxError) as exc:
+            _images.output.print_error(str(exc))
+            raise typer.Exit(1)
+
     if not dry_run:
-        return _images.images_generate(prompt=prompt, from_file=from_file, count=count,
-                                       model=model, server=server, json_out=json_out)
-    preview("images generate",
-            lambda: _images.images_generate(prompt=prompt, from_file=from_file, count=count,
-                                            model=model, server=server, json_out=True),
-            inputs=("prompts",),
-            explicit=_explicit(model=model) | {"prompts"},
-            json_out=json_out,
-            notes=("the model is resolved on send (the active image model when --model is "
-                   "omitted) and server-side clamps are applied then; only client-known fields "
-                   "are shown here",))
+        _run()
+        return
+    flagged = {"prompts"} | {k for k, v in {
+        "model": model, "style": style, "width": width, "height": height, "steps": steps,
+        "guidance": guidance, "negative_prompt": negative_prompt, "auto_enhance": auto_enhance,
+        "restore_faces": restore_faces, "remove_background": remove_background,
+        "director_mode": director_mode,
+    }.items() if v is not None}
+    preview("images generate", _run, inputs=("prompts",), explicit=flagged, json_out=json_out,
+            notes=("the model is resolved on send when --model is omitted and server-side "
+                   "clamps are applied then; only client-known fields are shown here",))
 
 
 @generate_app.command("image")
@@ -132,6 +194,8 @@ def videos_generate(
     guidance: float = typer.Option(7.5, "--guidance", help="Guidance scale"),
     motion: float = typer.Option(1.0, "--motion", help="Motion strength"),
     seed: int = typer.Option(None, "--seed", help="Random seed for reproducibility"),
+    negative_prompt: str = typer.Option(None, "--negative-prompt", help="What to avoid"),
+    prompt_style: str = typer.Option(None, "--prompt-style", help="Prompt style preset"),
     frames_only: bool = typer.Option(False, "--frames-only", help="Generate frames without combining"),
     wait: bool = typer.Option(False, "--wait", "-w", help="Wait for completion with progress"),
     save: Path = typer.Option(None, "--save", help="With --wait: download the finished clip to this file"),
@@ -139,22 +203,59 @@ def videos_generate(
     server: str = typer.Option(None, "--server", "-s"),
     json_out: bool = typer.Option(False, "--json", "-j"),
 ):
-    """Generate videos from a text prompt."""
+    """Generate videos from a text prompt.
+
+    `--negative-prompt` and `--prompt-style` are among the fields the Studio records in
+    `retry_data.params`; exposing them is what lets `videos reproduce` prefer the named
+    command (issue #8).
+    """
+    from llx.client import LlxConnectionError, LlxError
+
+    def _body() -> dict:
+        body: dict = {"prompts": [prompt] * count}
+        body.update(_videos._build_gen_params(
+            model, duration, fps, width, height, steps, guidance, motion, seed, frames_only))
+        if negative_prompt is not None:
+            body["negative_prompt"] = negative_prompt
+        if prompt_style is not None:
+            body["prompt_style"] = prompt_style
+        return body
+
+    def _run():
+        body = _body()
+        resolved = server or _videos.get_global_server()
+        json_mode = json_out or _videos.get_global_json()
+        _videos.output.set_json_mode(json_mode)
+        try:
+            client = _videos.get_client(resolved)
+            data = client.post("/api/batch-video/generate/text", json=body)
+            result = data.get("data", data)
+            batch_id = result.get("batch_id", "") if isinstance(result, dict) else ""
+            if wait and batch_id:
+                final = _videos._poll_batch(client, batch_id, json_mode)
+                if save:
+                    _videos._save_first_clip(client, batch_id, final, save)
+                return
+            if json_mode or _videos.output.is_pipe():
+                _videos.output.print_json(result)
+            else:
+                _videos.output.print_success(
+                    f"Video generation started ({count} video{'s' if count > 1 else ''})")
+                if batch_id:
+                    _videos.console.print(f"  Track with: [llx.accent]guaardvark videos status {batch_id}[/llx.accent]")
+        except (LlxConnectionError, LlxError) as exc:
+            _videos.output.print_error(str(exc))
+            raise typer.Exit(1)
+
     if not dry_run:
-        return _videos.videos_generate(
-            prompt=prompt, count=count, model=model, duration=duration, fps=fps, width=width,
-            height=height, steps=steps, guidance=guidance, motion=motion, seed=seed,
-            frames_only=frames_only, wait=wait, save=save, server=server, json_out=json_out)
-    preview("videos generate",
-            lambda: _videos.videos_generate(
-                prompt=prompt, count=count, model=model, duration=duration, fps=fps, width=width,
-                height=height, steps=steps, guidance=guidance, motion=motion, seed=seed,
-                frames_only=frames_only, wait=False, save=None, server=server, json_out=True),
-            inputs=("prompts",),
-            explicit=_explicit(model=model, duration_frames=duration, fps=fps, width=width,
-                               height=height, num_inference_steps=steps, seed=seed,
-                               generate_frames_only=frames_only) | {"prompts"},
-            json_out=json_out,
+        _run()
+        return
+    flagged = {"prompts"} | {k for k, v in {
+        "model": model, "duration_frames": duration, "fps": fps, "width": width,
+        "height": height, "num_inference_steps": steps, "seed": seed,
+        "negative_prompt": negative_prompt, "prompt_style": prompt_style,
+    }.items() if v is not None} | ({"generate_frames_only"} if frames_only else set())
+    preview("videos generate", _run, inputs=("prompts",), explicit=flagged, json_out=json_out,
             notes=("server clamps (model duration/fps/steps floors) are applied on send and are "
                    "not shown here",))
 
