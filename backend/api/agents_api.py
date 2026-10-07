@@ -8,6 +8,8 @@ import logging
 from flask import Blueprint, request, jsonify
 from typing import Dict, Any
 
+from backend.services.agent_config import NO_AGENT_MATCHES
+
 logger = logging.getLogger(__name__)
 
 # Create blueprint
@@ -234,7 +236,7 @@ def match_agent():
             return jsonify({
                 "success": True,
                 "agent": None,
-                "message": "No matching agent found"
+                "message": NO_AGENT_MATCHES
             })
 
     except Exception as e:
@@ -296,7 +298,7 @@ def execute_agent():
             if not agent:
                 return jsonify({
                     "success": False,
-                    "error": "No matching agent found"
+                    "error": NO_AGENT_MATCHES
                 }), 404
 
         if not agent.enabled:

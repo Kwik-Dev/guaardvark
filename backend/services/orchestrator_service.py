@@ -224,7 +224,12 @@ class OrchestratorService:
 
     def _create_plan(self, request: str) -> OrchestrationPlan:
         """Use the LLM to break the request into an ordered set of sub-tasks."""
-        agents = self.agent_config_manager.get_enabled_agents()
+        from backend.services.agent_config import AgentType
+        # The orchestrator plans; a step handed back to it would plan again.
+        agents = [
+            a for a in self.agent_config_manager.get_enabled_agents()
+            if a.agent_type != AgentType.ORCHESTRATOR
+        ]
         enabled_agent_ids = {a.id for a in agents}
         agents_desc = "\n".join(
             [

@@ -689,9 +689,8 @@ class AgentRouter:
             agent = manager.get_agent_for_message(message)
             
             if not agent:
-                # Fallback to generic executor if no agent matches
-                logger.warning("No matching agent found, using generic executor")
-                return self._execute_generic_agent_loop(decision, message, context)
+                from backend.services.agent_config import NO_AGENT_MATCHES
+                return {"type": "error", "error": NO_AGENT_MATCHES}
             
             if not agent.enabled:
                 return {
