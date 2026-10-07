@@ -24,6 +24,8 @@ import { SubjectThumb } from '../components/filmcrew/CastLibraryView';
 import DragDropImageUpload from '../components/filmcrew/DragDropImageUpload';
 import CastVoicePicker from '../components/filmcrew/CastVoicePicker';
 import ChangedElsewhereNotice from '../components/common/ChangedElsewhereNotice';
+import EntityContextMenu from '../components/common/EntityContextMenu';
+import useContextMenu from '../hooks/useContextMenu';
 import useServerSyncedForm from '../hooks/useServerSyncedForm';
 import useUnsavedChangesGuard from '../hooks/useUnsavedChangesGuard';
 
@@ -164,6 +166,7 @@ const CastMemberPage = () => {
   const [regenTarget, setRegenTarget] = useState(null); // sample being regenerated
   const [regenPrompt, setRegenPrompt] = useState('');
   const [lightboxIdx, setLightboxIdx] = useState(null); // open enlarged viewer at this samples[] index
+  const sampleMenu = useContextMenu();
 
   // Import LoRA (externally-trained checkpoint attached to this Subject)
   const [importOpen, setImportOpen] = useState(false);
@@ -1265,7 +1268,7 @@ const CastMemberPage = () => {
                 const trainSt = sampleTrainStatus(s, subject);
                 return (
                 <Grid item xs={6} sm={4} md={3} lg={2} key={s.id}>
-                  <Card variant="outlined">
+                  <Card variant="outlined" onContextMenu={(e) => sampleMenu.open(e, { sample: s, idx })}>
                     {s.image_url ? (
                       <Box sx={{ position: 'relative' }}>
                         <CardMedia component="img" height="160" image={s.image_url} alt={s.angle || `sample ${s.index}`}
@@ -1329,6 +1332,38 @@ const CastMemberPage = () => {
             </Grid>
             </Box>
           )}
+          <EntityContextMenu
+            anchorPosition={sampleMenu.anchorPosition}
+            onClose={sampleMenu.close}
+            actions={
+              sampleMenu.payload
+                ? [
+                    sampleMenu.payload.sample.image_url && {
+                      label: 'View larger',
+                      onClick: () => setLightboxIdx(sampleMenu.payload.idx),
+                    },
+                    {
+                      label: sampleMenu.payload.sample.approved ? 'Un-approve' : 'Approve',
+                      onClick: () => toggleApprove(sampleMenu.payload.sample),
+                    },
+                    {
+                      label: 'Regenerate…',
+                      onClick: () => {
+                        setRegenTarget(sampleMenu.payload.sample);
+                        setRegenPrompt(sampleMenu.payload.sample.image_prompt || '');
+                      },
+                      disabled: isPending(sampleMenu.payload.sample),
+                    },
+                    {
+                      label: 'Remove this generation',
+                      onClick: () => handleDeleteSample(sampleMenu.payload.sample),
+                      color: 'error.main',
+                      dividerBefore: true,
+                    },
+                  ]
+                : []
+            }
+          />
 
           <Divider sx={{ my: 3 }} />
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
