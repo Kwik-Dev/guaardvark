@@ -288,6 +288,15 @@ class FactsRegistry:
             self._next_fact_id = 1
 
 
+
+# Closing line of an agent run's first message. Asking the model which tools it
+# needs got a written plan back ("I should use fetch_url ..."), which native tool
+# calling then took as the final answer; this asks it to act instead.
+_ACT_NOW = (
+    "Do it now: call the tool you need first, and give your final answer once "
+    "you have its result. Answer directly only if no tool is needed."
+)
+
 class AgentExecutor:
     """
     ReACT-style agent executor
@@ -397,6 +406,7 @@ class AgentExecutor:
             iteration = 0
             steps = []
             self.original_query = user_query  # Store for synthesis step
+            self._described_tool_nudged = False
             self._tool_history = []  # Track tools called across iterations
 
             effective_budget = budget
@@ -612,6 +622,20 @@ class AgentExecutor:
                 error=str(e)
             )
     
+    def _described_tool(self, text: str) -> Optional[str]:
+        """Name of one of this run's tools that `text` mentions, or None.
+
+        Used only when a native first reply called no tool: a reply that talks
+        about a tool it could have called is a plan, not an answer.
+        """
+        if not text:
+            return None
+        for tool in getattr(self, "_li_tools", None) or []:
+            name = getattr(getattr(tool, "metadata", None), "name", None)
+            if name and re.search(rf"\b{re.escape(name)}\b", text):
+                return name
+        return None
+
     def _execute_iteration(self, prompt: str, system_prompt: str, iteration: int, process_id: Optional[str]) -> Dict[str, Any]:
         """Execute a single iteration of the agent loop"""
         from datetime import datetime
@@ -998,6 +1022,31 @@ Otherwise, call the next tool needed. Do NOT repeat a tool you already called wi
 
         if not tool_selections:
             # No tools called — treat as final answer or nudge
+            described = self._described_tool(response_text)
+            if described and iteration == 1 and not self._described_tool_nudged:
+                # The model wrote about calling one of its tools instead of
+                # calling it. Ask once; a second text reply stands as the answer.
+                self._described_tool_nudged = True
+                log_decision("agent_executor", "DESCRIBED_NOT_CALLED", {
+                    "iteration": iteration,
+                    "tool": described,
+                    "mode": "native",
+                })
+                return {
+                    'is_final': False,
+                    'step': AgentStep(
+                        iteration=iteration,
+                        thoughts=response_text,
+                        tool_calls=[],
+                        observations=[],
+                        timestamp=datetime.now().isoformat()
+                    ),
+                    'next_prompt': (
+                        f"You described using {described} but did not call it. "
+                        f"Call {described} now with its parameters; do not describe the plan.\n\n"
+                        f"Original question: {self.original_query}"
+                    ),
+                }
             if response_text and response_text.strip():
                 log_decision("agent_executor", "FINAL_ANSWER", {
                     "iteration": iteration,
@@ -1161,12 +1210,12 @@ Based on the tool results, either call another tool or provide your final answer
 User Query:
 {user_query}
 
-Think step-by-step about how to help with this request. What tools do you need?"""
+{_ACT_NOW}"""
         else:
             return f"""User Query:
 {user_query}
 
-Think step-by-step about how to help with this request. What tools do you need?"""
+{_ACT_NOW}"""
     
     def _synthesize_answer(self, query: str, facts: List[ExtractedFact]) -> str:
         """
