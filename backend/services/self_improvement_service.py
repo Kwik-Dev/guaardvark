@@ -550,6 +550,7 @@ class SelfImprovementService:
                 tool_registry=registry,
                 llm=None,  # uses default from Settings
                 max_iterations=agent_config.max_iterations,
+                agent=agent_config,
             )
 
             message = message or (
@@ -567,7 +568,7 @@ class SelfImprovementService:
                 _trigger=getattr(self, "_current_trigger", None),
             )
 
-            result = executor.execute(message, session_context=agent_config.system_prompt)
+            result = executor.execute(message)
 
             if result and result.final_answer:
                 return {

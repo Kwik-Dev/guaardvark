@@ -1342,10 +1342,8 @@ class AgentBrain:
             executor.set_tool_context(session_id=session_id)
 
             # Build session context from initial Tier 2 result if escalated.
-            # Include explicit budget status so Tier 3 "knows" how much effort has already been spent.
+            # The step budget reaches the model through the executor's prompts.
             session_context = ""
-            if budget:
-                session_context += f"\n{budget.to_context()}"
             if initial_context:
                 prev_response = initial_context.get("response", "")
                 prev_tools = initial_context.get("tools_used", [])

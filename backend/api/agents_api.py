@@ -323,15 +323,9 @@ def execute_agent():
                 "error": "Tool registry not available"
             }), 500
 
-        # Filter tool registry to only agent's assigned tools
-        from backend.services.agent_tools import ToolRegistry
-        agent_tool_registry = ToolRegistry()
-        for tool_name in agent.tools:
-            tool = tool_registry.get_tool(tool_name)
-            if tool:
-                agent_tool_registry.register(tool)
-            else:
-                logger.warning(f"Agent '{agent.id}' references tool '{tool_name}' which is not available")
+        agent_tool_registry, missing = tool_registry.subset(agent.tools)
+        if missing:
+            logger.warning(f"Agent '{agent.id}' references tools that are not available: {missing}")
 
         if len(agent_tool_registry) == 0:
             return jsonify({
@@ -345,15 +339,11 @@ def execute_agent():
             from backend.utils.llm_service import get_default_llm
 
             llm = get_default_llm()
-            executor = AgentExecutor(agent_tool_registry, llm, max_iterations=agent.max_iterations)
-
-            # Build session context with agent's system prompt
-            session_context = f"""Agent: {agent.name}
-System: {agent.system_prompt}
-
-User Context: {str(context)}"""
-
-            result = executor.execute(message, session_context=session_context)
+            executor = AgentExecutor(
+                agent_tool_registry, llm, max_iterations=agent.max_iterations, agent=agent
+            )
+            from backend.services.agent_prompt_blocks import user_context_line
+            result = executor.execute(message, session_context=user_context_line(context))
 
             return jsonify({
                 "success": True,

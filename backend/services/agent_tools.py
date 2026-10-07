@@ -214,7 +214,26 @@ class ToolRegistry:
     def list_tools(self) -> List[str]:
         """Get list of all registered tool names"""
         return list(self.tools.keys())
-    
+
+    def subset(self, names: List[str]) -> "tuple[ToolRegistry, List[str]]":
+        """A new registry holding only the named tools, in the order given.
+
+        Returns (registry, missing): ``missing`` lists the names this registry
+        does not have, so a caller can say which tools an agent lacks.
+        """
+        tools = self.tools
+        picked: Dict[str, BaseTool] = {}
+        missing: List[str] = []
+        for name in names:
+            tool = tools.get(name)
+            if tool is None:
+                missing.append(name)
+            else:
+                picked[name] = tool
+        registry = ToolRegistry()
+        registry.tools = picked
+        return registry, missing
+
     def get_tool_schemas(self, format: str = 'xml', tool_filter: str = None) -> str:
         """
         Generate tool schemas for LLM prompt
