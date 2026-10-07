@@ -65,10 +65,12 @@ const RUN_STATUS_COLORS = {
   killed: "error",
 };
 
+// The server writes UTC timestamps without a zone; read them as UTC, not local time.
 const formatDate = (iso) => {
   if (!iso) return "—";
   try {
-    return new Date(iso).toLocaleString();
+    const text = String(iso);
+    return new Date(/[zZ]|[+-]\d\d:\d\d$/.test(text) ? text : `${text}Z`).toLocaleString();
   } catch {
     return iso;
   }
