@@ -294,22 +294,27 @@ class AgentExecutor:
     Coordinates tool calling and LLM reasoning
     """
     
-    def __init__(self, tool_registry: ToolRegistry, llm, max_iterations: int = 10):
+    def __init__(self, tool_registry: ToolRegistry, llm, max_iterations: int = 10, agent=None):
         """
         Initialize agent executor
-        
+
         Args:
             tool_registry: Registry of available tools
             llm: LLM instance for reasoning
             max_iterations: Maximum iterations before stopping
+            agent: optional AgentConfig; its name and instructions go into the
+                system prompt, and its tools decide whether this is a screen task
         """
         self.tool_registry = tool_registry
         self.llm = llm if llm is not None else self._load_default_llm()
         self.max_iterations = max_iterations
+        self.agent = agent
         self.facts_registry = FactsRegistry()
         self.original_query = ""  # Store original query for synthesis
         self._tool_context = {}
         self._native_tools_supported = False  # set in execute() after model check
+        self._screen = False  # set in execute()
+        self._tool_filter = None
 
         # Try to get system coordinator if available
         try:
@@ -378,7 +383,7 @@ class AgentExecutor:
         
         Args:
             user_query: User's question or request
-            session_context: Additional context from session (now expected to contain budget.to_context() on escalation)
+            session_context: Extra context for the first user message (never the system prompt)
             process_id: Optional process ID from system coordinator
             max_steps: legacy int form (still supported)
             budget: preferred explicit StepBudget from AgentBrain (carries history + awareness)
@@ -429,35 +434,43 @@ class AgentExecutor:
 
             # Durable AgentMemory rows that match the task, kept when
             # memory_match_score against the query is above 0.3, best first.
+            # With BrainState the system prompt already carries its memory
+            # block, so this lookup only runs without it.
             memory_context = ""
-            try:
-                from backend.api.memory_api import search_memories
-                mems = search_memories(
-                    query=user_query,
-                    limit=8,
-                    min_importance=0.4,
-                    match_text=user_query,
-                    min_match=0.3,
-                    session_id=process_id or "default",
-                )
-                learnings = [(m.get('content') or '')[:200] for m in mems[:5]]
-                if learnings:
-                    memory_context = "\n\nSaved memories that match this task:\n" + "\n".join(f"- {l}" for l in learnings)
-            except Exception as e:
-                logger.debug(f"Contract memory context not available (falling back empty): {e}")
+            if not self._brain_state_used():
+                try:
+                    from backend.api.memory_api import search_memories
+                    mems = search_memories(
+                        query=user_query,
+                        limit=8,
+                        min_importance=0.4,
+                        match_text=user_query,
+                        min_match=0.3,
+                        session_id=process_id or "default",
+                    )
+                    learnings = [(m.get('content') or '')[:200] for m in mems[:5]]
+                    if learnings:
+                        memory_context = "Saved memories that match this task:\n" + "\n".join(f"- {l}" for l in learnings)
+                except Exception as e:
+                    logger.debug(f"Contract memory context not available (falling back empty): {e}")
 
             if memory_context:
-                session_context = (session_context or "") + memory_context
+                session_context = f"{session_context}\n\n{memory_context}" if session_context else memory_context
 
-            # Make budget visible to the agent from the first prompt (for awareness/solidification).
-            # This lets the LLM "see" its cross-tier limits in every tier's reasoning context.
-            if getattr(self, '_budget', None):
-                budget_summary = "\n" + self._budget.to_llm_summary() + " (cross-tier inherited; track your spend.)"
-                session_context = budget_summary + "\n" + session_context
-
-            # Detect vision/screen tasks and filter tools accordingly
-            is_vision_task = self._is_vision_task(user_query, session_context)
-            tool_filter = 'vision' if is_vision_task else None
+            # A configured agent is a screen agent when it owns agent_task_execute;
+            # otherwise the task text decides. The agent's own instructions and
+            # the session context never do: they name screens and browsers.
+            if self.tool_registry.get_tool("agent_task_execute") is None:
+                self._screen = False
+            elif self.agent is not None:
+                self._screen = "agent_task_execute" in (self.agent.tools or [])
+            else:
+                self._screen = self._is_vision_task(user_query)
+            is_vision_task = self._screen
+            # An agent's registry is already its own tool list; only an
+            # unconfigured screen run narrows the full registry.
+            tool_filter = 'vision' if (is_vision_task and self.agent is None) else None
+            self._tool_filter = tool_filter
 
             # Check if active model supports native function calling (Gemma 4, etc.)
             self._native_tools_supported = False
@@ -475,9 +488,7 @@ class AgentExecutor:
                 logger.debug(f"Native tool detection failed, using prompt injection: {e}")
 
             tool_schemas = self.tool_registry.get_tool_schemas(format='json_prompt', tool_filter=tool_filter)
-            system_prompt = self._resolve_system_prompt(
-                tool_schemas, session_context, is_vision_task=is_vision_task
-            )
+            system_prompt = self._resolve_system_prompt(tool_schemas)
 
             # Honesty steering already in BrainState prefix when available
             if not self._brain_state_used():
@@ -490,12 +501,12 @@ class AgentExecutor:
                 except Exception as e:
                     logger.debug(f"Honesty steering not available: {e}")
 
-            # LLM Debug: log system prompt and user message
-            log_system_prompt("agent_executor", system_prompt)
-            log_user_message("agent_executor", user_query)
-
             # Build initial prompt
             current_prompt = self._build_initial_prompt(user_query, session_context)
+
+            # LLM Debug: log system prompt and the first user message as sent
+            log_system_prompt("agent_executor", system_prompt)
+            log_user_message("agent_executor", current_prompt)
             
             # Agent loop
             while iteration < self.max_iterations:
@@ -826,8 +837,7 @@ Tools already called:
 Original task: {self.original_query}
 
 If the task is complete (all requested steps done), you MUST set "final_answer" with a summary.
-Otherwise, call the next tool needed. Do NOT repeat a tool you already called with the same parameters.
-{budget_block}"""
+Otherwise, call the next tool needed. Do NOT repeat a tool you already called with the same parameters."""
         
         return {
             'is_final': False,
@@ -843,7 +853,11 @@ Otherwise, call the next tool needed. Do NOT repeat a tool you already called wi
     
     @staticmethod
     def _is_vision_task(user_query: str, session_context: str = "") -> bool:
-        """Detect if this is a vision/screen automation task."""
+        """Detect if this is a vision/screen automation task.
+
+        execute() passes the task text only; session_context is read when a
+        caller passes it.
+        """
         import re
         combined = (user_query + " " + (session_context or "")).lower()
         # Exact substring keywords
@@ -883,117 +897,64 @@ Otherwise, call the next tool needed. Do NOT repeat a tool you already called wi
         except Exception:
             return False
 
-    def _resolve_system_prompt(
-        self, tool_schemas: str, session_context: str = "", is_vision_task: bool = False
-    ) -> str:
-        """Prefer BrainState canonical prompt; fall back to local builders."""
+    def _agent_identity(self) -> Tuple[str, str]:
+        """(name, instructions) of the configured agent, or two empty strings."""
+        if self.agent is None:
+            return "", ""
+        return (getattr(self.agent, "name", "") or "", getattr(self.agent, "system_prompt", "") or "")
+
+    def _resolve_system_prompt(self, tool_schemas: str, native: Optional[bool] = None) -> str:
+        """Prefer the BrainState canonical prompt; fall back to the local builder.
+
+        The agent's instructions appear here once. The session context goes
+        only into the first user message (_build_initial_prompt).
+        """
+        if native is None:
+            native = self._native_tools_supported
+        agent_name, agent_prompt = self._agent_identity()
         try:
             from backend.services.brain_state import BrainState
             bs = BrainState.get_instance()
             if getattr(bs, "_initialized", False):
-                role = "vision" if is_vision_task else "agent"
-                prompt = bs.get_system_prompt(
-                    role=role,
+                return bs.get_system_prompt(
+                    role="agent",
+                    screen=self._screen,
                     query=getattr(self, "original_query", ""),
                     budget=getattr(self, "_budget", None),
                     facts_registry=self.facts_registry,
+                    tool_list=tool_schemas,
+                    native=native,
+                    agent_name=agent_name,
+                    agent_prompt=agent_prompt,
                 )
-                if session_context and session_context.strip():
-                    prompt += f"\n\n{session_context}"
-                return prompt
         except Exception as e:
             logger.debug(f"BrainState system prompt unavailable, using local builder: {e}")
 
-        if self._native_tools_supported:
-            return self._build_system_prompt_native(session_context, is_vision_task=is_vision_task)
-        return self._build_system_prompt(tool_schemas, session_context, is_vision_task=is_vision_task)
+        if native:
+            return self._build_system_prompt_native()
+        return self._build_system_prompt(tool_schemas)
 
-    def _build_system_prompt(self, tool_schemas: str, session_context: str = "", is_vision_task: bool = False) -> str:
-        """Build system prompt with tool descriptions for JSON output"""
-
-        if is_vision_task:
-            rules_section = """RULES:
-- You are controlling a virtual screen (DISPLAY=:99) with Firefox and a desktop environment.
-- Use agent_mode_start first, then agent_task_execute to perform screen tasks.
-- Use agent_screen_capture to see what is currently on screen.
-- Do NOT use browser_navigate, browser_execute_js, app_launch, or analyze_website — those tools cannot interact with your virtual screen.
-- If you need to search the web as a fallback, use web_search.
-- Describe tasks in plain language for agent_task_execute (e.g., "Click the search box on YouTube and type Local LLM Systems, then press Enter").
-- Break complex tasks into small steps: first capture the screen, then execute one action at a time.
-- NEVER fabricate information. Only state facts found in tool results.
-- If you cannot complete the task, say so honestly."""
-        else:
-            rules_section = """RULES:
-- Use exact parameter names from the tool descriptions
-- Include ALL required parameters
-- After tool results, use them to formulate your answer
-- Only state facts found in tool results
-- When you have enough information, set final_answer
-- If a tool fails, try a DIFFERENT tool or different parameters. Never retry the same call.
-- NEVER fabricate information. Only state facts found in tool results.
-- If you cannot find the answer, say so honestly."""
-
-        budget_line = ""
+    def _budget_line(self) -> str:
         if getattr(self, '_budget', None):
-            budget_line = "\n" + self._budget.to_llm_summary() + " Use this information to plan efficiently across steps."
+            return self._budget.to_llm_summary() + " Use this information to plan efficiently across steps."
+        return ""
 
-        base_prompt = f"""You are an AI assistant with access to tools. Help the user by using tools when needed.{budget_line}
+    def _build_system_prompt(self, tool_schemas: str, native: bool = False) -> str:
+        """Local system prompt, used when BrainState is not initialized."""
+        from backend.services.agent_prompt_blocks import build_agent_prompt_tail
+        agent_name, agent_prompt = self._agent_identity()
+        return build_agent_prompt_tail(
+            tool_schemas=tool_schemas,
+            native=native,
+            screen=self._screen,
+            agent_name=agent_name,
+            agent_prompt=agent_prompt,
+            budget_line=self._budget_line(),
+        )
 
-Available Tools:
-{tool_schemas}
-
-RESPONSE FORMAT:
-You MUST respond with a JSON object. Every response must have these three fields:
-- "thoughts": your reasoning about what to do (string or null)
-- "tool_calls": array of tool calls to execute (empty array if none needed)
-- "final_answer": your final answer to the user (string or null)
-
-Each tool call object has: "tool_name" (string), "parameters" (object), and optional "reasoning" (string).
-
-EXAMPLE - Using a tool:
-{{"thoughts": "I need to read the file first", "tool_calls": [{{"tool_name": "read_code", "parameters": {{"filepath": "config.py"}}, "reasoning": "Need to see current config"}}], "final_answer": null}}
-
-EXAMPLE - Final answer (no tools needed):
-{{"thoughts": "I have all the information", "tool_calls": [], "final_answer": "The config file sets DEBUG to True on line 1."}}
-
-{rules_section}"""
-
-        # Append session context if it contains agent-specific instructions
-        if session_context and "Agent:" in session_context:
-            base_prompt += f"\n\n{session_context}"
-
-        return base_prompt
-
-    def _build_system_prompt_native(self, session_context: str = "", is_vision_task: bool = False) -> str:
-        """Build system prompt for native function calling models (Gemma 4, etc.).
-
-        Tool schemas are NOT included in the prompt — they're passed via the
-        API's tools parameter.  This keeps the context window clean.
-        """
-        if is_vision_task:
-            rules = (
-                "You are controlling a virtual screen (DISPLAY=:99) with Firefox and a desktop environment.\n"
-                "Use agent_mode_start first, then agent_task_execute to perform screen tasks.\n"
-                "Use agent_screen_capture to see what is currently on screen.\n"
-                "Break complex tasks into small steps: first capture the screen, then one action at a time.\n"
-                "NEVER fabricate information. Only state facts found in tool results.\n"
-                "If you cannot complete the task, say so honestly."
-            )
-        else:
-            rules = (
-                "Use tools when you need information or need to perform actions.\n"
-                "After tool results, use them to formulate your answer.\n"
-                "If a tool fails, try a DIFFERENT tool or different parameters.\n"
-                "NEVER fabricate information. Only state facts found in tool results.\n"
-                "If you cannot find the answer, say so honestly."
-            )
-
-        prompt = f"You are an AI assistant with access to tools. Help the user by calling tools when needed.\n\n{rules}"
-
-        if session_context and "Agent:" in session_context:
-            prompt += f"\n\n{session_context}"
-
-        return prompt
+    def _build_system_prompt_native(self) -> str:
+        """Local system prompt for models that take tools through the API's tools parameter."""
+        return self._build_system_prompt("", native=True)
 
     def _execute_iteration_native(self, prompt: str, system_prompt: str, iteration: int, process_id: Optional[str]) -> Dict[str, Any]:
         """Execute a single iteration using native function calling (Gemma 4, etc.).
@@ -1023,11 +984,9 @@ EXAMPLE - Final answer (no tools needed):
             # Fall back to prompt-injection path on any failure
             logger.warning(f"Native tool calling failed, falling back to prompt injection: {e}")
             self._native_tools_supported = False
-            # Rebuild system prompt with tool schemas for fallback
-            is_vision = self._is_vision_task(self.original_query, "")
-            tool_filter = 'vision' if is_vision else None
-            tool_schemas = self.tool_registry.get_tool_schemas(format='json_prompt', tool_filter=tool_filter)
-            fallback_system = self._build_system_prompt(tool_schemas, "", is_vision_task=is_vision)
+            # The prompt path needs the tool list and JSON format in the text.
+            tool_schemas = self.tool_registry.get_tool_schemas(format='json_prompt', tool_filter=self._tool_filter)
+            fallback_system = self._resolve_system_prompt(tool_schemas, native=False)
             return self._execute_iteration(prompt, fallback_system, iteration, process_id)
 
         response_text = _safe_content(llm_response.message)
@@ -1194,6 +1153,7 @@ Based on the tool results, either call another tool or provide your final answer
 
     def _build_initial_prompt(self, user_query: str, session_context: str) -> str:
         """Build the initial prompt for the agent"""
+        session_context = (session_context or "").strip()
         if session_context:
             return f"""Context:
 {session_context}

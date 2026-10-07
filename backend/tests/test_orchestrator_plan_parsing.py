@@ -226,6 +226,87 @@ class TestCreatePlanWithMockLLM:
             shutil.rmtree(temp_dir)
 
 
+class TestOrchestratorLeavesItselfOut:
+    def test_create_plan_neither_lists_nor_assigns_the_orchestrator(self, monkeypatch):
+        from backend.services.agent_config import AgentConfig, AgentType
+
+        agents = [
+            AgentConfig(id="orchestrator_agent", name="Task Orchestrator", description="Plans",
+                        agent_type=AgentType.ORCHESTRATOR, tools=["delegate_task"], system_prompt=""),
+            AgentConfig(id="general_assistant", name="General Assistant", description="General agent",
+                        agent_type=AgentType.GENERAL_ASSISTANT, tools=["web_search"], system_prompt="general"),
+        ]
+
+        class FakeManager:
+            def get_enabled_agents(self):
+                return agents
+
+        seen = []
+
+        class FakeLLM:
+            def chat(self, messages, format=None):
+                seen.append(messages[0].content)
+                plan = {"steps": [{"id": 1, "description": "do it", "assigned_agent": "orchestrator_agent",
+                                   "dependencies": []}]}
+
+                class FakeMessage:
+                    content = json.dumps(plan)
+
+                class FakeResponse:
+                    message = FakeMessage()
+
+                return FakeResponse()
+
+        service = OrchestratorService.__new__(OrchestratorService)
+        service.agent_config_manager = FakeManager()
+        service.llm = FakeLLM()
+
+        plan = service._create_plan("plan and execute something")
+
+        assert "- orchestrator_agent:" not in seen[0]
+        assert "- general_assistant:" in seen[0]
+        assert [t.assigned_agent for t in plan.subtasks] == ["general_assistant"]
+
+
+class TestDelegation:
+    def test_the_agent_goes_to_the_executor_and_its_text_stays_out_of_the_context(self, monkeypatch):
+        from backend.services.agent_config import AgentConfig, AgentType
+        from backend.services.agent_tools import ToolRegistry
+
+        agent = AgentConfig(id="research_agent", name="Web Research Agent", description="web",
+                            agent_type=AgentType.RESEARCH_AGENT, tools=["web_search", "fetch_url"],
+                            system_prompt="AGENT INSTRUCTIONS 42")
+
+        class FakeManager:
+            def get_agent(self, agent_id):
+                return agent
+
+        made = []
+
+        class FakeExecutor:
+            def __init__(self, registry, llm, max_iterations=10, agent=None):
+                made.append({"tools": registry.list_tools(), "agent": agent, "llm": llm})
+
+            def execute(self, prompt, session_context=""):
+                made[-1]["context"] = session_context
+                from types import SimpleNamespace
+                return SimpleNamespace(success=True, final_answer="done", error=None)
+
+        monkeypatch.setattr("backend.services.orchestrator_service.AgentExecutor", FakeExecutor)
+        service = OrchestratorService.__new__(OrchestratorService)
+        service.agent_config_manager = FakeManager()
+        service.llm = object()
+        service._all_tools = ToolRegistry()
+
+        result = service._delegate_to_agent("research_agent", "find x", {}, original_request="find x please")
+
+        assert result["success"] is True
+        assert made[0]["agent"] is agent
+        assert made[0]["llm"] is service.llm
+        assert "Goal: find x" in made[0]["context"]
+        assert "AGENT INSTRUCTIONS 42" not in made[0]["context"]
+
+
 try:
     from flask import Flask
     from backend.api.orchestrator_api import orchestrator_bp

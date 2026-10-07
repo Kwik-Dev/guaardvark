@@ -4,8 +4,9 @@ import copy
 import json
 import logging
 import os
+import re
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -14,6 +15,16 @@ from backend.config import GUAARDVARK_PROJECT_NAME as _PROJECT_NAME
 logger = logging.getLogger(__name__)
 
 AGENT_STATE_FILE = Path(os.environ.get("GUAARDVARK_ROOT", ".")) / "data" / "agent_state.json"
+
+EDITABLE_FIELDS: Tuple[str, ...] = ("enabled", "max_iterations", "system_prompt", "model")
+# Reset to default with no fields named puts these back; the on/off switch stays.
+RESET_FIELDS: Tuple[str, ...] = ("system_prompt", "max_iterations", "model")
+MAX_ITERATIONS_LIMIT = 50
+MAX_PROMPT_CHARS = 20000
+MAX_MODEL_CHARS = 200
+
+# get_agent_for_message returns None only when General Assistant, the catch-all, is off.
+NO_AGENT_MATCHES = "No enabled agent matches this request; General Assistant is off on the Agents page"
 
 
 class AgentType(Enum):
@@ -42,6 +53,9 @@ class AgentConfig:
     # behavior). Set to run this agent on a specific local model — e.g. an
     # autoresearch judge must not share the proposer's model.
     model: Optional[str] = None
+    # Fields a person may change on the Agents page; saved overrides of any
+    # other field are ignored on load.
+    editable: Tuple[str, ...] = EDITABLE_FIELDS
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -64,29 +78,22 @@ DEFAULT_AGENTS: Dict[str, AgentConfig] = {
     "content_creator": AgentConfig(
         id="content_creator",
         name="Content Creator",
-        description="Specialized agent for bulk content generation, WordPress CSV creation, and SEO-optimized writing",
+        description="Writes SEO web pages and delivers them as WordPress import rows or a bulk import CSV.",
         agent_type=AgentType.CONTENT_CREATOR,
         tools=[
             "generate_wordpress_content",
             "generate_enhanced_wordpress_content",
             "generate_bulk_csv",
+            "get_generation_status",
             "generate_csv",
         ],
-        system_prompt="""You are a Content Creator agent specialized in generating high-quality, SEO-optimized content.
+        system_prompt="""You write SEO web pages and deliver them in WordPress import format.
 
-Your capabilities:
-- Generate WordPress-compatible CSV files with proper formatting
-- Create bulk content with consistent quality and SEO optimization
-- Produce content tailored to specific industries and audiences
+- One page as text: generate_wordpress_content. Use generate_enhanced_wordpress_content instead when the page should draw on the person's indexed documents or stick to named services.
+- Many pages in one import file: generate_bulk_csv, then get_generation_status with the job_id it returned (as batch_id) until it reports complete.
+- Any other table: generate_csv.
 
-Guidelines:
-1. Always ask for client details if not provided (company name, industry, target audience)
-2. Ensure all content is unique and professionally written
-3. Follow SEO best practices (keyword placement, meta descriptions, proper headings)
-4. Maintain consistent brand voice throughout bulk generation
-5. Validate CSV output format before delivery
-
-When generating content, use the appropriate tool based on the request scale and requirements.""",
+Take client, website, topic, industry and audience from the request and its context. This run cannot ask questions: leave a missing detail out and list what was missing in your answer. Report what the tools returned (path, rows, job status); do not describe pages you did not generate.""",
         max_iterations=5,
         enabled=True,
         priority=10,
@@ -96,166 +103,103 @@ When generating content, use the appropriate tool based on the request scale and
             r"bulk.*pages?",
             r"generate.*\d+.*(?:pages?|articles?|posts?)",
             r"seo.*content",
-        ]
+        ],
+        metadata={"group": "create", "summary": "SEO pages for WordPress", "needs": []},
     ),
 
     "code_assistant": AgentConfig(
         id="code_assistant",
         name="Code Assistant",
-        description="Advanced coding agent with Claude Code-like capabilities for reading, searching, and editing code files",
+        description="Finds, reads and changes source code in indexed repositories and this project.",
         agent_type=AgentType.CODE_ASSISTANT,
         tools=[
-            "read_code",
+            "search_codebase",
             "search_code",
-            "edit_code",
+            "list_code_repositories",
+            "get_repository_map",
             "list_code_files",
+            "read_code",
+            "read_ast_node",
+            "edit_code",
             "verify_change",
             "check_inbound_change",
             "codegen",
-            "analyze_code",
             "generate_file",
-            "execute_python",
+            "analyze_code",
         ],
-        system_prompt="""You are an advanced Code Assistant agent with Claude Code-like capabilities for autonomous code manipulation.
+        system_prompt="""You work on source code.
 
-CORE CAPABILITIES:
-1. READ: Use read_code to examine file contents before making changes
-2. SEARCH: Use search_code to find patterns, functions, or code across the codebase
-3. EDIT: Use edit_code to modify files by replacing exact text (creates automatic backups)
-4. EXPLORE: Use list_code_files to understand project structure
-5. VERIFY: Use verify_change to confirm edits were applied correctly
+- Find: search_codebase finds code by meaning, search_code finds exact text, list_code_files lists files. For an overview of a repository, get its folder_id from list_code_repositories, then call get_repository_map.
+- Read: read_code reads a file; read_ast_node reads one class or function (it takes the folder_id too).
+- Change: edit_code replaces text that occurs exactly once in the file, whitespace included; verify_change confirms the change is there. Run check_inbound_change first on a change that adds network calls, shell commands, dependencies or agent instructions.
+- New code: codegen writes code, generate_file saves a new file, analyze_code reviews code.
 
-WORKFLOW FOR CODE MODIFICATIONS (ReACT Loop):
-1. UNDERSTAND: First search_code or read_code to understand the existing code
-2. PLAN: Think through what changes are needed
-3. EXECUTE: Use edit_code with the EXACT text to replace (must be unique in file). For a change
-   that adds network calls, shell commands, dependencies or agent instructions, run
-   check_inbound_change on it first: a held or blocked edit waits for a person.
-4. VERIFY: Use verify_change to confirm the edit succeeded
-5. ITERATE: If verification fails, read the file again and try a different approach
-
-CRITICAL RULES:
-1. ALWAYS read or search code BEFORE attempting to edit it
-2. The old_text in edit_code MUST be EXACTLY as it appears in the file (including whitespace)
-3. If old_text matches multiple locations, add more context to make it unique
-4. After every edit, verify the change was successful
-5. If an edit fails, read the file to see its current state
-6. Work incrementally - make one logical change at a time
-7. Preserve existing functionality unless explicitly asked to change it
-
-ERROR HANDLING:
-- If edit_code fails with "not found", read_code the file to see the actual content
-- If edit_code fails with "multiple occurrences", include more surrounding context
-- If verification fails, the edit was not applied - investigate and retry
-
-BEST PRACTICES:
-- Follow language-specific conventions and idioms
-- Maintain consistent code style with the existing codebase
-- Add clear comments for complex logic
-- Consider edge cases and error handling
-- Test your changes conceptually before verifying
-
-When asked to modify code, follow the READ -> PLAN -> EDIT -> VERIFY cycle.""",
+Read a file before you edit it. If edit_code says "not found" or "multiple occurrences", read the file again and widen old_text until it matches once. Make one change at a time and verify it. edit_code needs a person's approval: where none can be given it is refused, and then you put the exact old and new text in your answer instead.""",
         max_iterations=15,
         enabled=True,
         priority=8,
         trigger_patterns=[
-            r"code",
-            r"program",
-            r"script",
-            r"function",
-            r"class",
-            r"\.(py|js|jsx|ts|tsx|java|cpp|go|rs)\b",
-            r"analyze.*code",
-            r"review.*code",
-            r"edit.*file",
-            r"modify.*code",
-            r"change.*code",
-            r"fix.*bug",
-            r"refactor",
-            r"remove.*button",
-            r"add.*feature",
-            r"update.*component",
-        ]
+            r"\bcode(?:base)?\b",
+            r"\bprogram(?:ming)?\s+(?:in|language|that|to)\b",
+            r"\.(?:py|js|jsx|ts|tsx|java|cpp|go|rs)\b",
+            r"(?<!\w)(?:python|javascript|typescript|java|rust|golang|bash|shell|sql|c\+\+|react)(?!\w)"
+            r".{0,40}\b(?:function|class|method|script|module|error)s?\b",
+            r"\b(?:write|create)\s+(?:a|an)\b.{0,40}\b(?:script|function|class)\b",
+            r"\bfix\b.{0,40}\bbugs?\b",
+            r"\brefactor",
+            r"\b(?:edit|modify|change)\b.{0,40}\b(?:file|code)\b",
+            r"\bremove\b.{0,40}\bbutton\b",
+            r"\badd\b.{0,40}\bfeature\b",
+            r"\bupdate\b.{0,40}\bcomponent\b",
+            r"\b(?:analy[sz]e|review)\b.{0,40}\bcode\b",
+        ],
+        metadata={"group": "create", "summary": "Finds, reads and edits code", "needs": []},
     ),
 
     "data_analyst": AgentConfig(
         id="data_analyst",
         name="Data Analyst",
-        description="Specialized agent for data processing, CSV manipulation, and structured data generation",
+        description="Reads data files (CSV, Excel, JSON, XML, YAML) and writes new ones.",
         agent_type=AgentType.DATA_ANALYST,
         tools=[
+            "process_file",
             "generate_csv",
             "generate_file",
         ],
-        system_prompt="""You are a Data Analyst agent specialized in structured data operations.
+        system_prompt="""You read and produce data files: CSV, Excel, JSON, XML and YAML.
 
-Your capabilities:
-- Generate CSV files with proper formatting
-- Create structured data files (JSON, XML, YAML)
-- Process and transform data specifications
+- process_file reads a file the person names and returns its text; for Excel it returns each sheet's size, column names and first 20 rows.
+- generate_csv writes a table; generate_file writes JSON, XML, YAML or any other text file.
 
-Guidelines:
-1. Ensure data consistency and proper formatting
-2. Use appropriate data types for each column
-3. Validate data against specifications
-4. Handle special characters and encoding properly
-5. Generate realistic, varied sample data
-
-When generating data files, ensure they're properly formatted and immediately usable.""",
+Give every table one header row and one type of value per column. Rows you make up are sample data: say so in your answer. Quote figures exactly as process_file returned them, and say when a sheet holds more rows than it returned.""",
         max_iterations=5,
         enabled=True,
         priority=5,
         trigger_patterns=[
-            r"data",
-            r"spreadsheet",
-            r"excel",
-            r"\.csv\b",
-            r"\.json\b",
-            r"\.xml\b",
-        ]
+            r"\bdata(?:sets?)?\b(?!\s*base)",
+            r"\b(?:spreadsheets?|excel|xlsx)\b",
+            r"\.(?:csv|json|xml|xlsx)\b",
+        ],
+        metadata={"group": "create", "summary": "Reads and writes data files", "needs": []},
     ),
 
     "research_agent": AgentConfig(
         id="research_agent",
         name="Web Research Agent",
-        description="Specialized agent for web research, website analysis, and online information gathering",
+        description="Answers questions from the web: searches, reads the best pages and cites them.",
         agent_type=AgentType.RESEARCH_AGENT,
         tools=[
             "web_search",
+            "fetch_url",
             "analyze_website",
         ],
-        system_prompt="""You are a Web Research Agent specialized in gathering and analyzing information from the web.
+        system_prompt="""You answer questions from the web.
 
-CRITICAL RULES - ANTI-HALLUCINATION:
-1. NEVER state facts not found in tool observations
-2. After searching, EXTRACT key facts before deciding next action
-3. When you have enough facts, STOP searching and synthesize your answer
-4. Your final answer MUST cite which observation supports each claim
-5. If observations conflict, note the discrepancy explicitly
-6. If you don't have enough information, say so - do NOT make up details
+- web_search finds pages.
+- fetch_url reads one page; pass the person's question as query to get the part of the page that answers it.
+- analyze_website audits a page's title, meta description and SEO.
 
-Your capabilities:
-- Search the web for current information and facts
-- Analyze websites for content, SEO, and structure
-- Extract and summarize web content
-- Provide comprehensive research reports
-
-Guidelines:
-1. Use web_search when you need to find information or answer questions requiring current data
-2. Use analyze_website when users provide URLs or ask about specific websites
-3. Always cite sources when using web search results
-4. Provide clear, organized summaries of findings
-5. Combine multiple sources when possible for comprehensive answers
-
-When you see search results, first identify:
-"Key facts found: [list the specific facts with sources]"
-
-Then decide:
-- If you have enough facts: Synthesize answer using ONLY those facts
-- If you need more: What specific information is missing? Search for it.
-
-When researching, be thorough and verify information across multiple sources when possible. But NEVER add information that wasn't in your search results.""",
+Search, read the two or three most relevant results, answer, and stop. Give the URL behind each claim. Say when sources disagree or do not answer the question. If a tool reports that web access is off, tell the person it is switched on in Settings, and stop.""",
         max_iterations=8,
         enabled=True,
         priority=7,
@@ -273,63 +217,40 @@ When researching, be thorough and verify information across multiple sources whe
             r"what.*online",
             r"find.*information",
             r"search.*web",
-        ]
+        ],
+        metadata={"group": "web", "summary": "Searches and reads the web", "needs": ["web_access"]},
     ),
 
     "browser_automation": AgentConfig(
         id="browser_automation",
         name="Browser Automation Agent",
-        description="Specialized agent for web browser automation, scraping, testing, and interaction",
+        description="Drives a browser page by page: opens it, waits, clicks, fills forms and extracts content.",
         agent_type=AgentType.GENERAL_ASSISTANT,
         tools=[
             "browser_navigate",
+            "browser_wait",
             "browser_click",
             "browser_fill",
-            "browser_screenshot",
             "browser_extract",
-            "browser_wait",
-            "browser_execute_js",
             "browser_get_html",
+            "browser_screenshot",
+            "browser_execute_js",
+            "fetch_url",
             "analyze_website",
             "web_search",
         ],
-        system_prompt="""You are a Browser Automation specialist agent with full browser control capabilities.
+        system_prompt="""You drive a browser.
 
-CAPABILITIES:
-1. NAVIGATE: Navigate to URLs and wait for page load conditions
-2. INTERACT: Click elements, fill forms, and submit data
-3. EXTRACT: Scrape text, attributes, and HTML from elements
-4. SCREENSHOT: Capture full page or element screenshots
-5. WAIT: Wait for elements to appear or reach specific states
-6. EXECUTE: Run JavaScript code directly in the browser
+- Open a page with browser_navigate, then browser_wait for the element you need.
+- browser_click, browser_fill and browser_extract act on CSS selectors; browser_get_html returns the page source to find them.
+- browser_screenshot captures the page; browser_execute_js runs a script on it.
 
-WORKFLOW FOR WEB AUTOMATION:
-1. Navigate to the target URL (use browser_navigate)
-2. Wait for necessary elements to load (browser_wait if needed)
-3. Interact with the page (click, fill forms)
-4. Extract data or take screenshots as needed
-
-CRITICAL RULES:
-1. Always start by navigating to the page
-2. Use CSS selectors when possible - they're more reliable than XPath
-3. Wait for elements before interacting with them
-4. Handle errors gracefully - pages may not load as expected
-5. Respect rate limits and don't overwhelm target sites
-
-SECURITY:
-- Only visit trusted URLs
-- Don't submit sensitive data without user confirmation
-- Be cautious with JavaScript execution
-
-FALLBACK STRATEGY:
-- If browser_navigate fails, switch to analyze_website or web_search. Do NOT keep retrying browser tools that have already failed.
-- If you get a BLOCKED message for a browser tool, use analyze_website or web_search immediately.
-
-When asked to automate browser tasks, plan the sequence of actions carefully.""",
+Do not enter personal data, pay, post or send anything unless the request asks for exactly that. If a browser tool fails or is blocked, use fetch_url, analyze_website or web_search instead of retrying it.""",
         max_iterations=10,
         enabled=True,
         priority=9,
         trigger_patterns=[
+            r"^/browser\b",
             r"(?i)screenshot",
             r"(?i)browse\s+to|navigate\s+to",
             r"(?i)scrape|web\s+scrap",
@@ -341,13 +262,18 @@ When asked to automate browser tasks, plan the sequence of actions carefully."""
             r"(?i)get\s+(?:the\s+)?html",
             r"(?i)execute\s+javascript",
             r"(?i)wait\s+for\s+(?:the\s+)?(?:element|page|button)",
-        ]
+        ],
+        metadata={
+            "group": "web",
+            "summary": "Drives a browser by selector",
+            "needs": ["browser_automation", "web_access"],
+        },
     ),
 
     "desktop_automation": AgentConfig(
         id="desktop_automation",
         name="Desktop Automation Agent",
-        description="Specialized agent for desktop automation including file operations, app control, and GUI",
+        description="Acts on this computer's own desktop: files, applications, clipboard, notifications and the real screen.",
         agent_type=AgentType.GENERAL_ASSISTANT,
         tools=[
             "file_watch",
@@ -364,38 +290,20 @@ When asked to automate browser tasks, plan the sequence of actions carefully."""
             "clipboard_set",
             "notification_send",
         ],
-        system_prompt="""You are a Desktop Automation specialist agent for controlling the local desktop environment.
+        system_prompt="""You act on this computer's own desktop, the one the person is using.
 
-CAPABILITIES:
-1. FILE WATCHING: Monitor files/directories for changes
-2. BULK FILE OPS: Copy, move, delete files with glob patterns
-3. APP CONTROL: Launch, list, and focus applications
-4. GUI AUTOMATION: Click, type, hotkeys, screenshots
-5. CLIPBOARD: Read and write clipboard contents
-6. NOTIFICATIONS: Send desktop notifications
+- file_watch watches a file or folder for changes.
+- file_bulk_operation copies, moves or deletes files by pattern, only inside data/, ~/Documents, ~/Downloads and /tmp.
+- app_list lists running applications, app_launch starts an allowed application, app_focus brings a window to the front.
+- clipboard_get and clipboard_set read and write the clipboard; notification_send shows a desktop notification.
+- gui_click, gui_type, gui_hotkey and gui_screenshot work the real screen. Find a target with gui_locate_image rather than guessing coordinates.
 
-SECURITY RESTRICTIONS:
-- File operations are restricted to allowed directories (data/, ~/Documents, ~/Downloads, /tmp)
-- Only whitelisted applications can be launched
-- GUI automation requires explicit enable (GUAARDVARK_GUI_AUTOMATION=true)
-
-WORKFLOW FOR DESKTOP TASKS:
-1. Verify the operation is within security boundaries
-2. Use the appropriate tool for the task
-3. Report success/failure clearly
-
-CRITICAL RULES:
-1. Always check if automation is enabled before GUI operations
-2. Use file watching for monitoring, not polling
-3. Be careful with bulk delete operations
-4. GUI clicks require precise coordinates - use gui_locate_image when possible
-5. Don't type sensitive information without user confirmation
-
-When asked to automate desktop tasks, verify permissions and proceed carefully.""",
+These tools are off unless GUAARDVARK_DESKTOP_AUTOMATION=true, and the screen tools (gui_click, gui_type, gui_hotkey, gui_screenshot, gui_locate_image) also need GUAARDVARK_GUI_AUTOMATION=true. If a tool says it is disabled, say so and stop. Delete only files the person named or that match their pattern exactly. Never type passwords or other secrets.""",
         max_iterations=10,
         enabled=True,
         priority=9,
         trigger_patterns=[
+            r"^/desktop\b",
             r"(?i)watch\s+(?:the\s+|my\s+)?(?:folder|directory|file)",
             r"(?i)(?:copy|move|delete)\s+(?:all\s+)?(?:files|pdfs|images)",
             r"(?i)(?:bulk|batch)\s+(?:copy|move|delete|rename)",
@@ -410,13 +318,18 @@ When asked to automate desktop tasks, verify permissions and proceed carefully."
             r"(?i)desktop\s+automat",
             r"(?i)gui\s+automat",
             r"(?i)focus\s+.*window",
-        ]
+        ],
+        metadata={
+            "group": "computer",
+            "summary": "Files, apps and clipboard here",
+            "needs": ["desktop_automation"],
+        },
     ),
 
     "media_control": AgentConfig(
         id="media_control",
         name="Media Player Agent",
-        description="Controls media playback - play music, pause, skip, volume, and check what's playing",
+        description="Plays music from the music folder and controls playback and volume.",
         agent_type=AgentType.GENERAL_ASSISTANT,
         tools=[
             "media_play",
@@ -424,37 +337,14 @@ When asked to automate desktop tasks, verify permissions and proceed carefully."
             "media_volume",
             "media_status",
         ],
-        system_prompt="""You are a Media Player control agent for managing music and audio playback.
+        system_prompt="""You control music playback on this computer.
 
-CAPABILITIES:
-1. PLAY: Search for and play music files by artist, song, album, or genre
-2. CONTROL: Pause, stop, resume, skip to next/previous track
-3. VOLUME: Get or set system volume (0-100, or relative +/-10)
-4. STATUS: Check what's currently playing (title, artist, album)
+- media_play plays music matching a query: an artist, song, album or genre. For a generic request such as "play some music", use the query "music"; do not invent search terms.
+- media_control pauses, resumes, stops, or skips to the next or previous track.
+- media_volume sets the volume: 0-100, +10 or -10, mute or unmute.
+- media_status says what is playing.
 
-WORKFLOW:
-1. For "play X" requests: Use media_play with a search query
-2. For control commands: Use media_control with the appropriate action
-3. For volume changes: Use media_volume with the desired level
-4. For "what's playing": Use media_status to get current track info
-
-RULES:
-1. When asked to play music, use descriptive search terms
-2. If no music is found, suggest the user check their music directory in Settings
-3. For volume, use percentage (0-100) or relative (+10, -10)
-4. Always report what action was taken and the result
-5. If no player is running and user asks to pause/stop, explain that no player is active
-
-When the user says "play", determine if they want to:
-- Play specific music by artist/song name (use media_play with that name as query)
-- Play music generically like "play some music" (use media_play with query="music")
-- Resume paused playback (use media_control with action=toggle)
-
-IMPORTANT: For generic requests like "play some music", "play my music", "play something",
-use media_play with query="music". Do NOT invent search terms like "popular" or "top hits".
-
-CRITICAL: After a tool call succeeds, you MUST immediately set final_answer with a summary.
-Do NOT call the same tool again. One successful tool call = task complete = set final_answer.""",
+One successful call completes the task: give your answer right after it. If nothing is found, suggest checking the music folder in Settings. If no player is running, say so.""",
         max_iterations=3,
         enabled=True,
         priority=9,
@@ -467,87 +357,78 @@ Do NOT call the same tool again. One successful tool call = task complete = set 
             r"(?i)(?:turn|set)\s+(?:the\s+)?volume",
             r"(?i)volume\s+(?:up|down|\d+)",
             r"(?i)(?:mute|unmute|louder|quieter|softer)",
-        ]
+        ],
+        metadata={"group": "computer", "summary": "Plays and controls music", "needs": ["media_player"]},
     ),
 
     "orchestrator_agent": AgentConfig(
         id="orchestrator_agent",
         name="Task Orchestrator",
-        description="Meta-agent that breaks down complex requests and delegates to specialized agents",
+        description="Plans a multi-step request and hands each step to another enabled agent.",
         agent_type=AgentType.ORCHESTRATOR,
+        # Not a registry tool: the OrchestratorService plans and delegates.
         tools=["delegate_task"],
-        system_prompt="You are the Orchestrator. You plan and delegate.",
+        # The planner writes its own prompt; there is nothing here to edit.
+        system_prompt="",
         max_iterations=5,
         enabled=True,
         priority=100,
         trigger_patterns=[
-            r"plan\s+and\s+execute",
-            r"coordinate",
-            r"orchestrate",
-            r"(?:first|step\s*1).*(?:then|next|step\s*2)",
-        ]
+            r"\bplan\s+and\s+execute\b",
+            r"\borchestrate\b",
+            r"\bcoordinate\b.{0,40}\bagents?\b",
+            r"\bbreak\s+(?:this|it)\s+(?:down|into\s+(?:steps|tasks))\b",
+        ],
+        metadata={"group": "routing", "summary": "Splits a request across agents", "needs": []},
+        editable=("enabled",),
     ),
 
     "general_assistant": AgentConfig(
         id="general_assistant",
         name="General Assistant",
-        description="General-purpose agent for queries that don't match specialized agents",
+        description="Handles requests no specialist agent covers, from the person's documents, memories or the web.",
         agent_type=AgentType.GENERAL_ASSISTANT,
         tools=[
-            "generate_file",
-            "analyze_code",
             "web_search",
-            "analyze_website",
+            "fetch_url",
+            "search_knowledge_base",
+            "search_memory",
+            "generate_file",
         ],
-        system_prompt="""You are a General Assistant agent that helps with various tasks.
+        system_prompt="""You handle requests that no specialist agent covers.
 
-When you encounter a request:
-1. Analyze what the user needs
-2. Determine if a tool would help accomplish the task
-3. Use tools when they provide clear value
-4. Provide direct answers when no tool is needed
+- For a question about the person's own work, files or earlier conversations, check search_knowledge_base and search_memory before the web.
+- web_search finds pages and fetch_url reads one.
+- generate_file saves a file the person asks for.
 
-Be helpful, concise, and action-oriented.""",
+When no tool is needed, answer directly.""",
         max_iterations=10,
         enabled=True,
         priority=0,
-        trigger_patterns=[]
+        trigger_patterns=[],
+        metadata={"group": "routing", "summary": "Takes what no specialist covers", "needs": []},
     ),
 
     "agent_vision_control": AgentConfig(
         id="agent_vision_control",
         name="Agent Vision Control",
-        description="Vision-based computer control agent that sees the screen and performs mouse/keyboard actions on a virtual display",
+        description="Works the agent's own virtual screen (Firefox on display :99) by sight, separate from the person's screen.",
         agent_type=AgentType.GENERAL_ASSISTANT,
         tools=[
             "agent_mode_start",
             "agent_mode_stop",
             "agent_task_execute",
             "agent_screen_capture",
+            "agent_read_text_from_element",
             "agent_status",
         ],
-        system_prompt=f"""You are the Agent Vision Control system for {_PROJECT_NAME}. You can see and interact with a virtual screen using vision-based automation.
+        system_prompt=f"""You operate {_PROJECT_NAME}'s own virtual screen: Firefox on an XFCE desktop on display :99, separate from the person's screen. The person can watch it in the agent screen viewer.
 
-CAPABILITIES:
-1. START/STOP: Activate or deactivate agent vision control mode
-2. EXECUTE TASK: Run a task on the virtual screen (e.g., "search Google for guaardvark", "post to Twitter")
-3. SCREEN CAPTURE: Take a screenshot and analyze what's currently on the virtual screen
-4. STATUS: Check the current state of the agent control system
+- agent_task_execute carries out one task on the screen, given as a short plain goal.
+- agent_screen_capture answers a question about what is on the screen; agent_read_text_from_element reads the exact text in a region of it.
+- agent_status reports whether a task is running; agent_mode_stop stops the screen agent when you are done.
 
-HOW IT WORKS:
-- You operate on a virtual display (not the user's real screens)
-- A vision model sees the screen and describes UI elements
-- A text LLM decides what actions to take (click, type, hotkey, scroll)
-- Actions are executed via pyautogui on the virtual display
-- The user can watch via VNC viewer on port 5999
-
-WORKFLOW:
-1. Use agent_screen_capture first to see what's on the virtual screen
-2. Use agent_task_execute to run a multi-step task autonomously
-3. Use agent_status to check progress of running tasks
-4. Use agent_mode_stop when done
-
-Be clear about what you're doing and report results back to the user.""",
+On public sites, post, comment or send something only when the request says so in so many words.""",
         max_iterations=10,
         enabled=True,
         priority=15,
@@ -561,7 +442,8 @@ Be clear about what you're doing and report results back to the user.""",
             r'(?i)(?:show|tell|describe).{0,20}(?:virtual|agent).{0,10}screen',
             r'(?i)/vision',
             r'(?i)/agent\s',
-        ]
+        ],
+        metadata={"group": "computer", "summary": "Works the agent's own screen", "needs": ["screen_agent"]},
     ),
 }
 
@@ -578,7 +460,7 @@ class AgentConfigManager:
         self._agents = {k: copy.deepcopy(v) for k, v in DEFAULT_AGENTS.items()}
 
     def _load_saved_state(self):
-        """Load persisted agent overrides (enabled, max_iterations, system_prompt) from disk."""
+        """Load persisted agent overrides of each agent's editable fields from disk."""
         try:
             if not AGENT_STATE_FILE.exists():
                 return
@@ -588,7 +470,7 @@ class AgentConfigManager:
                 agent = self._agents.get(agent_id)
                 if not agent:
                     continue
-                for key in ("enabled", "max_iterations", "system_prompt", "model"):
+                for key in agent.editable:
                     if key in overrides:
                         setattr(agent, key, overrides[key])
             logger.info(f"Loaded agent state from {AGENT_STATE_FILE} ({len(saved)} agents)")
@@ -639,26 +521,77 @@ class AgentConfigManager:
         return [a for a in self.list_agents() if a.enabled]
 
     def update_agent(self, agent_id: str, updates: Dict[str, Any]) -> bool:
+        """Change an agent's editable fields. False when the agent does not exist.
+
+        Raises ValueError, naming the problem, for a field that is not
+        editable on this agent or a value out of range; nothing is changed then.
+        """
         agent = self._agents.get(agent_id)
         if not agent:
             return False
 
-        for key, value in updates.items():
-            if hasattr(agent, key):
-                if key == "agent_type" and isinstance(value, str):
-                    value = AgentType(value)
-                setattr(agent, key, value)
+        for key, value in _validated_updates(agent, updates).items():
+            setattr(agent, key, value)
 
         logger.info(f"Updated agent: {agent_id}")
         self._save_state()
         return True
 
+    def reset_agent(self, agent_id: str, fields: Optional[List[str]] = None) -> bool:
+        """Put fields back to the built-in default. False when the agent does not exist.
+
+        With no fields: the instructions, iteration limit and model, never the
+        on/off switch. Raises ValueError for a field that is not editable.
+        """
+        agent = self._agents.get(agent_id)
+        default = DEFAULT_AGENTS.get(agent_id)
+        if not agent or default is None:
+            return False
+        if fields is None:
+            fields = [key for key in RESET_FIELDS if key in agent.editable]
+        bad = [key for key in fields if key not in agent.editable]
+        if bad:
+            raise ValueError(
+                f"Cannot reset {', '.join(bad)} on {agent.name}; editable: {', '.join(agent.editable)}"
+            )
+        for key in fields:
+            setattr(agent, key, copy.deepcopy(getattr(default, key)))
+        logger.info(f"Reset agent {agent_id}: {', '.join(fields) or 'nothing'}")
+        self._save_state()
+        return True
+
+    def describe(self, agent: AgentConfig, registry=None, detail: bool = False) -> Dict[str, Any]:
+        """The agent as the Agents page shows it.
+
+        Adds to to_dict(): editable, overridden, group, summary, tools_missing
+        (names the registry lacks) and unavailable_reason; with detail, also
+        tools_detail [{name, description, requires_approval, installed}].
+        """
+        data = agent.to_dict()
+        meta = agent.metadata or {}
+        is_orchestrator = agent.agent_type == AgentType.ORCHESTRATOR
+        missing: List[str] = []
+        if registry is not None and not is_orchestrator:
+            _, missing = registry.subset(agent.tools)
+        reason = agent_readiness(agent)
+        if not reason and agent.tools and len(missing) == len(agent.tools):
+            reason = "None of its tools are available"
+        data.update({
+            "editable": list(agent.editable),
+            "overridden": overridden_fields(agent),
+            "group": meta.get("group"),
+            "summary": meta.get("summary", ""),
+            "tools_missing": missing,
+            "unavailable_reason": reason,
+        })
+        if detail:
+            data["tools_detail"] = _tools_detail(agent, registry, is_orchestrator)
+        return data
+
     def set_agent_enabled(self, agent_id: str, enabled: bool) -> bool:
         return self.update_agent(agent_id, {"enabled": enabled})
 
     def get_agent_for_message(self, message: str) -> Optional[AgentConfig]:
-        import re
-
         message_lower = message.lower()
 
         for agent in self.get_enabled_agents():
@@ -667,7 +600,8 @@ class AgentConfigManager:
                     logger.debug(f"Message matched agent '{agent.id}' with pattern: {pattern}")
                     return agent
 
-        return self._agents.get("general_assistant")
+        general = self._agents.get("general_assistant")
+        return general if general is not None and general.enabled else None
 
     def get_tools_for_agent(self, agent_id: str) -> List[str]:
         agent = self._agents.get(agent_id)
@@ -678,6 +612,129 @@ class AgentConfigManager:
             agent_id: agent.to_dict()
             for agent_id, agent in self._agents.items()
         }
+
+
+def _validated_updates(agent: AgentConfig, updates: Any) -> Dict[str, Any]:
+    """The updates as they will be stored; ValueError for anything not allowed."""
+    if not isinstance(updates, dict):
+        raise ValueError("Send a JSON object of the fields to change")
+    editable = ", ".join(agent.editable)
+    clean: Dict[str, Any] = {}
+    for key, value in updates.items():
+        if key not in agent.editable:
+            raise ValueError(f"'{key}' cannot be changed on {agent.name}; editable: {editable}")
+        if key == "enabled":
+            if not isinstance(value, bool):
+                raise ValueError("enabled must be true or false")
+        elif key == "max_iterations":
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_ITERATIONS_LIMIT:
+                raise ValueError(f"max_iterations must be a whole number from 1 to {MAX_ITERATIONS_LIMIT}")
+        elif key == "system_prompt":
+            if not isinstance(value, str):
+                raise ValueError("system_prompt must be text")
+            if not value.strip():
+                raise ValueError("Instructions cannot be empty; use Reset to default to restore the built-in text")
+            if len(value) > MAX_PROMPT_CHARS:
+                raise ValueError(f"Instructions are limited to {MAX_PROMPT_CHARS:,} characters")
+        elif key == "model":
+            if value is None or (isinstance(value, str) and not value.strip()):
+                value = None
+            elif not isinstance(value, str) or len(value.strip()) > MAX_MODEL_CHARS:
+                raise ValueError(f"model must be a model name of at most {MAX_MODEL_CHARS} characters, or empty")
+            else:
+                value = value.strip()
+        clean[key] = value
+    return clean
+
+
+def _short_description(text: str, limit: int = 200) -> str:
+    """The first sentence of a tool description, for a one-line listing."""
+    text = " ".join((text or "").split())
+    match = re.search(r"(?<=[.!?])\s", text)
+    first = text[:match.start()] if match else text
+    return first if len(first) <= limit else first[: limit - 1].rstrip() + "…"
+
+
+def _tools_detail(agent: AgentConfig, registry, is_orchestrator: bool) -> List[Dict[str, Any]]:
+    if is_orchestrator:
+        return [{
+            "name": name,
+            "description": "Hands each planned step to another enabled agent.",
+            "requires_approval": False,
+            "installed": True,
+        } for name in agent.tools]
+    details = []
+    for name in agent.tools:
+        tool = registry.get_tool(name) if registry is not None else None
+        details.append({
+            "name": name,
+            "description": _short_description(getattr(tool, "description", "")) if tool else "",
+            "requires_approval": bool(getattr(tool, "requires_approval", False)),
+            "installed": tool is not None,
+        })
+    return details
+
+
+def overridden_fields(agent: AgentConfig) -> List[str]:
+    """The editable fields where this agent differs from its built-in default."""
+    default = DEFAULT_AGENTS.get(agent.id)
+    if default is None:
+        return []
+    return [key for key in agent.editable if getattr(agent, key) != getattr(default, key)]
+
+
+def _need_unmet(need: str) -> Optional[str]:
+    """Why one of an agent's needs is not met on this install, or None when it is."""
+    from backend import config as _config
+    if need == "web_access":
+        from backend.utils.settings_utils import get_web_access
+        return None if get_web_access() else "Web access is off in Settings"
+    if need == "browser_automation":
+        return None if _config.BROWSER_AUTOMATION_ENABLED else "Browser automation is off (GUAARDVARK_BROWSER_AUTOMATION)"
+    if need == "desktop_automation":
+        return None if _config.DESKTOP_AUTOMATION_ENABLED else "Off until GUAARDVARK_DESKTOP_AUTOMATION=true"
+    if need == "screen_agent":
+        from backend.utils.platform import screen_agent_available
+        return None if screen_agent_available() else "The agent screen needs Linux"
+    if need == "media_player":
+        from backend.utils.platform import media_player_available
+        return None if media_player_available() else "Media playback needs Linux"
+    return None
+
+
+def agent_readiness(agent: AgentConfig) -> Optional[str]:
+    """Why this agent cannot do its work on this install, or None when it can.
+
+    Reads the agent's metadata["needs"]; the first unmet need is the reason.
+    """
+    for need in (agent.metadata or {}).get("needs") or []:
+        try:
+            reason = _need_unmet(need)
+        except Exception as e:
+            logger.debug(f"Readiness check '{need}' failed for {agent.id}: {e}")
+            reason = None
+        if reason:
+            return reason
+    return None
+
+
+def llm_for_agent(agent: Optional[AgentConfig], default=None):
+    """The LLM an agent runs on: its pinned model, else ``default``.
+
+    ``default`` is the caller's active chat model (None lets the caller load it).
+    Raises RuntimeError when the pinned model cannot be set up, rather than
+    running the agent on a model other than the one it is pinned to.
+    """
+    if agent is None or not agent.model:
+        return default
+    from backend.utils.llm_service import get_llm_instance
+    llm = get_llm_instance(model=agent.model)
+    if llm is None:
+        raise RuntimeError(
+            f"{agent.name} is set to run on the model '{agent.model}', which could not be loaded; "
+            "pick another model or the active chat model on the Agents page"
+        )
+    return llm
 
 
 _config_manager: Optional[AgentConfigManager] = None

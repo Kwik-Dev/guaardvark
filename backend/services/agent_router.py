@@ -689,9 +689,8 @@ class AgentRouter:
             agent = manager.get_agent_for_message(message)
             
             if not agent:
-                # Fallback to generic executor if no agent matches
-                logger.warning("No matching agent found, using generic executor")
-                return self._execute_generic_agent_loop(decision, message, context)
+                from backend.services.agent_config import NO_AGENT_MATCHES
+                return {"type": "error", "error": NO_AGENT_MATCHES}
             
             if not agent.enabled:
                 return {
@@ -706,9 +705,9 @@ class AgentRouter:
                 # Wrap as a decision to reuse _execute_orchestrator signature
                 return self._execute_orchestrator(decision, message, context)
 
-            # Get tool registry
+            from backend.services.agent_config import llm_for_agent
             registry = self._get_tool_registry()
-            llm = self._get_llm()
+            llm = llm_for_agent(agent) or self._get_llm()
 
             if not registry or not llm:
                 return {
@@ -716,15 +715,9 @@ class AgentRouter:
                     "error": "Agent system not available"
                 }
 
-            # Filter tool registry to only agent's assigned tools (like /api/agents/execute does)
-            from backend.services.agent_tools import ToolRegistry
-            agent_tool_registry = ToolRegistry()
-            for tool_name in agent.tools:
-                tool = registry.get_tool(tool_name)
-                if tool:
-                    agent_tool_registry.register(tool)
-                else:
-                    logger.warning(f"Agent '{agent.id}' references tool '{tool_name}' which is not available")
+            agent_tool_registry, missing = registry.subset(agent.tools)
+            if missing:
+                logger.warning(f"Agent '{agent.id}' references tools that are not available: {missing}")
 
             if len(agent_tool_registry) == 0:
                 return {
@@ -738,16 +731,11 @@ class AgentRouter:
             if decision.tool_params and decision.tool_params.get("args"):
                 query = decision.tool_params["args"]
 
-            # Create executor with agent's max_iterations
-            executor = AgentExecutor(agent_tool_registry, llm, max_iterations=agent.max_iterations)
-
-            # Build session context with agent's system prompt (like /api/agents/execute does)
-            session_context = f"""Agent: {agent.name}
-System: {agent.system_prompt}
-
-User Context: {str(context)}"""
-
-            result = executor.execute(query, session_context=session_context)
+            executor = AgentExecutor(
+                agent_tool_registry, llm, max_iterations=agent.max_iterations, agent=agent
+            )
+            from backend.services.agent_prompt_blocks import user_context_line
+            result = executor.execute(query, session_context=user_context_line(context))
 
             return {
                 "type": "agent_result",

@@ -8,6 +8,8 @@ import logging
 from flask import Blueprint, request, jsonify
 from typing import Dict, Any
 
+from backend.services.agent_config import NO_AGENT_MATCHES
+
 logger = logging.getLogger(__name__)
 
 # Create blueprint
@@ -45,14 +47,21 @@ def list_agents():
                 "name": "Content Creator",
                 "description": "...",
                 "tools": [...],
-                "enabled": true
+                "enabled": true,
+                "editable": ["enabled", "max_iterations", "system_prompt", "model"],
+                "overridden": [],
+                "group": "create",
+                "summary": "SEO pages for WordPress",
+                "tools_missing": [],
+                "unavailable_reason": null
             }
         ]
     }
     """
     try:
         manager = _get_config_manager()
-        agents = [agent.to_dict() for agent in manager.list_agents()]
+        registry = _get_tool_registry()
+        agents = [manager.describe(agent, registry) for agent in manager.list_agents()]
 
         return jsonify({
             "success": True,
@@ -71,7 +80,7 @@ def list_agents():
 @agents_bp.route("/<agent_id>", methods=["GET"])
 def get_agent(agent_id: str):
     """
-    Get a specific agent's configuration.
+    Get a specific agent's configuration, with tools_detail for each of its tools.
     """
     try:
         manager = _get_config_manager()
@@ -83,24 +92,9 @@ def get_agent(agent_id: str):
                 "error": f"Agent '{agent_id}' not found"
             }), 404
 
-        # Get tool details
-        tool_registry = _get_tool_registry()
-        tools_detail = []
-        if tool_registry:
-            for tool_name in agent.tools:
-                tool = tool_registry.get_tool(tool_name)
-                if tool:
-                    tools_detail.append({
-                        "name": tool.name,
-                        "description": tool.description
-                    })
-
-        agent_dict = agent.to_dict()
-        agent_dict["tools_detail"] = tools_detail
-
         return jsonify({
             "success": True,
-            "agent": agent_dict
+            "agent": manager.describe(agent, _get_tool_registry(), detail=True)
         })
 
     except Exception as e:
@@ -114,17 +108,21 @@ def get_agent(agent_id: str):
 @agents_bp.route("/<agent_id>", methods=["PATCH"])
 def update_agent(agent_id: str):
     """
-    Update an agent's configuration.
+    Update an agent's editable fields (the agent's "editable" list).
 
     Request:
     {
         "enabled": true,
-        "max_iterations": 15,
-        "system_prompt": "..."
+        "max_iterations": 15,          # 1-50
+        "system_prompt": "...",        # non-empty, up to 20,000 characters
+        "model": "name:tag" | null     # null or "" runs on the active chat model
     }
+
+    A field the agent does not allow, or a value out of range, is a 400 that
+    names the problem and lists the editable fields; nothing is changed then.
     """
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True)
         if not data:
             return jsonify({
                 "success": False,
@@ -132,31 +130,78 @@ def update_agent(agent_id: str):
             }), 400
 
         manager = _get_config_manager()
-
-        # Check agent exists
-        if not manager.get_agent(agent_id):
+        agent = manager.get_agent(agent_id)
+        if not agent:
             return jsonify({
                 "success": False,
                 "error": f"Agent '{agent_id}' not found"
             }), 404
 
-        # Update agent
-        success = manager.update_agent(agent_id, data)
-
-        if success:
-            return jsonify({
-                "success": True,
-                "message": f"Agent '{agent_id}' updated",
-                "agent": manager.get_agent(agent_id).to_dict()
-            })
-        else:
+        try:
+            manager.update_agent(agent_id, data)
+        except ValueError as e:
             return jsonify({
                 "success": False,
-                "error": "Update failed"
-            }), 500
+                "error": str(e),
+                "editable": list(agent.editable),
+            }), 400
+
+        return jsonify({
+            "success": True,
+            "message": f"Agent '{agent_id}' updated",
+            "agent": manager.describe(agent, _get_tool_registry(), detail=True)
+        })
 
     except Exception as e:
         logger.error(f"Failed to update agent: {e}", exc_info=True)
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@agents_bp.route("/<agent_id>/reset", methods=["POST"])
+def reset_agent(agent_id: str):
+    """
+    Put an agent's fields back to the built-in default.
+
+    Request (optional): {"fields": ["system_prompt", "max_iterations", "model"]}
+    With no fields, the instructions, iteration limit and model are reset; the
+    on/off switch is kept.
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        fields = data.get("fields") if isinstance(data, dict) else None
+        if fields is not None and (
+            not isinstance(fields, list) or not all(isinstance(f, str) for f in fields)
+        ):
+            return jsonify({"success": False, "error": "fields must be a list of field names"}), 400
+
+        manager = _get_config_manager()
+        agent = manager.get_agent(agent_id)
+        if not agent:
+            return jsonify({
+                "success": False,
+                "error": f"Agent '{agent_id}' not found"
+            }), 404
+
+        try:
+            manager.reset_agent(agent_id, fields)
+        except ValueError as e:
+            return jsonify({
+                "success": False,
+                "error": str(e),
+                "editable": list(agent.editable),
+            }), 400
+
+        return jsonify({
+            "success": True,
+            "message": f"Agent '{agent_id}' reset to default",
+            "agent": manager.describe(agent, _get_tool_registry(), detail=True)
+        })
+
+    except Exception as e:
+        logger.error(f"Failed to reset agent: {e}", exc_info=True)
         return jsonify({
             "success": False,
             "error": str(e)
@@ -184,7 +229,8 @@ def toggle_agent(agent_id: str):
         return jsonify({
             "success": True,
             "agent_id": agent_id,
-            "enabled": new_status
+            "enabled": new_status,
+            "agent": manager.describe(agent, _get_tool_registry()),
         })
 
     except Exception as e:
@@ -234,7 +280,7 @@ def match_agent():
             return jsonify({
                 "success": True,
                 "agent": None,
-                "message": "No matching agent found"
+                "message": NO_AGENT_MATCHES
             })
 
     except Exception as e:
@@ -296,7 +342,7 @@ def execute_agent():
             if not agent:
                 return jsonify({
                     "success": False,
-                    "error": "No matching agent found"
+                    "error": NO_AGENT_MATCHES
                 }), 404
 
         if not agent.enabled:
@@ -323,15 +369,9 @@ def execute_agent():
                 "error": "Tool registry not available"
             }), 500
 
-        # Filter tool registry to only agent's assigned tools
-        from backend.services.agent_tools import ToolRegistry
-        agent_tool_registry = ToolRegistry()
-        for tool_name in agent.tools:
-            tool = tool_registry.get_tool(tool_name)
-            if tool:
-                agent_tool_registry.register(tool)
-            else:
-                logger.warning(f"Agent '{agent.id}' references tool '{tool_name}' which is not available")
+        agent_tool_registry, missing = tool_registry.subset(agent.tools)
+        if missing:
+            logger.warning(f"Agent '{agent.id}' references tools that are not available: {missing}")
 
         if len(agent_tool_registry) == 0:
             return jsonify({
@@ -341,19 +381,16 @@ def execute_agent():
 
         # Execute using agent executor
         try:
+            from backend.services.agent_config import llm_for_agent
             from backend.services.agent_executor import AgentExecutor
             from backend.utils.llm_service import get_default_llm
 
-            llm = get_default_llm()
-            executor = AgentExecutor(agent_tool_registry, llm, max_iterations=agent.max_iterations)
-
-            # Build session context with agent's system prompt
-            session_context = f"""Agent: {agent.name}
-System: {agent.system_prompt}
-
-User Context: {str(context)}"""
-
-            result = executor.execute(message, session_context=session_context)
+            llm = llm_for_agent(agent) or get_default_llm()
+            executor = AgentExecutor(
+                agent_tool_registry, llm, max_iterations=agent.max_iterations, agent=agent
+            )
+            from backend.services.agent_prompt_blocks import user_context_line
+            result = executor.execute(message, session_context=user_context_line(context))
 
             return jsonify({
                 "success": True,
