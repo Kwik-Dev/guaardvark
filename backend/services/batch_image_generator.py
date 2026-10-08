@@ -102,6 +102,9 @@ class BatchImageRequest:
     user_treatment: Optional[str] = None
     ui_config: Optional[Dict[str, Any]] = None
     retry_data: Optional[Dict[str, Any]] = None
+    # The Studio page's picker announces "downloads ~N GB on first use" for a
+    # model that is not installed; only then may a batch download it.
+    allow_model_download: bool = False
 
 
 # Batch-level kwargs the create_batch_from_* factories forward into
@@ -1005,6 +1008,7 @@ class BatchImageGenerator:
                     auto_enhance=prompt.auto_enhance,
                     keep_pipeline=True,
                     output="path",
+                    allow_model_download=getattr(batch_status, "allow_model_download", False),
                     content_preset=prompt.content_preset,
                     enhance_anatomy=prompt.enhance_anatomy,
                     enhance_faces=prompt.enhance_faces,
@@ -1373,6 +1377,7 @@ class BatchImageGenerator:
         batch_status.face_restoration_weight = request.face_restoration_weight
         batch_status.generate_thumbnails = request.generate_thumbnails
         batch_status.remove_background = request.remove_background
+        batch_status.allow_model_download = request.allow_model_download
 
         first_p = request.prompts[0] if request.prompts else None
         prompts_list = [p.prompt for p in (request.prompts or [])]

@@ -960,6 +960,8 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         Object.entries(params).forEach(([key, value]) => {
           formData.append(key, value.toString());
         });
+        // The model picker shows what a missing model downloads, so this page may.
+        formData.append('allow_model_download', 'true');
 
         response = await fetch(`${API_BASE}/batch-image/generate/csv`, {
           method: 'POST',
@@ -1006,6 +1008,8 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
           body: JSON.stringify({
             prompts: promptsToGenerate,
             ...params,
+            // The model picker shows what a missing model downloads, so this page may.
+            allow_model_download: true,
             // Cast characters: backend resolves these to LoRA paths + trigger.
             subject_ids: castSubjectIds,
             // User LoRAs switched on below the model select.
