@@ -184,6 +184,84 @@ def _gpu_memory_mb() -> Optional[tuple]:
     return None
 
 
+# Ollama places a model when it loads it. One loaded while the GPU was short
+# (an image pipeline holding VRAM) runs partly or wholly on the CPU until it
+# unloads, and every chat renews its keep-alive, so it can stay there long
+# after the room came back.
+_PLACEMENT_CHECK_EVERY_S = 60.0
+_PLACEMENT_MARGIN_MB = 1024
+_PLACEMENT_RELOAD_WINDOW_S = 600.0
+_PLACEMENT_BACKOFF_S = 1800.0
+_placement_checked: Dict[str, float] = {}
+_placement_reloaded: Dict[str, float] = {}
+_placement_lock = threading.Lock()
+
+
+def reload_onto_gpu_if_room(model_name: str) -> bool:
+    """Unload a model that sits partly on the CPU when the GPU now has room for
+    all of it, so the next request loads it whole onto the GPU.
+
+    Checks at most once a minute per model. A model still off the GPU at the
+    first check after such a reload, with room to spare, is not a placement
+    Ollama made under pressure (wholly on the CPU: Ollama is not using the
+    GPU); that is logged and the check backs off for half an hour instead of
+    reloading on every chat. True when the model was unloaded.
+    """
+    if not model_name:
+        return False
+    now = time.time()
+    with _placement_lock:
+        if now - _placement_checked.get(model_name, 0.0) < _PLACEMENT_CHECK_EVERY_S:
+            return False
+        _placement_checked[model_name] = now
+    base = get_ollama_base_url()
+    try:
+        models = requests.get(f"{base}/api/ps", timeout=3).json().get("models") or []
+    except Exception:
+        return False
+    entry = next((m for m in models if model_name in (m.get("name"), m.get("model"))), None)
+    if not entry:
+        return False
+    size, on_gpu = int(entry.get("size") or 0), int(entry.get("size_vram") or 0)
+    if size <= 0 or on_gpu >= size:
+        return False
+    on_cpu_mb = (size - on_gpu) / (1024 * 1024)
+    mem = _gpu_memory_mb()
+    if not mem:
+        return False
+    free_mb = mem[0]
+    share = round(100 * (size - on_gpu) / size)
+    if free_mb < on_cpu_mb + _PLACEMENT_MARGIN_MB:
+        logger.info(
+            "%s runs %d%% on the CPU; the GPU has %.0f MB free, %.0f MB short of moving it",
+            model_name, share, free_mb, on_cpu_mb + _PLACEMENT_MARGIN_MB - free_mb,
+        )
+        return False
+    with _placement_lock:
+        if now - _placement_reloaded.pop(model_name, 0.0) < _PLACEMENT_RELOAD_WINDOW_S:
+            cause = ("Ollama is not using the GPU; restart Ollama from Plugins" if on_gpu == 0
+                     else "Ollama keeps it there despite the free memory")
+            logger.warning(
+                "%s came back %d%% on the CPU after a reload although the GPU has %.0f MB "
+                "free: %s. Not reloading it again for %d minutes.",
+                model_name, share, free_mb, cause, _PLACEMENT_BACKOFF_S // 60,
+            )
+            _placement_checked[model_name] = now + _PLACEMENT_BACKOFF_S
+            return False
+        _placement_reloaded[model_name] = now
+    try:
+        requests.post(f"{base}/api/generate", json={"model": model_name, "keep_alive": 0}, timeout=30)
+    except Exception as e:
+        logger.warning("Could not unload %s to move it onto the GPU: %s", model_name, e)
+        return False
+    logger.warning(
+        "%s was %d%% on the CPU (%.0f MB) while the GPU has %.0f MB free; unloaded so "
+        "the next request loads it onto the GPU",
+        model_name, share, on_cpu_mb, free_mb,
+    )
+    return True
+
+
 def get_system_resources() -> Dict[str, float]:
     """
     Get available system memory resources in MB.

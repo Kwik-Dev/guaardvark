@@ -4699,6 +4699,11 @@ class UnifiedChatEngine:
             )
         except Exception as _oerr:
             logger.debug(f"Orchestrator pre-load for LLM skipped: {_oerr}")
+        try:
+            from backend.utils.ollama_resource_manager import reload_onto_gpu_if_room
+            reload_onto_gpu_if_room(model_name)
+        except Exception as _perr:
+            logger.debug(f"GPU placement check skipped: {_perr}")
 
         accumulated = []
         accumulated_thinking = []

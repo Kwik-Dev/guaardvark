@@ -187,12 +187,14 @@ def _run_plugin_script(argv: list, cwd: str, timeout: int) -> dict:
 
     # Fallback: direct subprocess.run (risks CUDA corruption — only used if sidecar is dead)
     try:
+        from backend.services.plugin_runner import service_env
         result = subprocess.run(
             argv,
             capture_output=True,
             text=True,
             timeout=timeout,
             cwd=cwd,
+            env=service_env(),
         )
         return {
             "ok": True,
