@@ -15,14 +15,15 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
+from urllib.parse import quote
 
 from flask import Blueprint, request, send_file
-from werkzeug.utils import secure_filename
 
 from backend.utils.response_utils import success_response, error_response
 from backend.utils.path_guard import PathEscapesRoot, contained
-from backend.services.batch_video_generator import get_batch_video_generator
+from backend.services.batch_video_generator import VideoRenameError, get_batch_video_generator
 from backend.services.job_types import RenderErrorKind, batch_failure, describe_failure, failure_kind
+from backend.services.video_consistency_metrics import NEEDS_REVIEW
 # Single source of truth for video-model file layout (download dst == install
 # check == ComfyUI loader paths). See backend/services/video_model_registry.py.
 from backend.services.video_model_registry import (
@@ -598,6 +599,7 @@ def get_batch_status(batch_id: str):
                 "error_kind": r.error_kind,
                 "failure": None if r.success else describe_failure(r.error_kind, r.error),
                 "metadata": r.metadata,
+                "review": getattr(r, "review", None),
             }
             for r in status.results
         ]
@@ -615,6 +617,11 @@ def get_batch_status(batch_id: str):
                 "flagged_videos": sum(
                     1 for r in status.results
                     if r.success and ((r.metadata or {}).get("quality") or {}).get("flagged")
+                ),
+                # Held until a person approves or re-renders them.
+                "needs_review_videos": sum(
+                    1 for r in status.results
+                    if (getattr(r, "review", None) or {}).get("state") == NEEDS_REVIEW
                 ),
                 "start_time": status.start_time.isoformat() if status.start_time else None,
                 "end_time": status.end_time.isoformat() if status.end_time else None,
@@ -693,34 +700,11 @@ def delete_video(batch_id: str, video_name: str):
     try:
         generator = get_batch_video_generator()
         try:
-            batch_dir = contained(generator.base_output_dir, batch_id)
-            target_path = contained(batch_dir, video_name)
+            deleted = generator.delete_video(batch_id, video_name)
         except PathEscapesRoot:
             return error_response("Invalid video path", 400)
-
-        if not target_path.exists():
+        if not deleted:
             return error_response("Video not found", 404)
-
-        target_path.unlink(missing_ok=True)
-
-        # Update metadata if present
-        metadata_file = batch_dir / "batch_metadata.json"
-        if metadata_file.exists():
-            try:
-                with open(metadata_file, "r") as f:
-                    data = json.load(f)
-                changed = False
-                for res in data.get("results", []):
-                    rel = res.get("video_path", "")
-                    if rel and (rel == str(Path(video_name)) or rel.endswith(video_name)):
-                        res["video_path"] = None
-                        changed = True
-                if changed:
-                    with open(metadata_file, "w") as f:
-                        json.dump(data, f, indent=2)
-            except Exception as e:
-                logger.warning(f"Failed to update metadata after delete: {e}")
-
         return success_response({"batch_id": batch_id, "deleted": video_name})
     except Exception as e:
         logger.error(f"Failed to delete video: {e}")
@@ -729,48 +713,32 @@ def delete_video(batch_id: str, video_name: str):
 
 @batch_video_bp.route("/video/<batch_id>/<path:video_name>/rename", methods=["PUT"])
 def rename_video(batch_id: str, video_name: str):
+    """Rename one clip. Body {"new_name": "<file name>"}; the extension is kept.
+
+    Answers with the clip's new paths (relative to the batch) and the URL that
+    serves it, so a page can repoint its player without reloading the batch.
+    """
     try:
         data = request.get_json(silent=True) or {}
-        new_name = data.get("new_name", "").strip()
-        if not new_name:
-            return error_response("New name cannot be empty", 400)
-
+        new_name = str(data.get("new_name") or "")
         generator = get_batch_video_generator()
         try:
-            batch_dir = contained(generator.base_output_dir, batch_id)
-            src_path = contained(batch_dir, video_name)
+            renamed = generator.rename_video(batch_id, video_name, new_name)
         except PathEscapesRoot:
             return error_response("Invalid video path", 400)
+        except VideoRenameError as e:
+            return error_response(str(e), e.status)
 
-        if not src_path.exists():
-            return error_response("Video not found", 404)
-
-        new_safe = secure_filename(new_name)
-        dst_path = src_path.with_name(new_safe)
-        if dst_path.exists():
-            return error_response("A file with the new name already exists", 409)
-
-        src_path.rename(dst_path)
-
-        # Update metadata if present
-        metadata_file = batch_dir / "batch_metadata.json"
-        if metadata_file.exists():
-            try:
-                with open(metadata_file, "r") as f:
-                    meta = json.load(f)
-                updated = False
-                for res in meta.get("results", []):
-                    rel = res.get("video_path", "")
-                    if rel and (rel == str(Path(video_name)) or rel.endswith(video_name)):
-                        res["video_path"] = str(dst_path.relative_to(batch_dir))
-                        updated = True
-                if updated:
-                    with open(metadata_file, "w") as f:
-                        json.dump(meta, f, indent=2)
-            except Exception as e:
-                logger.warning(f"Failed to update metadata after rename: {e}")
-
-        return success_response({"batch_id": batch_id, "old_name": video_name, "new_name": new_safe})
+        video_path = renamed["video_path"]
+        return success_response({
+            "batch_id": batch_id,
+            "old_name": video_name,
+            "new_name": Path(video_path).name,
+            "old_video_path": renamed["old_video_path"],
+            "video_path": video_path,
+            "thumbnail_path": renamed["thumbnail_path"],
+            "url": f"{batch_video_bp.url_prefix}/video/{quote(batch_id)}/{quote(Path(video_path).as_posix())}",
+        })
     except Exception as e:
         logger.error(f"Failed to rename video: {e}")
         return error_response(str(e), 500)
@@ -848,6 +816,39 @@ def retry_batch(batch_id: str):
         })
     except Exception as e:
         logger.error(f"Failed to retry batch {batch_id}: {e}")
+        return error_response(str(e), 500)
+
+
+@batch_video_bp.route("/review/<batch_id>/<item_id>/approve", methods=["POST"])
+def approve_held_clip(batch_id: str, item_id: str):
+    """Keep a clip a quality check held for review; it is registered into Documents."""
+    try:
+        result = get_batch_video_generator().approve_item(batch_id, item_id)
+        if result is None:
+            return error_response("Clip not found", 404)
+        return success_response({"batch_id": batch_id, "item_id": item_id, "review": result.review})
+    except Exception as e:
+        logger.error(f"Failed to approve clip {batch_id}/{item_id}: {e}")
+        return error_response(str(e), 500)
+
+
+@batch_video_bp.route("/review/<batch_id>/<item_id>/rerender", methods=["POST"])
+def rerender_held_clip(batch_id: str, item_id: str):
+    """Render one clip again as a new batch with the same settings and a fresh seed."""
+    try:
+        generator = get_batch_video_generator()
+        new_status = generator.rerender_item(batch_id, item_id)
+        if new_status is None:
+            return error_response("Clip not found", 404)
+        return success_response({
+            "batch_id": new_status.batch_id,
+            "status": new_status.status,
+            "rerender_of": {"batch_id": batch_id, "item_id": item_id},
+        })
+    except ValueError as e:
+        return error_response(str(e), 400)
+    except Exception as e:
+        logger.error(f"Failed to re-render clip {batch_id}/{item_id}: {e}")
         return error_response(str(e), 500)
 
 
@@ -1150,8 +1151,10 @@ def list_video_models():
                 "capabilities": caps,
                 "tier_defaults": tier_defaults_for(model_id, total_vram_mb) if caps else {},
                 "license": info.get("license"),
-                # LoRA companions name the generation entries they apply to.
+                # LoRA companions name the generation entries they apply to;
+                # adapter False marks one no picker may offer.
                 "applies_to": info.get("applies_to", []),
+                "adapter": info.get("adapter"),
                 "active": model_id in {active_t2v, active_i2v} and bool(model_id),
                 "user": bool(info.get("user")) or is_user_model_id(model_id),
                 "like": info.get("like"),

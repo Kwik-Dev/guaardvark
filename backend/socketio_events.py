@@ -4,7 +4,7 @@ import io
 import numpy as np
 import threading
 
-from flask_socketio import emit, join_room
+from flask_socketio import emit, join_room, leave_room
 
 # Import the socketio instance from the shared instance file
 from backend.socketio_instance import socketio
@@ -103,41 +103,49 @@ def handle_voice_stream_chunk(data):
 
 @socketio.on("voice:stream_end")
 def handle_voice_stream_end(data):
-    """Process the complete audio buffer and return final transcript."""
+    """Transcribe a finished stream and answer with the stream id it was started with.
+
+    Each stream has its own room (joined in voice:stream_start); it is left
+    here on every path, or rooms pile up for the life of the connection.
+    """
     _prune_voice_buffers()
     session_id = data.get("session_id", "default")
-    
+    room = f"voice_{session_id}"
+
     with _voice_stream_lock:
         if session_id not in voice_stream_buffers or not voice_stream_buffers[session_id]:
             _voice_stream_meta.pop(session_id, None)
             emit("voice:final_transcript", {"text": "", "session_id": session_id})
+            leave_room(room)
             return
-            
+
         audio_bytes = voice_stream_buffers.pop(session_id)
         _voice_stream_meta.pop(session_id, None)
     logger.info(f"Voice stream ended for session: {session_id}, processing {len(audio_bytes)} bytes")
-    
+
     try:
         from faster_whisper.audio import decode_audio
         from backend.utils.faster_whisper_utils import transcribe_audio_faster, FASTER_WHISPER_AVAILABLE
-        
+
         if FASTER_WHISPER_AVAILABLE:
             audio_io = io.BytesIO(audio_bytes)
             audio_array = decode_audio(audio_io)
-            
+
             # Use tiny.en for fastest streaming response
             final_text, processing_time = transcribe_audio_faster(audio_array, model_size="tiny.en")
-            
+
             emit("voice:final_transcript", {
                 "text": final_text,
                 "session_id": session_id,
                 "processing_time": processing_time
-            }, room=f"voice_{session_id}")
+            }, room=room)
         else:
-            emit("voice:error", {"message": "faster-whisper not available"}, room=f"voice_{session_id}")
+            emit("voice:error", {"message": "faster-whisper not available", "session_id": session_id}, room=room)
     except Exception as e:
         logger.error(f"Voice stream processing failed: {e}")
-        emit("voice:error", {"message": str(e)}, room=f"voice_{session_id}")
+        emit("voice:error", {"message": str(e), "session_id": session_id}, room=room)
+    finally:
+        leave_room(room)
 
 @socketio.on("subscribe")
 def handle_subscribe(data):
@@ -531,14 +539,15 @@ def _handle_chat_send_local(payload):
             project_id = None
 
     # Abort any already-running generation for this session
-    try:
-        from backend.services.unified_chat_engine import set_abort_flag
-        set_abort_flag(session_id)
-    except Exception:
-        pass
+    from backend.services.unified_chat_engine import (
+        begin_new_turn, begin_turn, end_turn, turn_replaced,
+    )
+    turn_mark = begin_new_turn(session_id)
 
     def emit_fn(event, data_payload):
         data_payload["session_id"] = session_id
+        if turn_replaced(session_id, turn_mark):
+            return  # a newer message owns the room now
         try:
             logger.info(f"[SOCKET-CHAT][BRIDGE-LOCAL] EMIT {event} -> room={session_id}")
             _sio.emit(event, data_payload, room=session_id)
@@ -585,6 +594,7 @@ def _handle_chat_send_local(payload):
             return
 
     def _run():
+        begin_turn(session_id, turn_mark)
         try:
             logger.info(f"[SOCKET-CHAT][BRIDGE-LOCAL] BACKEND THREAD START session={session_id}")
 
@@ -627,6 +637,8 @@ def _handle_chat_send_local(payload):
         except Exception as _e:
             logger.error("[BRIDGE-LOCAL] engine error: %s", _e, exc_info=True)
             emit_fn("chat:error", {"error": str(_e)})
+        finally:
+            end_turn(session_id)
 
     threading.Thread(target=_run, daemon=True, name=f"bridge-chat-{session_id[:8]}").start()
 

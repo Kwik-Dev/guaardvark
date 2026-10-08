@@ -200,36 +200,63 @@ def _verify_angle_relabel_regen(
     comfy_gen=None,
     analyzer=None,
 ) -> dict:
-    """Vision-check still vs planned angle; one regen on mismatch; always relabel final.
+    """Vision-check still vs planned angle; one regen on mismatch; relabel to what
+    the final image shows.
 
-    Returns {match, regenerated, planned, observed, model}. Non-fatal on vision errors.
+    Returns {match, regenerated, planned, observed, model}. When the check could
+    not run or its reply could not be read ("angle unverified"), observed and
+    match are None: no regen, the planned label stays, and ``row.angle_state`` is
+    left 'unverified' so the training gate keeps the sample out of its framing
+    tally. When vision read the image but the plan has no known label, match is
+    None too, and the sample takes the observed label as verified. Non-fatal on
+    vision errors.
     """
     from backend.services.character_angle_verify import (
+        ANGLE_UNVERIFIED,
+        ANGLE_VERIFIED,
         apply_relabel,
         strengthen_prompt_for_angle,
         verify_sample_angle,
     )
     from backend.models import db
 
+    # Unverified until the final image's angle has actually been read.
+    row.angle_state = ANGLE_UNVERIFIED
     planned = row.angle or ""
     result = {
-        "match": True,
+        "match": None,
         "regenerated": False,
         "planned": planned,
         "observed": None,
         "model": None,
     }
-    try:
-        v1 = verify_sample_angle(output_path, planned, analyzer=analyzer)
-    except Exception as e:  # noqa: BLE001
-        log.warning("angle verify skipped (vision error): %s", e)
+
+    def _check() -> dict:
+        try:
+            return verify_sample_angle(output_path, planned, analyzer=analyzer)
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "match": None, "error": str(e)[:200]}
+
+    def _unverified(error) -> dict:
+        result["observed"] = None
+        result["match"] = None
+        log.warning(
+            "Character Generator: sample %s angle unverified (%s); keeping planned label %r",
+            row.index, error or "no classification", planned,
+        )
         return result
 
-    result["model"] = v1.get("model")
-    result["observed"] = v1.get("observed")
-    result["match"] = bool(v1.get("match", True))
+    def _read(v: dict) -> bool:
+        return bool(v.get("ok") and v.get("observed"))
 
-    if v1.get("ok") and not v1.get("match"):
+    v1 = _check()
+    result["model"] = v1.get("model")
+    if not _read(v1):
+        return _unverified(v1.get("error"))
+    result["observed"] = v1["observed"]
+    result["match"] = v1.get("match")
+
+    if v1.get("match") is False:
         log.info(
             "Character Generator: angle mismatch sample %s planned=%r observed=%r — regen once",
             row.index, planned, v1.get("observed"),
@@ -251,30 +278,34 @@ def _verify_angle_relabel_regen(
                 subject=subject,
                 use_lora=use_lora,
             )
-            row.seed = new_seed
-            # Keep original image_prompt (plan); strengthened text was regen-only.
-            result["regenerated"] = True
-            v2 = verify_sample_angle(output_path, planned, analyzer=analyzer)
-            result["observed"] = v2.get("observed") or result["observed"]
-            result["match"] = bool(v2.get("match", True))
-            result["model"] = v2.get("model") or result["model"]
         except Exception as e:  # noqa: BLE001
             log.warning(
                 "Character Generator: angle regen failed for sample %s: %s — relabeling only",
                 row.index, e,
             )
+        else:
+            row.seed = new_seed
+            # Keep original image_prompt (plan); strengthened text was regen-only.
+            result["regenerated"] = True
+            v2 = _check()
+            result["model"] = v2.get("model") or result["model"]
+            if not _read(v2):
+                # The regen replaced the pixels v1 described, so its label no longer applies.
+                return _unverified(v2.get("error"))
+            result["observed"] = v2["observed"]
+            result["match"] = v2.get("match")
 
     # Honest UI label = what the final pixels show
-    if result.get("observed"):
-        apply_relabel(row, result["observed"])
-        try:
-            db.session.add(row)
-        except Exception:
-            pass
-        log.info(
-            "Character Generator: sample %s angle %r → %r (regen=%s match=%s)",
-            row.index, planned, result["observed"], result["regenerated"], result["match"],
-        )
+    apply_relabel(row, result["observed"])
+    row.angle_state = ANGLE_VERIFIED
+    try:
+        db.session.add(row)
+    except Exception:
+        pass
+    log.info(
+        "Character Generator: sample %s angle %r → %r (regen=%s match=%s)",
+        row.index, planned, result["observed"], result["regenerated"], result["match"],
+    )
     return result
 
 

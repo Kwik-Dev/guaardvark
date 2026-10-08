@@ -10,17 +10,54 @@ Calls Ollama's /api/chat endpoint directly with image attachments.
 import base64
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from io import BytesIO
-from typing import Optional
+from typing import Optional, Tuple
 
 import requests
 from PIL import Image
 
 from backend.config import OLLAMA_BASE_URL
+from backend.services.model_capability_data import NON_TEXT_NAME_PATTERNS
 from backend.utils.ollama_resource_manager import request_options
 
 logger = logging.getLogger(__name__)
+
+
+# Vision model families the legacy decider holds back while another installed
+# model can write the reply.
+_VISION_NAME_PATTERNS = ("moondream", "llava", "bakllava", "gemma4")
+
+
+def _writes_text(model_name: str) -> bool:
+    """Whether a model can answer a chat request with text. When Ollama describes
+    the model its capability list decides: it needs "completion", and embedding
+    models and decision models (nimble and tev1 report only "decision") cannot
+    write a reply. A model Ollama cannot describe, or one described without a
+    capability list, falls back to the name rule in NON_TEXT_NAME_PATTERNS
+    (embedding and vision-only names); decision models have no name rule."""
+    from backend.services.model_capabilities import capabilities_for
+    try:
+        rec = capabilities_for(model_name, with_vision=False)
+    except Exception:  # noqa: BLE001
+        rec = None
+    if rec is None or not rec.exists or not rec.capabilities:
+        lower = model_name.lower()
+        return not any(re.search(p, lower) for p in NON_TEXT_NAME_PATTERNS)
+    return rec.completion and not rec.embedding and "decision" not in rec.capabilities
+
+
+def _saved_chat_model() -> str:
+    """The chat model the person chose, from the saved setting (no Flask or DB)."""
+    try:
+        from backend.config import _read_saved_model_name
+        name = (_read_saved_model_name() or "").strip()
+    except Exception:
+        return ""
+    if name and ":" not in name:
+        name += ":latest"
+    return name
 
 
 @dataclass
@@ -135,9 +172,11 @@ class VisionAnalyzer:
             # The agent loop must always name its brain. A silent auto-pick is
             # how a blind user model ended up "deciding" through a third model
             # nobody chose; see resolve_brain_eye in agent_control_service.
-            logger.warning("[VISION] text_query called without model= — auto-picking a decision "
-                           "model (legacy path; pass the brain explicitly)")
-            model = self._get_decision_model()
+            model, why = self._pick_decision_model()
+            logger.warning("[VISION] text_query called without model= — auto-picked %s: %s "
+                           "(legacy path; pass the brain explicitly)", model, why)
+            if not model:
+                return VisionResult(success=False, error=why)
 
         try:
             import time
@@ -193,36 +232,68 @@ class VisionAnalyzer:
             logger.error(f"Text query error: {e}", exc_info=True)
             return VisionResult(success=False, error=str(e), model_used=model)
 
-    def _get_decision_model(self) -> str:
-        """Legacy fallback: pick some text model when the caller named none.
+    def _get_decision_model(self) -> Optional[str]:
+        """The model the legacy text path will use, or None when no installed
+        model can write a reply (_pick_decision_model says why)."""
+        return self._pick_decision_model()[0]
+
+    def _pick_decision_model(self) -> Tuple[Optional[str], str]:
+        """Legacy fallback: pick a model that can write a text reply when the
+        caller named none. Returns (model or None, why).
 
         Only for callers that genuinely have no brain of their own
         (apprentice_engine, film_curator). The agent loop passes its brain
-        explicitly and must never land here. The gemma4 entries were removed
-        from the preference list on 2026-09-22: a vision model quietly becoming
-        the decider for a text-model user was exactly the fault being fixed.
+        explicitly and must never land here.
+
+        Order: GUAARDVARK_DECISION_MODEL when installed; the preferred text
+        models; any installed model not named as one that sees; then a model
+        that sees after all, the person's saved chat model first. A vision
+        model must not quietly become the decider while a text model is
+        installed, but on a stock install (gemma4:e2b and nomic-embed-text) it
+        is the only model that can reply. Embedding and decision models never
+        qualify (_writes_text), the override included: they cannot answer.
         """
         try:
             response = requests.get(f"{self.ollama_url}/api/tags", timeout=5)
-            if response.status_code == 200:
-                models = [m["name"] for m in response.json().get("models", [])]
-                # Prefer these text models in order (smarter models first for planning)
-                # Check for override from environment
-                override = os.environ.get("GUAARDVARK_DECISION_MODEL")
-                if override and override in models:
-                    return override
-                for preferred in ["llama3.1:8b", "llama3:8b", "llama3:latest",
-                                  "mistral:latest", "gemma2:latest"]:
-                    if preferred in models:
-                        return preferred
-                # Fall back to any non-vision model
-                vision_patterns = ["moondream", "llava", "bakllava", "gemma4"]
-                for m in models:
-                    if not any(vp in m.lower() for vp in vision_patterns):
-                        return m
-        except Exception:
-            pass
-        return "llama3:8b"  # Final fallback
+        except Exception as e:  # noqa: BLE001
+            return None, (f"could not reach Ollama at {self.ollama_url} to list its models "
+                          f"({type(e).__name__})")
+        if response.status_code != 200:
+            return None, f"Ollama returned {response.status_code} when listing its models"
+        try:
+            models = [m["name"] for m in response.json().get("models", [])]
+        except Exception as e:  # noqa: BLE001
+            return None, f"could not read Ollama's model list: {e}"
+
+        override = os.environ.get("GUAARDVARK_DECISION_MODEL")
+        if override and override in models:
+            if _writes_text(override):
+                return override, "GUAARDVARK_DECISION_MODEL"
+            logger.warning("[VISION] GUAARDVARK_DECISION_MODEL=%s cannot write a text reply "
+                           "(embedding or decision model); picking another", override)
+        # Prefer these text models in order (smarter models first for planning)
+        for preferred in ["llama3.1:8b", "llama3:8b", "llama3:latest",
+                          "mistral:latest", "gemma2:latest"]:
+            if preferred in models:
+                return preferred, "preferred text model"
+
+        def sees(name: str) -> bool:
+            return any(p in name.lower() for p in _VISION_NAME_PATTERNS)
+
+        for m in models:
+            if not sees(m) and _writes_text(m):
+                return m, "first installed model outside the vision families"
+
+        seeing = [m for m in models if sees(m) and _writes_text(m)]
+        saved = _saved_chat_model()
+        if saved in seeing:
+            return saved, "the saved chat model; no text-only model is installed"
+        # gemma4 is a full chat model; moondream and the llava family mostly caption.
+        seeing.sort(key=lambda m: "gemma4" not in m.lower())
+        if seeing:
+            return seeing[0], "no text-only model is installed"
+        return None, ("no installed Ollama model can write a text reply (embedding and "
+                      "decision models cannot); install a chat model")
 
     def encode_image(self, image: Image.Image) -> str:
         """

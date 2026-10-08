@@ -163,6 +163,13 @@ const ConnectionsPage = () => {
       {family === "social" && settings && (
         <Card variant="outlined" sx={{ mb: 2 }}>
           <CardContent>
+            {settings.posting_stopped && (
+              <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
+                {settings.posting_stop_reason ||
+                  "Public posting is stopped. Resume it on the Outreach page."}{" "}
+                Queued publishes are held on the Approvals page.
+              </CollapsibleAlert>
+            )}
             <Stack direction="row" alignItems="center" spacing={2} flexWrap="wrap">
               <Stack direction="row" alignItems="center" spacing={1}>
                 <Switch

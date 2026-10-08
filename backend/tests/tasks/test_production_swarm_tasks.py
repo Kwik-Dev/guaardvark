@@ -84,6 +84,13 @@ def production(app):
     return prod
 
 
+def _link(production, subject):
+    """Cast ``subject`` in ``production``, as the screenwriter does."""
+    from backend.models import ProductionSubject
+    db.session.add(ProductionSubject(production_id=production.id, subject_id=subject.id))
+    db.session.commit()
+
+
 def test_run_screenwriter_persists_subjects_and_shots(app, production):
     def fake_llm(*args, **kwargs):
         return json.dumps({
@@ -177,6 +184,60 @@ def test_run_screenwriter_retry_does_not_duplicate(app, production):
     assert ProductionShot.query.filter_by(production_id=production.id).count() == 1
 
 
+def _screenwriter_naming(name, description):
+    def fake_llm(*args, **kwargs):
+        return json.dumps({
+            "subjects": [{"name": name, "kind": "character", "description": description}],
+            "scenes": [],
+        })
+    return fake_llm
+
+
+def test_run_screenwriter_links_an_existing_subject_without_rewriting_it(app, production):
+    """A new film that names 'Anna' links the library's Anna as she is; the
+    script's text and cast pin stay with this production."""
+    from backend.models import ProductionSubject
+    anna = Subject(name="Anna", kind="character",
+                   description="Hand-written: auburn bob, green coat", cast_required=False)
+    db.session.add(anna)
+    db.session.commit()
+    anna_id = anna.id
+
+    production.script_text = "INT. CAFE - DAY\n[[Anna]] orders coffee."
+    db.session.commit()
+    run_screenwriter(production.id, llm=_screenwriter_naming("Anna", "LLM: a barista in her twenties"))
+
+    anna = db.session.get(Subject, anna_id)
+    assert anna.description == "Hand-written: auburn bob, green coat"
+    assert anna.cast_required is False
+    assert Subject.query.filter_by(name="Anna").count() == 1
+
+    link = ProductionSubject.query.filter_by(production_id=production.id, subject_id=anna_id).one()
+    assert link.script_description == "LLM: a barista in her twenties"
+    assert link.cast_required is True  # [[Anna]] pins her for this production
+
+
+def test_run_screenwriter_fills_an_existing_subject_s_empty_description(app, production):
+    anna = Subject(name="Anna", kind="character", description="  ")
+    db.session.add(anna)
+    db.session.commit()
+    anna_id = anna.id
+
+    run_screenwriter(production.id, llm=_screenwriter_naming("Anna", "A barista in her twenties"))
+
+    assert db.session.get(Subject, anna_id).description == "A barista in her twenties"
+
+
+def test_run_screenwriter_new_subject_takes_the_script_s_text(app, production):
+    from backend.models import ProductionSubject
+    run_screenwriter(production.id, llm=_screenwriter_naming("Bea", "A courier on a red bike"))
+
+    bea = Subject.query.filter_by(name="Bea").one()
+    assert bea.description == "A courier on a red bike"
+    link = ProductionSubject.query.filter_by(production_id=production.id, subject_id=bea.id).one()
+    assert link.script_description == "A courier on a red bike"
+
+
 def test_run_screenwriter_parse_error_marks_failed_stage(app, production):
     def fake_llm(*args, **kwargs):
         return "garbage"
@@ -229,6 +290,7 @@ def test_run_cinematographer_updates_shots_with_camera_and_image_prompt(app, pro
     subj = Subject(name="Alice", kind="character", description="A test character")
     db.session.add(subj)
     db.session.commit()
+    _link(production, subj)
     shot = ProductionShot(production_id=production.id, scene_number=1, shot_number=1, description="Wide shot")
     db.session.add(shot)
     db.session.commit()
@@ -272,6 +334,7 @@ def test_run_cinematographer_falls_back_to_agent_llm_when_director_fails(app, pr
     subj = Subject(name="Alice", kind="character", description="A test character")
     db.session.add(subj)
     db.session.commit()
+    _link(production, subj)
     shot = ProductionShot(production_id=production.id, scene_number=1, shot_number=1, description="Wide shot")
     db.session.add(shot)
     db.session.commit()
@@ -320,6 +383,7 @@ def test_run_cinematographer_drops_hallucinated_subject_ids(app, production, mon
     production.current_stage = "cinematography"
     real = Subject(name="Alice", kind="character", description="real subject")
     db.session.add(real); db.session.commit()
+    _link(production, real)
     real_id = real.id
     shot = ProductionShot(production_id=production.id, scene_number=1, shot_number=1, description="Wide")
     db.session.add(shot); db.session.commit()
@@ -343,6 +407,49 @@ def test_run_cinematographer_drops_hallucinated_subject_ids(app, production, mon
     rows = ProductionShotSubject.query.filter_by(shot_id=shot.id).all()
     assert len(rows) == 1
     assert rows[0].subject_id == real_id
+
+
+def test_subjects_for_production_without_linked_subjects_is_empty(app, production):
+    """The Cast Library is not the cast of every film: with no ProductionSubject
+    rows the planner is offered no subjects at all."""
+    from backend.tasks.production_swarm_tasks import _subjects_for_production
+    db.session.add_all([
+        Subject(name="Library Anna", kind="character", lora_path="/loras/anna.safetensors"),
+        Subject(name="Library Bob", kind="character"),
+    ])
+    db.session.commit()
+
+    assert _subjects_for_production(production.id) == []
+
+
+def test_subjects_for_production_returns_only_this_films_cast(app, production):
+    from backend.tasks.production_swarm_tasks import _subjects_for_production
+    cast = Subject(name="Alice", kind="character")
+    other = Subject(name="Library Anna", kind="character")
+    db.session.add_all([cast, other])
+    db.session.commit()
+    _link(production, cast)
+
+    assert [s.id for s in _subjects_for_production(production.id)] == [cast.id]
+
+
+def test_run_cinematographer_puts_no_library_lora_on_an_uncast_production(app, production, monkeypatch):
+    production.current_stage = "cinematography"
+    library = Subject(name="Library Anna", kind="character", lora_path="/loras/anna.safetensors")
+    db.session.add(library)
+    db.session.commit()
+    shot = ProductionShot(production_id=production.id, scene_number=1, shot_number=1, description="Wide")
+    db.session.add(shot)
+    db.session.commit()
+    # The planner names the library subject anyway; it is not in this film.
+    _director_plans(monkeypatch, [library.id], prompt="x", duration=3.0)
+
+    with patch("backend.celery_app.celery.send_task"):
+        run_cinematographer(production.id, llm=lambda *a, **k: json.dumps({"plans": []}))
+
+    assert ProductionShotSubject.query.filter_by(shot_id=shot.id).count() == 0
+    msg = SwarmMessage.query.filter_by(production_id=production.id, agent_name="cinematographer").first()
+    assert msg.input_json["subjects"] == []
 
 
 def test_run_storyboard_artist_advances_to_awaiting_approval(app, production):
@@ -439,6 +546,42 @@ def test_run_editor_renders_and_advances_to_complete(app, production):
     assert doc is not None
     assert not doc.path.startswith("/")
     assert doc.path.endswith(f"/productions/{production.id}/final/final.mp4")
+
+
+def test_run_editor_keeps_each_line_s_voice_record_on_the_shot(app, production):
+    """A Chatterbox failure that Kokoro covered is stored on the shot and read
+    back by the production view, not left in a log."""
+    from backend.api.production_api import _shot_to_dict
+    from backend.services.swarm.agents.editor import RenderResult
+
+    production.current_stage = "rendering"
+    spoken = ProductionShot(production_id=production.id, scene_number=1, shot_number=1,
+                            description="Close up", storyboard_image_path="/tmp/a.png",
+                            dialogue_text="Hello there", approved=True)
+    silent = ProductionShot(production_id=production.id, scene_number=1, shot_number=2,
+                            description="Wide", storyboard_image_path="/tmp/b.png", approved=True)
+    db.session.add_all([spoken, silent])
+    db.session.commit()
+    record = {
+        "requested_voice": None, "voice_id_sent": None, "backend": "kokoro", "voice": "af_heart",
+        "fallbacks": [{"kind": "engine_fallback",
+                       "message": "Chatterbox failed (CUDA out of memory); Kokoro (af_heart) spoke this line."}],
+    }
+
+    with patch("backend.tasks.production_swarm_tasks.Editor") as MockEditor:
+        MockEditor.return_value.render.return_value = RenderResult(
+            final_mp4_path="/tmp/final.mp4", mlt_path=None,
+            clip_paths=["/tmp/shot_1.mp4", "/tmp/shot_2.mp4"],
+            voiceover_paths=["/tmp/vo_1.wav", None], music_path=None,
+            voice_records=[record, None],
+        )
+        run_editor(production.id, i2v=MagicMock(), audio_foundry=MagicMock(), ffmpeg=MagicMock())
+
+    db.session.refresh(spoken)
+    db.session.refresh(silent)
+    assert spoken.voice_record == record
+    assert silent.voice_record is None
+    assert _shot_to_dict(spoken)["voice_record"]["fallbacks"][0]["kind"] == "engine_fallback"
 
 
 def test_run_editor_resolves_voice_and_lora_from_cast(app, production):
@@ -550,6 +693,7 @@ def test_run_cinematographer_retry_does_not_duplicate_shot_subjects(app, product
     subj = Subject(name="Alice", kind="character", description="A test character")
     db.session.add(subj)
     db.session.commit()
+    _link(production, subj)
     shot = ProductionShot(production_id=production.id, scene_number=1, shot_number=1, description="Wide shot")
     db.session.add(shot)
     db.session.commit()
@@ -701,3 +845,38 @@ def test_run_editor_without_a_video_model_has_no_scene_renderer(app, production)
         )
         run_editor(production.id, i2v=MagicMock(), audio_foundry=MagicMock(), ffmpeg=MagicMock())
         assert MockEditor.call_args.kwargs["scene_renderer"] is None
+
+
+def test_film_autocurate_is_on_by_default_and_can_be_turned_off(monkeypatch):
+    from backend.tasks.production_swarm_tasks import _film_autocurate_enabled
+    monkeypatch.delenv("GUAARDVARK_FILM_AUTOCURATE", raising=False)
+    assert _film_autocurate_enabled() is True
+    monkeypatch.setenv("GUAARDVARK_FILM_AUTOCURATE", "0")
+    assert _film_autocurate_enabled() is False
+
+
+def test_run_curator_all_pass_keeps_the_storyboard_gate(app, production):
+    from backend.tasks.production_swarm_tasks import run_curator
+    production.current_stage = "awaiting_approval"
+    shots = [
+        ProductionShot(production_id=production.id, scene_number=1, shot_number=n,
+                       description=f"Shot {n}", storyboard_image_path=f"/tmp/shot_{n}.png")
+        for n in (1, 2)
+    ]
+    db.session.add_all(shots)
+    db.session.commit()
+
+    passing = {"approved": True, "approve": True, "confidence": 95, "reason": "clean frame"}
+    with patch("backend.services.film_curator_service.judge_shot", return_value=dict(passing)), \
+         patch("backend.celery_app.celery.send_task") as mock_send_task:
+        summary = run_curator(production.id)
+
+    assert summary["flagged"] == 0
+    assert summary["advanced_to_rendering"] is False
+    for shot in shots:
+        db.session.refresh(shot)
+        assert shot.approved is True
+    db.session.refresh(production)
+    assert production.current_stage == "awaiting_approval"
+    sent = [c.args[0] for c in mock_send_task.call_args_list]
+    assert "production.run_editor" not in sent

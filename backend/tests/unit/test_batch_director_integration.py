@@ -13,6 +13,7 @@ the batch path stopped using when the Director layer was unified on
 from types import SimpleNamespace
 
 from backend.services import media_director as md
+from backend.services import video_model_registry as vmr
 from backend.services.batch_video_generator import (
     BatchVideoGenerator,
     BatchVideoRequest,
@@ -24,7 +25,8 @@ def test_to_i2v_model_mapping():
     assert BatchVideoGenerator._to_i2v_model("wan22-14b") == "wan22-14b-i2v"
     assert BatchVideoGenerator._to_i2v_model("cogvideox-5b") == "cogvideox-5b-i2v"
     assert BatchVideoGenerator._to_i2v_model("wan22-14b-i2v") == "wan22-14b-i2v"  # already I2V
-    assert BatchVideoGenerator._to_i2v_model(None) == "wan22-14b-i2v"            # safe default
+    # No model: the registry's default first-frame model (the 16 GB-native Wan 5B TI2V).
+    assert BatchVideoGenerator._to_i2v_model(None) == vmr.DEFAULT_I2V_MODEL
 
 
 def _req(items, **kw):
@@ -132,3 +134,100 @@ def test_apply_director_never_raises_on_director_failure(monkeypatch):
     BatchVideoGenerator._apply_director(SimpleNamespace(), req)
     assert items[0].prompt == "a"
     assert req.enhance_prompt is True
+
+
+# --- Batch image director pass ------------------------------------------------
+# apply_enhance_to_prompts imports media_director.enhance_prompts at call time,
+# so patching the module attribute reaches it.
+
+from backend.services.batch_image_generator import (  # noqa: E402
+    BatchImageGenerator,
+    BatchImageRequest,
+    BatchPrompt,
+)
+
+
+def _image_req(prompts, model="sd-xl", **kw):
+    rows = [BatchPrompt(id=str(i), prompt=p, model=model) for i, p in enumerate(prompts)]
+    return BatchImageRequest(batch_id="img1", prompts=rows, output_dir="/tmp/x", **kw)
+
+
+def _image_director_stub(monkeypatch, rewrite):
+    calls = []
+
+    def fake_enhance(prompts, **k):
+        calls.append(list(prompts))
+        return rewrite(list(prompts))
+
+    monkeypatch.setattr(md, "verbatim_prompts_enabled", lambda: False)
+    monkeypatch.setattr(md, "enhance_prompts", fake_enhance)
+    return calls
+
+
+def test_image_director_fallback_is_called_once_and_keeps_enhancer(monkeypatch):
+    calls = _image_director_stub(monkeypatch, lambda prompts: prompts)
+    req = _image_req(["a red fox", "a quiet harbour"], director_mode=True)
+
+    BatchImageGenerator._apply_director(SimpleNamespace(), req)
+
+    assert len(calls) == 1
+    assert [bp.prompt for bp in req.prompts] == ["a red fox", "a quiet harbour"]
+    assert all(bp.auto_enhance is True for bp in req.prompts)
+    assert req.auto_enhance is True
+
+
+def test_image_director_turns_enhancer_off_only_where_it_rewrote(monkeypatch):
+    calls = _image_director_stub(
+        monkeypatch, lambda prompts: ["DIR:" + prompts[0]] + prompts[1:],
+    )
+    req = _image_req(["a red fox", "a quiet harbour"], director_mode=True)
+
+    BatchImageGenerator._apply_director(SimpleNamespace(), req)
+
+    assert len(calls) == 1
+    first, second = req.prompts
+    assert (first.prompt, first.auto_enhance) == ("DIR:a red fox", False)
+    assert (second.prompt, second.auto_enhance) == ("a quiet harbour", True)
+    assert req.auto_enhance is False
+
+
+def test_image_director_natural_family_fallback_keeps_enhancer(monkeypatch):
+    # Natural families take the director by default; their enhancer only adds
+    # a style clause, so keeping it on after a fallback never stuffs tags.
+    calls = _image_director_stub(monkeypatch, lambda prompts: prompts)
+    req = _image_req(["a red fox"], model="zimage-turbo")
+
+    BatchImageGenerator._apply_director(SimpleNamespace(), req)
+
+    assert len(calls) == 1
+    assert req.prompts[0].auto_enhance is True
+    assert req.auto_enhance is True
+
+
+def test_image_storyboard_concept_fallback_keeps_enhancer(monkeypatch):
+    # storyboard_from_concept's failure contract is {"prompts": [concept] * n}.
+    monkeypatch.setattr(md, "storyboard_from_concept",
+                        lambda concept, n, **k: {"treatment": None, "prompts": [concept] * n})
+    req = _image_req(["placeholder one", "placeholder two"],
+                     storyboard_concept="a lighthouse at dawn")
+
+    BatchImageGenerator._apply_director(SimpleNamespace(), req)
+
+    assert [bp.prompt for bp in req.prompts] == ["a lighthouse at dawn"] * 2
+    assert all(bp.auto_enhance is True for bp in req.prompts)
+    assert req.auto_enhance is True
+
+
+def test_image_storyboard_turns_enhancer_off_only_on_real_shots(monkeypatch):
+    monkeypatch.setattr(md, "storyboard_from_concept",
+                        lambda concept, n, **k: {"treatment": "t",
+                                                 "prompts": ["wide shot of the lighthouse", concept]})
+    req = _image_req(["placeholder one", "placeholder two"],
+                     storyboard_concept="a lighthouse at dawn")
+
+    BatchImageGenerator._apply_director(SimpleNamespace(), req)
+
+    first, second = req.prompts
+    assert (first.prompt, first.auto_enhance) == ("wide shot of the lighthouse", False)
+    assert (second.prompt, second.auto_enhance) == ("a lighthouse at dawn", True)
+    assert req.auto_enhance is False

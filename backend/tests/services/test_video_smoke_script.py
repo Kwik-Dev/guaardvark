@@ -175,6 +175,23 @@ def test_dry_run_queues_nothing(fast, monkeypatch, capsys, tmp_path):
     assert "2 clip(s); nothing was queued." in out
 
 
+def test_size_length_steps_and_seed_options_reach_every_request(fast, monkeypatch, capsys, tmp_path):
+    import requests
+
+    monkeypatch.setattr(requests, "Session", _Backend(_models("wan22-5b"), {}))
+    assert fast.main(["--dry-run", "--mode", "t2v", "--out", str(tmp_path), "--width", "1280", "--height", "704",
+                      "--frames", "121", "--steps", "25", "--seed", "7"]) == 0
+    (body,) = [json.loads(line)["body"] for line in capsys.readouterr().out.splitlines() if line.startswith("{")]
+    assert (body["width"], body["height"], body["duration_frames"], body["num_inference_steps"], body["seed"]) == (
+        1280, 704, 121, 25, 7)
+
+    assert fast.main(["--dry-run", "--mode", "t2v", "--out", str(tmp_path)]) == 0
+    (body,) = [json.loads(line)["body"] for line in capsys.readouterr().out.splitlines() if line.startswith("{")]
+    clip = fast.smallest_clip(model_capabilities("wan22-5b"))
+    assert (body["width"], body["height"], body["duration_frames"], body["seed"]) == (
+        clip["width"], clip["height"], clip["duration_frames"], fast.SEED)
+
+
 def test_a_full_run_checks_each_clip_and_writes_the_table(fast, monkeypatch, capsys, tmp_path):
     import requests
 

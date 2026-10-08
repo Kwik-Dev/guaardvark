@@ -782,6 +782,17 @@ def _test_table_prefix() -> str:
     return ""
 
 
+def _store_scope(project_id=None):
+    """The project a document's vectors are stored under: its own in per_project
+    mode, None (the shared table) otherwise. get_or_create_index writes every
+    document to the shared table in global mode, so a purge keyed by the
+    document's project there looked in a table that is never written, removed
+    nothing, and re-indexing left the old copy beside the new one."""
+    from backend.config import PROJECT_INDEX_MODE
+    mode = os.getenv("GUAARDVARK_PROJECT_INDEX_MODE", PROJECT_INDEX_MODE)
+    return project_id if mode == "per_project" else None
+
+
 def _pg_table_name(project_id=None, profile: Optional[str] = None) -> Optional[str]:
     """Per (profile, scope, dimension) table.
 
@@ -813,6 +824,12 @@ def _pg_table_name(project_id=None, profile: Optional[str] = None) -> Optional[s
 _vector_store_fallback_reason: Optional[str] = None
 # Latch so the warning below is emitted once per process, not per query.
 _fallback_warned = False
+# True when the fallback came from an unreachable embedding backend, which
+# clears by itself once Ollama answers; a store that failed to build does not.
+_fallback_transient = False
+_last_fallback_retry = 0.0
+# How often a process on the stand-in store checks whether it can leave it.
+_FALLBACK_RETRY_S = 30.0
 
 
 def vector_store_fallback_reason() -> Optional[str]:
@@ -820,14 +837,48 @@ def vector_store_fallback_reason() -> Optional[str]:
     return _vector_store_fallback_reason
 
 
-def _fall_back_to_simple(reason: str):
-    global _vector_store_fallback_reason
+def _fall_back_to_simple(reason: str, transient: bool = False):
+    global _vector_store_fallback_reason, _fallback_transient
     _vector_store_fallback_reason = reason
+    _fallback_transient = transient
     logger.warning(
         "pgvector requested but %s — using an EMPTY SimpleVectorStore; "
         "the persisted index will NOT be consulted", reason,
     )
     return SimpleVectorStore() if SimpleVectorStore else None
+
+
+def _lift_transient_fallback() -> bool:
+    """Drop an index built on the stand-in store once the embedding backend answers.
+
+    A backend or worker that starts while Ollama is down cannot learn the
+    embedding width, so it builds on an empty in-memory store. That index is
+    cached for the life of the process, which left search empty, and indexing
+    writing nowhere, until a restart. Checked at most every _FALLBACK_RETRY_S;
+    returns True when the cached index was dropped so the caller rebuilds it.
+    """
+    global index, storage_context, _last_fallback_retry
+    if not (_vector_store_fallback_reason and _fallback_transient):
+        return False
+    now = time.monotonic()
+    if now - _last_fallback_retry < _FALLBACK_RETRY_S:
+        return False
+    _last_fallback_retry = now
+    if not _active_embed_dim():
+        return False
+    logger.warning(
+        "Embedding backend reachable again; rebuilding the index on the configured "
+        "vector store (was: %s)", _vector_store_fallback_reason,
+    )
+    with _index_operation_lock:
+        index = None
+        storage_context = None
+        try:
+            from flask import current_app
+            current_app.config.get("INDEX_CACHE", {}).clear()
+        except Exception:
+            pass  # no app context (Celery worker): the module globals are the only cache
+    return True
 
 
 def _make_vector_store(project_id=None, profile: Optional[str] = None):
@@ -843,7 +894,8 @@ def _make_vector_store(project_id=None, profile: Optional[str] = None):
     if not table or not dim:
         return _fall_back_to_simple(
             "the embedding dimension is unknown (embedding backend unreachable? "
-            "set GUAARDVARK_EMBEDDING_DIM to pin it)"
+            "set GUAARDVARK_EMBEDDING_DIM to pin it)",
+            transient=True,
         )
 
     try:
@@ -974,7 +1026,7 @@ def purge_document_vectors(document_id, project_id=None, profile: Optional[str] 
         return PurgeResult(0, "not_pgvector")
     if document_id is None:
         return PurgeResult(0, "no_document_id")
-    table = _pg_table_name(project_id, profile)
+    table = _pg_table_name(_store_scope(project_id), profile)
     if not table:
         return PurgeResult(0, "no_table")
     # The stored key is the LlamaIndex document id, `doc_<db_id>_<content_hash>` --
@@ -1430,6 +1482,7 @@ def get_or_create_index(project_id: Optional[str] = None):
 
     from backend.config import INDEX_ROOT, PROJECT_INDEX_MODE
 
+    _lift_transient_fallback()
     _sync_embed_model()
 
     index_mode = os.getenv("GUAARDVARK_PROJECT_INDEX_MODE", PROJECT_INDEX_MODE)
@@ -1870,8 +1923,10 @@ def search_with_llamaindex(
     try:
         with _index_operation_lock:
             local_index = index
-            if local_index is None:
-                logger.warning("search_with_llamaindex: Index not available, attempting to load...")
+            if local_index is None or vector_store_fallback_reason():
+                if local_index is None:
+                    logger.warning("search_with_llamaindex: Index not available, attempting to load...")
+                # On the stand-in store this is also where the index leaves it.
                 get_or_create_index(project_id=str(project_id) if project_id else None)
                 local_index = index
 
@@ -1932,6 +1987,11 @@ def search_with_llamaindex(
             effective_top_k = overlay["top_k"]
         else:
             effective_top_k = 5
+        # Reranking (the cross-encoder, else MMR) defaults on; an experiment or
+        # a promoted config may turn it off. The env switches stay the
+        # operator's master allow: an overlay True cannot force on a reranker
+        # the operator disabled.
+        rerank_on = bool(overlay.get("reranking_enabled", True))
 
         prof_params: Dict[str, Any] = {}
         try:
@@ -1970,7 +2030,7 @@ def search_with_llamaindex(
         # entirely non-matching and the caller gets nothing for no good reason.
         try:
             from backend.utils.reranker import is_enabled as _rerank_enabled
-            _widen_for_rerank = _rerank_enabled()
+            _widen_for_rerank = _rerank_enabled() and rerank_on
         except Exception:
             _widen_for_rerank = False
         # A reranker handed exactly top_k candidates cannot improve anything, and a
@@ -2172,6 +2232,8 @@ def search_with_llamaindex(
             from backend.utils.reranker import rerank as _ce_rerank
             if prof_params.get("rerank") is False:
                 _ce_info = {"applied": False, "reason": f"disabled by profile '{prof_params.get('profile')}'"}
+            elif not rerank_on:
+                _ce_info = {"applied": False, "reason": "disabled by experiment"}
             else:
                 results, _ce_info = _ce_rerank(query if isinstance(query, str) else "", results)
             trace["rerank"] = _ce_info
@@ -2186,11 +2248,11 @@ def search_with_llamaindex(
 
         # CPU-only MMR (relevance x diversity), only when the cross-encoder did not order
         # the candidates; see _mmr_rerank. Env var is the operator's master allow; the
-        # tunable param decides per query (defaults on).
+        # tunable param decides per query (rerank_on).
         _ce_ordered = bool((trace.get("rerank") or {}).get("applied"))
         if (not _ce_ordered
                 and os.environ.get("GUAARDVARK_RERANK_ENABLED", "true").lower() == "true"
-                and overlay.get("reranking_enabled", True)):
+                and rerank_on):
             results = _mmr_rerank(results)
             trace["mmr_applied"] = True
 
@@ -2286,7 +2348,7 @@ def purge_nodes_by_metadata(filters: Dict[str, Any], profile: Optional[str] = No
     """
     if not filters:
         return 0
-    table = resolve_existing_vector_table(project_id, profile)
+    table = resolve_existing_vector_table(_store_scope(project_id), profile)
     if not table:
         return 0
     clauses, params = [], []
@@ -2358,6 +2420,15 @@ def add_text_to_index(text: str, metadata: Dict[str, Any], project_id: Optional[
     but callers that care can distinguish empty (None) from failed (False).
     """
     global index, storage_context
+
+    # Same rule as add_file_to_index: nothing is replaced or written while the
+    # persisted store is not in use.
+    if index is None or vector_store_fallback_reason():
+        get_or_create_index(project_id)
+    _fallback = vector_store_fallback_reason()
+    if _fallback:
+        logger.error("add_text_to_index: not writing; the persisted vector store is not in use (%s)", _fallback)
+        return False
 
     try:
         if replace_where:
@@ -2489,6 +2560,35 @@ def _docling_load(file_path: str, filename: str, doc_cls):
         return None
 
 
+def _looks_binary(path: Path, sample_bytes: int = 8192) -> bool:
+    """A NUL byte in the first 8 KB, the test git and grep use for binary files."""
+    try:
+        with open(path, "rb") as f:
+            return b"\x00" in f.read(sample_bytes)
+    except OSError:
+        return False
+
+
+def _has_default_reader(file_extension: str) -> bool:
+    """Whether SimpleDirectoryReader has a format reader for the extension,
+    rather than decoding the bytes as text."""
+    try:
+        return file_extension in SimpleDirectoryReader.supported_suffix_fn()
+    except Exception:
+        return False
+
+
+# Why add_file_to_index found nothing to index, by document id, for callers
+# that record the failure on the document.
+_NO_CONTENT_REASONS: Dict[str, str] = {}
+
+
+def no_content_reason(document_id) -> Optional[str]:
+    """Why the last add_file_to_index of this document had nothing to index,
+    or None when it did not stop for that reason."""
+    return _NO_CONTENT_REASONS.get(str(document_id))
+
+
 def get_documents_from_file(file_path: str, client: Optional[str] = None, upload_date: Optional[str] = None) -> List[LlamaDocument]:
     documents: List[LlamaDocument] = []
     try:
@@ -2527,6 +2627,19 @@ def get_documents_from_file(file_path: str, client: Optional[str] = None, upload
                     _d.metadata.setdefault("client", client)
                     _d.metadata.setdefault("upload_date", upload_date)
                 return _md_docs
+
+        # A sitemap is a list of URLs, one document each. Ahead of the enhanced
+        # processor, whose XML reader would flatten it into one run of text.
+        if file_extension == ".xml" and parse_sitemap:
+            from backend.utils.xml_sitemap_handler import is_sitemap
+            if is_sitemap(str(path_obj)):
+                _sm_docs = parse_sitemap(str(path_obj))
+                for _d in _sm_docs:
+                    _d.metadata["file_path"] = str(path_obj)
+                    _d.metadata.setdefault("client", client)
+                    _d.metadata.setdefault("upload_date", upload_date)
+                logger.info("Sitemap %s: %d URL(s)", filename, len(_sm_docs))
+                return _sm_docs
 
         try:
             from backend.utils.file_processor_adapter import (
@@ -2590,9 +2703,11 @@ def get_documents_from_file(file_path: str, client: Optional[str] = None, upload
                     
                     logger.info(f"Successfully processed image {filename}: extracted {len(text_content)} characters")
                 else:
-                    error_msg = extraction_result.get('error', 'Unknown error')
-                    text_content = f"Image file: {filename} (OCR extraction failed: {error_msg})"
-                    
+                    # The reason goes in metadata only; in the text it would be
+                    # chunked, embedded and retrieved as the image's content.
+                    error_msg = extraction_result.get('error') or 'Unknown error'
+                    text_content = f"Image file: {filename} (no text content extracted)"
+
                     metadata = {
                         "source_filename": filename,
                         "file_path": str(path_obj),
@@ -2614,7 +2729,7 @@ def get_documents_from_file(file_path: str, client: Optional[str] = None, upload
                 logger.warning(f"Image content service not available for {filename}, falling back to SimpleDirectoryReader")
             except Exception as e:
                 logger.error(f"BUG FIX 8: Error processing image {filename}: {e}", exc_info=True)
-                text_content = f"Image file: {filename} (processing error: {str(e)})"
+                text_content = f"Image file: {filename} (no text content extracted)"
                 metadata = {
                     "source_filename": filename,
                     "file_path": str(path_obj),
@@ -2874,15 +2989,24 @@ def get_documents_from_file(file_path: str, client: Optional[str] = None, upload
                     file_extension not in image_extensions and
                     file_extension not in {'.xlsx', '.xls', '.xlsm', '.xlsb'} and
                     file_extension not in code_extensions):
-                    reader = SimpleDirectoryReader(
-                        input_files=[path_obj],
-                        file_metadata=file_metadata_func,
-                        errors="ignore",
-                    )
-                    documents.extend(reader.load_data())
-                    logger.info(
-                        f"Loaded {len(documents)} docs via SimpleDirectoryReader: {filename}"
-                    )
+                    # With no reader for the type, SimpleDirectoryReader decodes
+                    # the bytes as text and drops what does not decode, so a
+                    # binary file would index as noise.
+                    if not _has_default_reader(file_extension) and _looks_binary(path_obj):
+                        logger.warning(
+                            f"{filename} is binary and no reader handles "
+                            f"'{file_extension or 'no extension'}'; nothing to index"
+                        )
+                    else:
+                        reader = SimpleDirectoryReader(
+                            input_files=[path_obj],
+                            file_metadata=file_metadata_func,
+                            errors="ignore",
+                        )
+                        documents.extend(reader.load_data())
+                        logger.info(
+                            f"Loaded {len(documents)} docs via SimpleDirectoryReader: {filename}"
+                        )
                 elif not documents:
                     logger.warning(
                         f"Specific parser for {file_extension} yielded no documents for {filename}, SimpleDirectoryReader not re-attempted under these conditions."
@@ -2941,6 +3065,18 @@ def add_file_to_index(file_path: str, db_document: DBDocument, progress_callback
         logger.error("Index service not ready for document indexing")
         return False
 
+    # On the stand-in store, vectors would land in this process's memory, where
+    # no search sees them and a restart loses them, and the purge below would
+    # first delete the copy that search does use. Callers read the reason from
+    # vector_store_fallback_reason() and leave the document to be indexed later.
+    _fallback = vector_store_fallback_reason()
+    if _fallback:
+        logger.error(
+            "Not indexing %s: the persisted vector store is not in use (%s)",
+            getattr(db_document, "filename", file_path), _fallback,
+        )
+        return False
+
     if db_document is None:
         logger.error(f"Cannot add file: Missing DB document info for {file_path}.")
         return False
@@ -2981,17 +3117,24 @@ def add_file_to_index(file_path: str, db_document: DBDocument, progress_callback
         if progress_callback:
             progress_callback(30, f"Loading document: {db_document.filename}")
         
+        _NO_CONTENT_REASONS.pop(str(db_document.id), None)
         try:
             with _phase("parse_ms", timings):
                 documents = get_documents_from_file(
                     file_path=file_path,
-                    client=db_document.project.client.name if db_document.project and db_document.project.client else None,
+                    client=db_document.project.client_ref.name if db_document.project and db_document.project.client_ref else None,
                     upload_date=db_document.uploaded_at.isoformat() if db_document.uploaded_at else None
                 )
-            
-            if not documents:
-                logger.error(f"No documents loaded from {file_path}")
-                logger.error("No content could be extracted from file")
+
+            # A file with bytes in it that yields no text would index as zero
+            # nodes and read as indexed. A 0-byte file is left to the caller,
+            # which stores it as an empty document.
+            if not documents or (
+                    file_size_bytes and not any((d.text or "").strip() for d in documents)):
+                reason = f"nothing to index: no text could be read from {db_document.filename}"
+                _NO_CONTENT_REASONS[str(db_document.id)] = reason
+                logger.error(f"{reason} ({file_path})")
+                progress_system.error_process(process_id, reason)
                 return False
             
             logger.info(f"Loaded {len(documents)} document(s) from {file_path}")

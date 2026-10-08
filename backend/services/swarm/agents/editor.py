@@ -93,6 +93,9 @@ class RenderResult:
     clip_paths: list[str]
     voiceover_paths: list[str | None]
     music_path: str | None
+    # Per input shot: which voice spoke its line and any fallback
+    # (clients.build_voice_record), or None for a shot with no voiced line.
+    voice_records: list[dict | None] = field(default_factory=list)
 
 
 class Editor:
@@ -121,6 +124,8 @@ class Editor:
         # together; the per-shot I2V + TTS path is not used for them.
         self.scene_renderer = scene_renderer
         self.max_scene_seconds = max_scene_seconds
+        # (scene, shot) -> which voice spoke the line; filled by _render_voiceover.
+        self._voice_records: dict[tuple, dict] = {}
 
     def render(
         self,
@@ -155,6 +160,7 @@ class Editor:
 
         clip_paths: list[str] = []
         voiceover_paths: list[str | None] = []
+        self._voice_records = {}
         # Shots rendered as scene windows, laid out per window (clip, shots).
         windows: list[tuple[str, list[ShotInput]]] = []
 
@@ -288,6 +294,7 @@ class Editor:
             clip_paths=clip_paths,
             voiceover_paths=voiceover_paths,
             music_path=music_path,
+            voice_records=[self._voice_records.get(self._shot_key(s)) for s in shots],
         )
 
     def _build_arrangement(
@@ -383,19 +390,36 @@ class Editor:
             output_path=clip_path,
         )
 
+    @staticmethod
+    def _shot_key(shot: ShotInput) -> tuple:
+        return (shot.scene_number or 1, shot.shot_number)
+
     def _render_voiceover(self, shot: ShotInput, audio_dir: Path, voice: str) -> str | None:
+        """The line's voiceover path, or None. Records which voice spoke it
+        (and any fallback) in ``self._voice_records`` for RenderResult."""
         if not shot.dialogue_text or self.audio_foundry is None:
             return None
         vo_path = str(
             audio_dir / f"shot_{shot.scene_number or 1}_{shot.shot_number}_vo.wav"
         )
         try:
-            return self.audio_foundry.tts(
+            written = self.audio_foundry.tts(
                 text=shot.dialogue_text, voice=voice, output_path=vo_path,
             )
         except Exception as e:  # noqa: BLE001 — VO is best-effort, don't sink the render
             logger.warning("TTS failed for shot %s, continuing without VO: %s", shot.shot_number, e)
+            self._voice_records[self._shot_key(shot)] = {
+                "requested_voice": None if voice == "default" else voice,
+                "voice": None,
+                "fallbacks": [{"kind": "no_voiceover",
+                               "message": f"Speech failed ({str(e)[:200]}); this line has no voiceover."}],
+            }
             return None
+        reader = getattr(self.audio_foundry, "voice_record", None)
+        record = reader(written) if callable(reader) else None
+        if isinstance(record, dict):
+            self._voice_records[self._shot_key(shot)] = record
+        return written
 
     def _render_music(self, mood: str, duration_seconds: float, audio_dir: Path, suffix: str = "") -> str | None:
         if self.audio_foundry is None:

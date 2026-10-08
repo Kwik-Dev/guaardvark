@@ -15,7 +15,8 @@ backend's voice API, the Film Crew Editor, MCP's generate_speech):
       a voice_id        -> Kokoro speaking that built-in voice; no fallback,
                            since Chatterbox has no built-in voices
       neither           -> Chatterbox's stock voice, falling back to Kokoro's
-                           default voice on any error (logged), as before
+                           default voice on any error; the result's
+                           meta["fallback"] records it with the reason
 
 A request that names nothing therefore sounds exactly as it always did; a
 named voice or clip is either honoured or refused, never swapped for another
@@ -105,7 +106,8 @@ class VoiceGenBackend(AudioBackend):
             return self._gen_with(self._kokoro, params)
 
         # Nothing named: prefer Chatterbox, fall back to Kokoro on any runtime
-        # error — but NOT on a user cancel.
+        # error — but NOT on a user cancel. The result says it fell back and
+        # why, so a caller can show that this line is in another voice.
         try:
             return self._gen_with(self._chatterbox, params)
         except GenerationCancelled:
@@ -114,7 +116,12 @@ class VoiceGenBackend(AudioBackend):
             logger.warning(
                 "Chatterbox generate failed (%s) — retrying with Kokoro fallback", e,
             )
-            return self._gen_with(self._kokoro, params)
+            result = self._gen_with(self._kokoro, params)
+            result.meta = {
+                **(result.meta or {}),
+                "fallback": {"from": "chatterbox", "to": "kokoro", "reason": str(e)[:300]},
+            }
+            return result
 
     # ----------------------------------------------------------------------
 

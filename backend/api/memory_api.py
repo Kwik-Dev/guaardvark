@@ -26,6 +26,7 @@ from sqlalchemy import or_
 
 from backend.models import db, AgentMemory, AgentMemoryAudit
 from backend.services.memory_contract import (
+    MAX_PREFILTER_TERMS,
     MEMORY_SOURCES,
     MEMORY_STATUSES,
     MEMORY_TYPES,
@@ -37,6 +38,7 @@ from backend.services.memory_contract import (
     normalize_memory_status,
     normalize_memory_type,
     normalize_tags,
+    query_terms,
     source_trust_weight,
     validate_lesson_payload,
 )
@@ -534,6 +536,28 @@ def _app_context():
     return _flask_app.app_context()
 
 
+def _mark_recalled(memories) -> None:
+    """Count each row as recalled once (access_count, last_accessed_at)."""
+    now = utcnow()
+    for memory in memories:
+        memory.access_count = int(memory.access_count or 0) + 1
+        memory.last_accessed_at = now
+    db.session.commit()
+
+
+def _count_recalled(memories) -> None:
+    """_mark_recalled for prompt builders: a failed count never costs the
+    prompt its memories."""
+    unique = list({id(m): m for m in memories}.values())
+    if not unique:
+        return
+    try:
+        _mark_recalled(unique)
+    except Exception as e:
+        db.session.rollback()
+        logger.debug(f"Could not count recalled memories: {e}")
+
+
 def _query_memories(
     sources=None,
     types=None,
@@ -549,6 +573,7 @@ def _query_memories(
     raise_errors: bool = False,
     include_always_on: bool = True,
     count_access: bool = True,
+    min_importance: float | None = None,
 ):
     """Single source of truth for memory SELECT.
 
@@ -567,7 +592,16 @@ def _query_memories(
 
     count_access records the returned rows as recalled (access_count and
     last_accessed_at, which feed the "recalled before" rank reason). A
-    read-only search passes False.
+    read-only search passes False, and so do the prompt builders, which count
+    only the rows that fit their budget.
+
+    min_importance drops rows below that importance, always-on rows included.
+
+    A query with keywords recalls only rows that share at least one of them as
+    a whole word (memory_match_score above 0); the ILIKE prefilter alone would
+    let "art" through on "start", and importance and recency would fill the
+    remaining slots with unrelated rows. Always-on rows are exempt. A query
+    with no keyword ("what is it?") ranks rows as if none were given.
     """
     try:
         q = db.session.query(AgentMemory)
@@ -581,6 +615,8 @@ def _query_memories(
             q = q.filter(AgentMemory.status == normalize_memory_status(status))
         else:
             q = q.filter((AgentMemory.status == None) | (AgentMemory.status != "wrong"))
+        if min_importance is not None:
+            q = q.filter(AgentMemory.importance >= min_importance)
         if session_id:
             q = q.filter(
                 or_(AgentMemory.session_id == session_id, AgentMemory.session_id == None)
@@ -612,15 +648,13 @@ def _query_memories(
             if file_hints:
                 recall_query = f"{query or ''} {' '.join(file_hints)}".strip()
         if recall_query:
-            terms = list(recall_query.split())[:8]
             clauses = []
-            for term in terms:
-                if len(term) >= 3:
-                    search_term = f"%{term.lower()}%"
-                    clauses.extend([
-                        AgentMemory.content.ilike(search_term),
-                        AgentMemory.tags.ilike(search_term),
-                    ])
+            for term in query_terms(recall_query)[:MAX_PREFILTER_TERMS]:
+                search_term = f"%{term}%"
+                clauses.extend([
+                    AgentMemory.content.ilike(search_term),
+                    AgentMemory.tags.ilike(search_term),
+                ])
             if clauses:
                 q = q.filter(or_(*clauses))
 
@@ -667,6 +701,8 @@ def _query_memories(
             )
             if sources:
                 always_q = always_q.filter(AgentMemory.source.in_(normalized_sources))
+            if min_importance is not None:
+                always_q = always_q.filter(AgentMemory.importance >= min_importance)
             if project_id is not None:
                 always_q = always_q.filter(
                     or_(AgentMemory.project_id == project_id, AgentMemory.project_id == None)
@@ -688,6 +724,11 @@ def _query_memories(
             ).limit(3).all()
 
         ranked = sorted(candidates, key=score, reverse=True)
+        if query_terms(recall_query):
+            ranked = [
+                memory for memory in ranked
+                if memory_match_score(memory.content or "", normalize_tags(memory.tags), recall_query) > 0
+            ]
         selected = []
         seen = set()
         for memory in always_on + ranked:
@@ -701,11 +742,7 @@ def _query_memories(
                 break
 
         if selected and count_access:
-            now = utcnow()
-            for memory in selected:
-                memory.access_count = int(memory.access_count or 0) + 1
-                memory.last_accessed_at = now
-            db.session.commit()
+            _mark_recalled(selected)
         return selected
     except Exception as e:
         try:
@@ -751,10 +788,63 @@ def get_memories_for_context(
         )
 
 
-# The ids behind the last memory block built on this thread. Feedback on a
-# reply needs to know which memories shaped it; the block itself is prose and
-# the chat engine must not re-run the query. Pop, never peek: a reused worker
-# thread must not hand one request's selection to the next.
+def search_memories(
+    query: str,
+    limit: int = 8,
+    min_importance: float | None = None,
+    match_text: str | None = None,
+    min_match: float = 0.0,
+    session_id: str = None,
+    project_id=None,
+    workspace_root: str = None,
+) -> list[dict]:
+    """Recalled memories as dicts, for callers that build their own hint lines
+    (the agent executor, the screen agent's launcher recovery).
+
+    Rows are selected and ranked by `_query_memories`. With match_text, each
+    row also gets a `match_score` from `memory_match_score` against that text;
+    rows at or below min_match are dropped and the rest are ordered by it.
+    Only the rows returned count as recalled. Returns [] when nothing matches
+    or the query fails.
+    """
+    with _app_context():
+        rows = _query_memories(
+            limit=limit,
+            query=query,
+            session_id=session_id,
+            project_id=project_id,
+            workspace_root=workspace_root,
+            include_always_on=False,
+            count_access=False,
+            min_importance=min_importance,
+        )
+        picked = []
+        for row in rows:
+            item = row.to_dict()
+            if match_text is not None:
+                item["match_score"] = memory_match_score(
+                    row.content or "", normalize_tags(row.tags), match_text
+                )
+                if item["match_score"] <= min_match:
+                    continue
+            picked.append((row, item))
+        if match_text is not None:
+            picked.sort(key=lambda pair: pair[1]["match_score"], reverse=True)
+        if picked:
+            try:
+                _mark_recalled([row for row, _ in picked])
+            except Exception as e:
+                db.session.rollback()
+                logger.debug(f"Could not count recalled memories: {e}")
+        return [item for _, item in picked]
+
+
+# The ids behind the last memory block built on this thread: the memories
+# whose lines made it into the block, not every row the query selected, since
+# the character budget can cut the rest. Feedback on a reply credits or blames
+# exactly these; the block itself is prose and the chat engine must not re-run
+# the query. Pop, never peek: a reused worker thread must not hand one
+# request's selection to the next.
 _LAST_SELECTED = threading.local()
 
 
@@ -774,6 +864,8 @@ def _get_memories_for_context_inner(
     workspace_root: str = None,
     cli_working_memory: dict | None = None,
 ) -> str:
+    # Counted after rendering: only the rows whose lines fit the budget were
+    # recalled, and "recalled before" should not favour rows the model never saw.
     memories = _query_memories(
         limit=limit,
         query=query,
@@ -782,14 +874,16 @@ def _get_memories_for_context_inner(
         user_id=user_id,
         workspace_root=workspace_root,
         cli_working_memory=cli_working_memory,
+        count_access=False,
     )
-    _LAST_SELECTED.ids = [m.id for m in (memories or [])]
+    _LAST_SELECTED.ids = []
 
     if not memories:
         return ""
 
     char_budget = max_tokens * 4  # rough chars-to-tokens ratio
     used = 0
+    shown = set()
 
     # Group by category. lesson_summary stays as its own bucket (source-based);
     # everything else groups by type so each lands under a framing header
@@ -826,6 +920,7 @@ def _get_memories_for_context_inner(
                 return out
             out.append(line)
             used += len(line)
+            shown.add(m.id)
         return out
 
     for type_name in ("fact", "note", "preference"):
@@ -893,6 +988,7 @@ def _get_memories_for_context_inner(
                 break
             lesson_lines.append(line)
             used += len(line)
+            shown.add(m.id)
         if lesson_lines:
             sections.append(
                 "\n".join(
@@ -919,6 +1015,9 @@ def _get_memories_for_context_inner(
         if body:
             sections.append("\n".join(["Confirmed by your feedback (keep doing this):"] + body))
 
+    shown_rows = [m for m in memories if m.id in shown]
+    _LAST_SELECTED.ids = [m.id for m in shown_rows]
+    _count_recalled(shown_rows)
     if not sections:
         return ""
     return "\n\n".join(sections)
@@ -968,12 +1067,14 @@ def _get_lessons_for_agent_prompt_inner(
     project_id=None,
     workspace_root: str = None,
 ) -> str:
+    # As in chat recall, a row counts as recalled only when its block fits.
     lesson_rows = _query_memories(
         sources=["lesson_summary", "manual"],
         limit=max_rows,
         session_id=session_id,
         project_id=project_id,
         workspace_root=workspace_root,
+        count_access=False,
     )
     rows = list(lesson_rows)
     if include_belief_updates:
@@ -983,6 +1084,7 @@ def _get_lessons_for_agent_prompt_inner(
             session_id=session_id,
             project_id=project_id,
             workspace_root=workspace_root,
+            count_access=False,
         )
         seen_ids = {r.id for r in rows}
         rows.extend(r for r in belief_rows if r.id not in seen_ids)
@@ -990,6 +1092,7 @@ def _get_lessons_for_agent_prompt_inner(
     # No early return on empty rows: the corrections block below can still
     # have something to say, and the final check covers the all-empty case.
     sections = []
+    shown_rows = []
     total = 0
     for row in rows:
         content = (row.content or "").strip()
@@ -1019,6 +1122,7 @@ def _get_lessons_for_agent_prompt_inner(
         if total + len(block) > max_chars:
             break
         sections.append(block)
+        shown_rows.append(row)
         total += len(block) + 2
 
     # Corrections from the user's thumbs, appended after the lessons and
@@ -1030,6 +1134,7 @@ def _get_lessons_for_agent_prompt_inner(
             session_id=session_id,
             project_id=project_id,
             workspace_root=workspace_root,
+            count_access=False,
         )
     except Exception:
         fb_rows = []
@@ -1043,10 +1148,12 @@ def _get_lessons_for_agent_prompt_inner(
         if total + len(line) > max_chars:
             break
         fb_lines.append(line)
+        shown_rows.append(r)
         total += len(line) + 1
     if fb_lines:
         sections.append("### Corrections from feedback\n" + "\n".join(fb_lines))
 
+    _count_recalled(shown_rows)
     if not sections:
         return ""
     return "## Lessons & Notes (cross-session memory — apply when relevant)\n" + "\n\n".join(sections)

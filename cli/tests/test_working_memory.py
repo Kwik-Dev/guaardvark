@@ -84,6 +84,31 @@ def test_cli_context_and_rag_demote_for_deictic_file_followup(tmp_path):
     assert should_demote_rag("Suggest improvements to the file", memory) is True
 
 
+def test_bare_that_keeps_rag_and_edit_target(tmp_path):
+    target = tmp_path / "test-container.sh"
+    target.write_text("#!/usr/bin/env bash\n")
+    memory = empty_working_memory()
+    memory["active_file"] = str(target)
+    question = "what does the onboarding doc say, I forgot that part"
+
+    assert should_demote_rag(question, memory) is False
+
+    apply_user_intent(memory, "review the onboarding doc, I forgot that part")
+    assert memory["pending_edit_target"] is None
+
+
+def test_that_file_still_points_at_active_file(tmp_path):
+    target = tmp_path / "test-container.sh"
+    target.write_text("#!/usr/bin/env bash\n")
+    memory = empty_working_memory()
+    memory["active_file"] = str(target)
+
+    assert should_demote_rag("improve that file", memory) is True
+
+    apply_user_intent(memory, "improve that file")
+    assert memory["pending_edit_target"] == str(target)
+
+
 def test_approval_guard_rejects_unrelated_edit_target(tmp_path):
     expected = tmp_path / "docs" / "test-container.sh"
     expected.parent.mkdir()

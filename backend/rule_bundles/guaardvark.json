@@ -33,9 +33,9 @@
       "name": "brevity_on_small_models",
       "level": "LEARNED",
       "type": "PROMPT_TEMPLATE",
-      "target_models_json": "[\"tinyllama\", \"llama3.2:1b\", \"qwen3.5:1.5b\"]",
+      "target_models_json": "[\"tinyllama*\", \"llama3.2:1b*\", \"qwen3.5:1.5b*\"]",
       "is_active": true,
-      "description": "Model-scoped via target_models_json: models this small cannot hold long instructions, so the ask is trimmed.",
+      "description": "Model-scoped via target_models_json, each target ending in '*' so every tag and quantisation of that model is covered: models this small cannot hold long instructions, so the ask is trimmed.",
       "rule_text": "Answer in at most three sentences. Do not explain your reasoning unless asked."
     },
     {

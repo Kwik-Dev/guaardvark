@@ -20,6 +20,10 @@ logger = logging.getLogger(__name__)
 # Create blueprint
 tools_bp = Blueprint("tools", __name__, url_prefix="/api/tools")
 
+# Saved and shown when a routed result carries no answer text. The result
+# itself is a Python dict and is never a reply.
+_NO_REPLY_TEXT = "No reply came back for this request."
+
 
 def _extract_and_save_screenshots(result):
     """Extract screenshot base64 data from agent result and save to files.
@@ -415,27 +419,43 @@ def route_message():
                 # plain file request to the screen-agent loop (2026-09-05).
                 asks_for_agent = bool(re.search(r"\b(?:agent|screen)\b", message, re.I))
                 if screen_active or is_vision or asks_for_agent:
+                    # execute_via "unified": this preview is a hint for unified
+                    # chat (AgentBrain), not a decision /route-and-execute can
+                    # act on. That endpoint routes again through the legacy
+                    # router, which treats "what is an agent?" as plain chat.
                     route = type('obj', (object,), {
                         'route_type': type('rt', (object,), {'value': 'agent_loop'})(),
                         'tool_name': 'agent_task_execute' if 'execute' in message.lower() or 'do' in message.lower() else None,
                         'tool_params': {},
                         'confidence': 0.75,
                         'reasoning': 'Routed via AgentBrain (screen_active or vision/STA path; lean on memory/lessons/budget)',
-                        'suggested_mode': 'agent'
+                        'suggested_mode': 'agent',
+                        'execute_via': 'unified',
                     })()
         except Exception:
             pass  # fallthrough to legacy bridge
 
         if route is None:
-            from backend.services.agent_router import route_message as do_route
+            from backend.services.agent_router import (
+                RouteType,
+                is_explicit_agent_request,
+                route_message as do_route,
+            )
             decision = do_route(message, context)
+            # Only an explicit agent request keeps the legacy loop; an
+            # agent-loop match on an ordinary question goes to unified chat.
+            execute_via = None
+            if (decision.route_type == RouteType.AGENT_LOOP
+                    and not is_explicit_agent_request(message, decision)):
+                execute_via = 'unified'
             route = type('obj', (object,), {
                 'route_type': type('rt', (object,), {'value': decision.route_type.value})(),
                 'tool_name': decision.tool_name,
                 'tool_params': decision.tool_params,
                 'confidence': decision.confidence,
                 'reasoning': decision.reasoning + ' (legacy bridge; migrate to AgentBrain)',
-                'suggested_mode': getattr(decision, 'suggested_mode', None)
+                'suggested_mode': getattr(decision, 'suggested_mode', None),
+                'execute_via': execute_via,
             })()
 
         return jsonify({
@@ -446,7 +466,8 @@ def route_message():
                 "tool_params": route.tool_params,
                 "confidence": route.confidence,
                 "reasoning": route.reasoning,
-                "suggested_mode": route.suggested_mode
+                "suggested_mode": route.suggested_mode,
+                "execute_via": route.execute_via,
             }
         })
 
@@ -499,6 +520,17 @@ def route_and_execute():
         from backend.services.agent_router import execute_routed_message
         result = execute_routed_message(message, context)
 
+        # Nothing to run: the legacy router wants a model reply. Hand the turn
+        # back so the client sends it through unified chat, which saves both
+        # sides of the exchange itself; saving here would put the routing
+        # dict in the history as the answer.
+        if result.get("type") == "chat" and result.get("requires_llm"):
+            return jsonify({
+                "success": True,
+                "fallback_to_chat": True,
+                "result": result,
+            })
+
         # Extract screenshots from agent result and save to files
         screenshot_urls = _extract_and_save_screenshots(result)
         if screenshot_urls:
@@ -510,7 +542,7 @@ def route_and_execute():
         for url in screenshot_urls:
             display_content += f"\n\n![Screenshot]({url})"
         if not display_content.strip():
-            display_content = str(result)
+            display_content = _NO_REPLY_TEXT
 
         # Save messages to DB for chat history persistence
         session_id = context.get("session_id")
@@ -532,10 +564,13 @@ def route_and_execute():
                 )
                 db.session.add(user_msg)
 
-                # Save assistant response with screenshot markdown
+                # Save assistant response with screenshot markdown. An agent
+                # loop's facts check rides along so the note survives reload.
+                verified = result.get("verified") if result.get("type") == "agent_result" else None
                 assistant_msg = LLMMessage(
                     session_id=session_id, role="assistant",
-                    content=display_content, timestamp=datetime.now()
+                    content=display_content, timestamp=datetime.now(),
+                    extra_data={"verified": verified} if verified is not None else None,
                 )
                 db.session.add(assistant_msg)
 

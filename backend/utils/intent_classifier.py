@@ -13,6 +13,8 @@ import re
 from typing import Dict, List, Tuple, Optional
 from enum import Enum
 
+from backend.services.intent_service import find_keywords, whole_word_pattern
+
 logger = logging.getLogger(__name__)
 
 # Try to import semantic classifier
@@ -34,7 +36,7 @@ class IntentType(Enum):
     COMMAND = "COMMAND"              # /codegen, /analyze commands
     DATABASE_QUERY = "DATABASE_QUERY"  # Count/list requests
     RAG_SEARCH = "RAG_SEARCH"        # Document content search
-    WEB_SEARCH = "WEB_SEARCH"        # Current info requests
+    WEB_SEARCH = "WEB_SEARCH"        # Current info requests; sizes the context and offers a search, never sends one by itself
     GENERAL_CHAT = "GENERAL_CHAT"    # Default conversational
 
 class IntentClassifier:
@@ -54,7 +56,11 @@ class IntentClassifier:
             'all clients', 'all projects', 'all documents',
             'tell me how many', 'how many clients', 'how many projects', 'how many documents'
         ]
-        
+        # A record query needs both: a count/list phrase and an app record noun.
+        # Either alone is ordinary chat ("show me a joke", "my project files").
+        self.database_count_phrases = ['how many', 'count', 'list', 'show me', 'number of', 'total']
+        self.database_record_nouns = ['clients', 'projects', 'documents', 'files', 'tasks']
+
         # Document search patterns  
         self.document_keywords = [
             'document', 'contract', 'agreement', 'uploaded', 'file content',
@@ -78,6 +84,9 @@ class IntentClassifier:
             'how are you today', 'today?', 'doing today', 'feel today'
         ]
         
+        # One whole-word pattern per keyword list, compiled on first use
+        self._keyword_patterns: Dict[Tuple[str, ...], "re.Pattern[str]"] = {}
+
         # Context length thresholds
         self.max_context_lengths = {
             IntentType.COMMAND: 5000,        # Minimal context for commands
@@ -113,7 +122,12 @@ class IntentClassifier:
             return IntentType.COMMAND, 0.95, metadata
 
         # 2. Database Query Detection (keyword-based - specific to this app)
-        db_confidence, db_keywords = self._check_keywords(message_lower, self.database_keywords)
+        _, count_phrases = self._check_keywords(message_lower, self.database_count_phrases)
+        _, record_nouns = self._check_keywords(message_lower, self.database_record_nouns)
+        if count_phrases and record_nouns:
+            db_confidence, db_keywords = self._check_keywords(message_lower, self.database_keywords)
+        else:
+            db_confidence, db_keywords = 0.0, []
         if db_confidence > 0.6:
             metadata['keywords_found'] = db_keywords
             logger.info(f"Intent: DATABASE_QUERY detected - keywords: {db_keywords}")
@@ -191,25 +205,28 @@ class IntentClassifier:
     def _check_keywords(self, message: str, keywords: List[str]) -> Tuple[float, List[str]]:
         """
         Check for keyword matches and return confidence score
-        
+
+        Keywords match as whole words, never inside another word: "now" is
+        not found in "know", "count" not in "account", "list" not in "listen".
+
         Args:
             message: Lowercase message text
             keywords: List of keywords to check
-            
+
         Returns:
             Tuple of (confidence_score, matched_keywords)
         """
-        matched_keywords = []
-        total_matches = 0
-        
-        for keyword in keywords:
-            if keyword in message:
-                matched_keywords.append(keyword)
-                # Weight longer keywords more heavily
-                total_matches += len(keyword.split())
-        
+        key = tuple(keywords)
+        pattern = self._keyword_patterns.get(key)
+        if pattern is None:
+            pattern = self._keyword_patterns[key] = whole_word_pattern(keywords)
+
+        matched_keywords = find_keywords(pattern, message)
         if not matched_keywords:
             return 0.0, []
+
+        # Weight longer keywords more heavily
+        total_matches = sum(len(keyword.split()) for keyword in matched_keywords)
         
         # Calculate confidence based on matches and message length
         confidence = min(0.95, (total_matches / max(1, len(message.split()))) + 0.3)
@@ -279,6 +296,68 @@ except ImportError:
 def should_enable_web_search(intent_type: IntentType, message: str) -> bool:
     """Check if web search should be enabled"""
     return intent_classifier.should_use_web_search(intent_type, message)
+
+
+# The two offers a reply can carry; see offer_web_search.
+WEB_SEARCH_OFFER_SEARCH = "search"
+WEB_SEARCH_OFFER_ENABLE = "enable_web_access"
+# The query is the person's message as typed. Longer than this it is a paste or
+# a brief rather than a question, as enhanced chat's _WEB_SEARCH_MAX_CHARS has it.
+WEB_SEARCH_OFFER_MAX_CHARS = 300
+
+
+# Realtime confidence an offer needs: one whole-word realtime keyword ("weather",
+# "score", "latest") gives 0.6 in the keyword fallback, two give 0.8.
+WEB_SEARCH_OFFER_MIN_REALTIME = 0.6
+# A reply that says it cannot know current facts ("I don't have real-time data",
+# "as of my last update", "I can't browse the internet").
+_REPLY_LACKS_CURRENT_INFO_RE = re.compile(
+    r"\b(?:don'?t|do not|cannot|can'?t|unable to)\b[^.!?\n]{0,60}"
+    r"\b(?:real[- ]time|live data|current (?:data|information|events|news)|up[- ]to[- ]date|"
+    r"browse|the internet|look (?:it|that|this) up)\b"
+    r"|\bas of my (?:last|latest) (?:update|training)\b"
+    r"|\bmy (?:training|knowledge) (?:data|cutoff|cut-off)\b",
+    re.IGNORECASE,
+)
+
+
+def offer_web_search(message: str, intent_type: Optional[IntentType] = None,
+                     reply: Optional[str] = None) -> Optional[Dict[str, str]]:
+    """The offer a chat reply carries when ``message`` looks like it needs
+    current information, or None.
+
+    ``{"action": "search", "query": message}`` with web access on: the chat
+    shows "Search the web for this", and a click runs one search of the query.
+    ``{"action": "enable_web_access", "query": message}`` with it off: the
+    chat says how to turn web access on. The offer itself sends nothing, and
+    callers ask only for a turn that sent no search. ``intent_type`` is the
+    caller's own classification of ``message``, when it has one.
+
+    Offered when the message is a current-information question by both
+    signals (a web-search classification and the realtime check), or when
+    ``reply`` says it lacks current information. The web-search keywords
+    alone also fire on "check my code" or "find my invoice"; the chip would
+    then sit under ordinary replies.
+    """
+    text = (message or "").strip()
+    if not text or len(text) > WEB_SEARCH_OFFER_MAX_CHARS:
+        return None
+    if intent_type is None:
+        intent_type, _, _ = intent_classifier.classify_intent(text)
+    asks_current = False
+    if should_enable_web_search(intent_type, text):
+        is_live, confidence = is_realtime_query(text)
+        asks_current = is_live and confidence >= WEB_SEARCH_OFFER_MIN_REALTIME
+    if not asks_current and not (reply and _REPLY_LACKS_CURRENT_INFO_RE.search(reply)):
+        return None
+    try:
+        from backend.utils.settings_utils import get_web_access
+        web_access = bool(get_web_access())
+    except Exception as e:
+        logger.debug(f"Web access setting unreadable, offering to turn it on: {e}")
+        web_access = False
+    action = WEB_SEARCH_OFFER_SEARCH if web_access else WEB_SEARCH_OFFER_ENABLE
+    return {"action": action, "query": text}
 
 
 def is_realtime_query(message: str) -> Tuple[bool, float]:

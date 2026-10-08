@@ -1,10 +1,19 @@
 """
 Kill switch + cadence enforcement for outreach.
 
-Three layers of brakes:
+Above everything sits the stop on all public posting, posting_stop_reason():
+Setting('public_posting_stopped'). It covers outreach and Connections publishing
+alike, is never set on a fresh install, and is its own setting rather than
+social_outreach_enabled, which defaults off and must not hold back a publish.
+stop_all_posting() engages it and holds what is queued; resume_posting() lifts it.
+
+Three layers of brakes for outreach:
   1. is_enabled() — global on/off via Setting('social_outreach_enabled', 'true'/'false'). Defaults false.
+     Also false while public posting is stopped.
   2. is_supervised() — when true, drafts wait for a person (Approvals → Outreach) instead of posting.
      Defaults true; only an explicit "false" lets graded drafts post on their own.
+     requires_independent_check() — when unsupervised, a draft also needs a second check that
+     actually ran (gates.independent_ok). Defaults true.
   3. cadence checks — Redis-backed, per-platform. Hard caps: 1 post / 30 min / platform, 8 posts / 24h / platform.
 
 Plus task-level abort on 2 servo failures (enforced by the loop, not here).
@@ -29,6 +38,10 @@ SERVO_FAILURE_ABORT_THRESHOLD = 2
 
 REDIS_KEY_LAST_POST = "social_outreach:last_post:{platform}"
 REDIS_KEY_DAILY_LIST = "social_outreach:posts_24h:{platform}"  # zset of timestamps
+
+POSTING_STOP_KEY = "public_posting_stopped"
+POSTING_STOPPED_REASON = "Public posting is stopped. Resume it on the Outreach page."
+POSTING_STOP_UNREADABLE_REASON = "The public posting stop could not be read; refusing to post."
 
 
 def _get_redis():
@@ -107,9 +120,28 @@ def _is_on(value: Optional[str]) -> bool:
     return (value or "").strip().lower() in ("true", "1", "yes", "on")
 
 
+def posting_stop_reason() -> Optional[str]:
+    """Why nothing may be posted publicly right now, or None when posting may go ahead.
+
+    Covers outreach and Connections publishing. A stop that cannot be read
+    counts as engaged: unknown must not mean "post".
+    """
+    try:
+        value = _lookup_setting(POSTING_STOP_KEY)
+    except Exception as e:
+        logger.warning("posting stop unreadable, treating as stopped: %s", e)
+        return POSTING_STOP_UNREADABLE_REASON
+    return POSTING_STOPPED_REASON if _is_on(value) else None
+
+
+def posting_stopped() -> bool:
+    return posting_stop_reason() is not None
+
+
 def is_enabled() -> bool:
-    """Whether outreach is switched on. Off when the setting cannot be read."""
-    return _is_on(_read_setting("social_outreach_enabled", "false"))
+    """Whether outreach may run: switched on and public posting not stopped.
+    Off when either setting cannot be read."""
+    return _is_on(_read_setting("social_outreach_enabled", "false")) and not posting_stopped()
 
 
 def _supervised(value: Optional[str]) -> bool:
@@ -129,12 +161,27 @@ def is_supervised() -> bool:
         return True
 
 
+def requires_independent_check() -> bool:
+    """Whether an unsupervised draft needs a second check that actually ran
+    (gates.independent_ok) before it may post. True unless the setting
+    ``outreach_require_independent_check`` is switched off explicitly, and true
+    when the setting cannot be read."""
+    try:
+        value = _lookup_setting("outreach_require_independent_check")
+    except Exception as e:
+        logger.warning("independent-check setting unreadable, treating as required: %s", e)
+        return True
+    return True if value is None else _is_on(value)
+
+
 def status_snapshot() -> dict:
     """What GET /api/social-outreach/status and outreach_status report.
 
     ``settings_readable`` is false when the settings table could not be read;
     ``enabled`` and ``supervised`` are then the fail-closed values the posting
-    paths use, not what the user set.
+    paths use, not what the user set. ``enabled`` is the outreach switch as
+    set; ``posting_stopped`` is the stop on all public posting, which holds
+    outreach back whatever ``enabled`` says.
     """
     readable = True
     try:
@@ -143,9 +190,12 @@ def status_snapshot() -> dict:
     except Exception as e:
         logger.warning("outreach settings unreadable: %s", e)
         readable, enabled, supervised = False, False, True
+    stop_reason = posting_stop_reason()
     return {
         "enabled": enabled,
         "supervised": supervised,
+        "posting_stopped": stop_reason is not None,
+        "posting_stop_reason": stop_reason,
         "settings_readable": readable,
         "caps": {
             "min_gap_seconds": CADENCE_MIN_GAP_SECONDS,
@@ -299,8 +349,20 @@ def drain_pending_outreach_tasks(queues: tuple[str, ...] = ("default", "celery")
     return {"purged": purged, "revoked": revoked, "errors": errors}
 
 
-def cancel_outreach_task_rows() -> dict:
-    """Mark queued/in-progress Task-backed outreach runs as cancelled."""
+def _stored_celery_id(row) -> Optional[str]:
+    """The Celery id a dispatcher kept in the Task's handler_config, if any.
+
+    The tasks table has no column for it, and job_id holds "task_<id>" once
+    the executor starts, so a row without this cannot be revoked by id.
+    """
+    config = row.handler_config if isinstance(row.handler_config, dict) else {}
+    value = config.get("celery_task_id")
+    return str(value) if value else None
+
+
+def _cancel_task_rows(task_handler: str) -> dict:
+    """Mark queued/in-progress Task rows of one handler as cancelled, revoking
+    the Celery job where its id was stored."""
     cancelled = 0
     revoked = 0
     errors: list[str] = []
@@ -314,7 +376,7 @@ def cancel_outreach_task_rows() -> dict:
         from backend.models import Task, db
 
         rows = (
-            Task.query.filter(Task.task_handler == "social_outreach")
+            Task.query.filter(Task.task_handler == task_handler)
             .filter(Task.status.in_(("queued", "pending", "in-progress")))
             .all()
         )
@@ -328,10 +390,11 @@ def cancel_outreach_task_rows() -> dict:
             errors.append(f"celery import: {e}")
 
         for row in rows:
-            if celery and row.celery_task_id:
+            celery_id = _stored_celery_id(row)
+            if celery and celery_id:
                 try:
                     celery.control.revoke(
-                        row.celery_task_id,
+                        celery_id,
                         terminate=True,
                         signal="SIGTERM",
                     )
@@ -353,6 +416,45 @@ def cancel_outreach_task_rows() -> dict:
     return {"cancelled_tasks": cancelled, "revoked_tasks": revoked, "errors": errors}
 
 
+def cancel_outreach_task_rows() -> dict:
+    """Mark queued/in-progress Task-backed outreach runs as cancelled."""
+    return _cancel_task_rows("social_outreach")
+
+
+def hold_connection_publishes() -> dict:
+    """Cancel Connections publish jobs and hold the publishes they carried.
+
+    Each queued publish goes back to awaiting_approval, so it waits on the
+    Approvals page for a person's click once posting resumes. A publish
+    already being sent is counted in ``in_flight``: it cannot be recalled.
+    """
+    result = _cancel_task_rows("connections")
+    held = in_flight = 0
+    errors = list(result["errors"])
+    try:
+        from flask import has_app_context
+
+        if has_app_context():
+            from backend.services.connections import publish_service
+
+            held, in_flight = publish_service.hold_queued()
+    except Exception as e:
+        errors.append(f"hold publishes: {e}")
+        try:
+            from backend.models import db
+
+            db.session.rollback()
+        except Exception:
+            pass
+    return {
+        "held_publishes": held,
+        "in_flight_publishes": in_flight,
+        "cancelled_publish_tasks": result["cancelled_tasks"],
+        "revoked_publish_tasks": result["revoked_tasks"],
+        "errors": errors,
+    }
+
+
 def apply_kill_switch() -> dict:
     """Hard-stop outreach: flip off, drain broker queue, cancel Task rows."""
     set_enabled(False)
@@ -360,6 +462,39 @@ def apply_kill_switch() -> dict:
     result.update(drain_pending_outreach_tasks())
     result.update(cancel_outreach_task_rows())
     return result
+
+
+def stop_all_posting() -> dict:
+    """Engage the stop on all public posting, outreach and Connections alike.
+
+    The stop is written first, so every posting path refuses from here on;
+    then queued work is cleared. Approved outreach drafts stay approved and
+    post on the usual schedule after resume_posting(); held Connections
+    publishes need a person's approval. ``posting_stopped`` in the result is
+    read back, so a failed write shows as false.
+    """
+    _write_setting(POSTING_STOP_KEY, "true")
+    drained = drain_pending_outreach_tasks()
+    outreach_rows = cancel_outreach_task_rows()
+    publishes = hold_connection_publishes()
+    return {
+        "posting_stopped": posting_stopped(),
+        "purged": drained["purged"],
+        "revoked": drained["revoked"],
+        "cancelled_tasks": outreach_rows["cancelled_tasks"],
+        "revoked_tasks": outreach_rows["revoked_tasks"],
+        "held_publishes": publishes["held_publishes"],
+        "in_flight_publishes": publishes["in_flight_publishes"],
+        "cancelled_publish_tasks": publishes["cancelled_publish_tasks"],
+        "revoked_publish_tasks": publishes["revoked_publish_tasks"],
+        "errors": drained["errors"] + outreach_rows["errors"] + publishes["errors"],
+    }
+
+
+def resume_posting() -> dict:
+    """Lift the stop. Nothing held is sent by this call: see stop_all_posting."""
+    _write_setting(POSTING_STOP_KEY, "false")
+    return {"posting_stopped": posting_stopped()}
 
 
 def cadence_status() -> dict:

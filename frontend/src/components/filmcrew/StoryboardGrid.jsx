@@ -31,11 +31,37 @@ const NO_STORYBOARD_PLACEHOLDER =
     '</svg>'
   );
 
+// The curator's advice on a frame, as one plain line for the card.
+const curatorLine = (advice) => {
+  const verdict = advice.verdict === 'flag' ? 'flagged' : 'approved';
+  return advice.reason ? `Curator: ${verdict} — ${advice.reason}` : `Curator: ${verdict}`;
+};
+
+// Flagged by the curator and not approved by a person: rendering it needs a yes.
+const isCuratorFlagged = (shot) =>
+  shot.curator_advice?.verdict === 'flag' && !(shot.approved && shot.approved_by === 'person');
+
 const StoryboardGrid = ({ currentStage, shots, onRegenerate, onApproveAll, isApproving }) => {
   const [regenShot, setRegenShot] = useState(null);
   const [promptOverride, setPromptOverride] = useState('');
   const [loading, setLoading] = useState(false);
   const [regenError, setRegenError] = useState(null);
+  const [confirmingFlagged, setConfirmingFlagged] = useState(false);
+
+  const flaggedShots = shots.filter(isCuratorFlagged);
+
+  const handleApproveClick = () => {
+    if (flaggedShots.length > 0) {
+      setConfirmingFlagged(true);
+      return;
+    }
+    onApproveAll();
+  };
+
+  const handleRenderAnyway = () => {
+    setConfirmingFlagged(false);
+    onApproveAll({ confirmFlagged: true });
+  };
 
   const handleRegenClick = (shot) => {
     setRegenShot(shot);
@@ -75,7 +101,7 @@ const StoryboardGrid = ({ currentStage, shots, onRegenerate, onApproveAll, isApp
             variant="contained"
             color="success"
             startIcon={<CheckCircleIcon />}
-            onClick={onApproveAll}
+            onClick={handleApproveClick}
             disabled={isApproving}
           >
             {isApproving ? 'Approving…' : 'Approve & Render'}
@@ -96,11 +122,12 @@ const StoryboardGrid = ({ currentStage, shots, onRegenerate, onApproveAll, isApp
                 />
                 <Box sx={{ position: 'absolute', top: 8, right: 8, display: 'flex', gap: 1 }}>
                   {shot.approved && (
-                    <Chip 
-                      label="Approved" 
-                      color="success" 
-                      size="small" 
-                      sx={{ height: 24 }}
+                    <Chip
+                      label={shot.approved_by === 'curator' ? 'Pre-ticked' : 'Approved'}
+                      color="success"
+                      variant={shot.approved_by === 'curator' ? 'outlined' : 'filled'}
+                      size="small"
+                      sx={{ height: 24, bgcolor: shot.approved_by === 'curator' ? 'background.paper' : undefined }}
                     />
                   )}
                   <Tooltip title={canRegenerate ? "Regenerate this shot" : "Regeneration is available during storyboard approval"}>
@@ -131,6 +158,16 @@ const StoryboardGrid = ({ currentStage, shots, onRegenerate, onApproveAll, isApp
                 }}>
                   {shot.description}
                 </Typography>
+                {shot.curator_advice?.verdict && (
+                  <Typography
+                    variant="caption"
+                    display="block"
+                    color={shot.curator_advice.verdict === 'flag' ? 'warning.main' : 'success.main'}
+                    sx={{ mt: 1 }}
+                  >
+                    {curatorLine(shot.curator_advice)}
+                  </Typography>
+                )}
               </CardContent>
             </Card>
           </Grid>
@@ -166,6 +203,30 @@ const StoryboardGrid = ({ currentStage, shots, onRegenerate, onApproveAll, isApp
             disabled={loading}
           >
             {loading ? 'Rolling...' : 'Regenerate'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={confirmingFlagged} onClose={() => setConfirmingFlagged(false)}>
+        <DialogTitle>Render anyway?</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" sx={{ mb: 1 }}>
+            {flaggedShots.length} {flaggedShots.length === 1 ? 'shot was' : 'shots were'} flagged by the curator:
+          </Typography>
+          {flaggedShots.map((shot) => (
+            <Typography key={shot.id} variant="body2" sx={{ ml: 2 }}>
+              Scene {shot.scene_number} / Shot {shot.shot_number}
+              {shot.curator_advice?.reason ? `: ${shot.curator_advice.reason}` : ''}
+            </Typography>
+          ))}
+          <Typography variant="body2" sx={{ mt: 2 }}>
+            Regenerate them first, or render them as they are.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmingFlagged(false)}>Cancel</Button>
+          <Button onClick={handleRenderAnyway} variant="contained" color="warning">
+            Render anyway
           </Button>
         </DialogActions>
       </Dialog>

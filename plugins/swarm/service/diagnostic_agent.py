@@ -5,12 +5,14 @@ When an agent fails a task (crashes or exhausts retries), the Diagnostic
 Agent is spawned in the same worktree to read the logs, understand the
 failure, and attempt a fix.
 
-Implementation note: this agent runs `claude` as a subprocess with the
-worktree as its working directory so the LLM's file-edit tools operate on
-the failing task's branch. Earlier versions called the main backend's
-async chat endpoint, which (a) executed in the backend's CWD rather than
-the worktree and (b) returned a request_id ack synchronously while the
-real work streamed over Socket.IO — so the agent always claimed success
+Implementation note: this agent runs the failed task's own backend CLI
+(the argv its backend's command_prefix() builds) as a subprocess with the
+worktree as its working directory, so the LLM's file-edit tools operate on
+the failing task's branch and a task that ran locally is diagnosed locally.
+Earlier versions called the main backend's async chat endpoint, which
+(a) executed in the backend's CWD rather than the worktree and (b) returned
+a request_id ack synchronously while the real work streamed over
+Socket.IO — so the agent always claimed success
 without verifying anything. We now verify by checking that HEAD advanced
 in the worktree before reporting success back to the orchestrator.
 """
@@ -18,6 +20,7 @@ in the worktree before reporting success back to the orchestrator.
 import logging
 import subprocess
 from pathlib import Path
+from typing import Sequence
 
 logger = logging.getLogger("swarm.diagnostic")
 
@@ -30,11 +33,15 @@ class DiagnosticAgent:
     can be completed successfully.
     """
 
-    def __init__(self, backend_url: str, claude_command: str = "claude"):
+    def __init__(self, backend_url: str, command: Sequence[str]):
         # backend_url is kept for signature compatibility with the orchestrator
         # but is no longer used — diagnosis runs locally in the worktree.
+        # command is the argv that runs one prompt on the task's backend; the
+        # prompt is appended as the last argument.
         self.backend_url = backend_url
-        self.claude_command = claude_command
+        self.command = list(command)
+        if not self.command:
+            raise ValueError("DiagnosticAgent needs a backend command")
 
     def run_diagnosis(
         self,
@@ -65,13 +72,7 @@ class DiagnosticAgent:
 
         try:
             result = subprocess.run(
-                [
-                    self.claude_command,
-                    "--print",
-                    "--bare",
-                    "--dangerously-skip-permissions",
-                    prompt,
-                ],
+                self.command + [prompt],
                 cwd=str(wt),
                 capture_output=True,
                 text=True,
@@ -81,7 +82,7 @@ class DiagnosticAgent:
             logger.error(f"DiagnosticAgent timed out after {DIAGNOSTIC_TIMEOUT_SECONDS}s in {wt}")
             return False
         except FileNotFoundError:
-            logger.error(f"DiagnosticAgent: command not found: {self.claude_command!r}")
+            logger.error(f"DiagnosticAgent: command not found: {self.command[0]!r}")
             return False
         except Exception as e:
             logger.error(f"DiagnosticAgent subprocess failed: {e}")

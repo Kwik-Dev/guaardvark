@@ -47,8 +47,13 @@ export const confirmCasting = async (productionId) => {
   return response.data;
 };
 
-export const approveStoryboard = async (productionId) => {
-  const response = await axios.post(`${API_BASE}/production/${productionId}/storyboard/approve`);
+// confirmFlagged: the person has seen the shots the curator flagged and wants
+// them rendered anyway. Without it the server refuses while any are flagged.
+export const approveStoryboard = async (productionId, { confirmFlagged = false } = {}) => {
+  const url = `${API_BASE}/production/${productionId}/storyboard/approve`;
+  const response = confirmFlagged
+    ? await axios.post(url, { confirm_flagged: true })
+    : await axios.post(url);
   return response.data;
 };
 

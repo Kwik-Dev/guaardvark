@@ -26,6 +26,23 @@ class TestParsers:
         assert wants_film_crew("generate a video of a fox") is False
         assert is_film_crew_request("/film-crew INT. ROOM") is True
 
+    @pytest.mark.parametrize("message", [
+        "can you produce a python script that renames files?",
+        "I want to film a script reading next week",
+    ])
+    def test_film_crew_words_mid_sentence_are_not_a_request(self, message):
+        assert wants_film_crew(message) is False
+        assert is_film_crew_request(message) is False
+
+    @pytest.mark.parametrize("message,script", [
+        ("run the film crew on this: INT. KITCHEN - NIGHT", "INT. KITCHEN - NIGHT"),
+        ("produce this script: INT. KITCHEN - NIGHT", "INT. KITCHEN - NIGHT"),
+        ("/film-crew INT. ROOM. Hi.", "INT. ROOM. Hi."),
+    ])
+    def test_film_crew_command_at_the_start(self, message, script):
+        assert is_film_crew_request(message) is True
+        assert parse_film_crew_nl(message)["script_text"] == script
+
     def test_parse_music_video_song_path_and_style(self):
         parsed = parse_music_video_nl("make a music video from song.mp3 neon noir rain")
         assert parsed["song"] == "song.mp3"
@@ -101,6 +118,15 @@ class TestDirectIntercepts:
         assert engine._calls[0][0] == "start_film_crew"
         assert "INT. KITCHEN" in engine._calls[0][1]["script_text"]
 
+    def test_code_request_does_not_start_film_crew(self):
+        engine = self._engine("start_film_crew")
+        result = engine._try_film_crew_direct(
+            "can you produce a python script that renames files?",
+            "s", lambda *a: None, "r", {},
+        )
+        assert result is None
+        assert engine._calls == []
+
 
 class TestVideoIntentExclusion:
     def test_music_video_is_not_generic_video(self):
@@ -145,7 +171,7 @@ def _no_dispatch_and_no_gpu(monkeypatch):
     monkeypatch.setattr(ProductionService, "dispatch_agent", lambda self, prod_id, agent: None)
     monkeypatch.setattr(
         "backend.services.video_model_registry.resolve_active_video_model",
-        lambda role, explicit=None, surface=None: (explicit or "wan22-5b", None),
+        lambda role, explicit=None, surface=None, comfyui_down_ok=False: (explicit or "wan22-5b", None),
     )
 
 

@@ -20,7 +20,6 @@ class HardwareService:
                 "gradient_accumulation_steps": 4,
                 "max_seq_length": 512,
                 "use_4bit": False,
-                "cpu_offload": False,
                 "lora_rank": 8
             }
         }
@@ -52,36 +51,31 @@ class HardwareService:
                     config.update({
                         "batch_size": 4,
                         "gradient_accumulation_steps": 2,
-                        "max_seq_length": 4096,
-                        "cpu_offload": False
+                        "max_seq_length": 4096
                     })
                 elif vram >= 15000: # 16GB (4080/4070 Ti)
                     config.update({
                         "batch_size": 2,
                         "gradient_accumulation_steps": 4,
-                        "max_seq_length": 2048,
-                        "cpu_offload": False
+                        "max_seq_length": 2048
                     })
                 elif vram >= 11000: # 12GB (3060/4070)
                     config.update({
                         "batch_size": 1,
                         "gradient_accumulation_steps": 4,
-                        "max_seq_length": 2048,
-                        "cpu_offload": True # Safety net
+                        "max_seq_length": 2048
                     })
                 elif vram >= 7000: # 8GB
                     config.update({
                         "batch_size": 1,
                         "gradient_accumulation_steps": 8,
-                        "max_seq_length": 1024,
-                        "cpu_offload": True
+                        "max_seq_length": 1024
                     })
                 else: # < 8GB
                     config.update({
                         "batch_size": 1,
                         "gradient_accumulation_steps": 8,
-                        "max_seq_length": 512,
-                        "cpu_offload": True
+                        "max_seq_length": 512
                     })
                     
             except Exception as e:
@@ -91,7 +85,7 @@ class HardwareService:
             caps["gpu_name"] = "Apple Metal (MPS)"
             caps["vram_total_mb"] = None  # MPS VRAM not directly queryable like CUDA
             config = caps["recommended_config"]
-            config.update({"use_4bit": False, "lora_rank": 8, "batch_size": 1, "cpu_offload": True})
+            config.update({"use_4bit": False, "lora_rank": 8, "batch_size": 1})
         elif getattr(torch.version, 'hip', None):
             caps["device_type"] = "rocm"
             caps["gpu_name"] = "AMD ROCm (HIP)"
@@ -100,13 +94,13 @@ class HardwareService:
             except:
                 caps["vram_total_mb"] = None
             config = caps["recommended_config"]
-            config.update({"use_4bit": True, "lora_rank": 16, "batch_size": 2, "cpu_offload": False})
+            config.update({"use_4bit": True, "lora_rank": 16, "batch_size": 2})
         else:
             caps["device_type"] = "cpu"
             caps["gpu_name"] = "CPU-only"
             caps["vram_total_mb"] = None
             config = caps["recommended_config"]
-            config.update({"use_4bit": False, "lora_rank": 8, "batch_size": 1, "cpu_offload": True, "max_seq_length": 2048})
+            config.update({"use_4bit": False, "lora_rank": 8, "batch_size": 1, "max_seq_length": 2048})
             logger.info("Hardware: CPU-only / no accelerator detected")
         
         return caps

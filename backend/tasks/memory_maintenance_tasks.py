@@ -68,8 +68,8 @@ def reconcile_belief_updates(self, threshold: int | None = None) -> dict:
     contradicted via belief_update memories.
 
     Wraps `lesson_reconciler.scan_belief_updates()`. Idempotent — the scan
-    skips groups that already have an open PendingFix for the same (file,
-    element). PendingFix rows are review-gated; nothing here writes to the
+    skips groups that already have an open, applied or rejected PendingFix
+    for the same (file, element). PendingFix rows are review-gated; nothing here writes to the
     knowledge files directly. The on-demand CLI / API entrypoints still work
     exactly as before; this task just makes the loop self-driving.
 

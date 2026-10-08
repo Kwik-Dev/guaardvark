@@ -26,6 +26,8 @@ import DragDropImageUpload from '../components/filmcrew/DragDropImageUpload';
 import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import CastVoicePicker from '../components/filmcrew/CastVoicePicker';
 import ChangedElsewhereNotice from '../components/common/ChangedElsewhereNotice';
+import EntityContextMenu from '../components/common/EntityContextMenu';
+import useContextMenu from '../hooks/useContextMenu';
 import useServerSyncedForm from '../hooks/useServerSyncedForm';
 import useUnsavedChangesGuard from '../hooks/useUnsavedChangesGuard';
 
@@ -170,6 +172,7 @@ const CastMemberPage = () => {
   const [regenTarget, setRegenTarget] = useState(null); // sample being regenerated
   const [regenPrompt, setRegenPrompt] = useState('');
   const [lightboxIdx, setLightboxIdx] = useState(null); // open enlarged viewer at this samples[] index
+  const sampleMenu = useContextMenu();
 
   // Import LoRA (externally-trained checkpoint attached to this Subject)
   const [importOpen, setImportOpen] = useState(false);
@@ -1221,14 +1224,28 @@ const CastMemberPage = () => {
             </CollapsibleAlert>
           )}
           {subject.smoke_identity?.ok && (
-            <CollapsibleAlert severity={Number(subject.smoke_identity.score) >= 0.75 ? 'success' : 'warning'} sx={{ mb: 2 }}>
-              Post-train smoke identity score:{' '}
-              {subject.smoke_identity.score != null
-                ? Number(subject.smoke_identity.score).toFixed(2)
-                : 'n/a'}{' '}
-              ({subject.smoke_identity.method || 'hist'}
-              {subject.smoke_identity.family ? ` · ${subject.smoke_identity.family}` : ''})
-            </CollapsibleAlert>
+            subject.smoke_identity.status === 'measured' ? (
+              <CollapsibleAlert
+                severity={
+                  Number(subject.smoke_identity.score) >= Number(subject.smoke_identity.threshold ?? 0.75)
+                    ? 'success'
+                    : 'warning'
+                }
+                sx={{ mb: 2 }}
+              >
+                Post-train smoke identity score:{' '}
+                {Number(subject.smoke_identity.score).toFixed(2)}{' '}
+                ({subject.smoke_identity.method}
+                {subject.smoke_identity.family ? ` · ${subject.smoke_identity.family}` : ''})
+              </CollapsibleAlert>
+            ) : (
+              /* No badge and no number: the score is withheld until the method is
+                 proven on labelled pairs, and a colour would be a verdict. */
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 2 }}>
+                Identity: not measured
+                {subject.smoke_identity.reason ? ` — ${subject.smoke_identity.reason}` : ''}
+              </Typography>
+            )
           )}
 
           {/* Progress + honest status — so a planned-but-not-generated sheet doesn't
@@ -1270,7 +1287,7 @@ const CastMemberPage = () => {
                 const trainSt = sampleTrainStatus(s, subject);
                 return (
                 <Grid item xs={6} sm={4} md={3} lg={2} key={s.id}>
-                  <Card variant="outlined">
+                  <Card variant="outlined" onContextMenu={(e) => sampleMenu.open(e, { sample: s, idx })}>
                     {s.image_url ? (
                       <Box sx={{ position: 'relative' }}>
                         <CardMedia component="img" height="160" image={s.image_url} alt={s.angle || `sample ${s.index}`}
@@ -1298,6 +1315,11 @@ const CastMemberPage = () => {
                         </Tooltip>
                         <StatusChip status={s.status} />
                       </Box>
+                      {s.angle_state === 'unverified' && (
+                        <Tooltip title="The vision check could not read this image, so the angle is the planned one and does not count toward framing coverage.">
+                          <Chip size="small" variant="outlined" color="warning" label="angle unverified" sx={{ mt: 0.5 }} />
+                        </Tooltip>
+                      )}
                     </CardContent>
                     <CardActions sx={{ pt: 0, justifyContent: 'space-between' }}>
                       <Tooltip title={s.approved ? 'Approved — click to un-approve' : 'Approve this sample'}>
@@ -1329,6 +1351,38 @@ const CastMemberPage = () => {
             </Grid>
             </Box>
           )}
+          <EntityContextMenu
+            anchorPosition={sampleMenu.anchorPosition}
+            onClose={sampleMenu.close}
+            actions={
+              sampleMenu.payload
+                ? [
+                    sampleMenu.payload.sample.image_url && {
+                      label: 'View larger',
+                      onClick: () => setLightboxIdx(sampleMenu.payload.idx),
+                    },
+                    {
+                      label: sampleMenu.payload.sample.approved ? 'Un-approve' : 'Approve',
+                      onClick: () => toggleApprove(sampleMenu.payload.sample),
+                    },
+                    {
+                      label: 'Regenerate…',
+                      onClick: () => {
+                        setRegenTarget(sampleMenu.payload.sample);
+                        setRegenPrompt(sampleMenu.payload.sample.image_prompt || '');
+                      },
+                      disabled: isPending(sampleMenu.payload.sample),
+                    },
+                    {
+                      label: 'Remove this generation',
+                      onClick: () => handleDeleteSample(sampleMenu.payload.sample),
+                      color: 'error.main',
+                      dividerBefore: true,
+                    },
+                  ]
+                : []
+            }
+          />
 
           <Divider sx={{ my: 3 }} />
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>

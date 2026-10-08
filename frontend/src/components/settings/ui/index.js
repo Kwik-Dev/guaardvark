@@ -6,6 +6,7 @@
 //   SettingsPanel + Cluster    layout
 //   ConfirmActionDialog        the one confirmation for destructive actions
 //   DashboardStrip / Tile      the read-only strip above the panels
+//   HelpTitle                  hover explanation on a title (the `help` prop)
 
 export { default as SettingChip } from "./SettingChip";
 export { default as ChoiceChips } from "./ChoiceChips";
@@ -15,3 +16,4 @@ export { default as SettingsPanel } from "./SettingsPanel";
 export { Cluster, Line, Sep, Hint } from "./SettingsCluster";
 export { default as ConfirmActionDialog } from "./ConfirmActionDialog";
 export { default as DashboardStrip, DashboardTile } from "./DashboardStrip";
+export { default as HelpTitle } from "./HelpTitle";

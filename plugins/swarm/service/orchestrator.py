@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import threading
 import time
 from pathlib import Path
@@ -28,7 +27,9 @@ from typing import Any, Callable
 import psutil
 import requests
 
+from .backend_url import backend_api_url
 from .config import SwarmConfig, check_internet
+from .gpu_hold import GpuHoldClient, ollama_model_of
 from .merge_manager import MergeManager
 from .models import (
     AgentStatus,
@@ -47,6 +48,9 @@ logger = logging.getLogger("swarm.orchestrator")
 
 # how often we check on running agents (seconds)
 POLL_INTERVAL = 5
+
+# Tag values that mean "no preference", as the plan's "Assign to:" line reads them.
+_NO_PREFERENCE = ("", "any", "auto", "none")
 
 # Freeze-guard thresholds for the shared 60GB box. Each spawned agent is a
 # `claude`/`cline` subprocess that can balloon RAM (and carry "shadow RAM"
@@ -108,6 +112,15 @@ class SwarmOrchestrator:
         # retry tracking
         self._retries: dict[str, int] = {}
         self.max_retries = 2
+
+        # main backend API: merges, GPU holds, event pushes and the
+        # diagnostic agent all reach the backend here
+        self._backend_url = backend_api_url()
+
+        # GPU holds on the backend's orchestrator for agents running a local
+        # Ollama model: task_id -> slot_id, released when the agent exits
+        self._gpu: GpuHoldClient | None = None
+        self._gpu_holds: dict[str, str] = {}
 
         # threading for async operation
         self._thread: threading.Thread | None = None
@@ -197,20 +210,12 @@ class SwarmOrchestrator:
         )
 
         # set up merge manager
-        flask_port = os.environ.get("FLASK_PORT", "5002")
-        backend_url = f"http://localhost:{flask_port}/api"
-        
         self.merge_mgr = MergeManager(
             self.repo_path, 
             self.worktree_mgr.base_branch,
             enable_merger_agent=self.config.enable_merger_agent,
-            backend_url=backend_url
+            backend_url=self._backend_url
         )
-
-        self._diagnostic_agent = None
-        if self.config.enable_diagnostic_agent:
-            from .diagnostic_agent import DiagnosticAgent
-            self._diagnostic_agent = DiagnosticAgent(backend_url)
 
         # Set up inter-agent communication bus
         from .communication_bus import CommunicationBus
@@ -234,6 +239,9 @@ class SwarmOrchestrator:
             self._emit_event("swarm_error", "swarm", {"error": str(e)})
         finally:
             self.result.completed_at = time.time()
+            # nothing polls the agents past this point, so no hold may outlive it
+            for task_id in list(self._gpu_holds):
+                self._release_gpu_hold(task_id)
 
         # merge phase
         if do_merge and self.merge_mgr:
@@ -289,6 +297,7 @@ class SwarmOrchestrator:
             backend = self._backends.get(process.backend_name)
             if backend:
                 backend.kill(process)
+            self._release_gpu_hold(task_id)
             task = self._find_task(task_id)
             if task:
                 task.status = SwarmStatus.CANCELLED
@@ -471,22 +480,27 @@ class SwarmOrchestrator:
         # select backend
         preferred = task.preferred_backend
         
-        # Check for [Model: ...] or [Backend: ...] tags
-        if "Model" in task.tags:
-            # see if the tag matches a backend name directly
-            tag_val = task.tags["Model"].lower()
-            if tag_val in self.config.backends:
-                preferred = tag_val
-            else:
-                # otherwise, try to find a backend that uses this model
-                for name, bcfg in self.config.backends.items():
-                    if bcfg.model and tag_val in bcfg.model.lower():
-                        preferred = name
-                        break
-        elif "Backend" in task.tags:
-            preferred = task.tags["Backend"].lower()
+        # [Model: ...] and [Backend: ...] tags, keys in any letter case. A model
+        # tag wins over a backend tag; either one that names something
+        # unavailable fails the task rather than falling back.
+        tags = {str(k).strip().lower(): str(v).strip() for k, v in task.tags.items()}
+        model_tag = tags.get("model", "")
+        backend_tag = tags.get("backend", "")
+        if model_tag.lower() in _NO_PREFERENCE:
+            model_tag = ""
+        if backend_tag.lower() in _NO_PREFERENCE:
+            backend_tag = ""
 
-        backend_config = self.config.select_backend(preferred, online=online)
+        if model_tag:
+            backend_config, reason = self.config.select_backend_for_model(model_tag, online=online)
+            if not backend_config:
+                raise RuntimeError(f"requested model {model_tag} not available: {reason}")
+        else:
+            if backend_tag:
+                preferred = backend_tag.lower()
+            backend_config, reason = self.config.select_backend(preferred, online=online)
+            if not backend_config and preferred:
+                raise RuntimeError(f"requested backend {preferred} not available: {reason}")
         if not backend_config:
             configured = list(self.config.backends.keys())
             import shutil
@@ -520,13 +534,14 @@ class SwarmOrchestrator:
         except Exception as e:
             logger.debug(f"Could not record base HEAD for {task.id}: {e}")
 
-        # spawn the agent
-        config_dict = {
-            "command": backend_config.command,
-            "args": backend_config.args,
-            "model": backend_config.model,
-        }
-        process = backend.spawn(wt_info.worktree_path, task, config_dict)
+        # spawn the agent, holding its local model on the GPU while it runs
+        config_dict = self._backend_call_config(backend_config)
+        self._hold_gpu(task, backend_config)
+        try:
+            process = backend.spawn(wt_info.worktree_path, task, config_dict)
+        except Exception:
+            self._release_gpu_hold(task.id)
+            raise
 
         task.status = SwarmStatus.RUNNING
         task.started_at = time.time()
@@ -558,6 +573,7 @@ class SwarmOrchestrator:
                 continue
 
             if new_status == AgentStatus.FINISHED:
+                self._release_gpu_hold(task_id)
                 completion_state = self._completion_state(task)
                 if completion_state.get("has_uncommitted_diff"):
                     task.status = SwarmStatus.NEEDS_REVIEW
@@ -598,12 +614,13 @@ class SwarmOrchestrator:
                     })
                 else:
                     # Retries exhausted — try one last-ditch diagnosis if enabled
-                    if self._diagnostic_agent and task.worktree_path:
+                    diagnostic_agent = self._diagnostic_agent_for(task) if task.worktree_path else None
+                    if diagnostic_agent:
                         logger.warning(f"Task '{task_id}' retries exhausted — invoking DiagnosticAgent...")
                         self._emit_event("task_diagnostic_start", task_id, {"reason": "retries_exhausted"})
-                        
+
                         logs = self.get_task_logs(task_id, lines=200)
-                        fixed = self._diagnostic_agent.run_diagnosis(
+                        fixed = diagnostic_agent.run_diagnosis(
                             task.worktree_path,
                             task.title,
                             task.description,
@@ -615,6 +632,7 @@ class SwarmOrchestrator:
                             task.status = SwarmStatus.DONE
                             task.completed_at = time.time()
                             self._emit_event("task_diagnostic_success", task_id, {"message": "Agent fixed the issue autonomously"})
+                            self._release_gpu_hold(task_id)
                             self._processes.pop(task_id, None)
                             continue
 
@@ -627,7 +645,9 @@ class SwarmOrchestrator:
                         "elapsed": task.elapsed_human,
                     })
 
-                # Cleanup the crashed process record
+                # Cleanup the crashed process record. The hold is kept through
+                # the diagnosis above, which runs the same model; a retry takes a new one.
+                self._release_gpu_hold(task_id)
                 self._processes.pop(task_id, None)
 
     def _completion_state(self, task: SwarmTask) -> dict[str, object]:
@@ -716,6 +736,61 @@ class SwarmOrchestrator:
             else:
                 logger.warning(f"Unknown backend '{name}' in config — skipping")
 
+    @staticmethod
+    def _backend_call_config(backend_config) -> dict[str, Any]:
+        """The per-call settings a backend's spawn() and command_prefix() read."""
+        return {
+            "command": backend_config.command,
+            "args": backend_config.args,
+            "model": backend_config.model,
+        }
+
+    def _gpu_client(self) -> GpuHoldClient:
+        if self._gpu is None:
+            self._gpu = GpuHoldClient(self._backend_url)
+        return self._gpu
+
+    def _hold_gpu(self, task: SwarmTask, backend_config) -> None:
+        """Hold the Ollama model this task's agent runs, if it runs one."""
+        model = ollama_model_of(backend_config.model)
+        if not model or task.id in self._gpu_holds:
+            return
+        slot_id = self._gpu_client().hold(model)
+        if slot_id:
+            self._gpu_holds[task.id] = slot_id
+
+    def _release_gpu_hold(self, task_id: str) -> None:
+        slot_id = self._gpu_holds.pop(task_id, None)
+        if slot_id:
+            self._gpu_client().release(slot_id)
+
+    def _diagnostic_agent_for(self, task: SwarmTask):
+        """A DiagnosticAgent on the backend that ran this task, or None.
+
+        None when enable_diagnostic_agent is off. It never switches backend,
+        so a task that ran locally is diagnosed locally, and a backend that
+        needs internet is never used while the swarm is in Flight Mode.
+        """
+        if not self.config.enable_diagnostic_agent or not task.backend_name:
+            return None
+        backend_config = self.config.backends.get(task.backend_name)
+        backend = self._backends.get(task.backend_name)
+        if backend_config is None or backend is None:
+            return None
+        flight_mode = self.config.flight_mode or bool(self.result and self.result.flight_mode)
+        if flight_mode and (backend_config.requires_internet or backend.requires_internet):
+            logger.info(
+                f"No diagnosis for '{task.id}': {task.backend_name} needs internet "
+                f"and the swarm is in Flight Mode"
+            )
+            return None
+        try:
+            command = backend.command_prefix(self._backend_call_config(backend_config))
+        except NotImplementedError:
+            return None
+        from .diagnostic_agent import DiagnosticAgent
+        return DiagnosticAgent(self._backend_url, command)
+
     def _find_task(self, task_id: str) -> SwarmTask | None:
         if not self.result:
             return None
@@ -781,9 +856,7 @@ class SwarmOrchestrator:
 
         # 2. Push to main backend for WebSocket broadcast
         try:
-            # Main backend is on 5002 by default
-            port = os.environ.get("FLASK_PORT", "5002")
-            url = f"http://localhost:{port}/api/swarm/event"
+            url = f"{self._backend_url}/swarm/event"
             requests.post(url, json={
                 "event_type": event_type,
                 "task_id": task_id,

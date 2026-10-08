@@ -2,6 +2,7 @@ import React, { useEffect } from "react";
 import { useLocation } from "react-router-dom";
 import FloatingChatCard from "./FloatingChatCard";
 import FloatingChatFAB from "./FloatingChatFAB";
+import FloatingChatVoiceSink from "./FloatingChatVoiceSink";
 import { useFloatingChatStore } from "../../stores/useFloatingChatStore";
 import { usePageContext } from "../../hooks/usePageContext";
 import { isFloatingChatHiddenRoute } from "../../config/floatingChat";
@@ -47,6 +48,7 @@ const FloatingChatProvider = () => {
 
   return (
     <>
+      <FloatingChatVoiceSink />
       <FloatingChatFAB />
       <FloatingChatCard />
     </>

@@ -30,10 +30,14 @@ import ToolCallCard from "./ToolCallCard";
 import ThinkingCard from "./ThinkingCard";
 import SynthesizedAnswerChip from "./SynthesizedAnswerChip";
 import { isSynthesizedMessage, isSynthesizedStep } from "./synthesizedAnswer";
+import WebSearchOfferChip from "./WebSearchOfferChip";
+import { webSearchOfferOf } from "./webSearchOffer";
 import AgentThinkingTrail from "./AgentThinkingTrail";
 import OrchestratorPlanView from "../orchestrator/OrchestratorPlanView";
 import ImageLightbox from "../images/ImageLightbox";
 import NarrateButton from "../common/NarrateButton";
+import EntityContextMenu from "../common/EntityContextMenu";
+import useContextMenu from "../../hooks/useContextMenu";
 import { agentNoteCaption } from "./agentNoteCaptions";
 
 
@@ -60,7 +64,7 @@ const formatTime = (timestamp) => {
   }
 };
 
-const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate }) => {
+const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate, onSearchWeb }) => {
   const isUser = message.role === "user";
   // Per-message sessionId takes precedence, fall through to the list-level
   // prop so feedback on assistant turns (which often lack message.sessionId)
@@ -116,6 +120,7 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate }
   })();
   const [feedback, setFeedback] = useState(initialFeedback); // null | "up" | "down"
   const [copied, setCopied] = useState(false);
+  const bubbleMenu = useContextMenu();
   // Tag every thumb with the active lesson, if one is open. Pearls with a
   // lesson_id skip the per-👍 distill path and flow through the End-Lesson
   // summary distiller instead.
@@ -376,6 +381,17 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate }
   }
 
   const formattedTime = formatTime(message.timestamp);
+  const webSearchOffer = webSearchOfferOf(message);
+
+  // Same condition as the thumbs row under assistant replies.
+  const canRate =
+    message.role === "assistant" && !isCommand && !isProgress &&
+    typeof message.content === "string" && message.content.length > 10;
+  // Media keeps the browser menu (save or copy image).
+  const handleBubbleContextMenu = (e) => {
+    if (e.target?.closest?.("img, video, audio, canvas")) return;
+    bubbleMenu.open(e);
+  };
 
   return (
     <>
@@ -435,6 +451,7 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate }
       )}
       <Paper
         elevation={isCommand ? 0 : 2}
+        onContextMenu={message.content ? handleBubbleContextMenu : undefined}
         sx={{
           p: 1.5,
           maxWidth: "80%",
@@ -773,6 +790,21 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate }
             Response reached the output limit.
           </Typography>
         )}
+        {/* An agent answer the facts check could not match to its tool
+            results; true and unset (no tools ran) show nothing. */}
+        {message.role === "assistant" && message.verified === false && (
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            data-testid="unverified-note"
+            sx={{ display: "block", mt: 0.5, fontStyle: "italic", opacity: 0.8 }}
+          >
+            Some of this answer was not checked against the tool results.
+          </Typography>
+        )}
+        {!isCommand && webSearchOffer && (
+          <WebSearchOfferChip offer={webSearchOffer} onSearch={onSearchWeb} />
+        )}
         {/* Feedback + narrate for assistant replies (not system/command rows) */}
         {message.role === "assistant" && !isCommand && !isProgress && message.content && typeof message.content === 'string' && message.content.length > 10 && (
           <>
@@ -864,6 +896,24 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate }
         </Typography>
       )}
     </Box>
+    <EntityContextMenu
+      anchorPosition={bubbleMenu.anchorPosition}
+      onClose={bubbleMenu.close}
+      actions={
+        bubbleMenu.isOpen
+          ? [
+              { label: "Copy", onClick: handleCopy },
+              canRate && {
+                label: "Good response",
+                checked: feedback === "up",
+                onClick: () => handleFeedback(true),
+                dividerBefore: true,
+              },
+              canRate && { label: "Bad response", checked: feedback === "down", onClick: () => handleFeedback(false) },
+            ]
+          : []
+      }
+    />
     {lightbox && (
       <ImageLightbox
         imageUrl={lightbox.images[lightbox.index]?.url || lightbox.url}
@@ -901,12 +951,15 @@ MessageItem.propTypes = {
     thinking: PropTypes.string,
     truncated: PropTypes.bool,
     synthesized: PropTypes.bool,
+    verified: PropTypes.bool,
     extra_data: PropTypes.object,
     message_id: PropTypes.number,
     request_id: PropTypes.string,
+    web_search_offer: PropTypes.object,
   }).isRequired,
   sessionId: PropTypes.string,
   onOrchestratorUpdate: PropTypes.func,
+  onSearchWeb: PropTypes.func,
 };
 
 export default React.memo(MessageItem);

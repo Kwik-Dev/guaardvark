@@ -194,6 +194,334 @@ class TestPastedDescriptionsDoNotGenerate:
         assert "generate_image" not in selected
 
 
+# (message, no picture in the session, picture attached or just made, older picture)
+_IMAGE_INTENT_ROWS = [
+    ("Draw me a cat wearing a top hat", "new", "new", "new"),
+    ("Can you draw a dragon over a castle at night?", "new", "new", "new"),
+    ("generate an image of a lighthouse at dusk", "new", "new", "new"),
+    ("animate this logo spinning slowly", "new", "new", "new"),
+    ("make a picture of my dog as an astronaut", "new", "new", "new"),
+    ("How do I animate a CSS button on hover?", "-", "-", "-"),
+    ("Can you draw a conclusion from these numbers?", "-", "-", "-"),
+    ("Can you fix the grammar in this sentence?", "-", "-", "-"),
+    ("How do I make an image responsive in CSS?", "-", "-", "-"),
+    ("Make sure the image path in config.yaml is correct", "-", "-", "-"),
+    ("Please add error handling to this function", "-", "-", "-"),
+    ("We should draw the line at 50 requests per minute", "-", "-", "-"),
+    ("make it bigger", "-", "edit", "-"),
+    ("add a red scarf to the horse", "-", "edit", "-"),
+    ("change the date format to ISO 8601", "-", "-", "-"),
+    ("now change the sky in the last image to sunset", "-", "edit", "edit"),
+]
+
+
+class TestImageIntent:
+    """New picture, edit of the session's picture, or neither.
+
+    The engine tries the edit first and new-image generation after it, and both
+    run with no model in the loop, so a false hit starts a GPU job.
+    """
+
+    @staticmethod
+    def _route(message, has_recent_image, has_stale_image):
+        from backend.services.unified_chat_engine import (
+            user_wants_image_edit,
+            user_wants_image_generation,
+        )
+        if user_wants_image_edit(message, has_recent_image, has_stale_image):
+            return "edit"
+        return "new" if user_wants_image_generation(message) else "-"
+
+    @pytest.mark.parametrize("message,no_image,recent,stale", _IMAGE_INTENT_ROWS)
+    def test_route(self, message, no_image, recent, stale):
+        assert self._route(message, False, False) == no_image
+        assert self._route(message, True, False) == recent
+        assert self._route(message, False, True) == stale
+
+    def test_mid_sentence_draw_is_left_to_the_chat_model(self):
+        from backend.services.unified_chat_engine import (
+            _pin_image_generation_tools,
+            user_wants_image_generation,
+        )
+        message = "I'd like you to draw a cat"
+        assert user_wants_image_generation(message) is False
+        selected = _pin_image_generation_tools(message, [], ["web_search", "generate_image"])
+        assert "generate_image" in selected
+
+
+class TestImageFocus:
+    """A follow-up edit applies right after an image turn, or when it names the image."""
+
+    def test_plain_chat_turn_ends_the_follow_up_edit(self, monkeypatch, tmp_path):
+        import backend.services.media_director as media_director
+        import backend.services.unified_chat_engine as uce
+        from backend.tests.test_unified_chat_host_hooks import (
+            _engine as chat_engine,
+            _run as chat_turn,
+        )
+
+        sid = "sess-host"  # the session chat_turn runs in
+        picture = tmp_path / "last.png"
+        picture.write_bytes(b"png")
+        edits = []
+
+        class Registry:
+            def get_tool(self, name):
+                return object() if name == "edit_image" else None
+
+            def execute_tool(self, tool_name, **params):
+                edits.append(params["instruction"])
+                raise RuntimeError("no render in a unit test")
+
+        monkeypatch.setattr(media_director, "refine_edit_instruction", lambda text, **kw: text)
+        editor = uce.UnifiedChatEngine.__new__(uce.UnifiedChatEngine)
+        editor.registry = Registry()
+        editor._image_data = None
+        editor._save_message = lambda *a, **k: None
+
+        def follow_up(message):
+            editor._try_image_edit_direct(message, sid, lambda *a: None, "req", {})
+
+        try:
+            uce._remember_session_image(sid, str(picture))
+            follow_up("make it bigger")
+            assert edits == ["make it bigger"]
+
+            chat_turn(chat_engine(monkeypatch), "hello there, how are you today", {})
+            assert sid not in uce._SESSION_IMAGE_FOCUS
+
+            follow_up("make it bigger")
+            assert edits == ["make it bigger"]
+            follow_up("make the last image bigger")
+            assert edits == ["make it bigger", "make the last image bigger"]
+        finally:
+            uce._SESSION_LAST_EDIT.pop(sid, None)
+            uce._SESSION_IMAGE_FOCUS.discard(sid)
+
+
+class TestImageRetry:
+    """A "try again" after a failed render applies to the next turn only."""
+
+    @staticmethod
+    def _retry_engine(monkeypatch, calls):
+        import backend.services.unified_chat_engine as uce
+
+        class Registry:
+            def get_tool(self, name):
+                return object() if name in ("generate_image", "edit_image") else None
+
+        monkeypatch.setattr(uce, "resolve_chat_image_model", lambda *a, **k: "test-model")
+        monkeypatch.setattr(uce, "inject_chat_image_model", lambda tool, params, options=None: params)
+        engine = uce.UnifiedChatEngine.__new__(uce.UnifiedChatEngine)
+        engine.registry = Registry()
+        engine._run_direct_tool_execution = (
+            lambda tool, params, *a, **k: calls.append((tool, params)) or {"success": True}
+        )
+        return engine
+
+    def test_pending_retry_expires_after_a_chat_turn(self, monkeypatch, tmp_path):
+        import backend.services.unified_chat_engine as uce
+        from backend.tests.test_unified_chat_host_hooks import (
+            _engine as chat_engine,
+            _run as chat_turn,
+        )
+
+        sid = "sess-host"  # the session chat_turn runs in
+        picture = tmp_path / "last.png"
+        picture.write_bytes(b"png")
+        calls = []
+        retry = self._retry_engine(monkeypatch, calls)
+
+        def try_again():
+            for attempt in (retry._try_image_generate_retry, retry._try_image_edit_retry):
+                attempt("try again", sid, {}, lambda *a: None, "req")
+
+        try:
+            uce._SESSION_PENDING_IMAGE_PROMPT[sid] = "a castle at dusk"
+            uce._SESSION_PENDING_IMAGE_EDIT[sid] = {"instruction": "add a moat", "image": str(picture)}
+            try_again()
+            assert [tool for tool, _ in calls] == ["generate_image", "edit_image"]
+
+            chat_turn(chat_engine(monkeypatch), "hello there, how are you today", {})
+            assert sid not in uce._SESSION_PENDING_IMAGE_PROMPT
+            assert sid not in uce._SESSION_PENDING_IMAGE_EDIT
+
+            calls.clear()
+            try_again()
+            assert calls == []
+        finally:
+            uce._SESSION_PENDING_IMAGE_PROMPT.pop(sid, None)
+            uce._SESSION_PENDING_IMAGE_EDIT.pop(sid, None)
+
+    @pytest.mark.parametrize("message,is_retry", [
+        ("try again", True),
+        ("retry please", True),
+        ("Try again.", True),
+        ("how do I retry a failed HTTP request?", False),
+        ("can you try again with a blue sky", False),
+    ])
+    def test_only_a_short_retry_line_is_a_retry(self, message, is_retry):
+        from backend.services.unified_chat_engine import _is_image_retry_message
+        assert _is_image_retry_message(message) is is_retry
+
+    def test_a_question_about_retrying_does_not_re_render(self, monkeypatch):
+        import backend.services.unified_chat_engine as uce
+
+        sid = "retry-question"
+        calls = []
+        retry = self._retry_engine(monkeypatch, calls)
+        try:
+            uce._SESSION_PENDING_IMAGE_PROMPT[sid] = "a castle at dusk"
+            result = retry._try_image_generate_retry(
+                "how do I retry a failed HTTP request?", sid, {}, lambda *a: None, "req",
+            )
+            assert result is None
+            assert calls == []
+        finally:
+            uce._SESSION_PENDING_IMAGE_PROMPT.pop(sid, None)
+
+
+class TestVideoRequests:
+    """A new clip starts only from a request for one, never from a question that mentions video."""
+
+    @pytest.fixture
+    def uce(self, monkeypatch):
+        import backend.services.unified_chat_engine as uce
+        monkeypatch.setattr(uce, "_media_requires_explicit_command", lambda: False)
+        return uce
+
+    @pytest.mark.parametrize("message", [
+        "make a video of a fox running",
+        "make a video of a cat surfing",
+        "Can you make a short video of waves crashing?",
+        "Generate a 10 second cinematic video of a dragon flying over mountains",
+        "I love foxes. Make a video of one in the snow",
+        "video of a cat surfing",
+    ])
+    def test_requests_start_a_video(self, uce, message):
+        assert uce.user_wants_video_generation(message) is True
+        assert uce.user_wants_image_generation(message) is False
+
+    @pytest.mark.parametrize("message", [
+        "How do I make a video in Premiere?",
+        "Make a video in DaVinci Resolve of my trip",
+        "What's the best software to make a video on Linux?",
+        "Why does it take so long to generate a video?",
+        "Is it possible to make a video longer than 10 seconds?",
+        "I'm going to make dinner and then watch a video",
+        "make a list of video ideas",
+        "Can you make a video call to my mom?",
+        "Can you produce a video script for my channel?",
+    ])
+    def test_questions_and_mentions_start_nothing(self, uce, message):
+        assert uce.user_wants_video_generation(message) is False
+        # Turned down for video, the message does not become a picture request either.
+        assert uce.user_wants_image_generation(message) is False
+
+    def test_a_picture_that_mentions_video_is_still_a_picture(self, uce):
+        message = "make a picture of my video game character"
+        assert uce.user_wants_video_generation(message) is False
+        assert uce.user_wants_image_generation(message) is True
+
+
+class TestSlashMediaCommands:
+    """/imagine and /image make a picture; only /video makes a clip."""
+
+    @pytest.mark.parametrize("message", ["/imagine a red fox", "/image a red fox"])
+    def test_image_commands_never_start_a_video(self, monkeypatch, message):
+        import backend.services.unified_chat_engine as uce
+        monkeypatch.setattr(uce, "_media_requires_explicit_command", lambda: False)
+        assert uce.user_wants_video_generation(message) is False
+        assert uce.user_wants_image_generation(message) is True
+
+        engine = uce.UnifiedChatEngine.__new__(uce.UnifiedChatEngine)
+        engine.registry = type("R", (), {"get_tool": lambda self, n: object()})()
+        assert engine._try_video_generate_direct(message, "sess", lambda *a, **k: None, "req", {}) is None
+
+    def test_video_command_is_a_video(self, monkeypatch):
+        import backend.services.unified_chat_engine as uce
+        monkeypatch.setattr(uce, "_media_requires_explicit_command", lambda: False)
+        assert uce.user_wants_video_generation("/video a red fox") is True
+        assert uce.user_wants_image_generation("/video a red fox") is False
+
+
+class TestVideoFromPictureInFocus:
+    """A video request that points back at the picture animates it; it is never an image edit."""
+
+    @pytest.fixture
+    def uce(self, monkeypatch):
+        import backend.services.unified_chat_engine as uce
+        monkeypatch.setattr(uce, "_media_requires_explicit_command", lambda: False)
+        return uce
+
+    def test_long_run_of_describing_words_is_still_a_request(self, uce):
+        assert uce.user_wants_video_generation(
+            "create a short cinematic slow motion aerial drone video of a waterfall") is True
+        assert uce.user_wants_video_generation("make the function that saves my video faster") is False
+
+    @pytest.mark.parametrize("message", ["/video make it rain", "make a video of it"])
+    def test_video_request_is_not_an_image_edit(self, uce, message):
+        assert uce.user_wants_image_edit(message, has_recent_image=True) is False
+
+    def test_plain_edit_still_edits(self, uce):
+        assert uce.user_wants_image_edit("make it brighter", has_recent_image=True) is True
+
+    @pytest.mark.parametrize("message", [
+        "how do I remove the background in GIMP?",
+        "how can I make it brighter in Photoshop?",
+    ])
+    def test_how_to_question_is_not_an_edit(self, uce, message):
+        assert uce.user_wants_image_edit(message, has_recent_image=True) is False
+
+    def _engine(self, uce, calls):
+        engine = uce.UnifiedChatEngine.__new__(uce.UnifiedChatEngine)
+        engine.registry = type("R", (), {"get_tool": lambda self, n: object()})()
+        engine._image_data = None
+        engine._run_direct_tool_execution = lambda tool, params, *a, **k: calls.append((tool, params)) or {}
+        return engine
+
+    def test_picture_in_focus_is_the_first_frame(self, uce, tmp_path):
+        sid = "sess-video-focus"
+        picture = tmp_path / "last.png"
+        picture.write_bytes(b"png")
+        calls = []
+        engine = self._engine(uce, calls)
+        try:
+            uce._remember_session_image(sid, str(picture))
+            engine._try_video_generate_direct("/video make it rain", sid, lambda *a, **k: None, "req", {})
+            engine._try_video_generate_direct("/video a fox in the snow", sid, lambda *a, **k: None, "req", {})
+            uce._SESSION_IMAGE_FOCUS.discard(sid)
+            engine._try_video_generate_direct("/video make it rain", sid, lambda *a, **k: None, "req", {})
+        finally:
+            uce._SESSION_LAST_EDIT.pop(sid, None)
+            uce._SESSION_IMAGE_FOCUS.discard(sid)
+        assert calls[0] == ("generate_video", {"prompt": "make it rain", "first_image": str(picture)})
+        assert "first_image" not in calls[1][1], "a request with its own scene gets no first frame"
+        assert "first_image" not in calls[2][1], "a picture out of focus is not animated"
+
+
+class TestNamedPhotoToolsSkipHowTo:
+    """Background removal, outpaint and identity run with no model in the loop."""
+
+    @pytest.mark.parametrize("gate,message", [
+        ("user_wants_background_remove", "how do I remove the background in GIMP?"),
+        ("user_wants_outpaint", "how to outpaint in Krita"),
+        ("user_wants_identity_generate", "how can I put this person in a different scene?"),
+    ])
+    def test_how_to_question_is_not_a_request(self, gate, message):
+        import backend.services.unified_chat_engine as uce
+        assert getattr(uce, gate)(message) is False
+
+    @pytest.mark.parametrize("gate,message", [
+        ("user_wants_background_remove", "remove the background"),
+        ("user_wants_outpaint", "extend the canvas to the left"),
+        ("user_wants_identity_generate", "put this person in a rainy alley"),
+    ])
+    def test_request_still_runs(self, gate, message):
+        import backend.services.unified_chat_engine as uce
+        assert getattr(uce, gate)(message) is True
+
+
 class TestCommandOnlyMode:
     """chat_media_requires_command: only an explicit command may create media."""
 

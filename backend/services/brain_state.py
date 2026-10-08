@@ -498,13 +498,26 @@ class BrainState:
         tool_list: str = "",
         is_voice_message: bool = False,
         context: str = None,
+        native: bool = False,
+        agent_name: str = "",
+        agent_prompt: str = "",
+        screen: bool = False,
     ) -> str:
         """Canonical system prompt builder for all tiers.
 
         Args:
-            role: "chat" | "agent" | "vision"
+            role: "chat" | "agent" | "vision". "agent" is the AgentExecutor
+                loop; "vision" is the Tier 2 chat path for images and the
+                watched agent screen.
             context: deprecated alias for role (back-compat)
-            tool_list: XML tool list for chat role (from UCE concise builder)
+            tool_list: chat role, the XML tool list (from UCE concise builder);
+                agent role, the executor's json_prompt list of the tools that
+                run can call
+            native: agent role, the model takes tools through the API's tools
+                parameter
+            agent_name, agent_prompt: agent role, a configured agent's name
+                and instructions
+            screen: agent role, the run works the agent's virtual screen
         """
         if context and role == "chat":
             role = context
@@ -559,7 +572,7 @@ class BrainState:
             )
 
         facts_block = ""
-        if facts_registry is not None and hasattr(facts_registry, "format_facts_for_prompt"):
+        if getattr(facts_registry, "facts", None) and hasattr(facts_registry, "format_facts_for_prompt"):
             try:
                 fb = facts_registry.format_facts_for_prompt()
                 if fb:
@@ -598,18 +611,14 @@ class BrainState:
             )
 
         if role == "agent":
-            return (
-                f"{filled_prefix}You are an AI assistant with access to tools. "
-                "Help the user by using tools when needed.\n\n"
-                f"Available Tools:\n{self.tool_schemas_json}\n\n"
-                "RESPONSE FORMAT:\n"
-                'You MUST respond with a JSON object: "thoughts", "tool_calls", "final_answer".\n'
-                "RULES:\n"
-                "- Use exact parameter names from tool descriptions\n"
-                "- Only state facts found in tool results\n"
-                "- NEVER fabricate information\n"
-                f"{voice_suffix}"
-            )
+            from backend.services.agent_prompt_blocks import build_agent_prompt_tail
+            return filled_prefix + build_agent_prompt_tail(
+                tool_schemas=tool_list,
+                native=native,
+                screen=screen,
+                agent_name=agent_name,
+                agent_prompt=agent_prompt,
+            ) + voice_suffix
 
         # chat role (Tier 2 / UCE)
         if skip_tools:

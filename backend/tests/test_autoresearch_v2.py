@@ -1,6 +1,7 @@
 """Autoresearch 2.0 tests: the active-config layer, honest eval scoring,
 and the research-run engine (Phases A+B of the 2026-08-10 rebuild)."""
 import hashlib
+import time
 import pytest
 from datetime import timedelta
 from unittest.mock import patch, MagicMock
@@ -259,9 +260,102 @@ class TestResearchRunEngine:
             db.session.refresh(active)
             assert cand.is_active is True and cand.status == "promoted"
             assert active.is_active is False and active.status == "superseded"
-            assert run.promotions == [cand.id]
+            assert run.promotions["promoted_ids"] == [cand.id]
+            # Each confirmation eval starts on a fresh budget.
+            assert auto_svc.eval_harness.begin_experiment_budget.call_count == 2
+
+    def test_run_metadata_survives_promotion(self, app):
+        with app.app_context():
+            svc_run = self._mk_service()
+            cand = ResearchConfig(params={"top_k": 9}, is_active=False,
+                                  status="candidate", composite_score=3.8)
+            db.session.add(cand)
+            db.session.commit()
+            run = ResearchRun(run_tag="t-meta", mode="rag_tuning", promotions={
+                "trigger": "nightly", "candidate_ids": [cand.id],
+                "baseline": {"score": 3.0}, "latest_score": 3.8,
+            })
+            db.session.add(run)
+            db.session.commit()
+            auto_svc = MagicMock()
+            auto_svc.eval_harness.run_full_eval.side_effect = [
+                {"composite_score": 3.8}, {"composite_score": 3.0},
+            ]
+            svc_run._confirm_and_activate(auto_svc, run)
+            db.session.commit()
+            db.session.refresh(run)
+            assert run.promotions["promoted_ids"] == [cand.id]
+            assert run.promotions["trigger"] == "nightly"
+            assert run.promotions["candidate_ids"] == [cand.id]
+            assert run.promotions["baseline"] == {"score": 3.0}
+            assert run.promotions["latest_score"] == 3.8
+
+    def _slice_service(self, stored_baseline=4.94):
+        auto_svc = MagicMock()
+        cfg = {"params": {"top_k": 5}, "baseline_score": stored_baseline, "phase": 1,
+               "phase_plateau_count": 14, "tuned": []}
+        auto_svc._load_config.return_value = cfg
+        auto_svc.eval_harness.avg_pair_seconds = None
+        auto_svc.eval_harness._get_active_eval_pairs.return_value = [
+            {"eval_generation_id": "gen-b"}] * 11
+        auto_svc.eval_harness.run_full_eval.return_value = {
+            "composite_score": 2.39, "num_pairs": 11, "judged_pairs": 11,
+            "details": [], "parse_fail_crash": False,
+        }
+        return auto_svc, cfg
+
+    def test_every_run_measures_its_own_baseline(self, app):
+        with app.app_context():
+            svc_run = self._mk_service()
+            run = ResearchRun(run_tag="t-baseline", mode="rag_tuning", status="running",
+                              wall_clock_budget_s=3600, started_at=utcnow())
+            db.session.add(run)
+            db.session.commit()
+            auto_svc, cfg = self._slice_service(stored_baseline=4.94)
+            order = []
+            auto_svc.eval_harness.begin_experiment_budget.side_effect = \
+                lambda **k: order.append("budget")
+            auto_svc.eval_harness.run_full_eval.side_effect = \
+                lambda *a, **k: order.append("eval") or {
+                    "composite_score": 2.39, "num_pairs": 11, "judged_pairs": 11,
+                    "details": [], "parse_fail_crash": False}
+
+            def one_experiment(**kwargs):
+                svc_run._set_kill(True)
+                return {"experiment_id": "e1", "parameter": "top_k", "status": "discard",
+                        "composite_score": 2.2, "baseline_score": 2.39, "delta": -0.19,
+                        "fidelity": 1, "retrieval_metrics": {"judged_pairs": 11}}
+            auto_svc.run_single_experiment.side_effect = one_experiment
+            with patch("backend.services.research_run_service.time.sleep"), \
+                 patch("backend.utils.gpu_check.gpu_busy", return_value=False):
+                ledger, _ids, halt, status = svc_run._run_rag_slice(
+                    run, auto_svc, time.time(), 3600)
+            assert order[:2] == ["budget", "eval"]
+            assert run.baseline_score == 2.39
+            assert run.promotions["baseline"]["score"] == 2.39
+            assert run.promotions["baseline"]["eval_generation"] == "gen-b"
+            assert cfg["phase_plateau_count"] == 0 and cfg["baseline_score"] == 2.39
+            assert halt == "killed" and len(ledger) == 1
+
+    def test_a_baseline_that_measures_nothing_refuses_the_run(self, app):
+        with app.app_context():
+            svc_run = self._mk_service()
+            run = ResearchRun(run_tag="t-nobase", mode="rag_tuning", status="running",
+                              wall_clock_budget_s=3600, started_at=utcnow())
+            db.session.add(run)
+            db.session.commit()
+            auto_svc, _cfg = self._slice_service()
+            auto_svc.eval_harness.run_full_eval.return_value = {
+                "composite_score": 0.0, "num_pairs": 0, "details": []}
+            _l, _i, halt, status = svc_run._run_rag_slice(run, auto_svc, time.time(), 3600)
+            assert (halt, status) == ("baseline_eval_failed", "failed_precondition")
+            db.session.refresh(run)
+            assert run.status == "failed_precondition"
+            assert run.halt_reason.startswith("baseline_eval_failed: no eval pairs")
+            auto_svc.run_single_experiment.assert_not_called()
 
     def test_report_flags_single_model_judging(self, app):
+        """The judge graded answers written by its own model."""
         with app.app_context():
             svc_run = self._mk_service()
             run = ResearchRun(run_tag="t-6", mode="rag_tuning",
@@ -270,12 +364,84 @@ class TestResearchRunEngine:
             ledger = [
                 {"parameter": "top_k", "old_value": "5", "new_value": "8",
                  "delta": 0.1, "status": "keep", "proposal_source": "llm",
-                 "proposer_model": "gemma4", "judge_model": "gemma4",
-                 "composite_score": 3.1},
+                 "proposer_model": "qwen3:14b", "judge_model": "gemma4",
+                 "composite_score": 3.1,
+                 "retrieval_metrics": {"fidelity": 1, "judged_pairs": 11,
+                                       "answer_model": "gemma4:latest"}},
             ]
             report = svc_run._write_report(run, ledger)
             assert "single-model judging" in report
             assert "100% LLM" in report
+
+    def test_report_flags_an_unset_judge(self, app):
+        with app.app_context():
+            run = ResearchRun(run_tag="t-6b", mode="rag_tuning", baseline_score=3.0,
+                              halt_reason="plateaued", promotions={"judge": {
+                                  "configured": None, "answer_model": "gemma4:12b",
+                                  "independent": False, "problem": "judge_unset"}})
+            ledger = [{"parameter": "top_k", "old_value": "5", "new_value": "8",
+                       "delta": -0.2, "status": "discard", "proposal_source": "tpe",
+                       "judge_model": "gemma4:12b", "composite_score": 2.8,
+                       "retrieval_metrics": {"fidelity": 1, "judged_pairs": 11}}]
+            report = self._mk_service()._write_report(run, ledger)
+            assert "single-model judging" in report
+
+    def test_report_is_quiet_with_an_independent_judge(self, app):
+        with app.app_context():
+            run = ResearchRun(run_tag="t-6c", mode="rag_tuning", baseline_score=3.0,
+                              halt_reason="plateaued", promotions={"judge": {
+                                  "configured": "qwen3:14b", "answer_model": "gemma4:12b",
+                                  "independent": True, "problem": None}})
+            ledger = [{"parameter": "top_k", "old_value": "5", "new_value": "8",
+                       "delta": -0.2, "status": "discard", "proposal_source": "tpe",
+                       "judge_model": "qwen3:14b", "composite_score": 2.8,
+                       "retrieval_metrics": {"fidelity": 1, "judged_pairs": 11,
+                                             "answer_model": "gemma4:12b"}}]
+            report = self._mk_service()._write_report(run, ledger)
+            assert "single-model judging" not in report
+
+    def test_report_headline_shows_a_regression(self, app):
+        with app.app_context():
+            run = ResearchRun(run_tag="t-regress", mode="rag_tuning", baseline_score=3.0,
+                              best_score=2.6, halt_reason="plateaued", promotions={
+                                  "baseline": {"score": 3.0,
+                                               "measured_at": "2026-10-07T05:09:00"}})
+            ledger = [
+                {"parameter": "top_k", "old_value": "5", "new_value": "4", "delta": -0.4,
+                 "status": "discard", "proposal_source": "tpe", "composite_score": 2.6,
+                 "retrieval_metrics": {"fidelity": 1, "judged_pairs": 11}},
+                {"parameter": "top_k", "old_value": "5", "new_value": "3", "delta": -0.9,
+                 "status": "discard", "proposal_source": "tpe", "composite_score": 2.1,
+                 "retrieval_metrics": {"fidelity": 1, "judged_pairs": 11}},
+            ]
+            report = self._mk_service()._write_report(run, ledger)
+            headline = next(line for line in report.splitlines()
+                            if line.startswith("**Headline**"))
+            assert "baseline 3.000 (measured 2026-10-07T05:09:00)" in headline
+            assert "latest 2.100 (-0.900)" in headline
+            assert "best tried 2.600 (-0.400)" in headline
+            assert "over 2 measured experiment(s)" in headline
+
+    def test_report_proposal_mix_leaves_out_health_checks_and_code_arms(self, app):
+        with app.app_context():
+            run = ResearchRun(run_tag="t-mix", mode="unified", baseline_score=3.0,
+                              halt_reason="plateaued")
+            ledger = [
+                {"parameter": "pytest_snapshot", "new_value": "failures=0", "status": "pass",
+                 "proposal_source": "heal", "composite_score": 0.0},
+                {"parameter": "chunker", "new_value": "smarter dedup", "status": "keep",
+                 "proposal_source": "code_arm", "composite_score": 3.5, "delta": 0.5,
+                 "retrieval_metrics": {"layer": "code", "self_reported": True}},
+                {"parameter": "top_k", "old_value": "5", "new_value": "6", "delta": -0.1,
+                 "status": "discard", "proposal_source": "tpe", "composite_score": 2.9,
+                 "retrieval_metrics": {"fidelity": 1, "judged_pairs": 11}},
+            ]
+            report = self._mk_service()._write_report(run, ledger)
+            assert "100% TPE, 0% LLM, 0% random fallback" in report
+            assert "1 health check(s) not counted" in report
+            assert "0 keep / 1 discard / 0 crash of 1 tried" in report
+            assert "**Self-reported**" in report and "smarter dedup" in report
+            assert "**Health checks**" in report
 
     def test_confirmation_ignores_foreign_candidates(self, app):
         with app.app_context():
@@ -324,6 +490,7 @@ class TestResearchRunEngine:
             svc_run = self._mk_service()
             with patch.object(svc_run, "_celery_has_live_execute_run",
                               return_value=False), \
+                 patch.object(svc_run, "_precondition_failures", return_value=([], [])), \
                  patch.object(svc_run, "_enqueue_execute_run"):
                 result = svc_run.kickoff(budget_hours=1, trigger="manual")
             db.session.refresh(stale)
@@ -331,6 +498,30 @@ class TestResearchRunEngine:
             assert stale.halt_reason == "worker_crashed"
             assert result["status"] == "started"
             assert result["run"]["run_tag"] != "old-dead"
+
+    def test_status_and_config_gets_leave_the_config_file_alone(self, app, tmp_path, monkeypatch):
+        import json
+        from backend.api.rag_autoresearch_api import autoresearch_bp
+        from backend.config import AUTORESEARCH_DEFAULT_PARAMS
+        monkeypatch.setenv("GUAARDVARK_ROOT", str(tmp_path))
+        (tmp_path / "data").mkdir()
+        cfg_file = tmp_path / "data" / "rag_experiment_config.json"
+        # No "tuned" record: a load would infer it and rewrite the file.
+        cfg_file.write_text(json.dumps({
+            "version": 1, "baseline_score": 4.94, "phase": 1,
+            "phase_plateau_count": 14,
+            "params": dict(AUTORESEARCH_DEFAULT_PARAMS, dedup_threshold=0.85),
+        }))
+        before = cfg_file.read_bytes()
+        if "autoresearch" not in app.blueprints:
+            app.register_blueprint(autoresearch_bp)
+        with app.test_client() as client:
+            first = client.get("/api/autoresearch/status")
+            second = client.get("/api/autoresearch/status")
+            cfg = client.get("/api/autoresearch/config")
+        assert first.status_code == second.status_code == cfg.status_code == 200
+        assert first.get_json()["config_migration_pending"] is True
+        assert cfg_file.read_bytes() == before
 
     def test_status_running_when_research_run_active(self, app):
         with app.app_context():
@@ -344,6 +535,328 @@ class TestResearchRunEngine:
             assert st["running"] is True
             assert st["active_run"]["run_tag"] == "t-status"
             assert st["active_run"]["budget_remaining_s"] is not None
+
+
+def _ollama_up():
+    return patch("requests.get", return_value=MagicMock(status_code=200))
+
+
+def _seed_corpus(eval_source_status="INDEXED", n_pairs=2):
+    """Enough indexed text documents for the corpus gate, plus active eval
+    pairs cut from a document in `eval_source_status`."""
+    from backend.models import Document
+    from backend.config import AUTORESEARCH_MIN_CORPUS_SIZE
+    text = "A paragraph of real text about pumps and valves. " * 10
+    for i in range(AUTORESEARCH_MIN_CORPUS_SIZE):
+        db.session.add(Document(filename=f"d{i}.md", path=f"/x/d{i}.md",
+                                content=text, index_status="INDEXED"))
+    source = Document(filename="src.md", path="/x/src.md", content=text,
+                      index_status=eval_source_status)
+    db.session.add(source)
+    db.session.flush()
+    for i in range(n_pairs):
+        db.session.add(EvalPair(question=f"q{i}", expected_answer="a",
+                                source_doc_id=source.id, is_active=True))
+    db.session.commit()
+
+
+class TestKickoffRefusesWithReasons:
+    def _kick(self, trigger="manual", active_model="gemma4:12b"):
+        svc_run = ResearchRunService()
+        enqueue = MagicMock()
+        with _ollama_up(), \
+             patch.object(svc_run, "_celery_has_live_execute_run", return_value=False), \
+             patch.object(svc_run, "_enqueue_execute_run", enqueue), \
+             patch("backend.utils.llm_service.get_saved_active_model_name",
+                   return_value=active_model):
+            result = svc_run.kickoff(budget_hours=1, trigger=trigger)
+        return result, enqueue
+
+    def test_unindexed_eval_sources_refuse_and_send_no_task(self, app):
+        with app.app_context():
+            _seed_corpus(eval_source_status="PENDING", n_pairs=3)
+            db.session.add(Setting(key="autoresearch_judge_model", value="qwen3:14b"))
+            db.session.commit()
+            result, enqueue = self._kick()
+            enqueue.assert_not_called()
+            assert result["not_run"] is True
+            assert len(result["reasons"]) == 1
+            assert result["reasons"][0].startswith(
+                "eval_sources_not_indexed — 3 of 3 active eval pairs come from "
+                "documents that are not indexed (PENDING: 3)")
+            run = db.session.get(ResearchRun, result["run"]["id"])
+            assert run.status == "failed_precondition"
+            assert run.halt_reason.startswith("eval_sources_not_indexed")
+            assert len(run.halt_reason) <= 200
+            assert run.ended_at is not None
+            assert "DID NOT RUN" in run.report_md
+            assert run.promotions["trigger"] == "manual"
+
+    def test_every_reason_is_collected(self, app):
+        with app.app_context():
+            svc_run = ResearchRunService()
+            with patch("requests.get", side_effect=ConnectionError("refused")), \
+                 patch.object(svc_run, "_celery_has_live_execute_run", return_value=False), \
+                 patch.object(svc_run, "_enqueue_execute_run") as enqueue, \
+                 patch("backend.utils.llm_service.get_saved_active_model_name",
+                       return_value="gemma4:12b"):
+                result = svc_run.kickoff(budget_hours=1, trigger="nightly")
+            enqueue.assert_not_called()
+            codes = [r.split(" ")[0] for r in result["reasons"]]
+            assert codes == ["ollama_unreachable", "insufficient_corpus",
+                             "no_eval_pairs", "judge_unset"]
+            run = db.session.get(ResearchRun, result["run"]["id"])
+            assert all(f"`{r}`" in run.report_md for r in result["reasons"])
+
+    def test_api_answers_422_with_the_reasons(self, app):
+        from backend.api.rag_autoresearch_api import autoresearch_bp
+        if "autoresearch" not in app.blueprints:
+            app.register_blueprint(autoresearch_bp)
+        with app.app_context():
+            _seed_corpus(eval_source_status="PENDING")
+        with app.test_client() as client, _ollama_up(), \
+             patch("backend.services.research_run_service.ResearchRunService._celery_has_live_execute_run",
+                   return_value=False), \
+             patch("backend.services.research_run_service.ResearchRunService._enqueue_execute_run") as enqueue:
+            res = client.post("/api/autoresearch/runs", json={"budget_hours": 1})
+        assert res.status_code == 422
+        body = res.get_json()
+        assert body["not_run"] is True
+        assert body["error"].startswith("eval_sources_not_indexed")
+        assert body["run"]["status"] == "failed_precondition"
+        enqueue.assert_not_called()
+
+    def test_nightly_refuses_without_a_judge_while_manual_warns(self, app):
+        with app.app_context():
+            _seed_corpus(eval_source_status="INDEXED")
+            nightly, enqueue = self._kick(trigger="nightly")
+            enqueue.assert_not_called()
+            assert nightly["not_run"] is True
+            assert [r.split(" ")[0] for r in nightly["reasons"]] == ["judge_unset"]
+            assert "gemma4:12b grades its own answers" in nightly["reasons"][0]
+
+            manual, enqueue = self._kick(trigger="manual")
+            enqueue.assert_called_once()
+            assert manual["status"] == "started"
+            assert manual["warnings"][0].startswith("judge_unset")
+            run = db.session.get(ResearchRun, manual["run"]["id"])
+            assert run.status == "pending"
+            assert run.promotions["trigger"] == "manual"
+            assert run.promotions["warnings"][0].startswith("judge_unset")
+
+    def test_nightly_refuses_a_judge_that_is_the_answer_model(self, app):
+        with app.app_context():
+            _seed_corpus(eval_source_status="INDEXED")
+            db.session.add(Setting(key="autoresearch_judge_model", value="gemma4:12b"))
+            db.session.commit()
+            result, enqueue = self._kick(trigger="nightly")
+            enqueue.assert_not_called()
+            assert result["reasons"][0].startswith("judge_same_as_answer_model")
+
+    def test_nightly_starts_with_an_independent_judge(self, app):
+        with app.app_context():
+            _seed_corpus(eval_source_status="INDEXED")
+            db.session.add(Setting(key="autoresearch_judge_model", value="qwen3:14b"))
+            db.session.commit()
+            result, enqueue = self._kick(trigger="nightly")
+            enqueue.assert_called_once()
+            assert result["status"] == "started" and result["warnings"] == []
+
+
+class TestLedgerScores:
+    def test_heal_rows_are_health_checks_not_keeps(self, app):
+        from backend.models import ExperimentRun
+        with app.app_context():
+            run = ResearchRun(run_tag="t-heal", mode="unified")
+            db.session.add(run)
+            db.session.commit()
+            svc_run = ResearchRunService()
+            svc_run._log_heal_row(run, {"pytest": {"ok": True, "red": False}})
+            svc_run._log_heal_row(run, {"tests_red": True, "pytest": {"ok": False, "red": True}})
+            svc_run._log_heal_row(run, {"pytest": {"ok": False, "skipped": True}})
+            statuses = [r.status for r in ExperimentRun.query.filter_by(run_tag="t-heal")
+                        .order_by(ExperimentRun.created_at).all()]
+            assert sorted(statuses) == ["fail", "pass", "skipped"]
+
+    def test_best_and_latest_come_from_measured_experiments_only(self):
+        from backend.services.research_run_service import summarize_ledger
+        rows = [
+            {"proposal_source": "heal", "status": "keep", "composite_score": 0.0},
+            {"proposal_source": "tpe", "status": "discard", "composite_score": 2.6,
+             "retrieval_metrics": {"fidelity": 1, "judged_pairs": 11}},
+            # F0 screen: records the baseline without judging anything.
+            {"proposal_source": "tpe", "status": "discard", "composite_score": 4.9,
+             "retrieval_metrics": {"fidelity": 0, "judged_pairs": 0}},
+            {"proposal_source": "llm", "status": "crash", "composite_score": 0.0},
+            {"proposal_source": "code_arm", "status": "keep", "composite_score": 4.8,
+             "retrieval_metrics": {"layer": "code"}},
+            {"proposal_source": "tpe", "status": "discard", "composite_score": 2.1,
+             "retrieval_metrics": {"fidelity": 1, "judged_pairs": 11}},
+        ]
+        s = summarize_ledger(rows)
+        assert s["latest_score"] == 2.1
+        assert s["best_tried_score"] == 2.6
+        assert s["measured_experiments"] == 2
+        assert s["experiments"] == 4
+        assert s["health_checks"] == 1
+        assert s["self_reported"] == 1
+
+    def test_old_rows_without_fidelity_count_only_when_judged(self):
+        from backend.services.research_run_service import summarize_ledger
+        rows = [
+            {"proposal_source": "tpe", "status": "discard", "composite_score": 1.9,
+             "eval_details": [{"composite": 2}], "retrieval_metrics": {"layer": "params"}},
+            {"proposal_source": "tpe", "status": "discard", "composite_score": 4.94,
+             "eval_details": [], "retrieval_metrics": {"layer": "params"}},
+        ]
+        assert summarize_ledger(rows)["best_tried_score"] == 1.9
+
+    def test_nothing_measured_leaves_best_score_empty(self, app):
+        with app.app_context():
+            run = ResearchRun(run_tag="t-nobest", mode="rag_tuning", status="running",
+                              wall_clock_budget_s=3600, started_at=utcnow())
+            db.session.add(run)
+            db.session.commit()
+            auto_svc = MagicMock()
+            auto_svc._load_config.return_value = {"params": {}, "phase": 1,
+                                                  "phase_plateau_count": 0}
+            auto_svc.eval_harness.avg_pair_seconds = None
+            auto_svc.eval_harness.run_full_eval.return_value = {
+                "composite_score": 4.0, "num_pairs": 11, "judged_pairs": 11,
+                "parse_fail_crash": False}
+            svc_run = ResearchRunService()
+
+            def crash(**kwargs):
+                svc_run._set_kill(True)
+                return {"experiment_id": "c1", "parameter": "top_k", "status": "crash",
+                        "composite_score": 0.0, "retrieval_metrics": {"judged_pairs": 0}}
+            auto_svc.run_single_experiment.side_effect = crash
+            with patch("backend.services.research_run_service.time.sleep"), \
+                 patch("backend.utils.gpu_check.gpu_busy", return_value=False):
+                svc_run._run_rag_slice(run, auto_svc, time.time(), 3600)
+            assert run.baseline_score == 4.0
+            assert run.best_score is None
+            assert run.promotions["latest_score"] is None
+
+    def test_runs_list_carries_measured_scores_and_health_checks(self, app):
+        from backend.models import ExperimentRun
+        from backend.api.rag_autoresearch_api import autoresearch_bp
+        if "autoresearch" not in app.blueprints:
+            app.register_blueprint(autoresearch_bp)
+        with app.app_context():
+            db.session.add(ResearchRun(run_tag="t-list", mode="unified", status="completed",
+                                       baseline_score=3.0, best_score=3.0))
+            t = utcnow()
+            for i, (src, status, score) in enumerate(
+                    [("heal", "keep", 0.0), ("tpe", "discard", 2.4), ("tpe", "discard", 2.2)]):
+                db.session.add(ExperimentRun(
+                    id=f"r{i}", run_tag="t-list", phase=1, parameter_changed="top_k",
+                    new_value="4", status=status, proposal_source=src,
+                    composite_score=score, eval_details=[{"composite": score}],
+                    created_at=t + timedelta(seconds=i)))
+            db.session.commit()
+        with app.test_client() as client:
+            run = client.get("/api/autoresearch/runs").get_json()["runs"][0]
+        assert run["latest_score"] == 2.2
+        assert run["best_tried_score"] == 2.4
+        assert run["health_checks"] == 1
+        assert run["best_score"] == 3.0  # the stored column is left as it was
+
+
+class TestCurrentExperimentIsVisible:
+    def test_status_reads_the_parameter_under_test_from_the_run(self, app, tmp_path, monkeypatch):
+        monkeypatch.setenv("GUAARDVARK_ROOT", str(tmp_path))
+        with app.app_context():
+            db.session.add(ResearchRun(
+                run_tag="t-current", mode="rag_tuning", status="running",
+                started_at=utcnow(), wall_clock_budget_s=3600,
+                promotions={"current": {"parameter": "hybrid_search_alpha",
+                                        "new_value": "0.5"}}))
+            db.session.commit()
+            with patch("backend.utils.llm_service.get_saved_active_model_name",
+                       return_value="gemma4:12b"):
+                st = RAGAutoresearchService().get_status()
+        assert st["current_parameter"] == "hybrid_search_alpha"
+
+    def test_the_slice_records_and_then_clears_the_current_change(self, app):
+        with app.app_context():
+            run = ResearchRun(run_tag="t-cur2", mode="rag_tuning", status="running",
+                              wall_clock_budget_s=3600, started_at=utcnow())
+            db.session.add(run)
+            db.session.commit()
+            svc_run = ResearchRunService()
+            auto_svc = MagicMock()
+            auto_svc._load_config.return_value = {"params": {}, "phase": 1,
+                                                  "phase_plateau_count": 0}
+            auto_svc.eval_harness.avg_pair_seconds = None
+            auto_svc.eval_harness.run_full_eval.return_value = {
+                "composite_score": 3.0, "num_pairs": 4, "judged_pairs": 4,
+                "parse_fail_crash": False}
+            seen = {}
+
+            def experiment(**kwargs):
+                kwargs["on_proposal"]({"parameter": "top_k", "new_value": 6})
+                seen.update(db.session.get(ResearchRun, run.id).promotions["current"])
+                svc_run._set_kill(True)
+                return {"experiment_id": "x", "parameter": "top_k", "status": "discard",
+                        "composite_score": 2.9, "retrieval_metrics": {"fidelity": 1}}
+            auto_svc.run_single_experiment.side_effect = experiment
+            with patch("backend.services.research_run_service.time.sleep"), \
+                 patch("backend.utils.gpu_check.gpu_busy", return_value=False):
+                svc_run._run_rag_slice(run, auto_svc, time.time(), 3600)
+            assert seen["parameter"] == "top_k" and seen["new_value"] == "6"
+            db.session.refresh(run)
+            assert "current" not in run.promotions
+
+    def test_posted_experiments_are_marked_self_reported(self, app):
+        from backend.models import ExperimentRun
+        from backend.api.rag_autoresearch_api import autoresearch_bp
+        if "autoresearch" not in app.blueprints:
+            app.register_blueprint(autoresearch_bp)
+        with app.test_client() as client:
+            res = client.post("/api/autoresearch/experiments", json={
+                "parameter": "chunker", "new_value": "smarter dedup", "status": "keep",
+                "source": "code_arm", "composite_score": 3.6, "baseline_score": 3.0,
+                "run_tag": "t-self",
+            })
+        assert res.status_code == 201
+        row = db.session.get(ExperimentRun, res.get_json()["id"])
+        assert row.retrieval_metrics["self_reported"] is True
+
+
+class TestExecuteRunRunsOnce:
+    def test_a_run_that_is_not_pending_is_left_alone(self, app):
+        with app.app_context():
+            run = ResearchRun(run_tag="t-redelivered", mode="unified",
+                              status="completed", halt_reason="plateaued",
+                              wall_clock_budget_s=3600)
+            db.session.add(run)
+            db.session.commit()
+            svc_run = ResearchRunService()
+            with patch.object(svc_run, "_check_preconditions") as pre, \
+                 patch.object(svc_run, "_run_rag_slice") as rag, \
+                 patch("backend.services.rag_autoresearch_service.get_autoresearch_service"):
+                svc_run.execute_run(run.id)
+            pre.assert_not_called()
+            rag.assert_not_called()
+            db.session.refresh(run)
+            assert run.status == "completed" and run.halt_reason == "plateaued"
+
+    def test_preconditions_are_checked_again_with_the_stored_trigger(self, app):
+        with app.app_context():
+            run = ResearchRun(run_tag="t-nightly", mode="rag_tuning", status="pending",
+                              wall_clock_budget_s=60, promotions={"trigger": "nightly"})
+            db.session.add(run)
+            db.session.commit()
+            svc_run = ResearchRunService()
+            with patch.object(svc_run, "_check_preconditions",
+                              return_value=(False, "judge_unset — x")) as pre, \
+                 patch("backend.services.rag_autoresearch_service.get_autoresearch_service"):
+                svc_run.execute_run(run.id)
+            assert pre.call_args.kwargs["trigger"] == "nightly"
+            db.session.refresh(run)
+            assert run.status == "failed_precondition"
+            assert run.halt_reason == "judge_unset — x"
 
 
 class TestDirector:

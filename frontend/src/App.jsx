@@ -1,6 +1,6 @@
 
-import React, { Suspense, lazy } from "react";
-import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-dom";
+import React, { Suspense } from "react";
+import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import useNavigationCancel from "./hooks/useNavigationCancel";
 import useGpuIntent from "./hooks/useGpuIntent";
 import useKeyboardForwarding from "./hooks/useKeyboardForwarding";
@@ -18,6 +18,7 @@ import brand from "./config/brand";
 import { landingRouteFor } from "./config/profile";
 import { NAV_CHROME, navChromeWidth } from "./config/navCatalog";
 import { extensionRoutes, extensionHeaders, extensionLandingRoute } from "./extensions";
+import lazyWithReload from "./utils/lazyWithReload";
 
 import TrainingFloater from "./components/agent/TrainingFloater";
 import FirstRunProfileDialog from "./components/modals/FirstRunProfileDialog";
@@ -28,60 +29,62 @@ import ChatPage from "./pages/ChatPage";
 import NotFoundPage from "./pages/NotFoundPage";
 
 // Lazy-loaded — loaded on demand when route is visited
-const SettingsPage = lazy(() => import("./pages/SettingsPage"));
-const ProjectsPage = lazy(() => import("./pages/ProjectsPage"));
-const TaskPage = lazy(() => import("./pages/TaskPage"));
-const ActivityPage = lazy(() => import("./pages/ActivityPage"));
-const DocumentsPage = lazy(() => import("./pages/DocumentsPage"));
-const RulesPage = lazy(() => import("./pages/RulesPage"));
-const ToolsPage = lazy(() => import("./pages/ToolsPage"));
-const AgentsPage = lazy(() => import("./pages/AgentsPage"));
-const AgentMemoryPage = lazy(() => import("./pages/AgentMemoryPage"));
-const MCPServersPage = lazy(() => import("./pages/MCPServersPage"));
-const WebsitesPage = lazy(() => import("./pages/WebsitesPage"));
-const WebsiteDetailPage = lazy(() => import("./pages/WebsiteDetailPage"));
-const FileGenerationPage = lazy(() => import("./pages/FileGenerationPage"));
-const ProjectDetailPage = lazy(() => import("./pages/ProjectDetailPage"));
-const ClientPage = lazy(() => import("./pages/ClientPage"));
-const UploadPage = lazy(() => import("./pages/UploadPage"));
-const TrainingPage = lazy(() => import("./pages/TrainingPage"));
-const ImagesPage = lazy(() => import("./pages/ImagesPage"));
-const AudioFoundryPage = lazy(() => import("./pages/AudioFoundryPage"));
-const VideoTextOverlayPage = lazy(() => import("./pages/VideoTextOverlayPage"));
-const VideoEditorPage = lazy(() => import("./pages/VideoEditorPage"));
-const BulkImportDocumentsPage = lazy(() => import("./pages/BulkImportDocumentsPage"));
-const CodeEditorPage = lazy(() => import("./pages/CodeEditorPage"));
-const ContentLibraryPage = lazy(() => import("./pages/ContentLibraryPage"));
-const ProgressTestPage = lazy(() => import("./pages/ProgressTestPage"));
-const WordPressSitesPage = lazy(() => import("./pages/WordPressSitesPage"));
-const WordPressPagesPage = lazy(() => import("./pages/WordPressPagesPage"));
-const StickyNotesPage = lazy(() => import("./pages/StickyNotesPage"));
-const DevToolsPage = lazy(() => import("./pages/DevToolsPage"));
-const PluginsPage = lazy(() => import("./pages/PluginsPage"));
-const ConnectionsPage = lazy(() => import("./pages/ConnectionsPage"));
-const ApprovalsPage = lazy(() => import("./pages/ApprovalsPage"));
-const SwarmPage = lazy(() => import("./pages/SwarmPage"));
-const AutoresearchPage = lazy(() => import("./pages/AutoresearchPage"));
-const OutreachPage = lazy(() => import("./pages/OutreachPage"));
-const VoiceChatPage = lazy(() => import("./pages/VoiceChatPage"));
-const SystemMapPage = lazy(() => import("./pages/SystemMapPage"));
-const FilmCrewPage = lazy(() => import("./pages/FilmCrewPage"));
-const MusicVideoPage = lazy(() => import("./pages/MusicVideoPage"));
-const CastStudioPage = lazy(() => import("./pages/CastStudioPage"));
-const CastMemberPage = lazy(() => import("./pages/CastMemberPage"));
+const SettingsPage = lazyWithReload(() => import("./pages/SettingsPage"));
+const ProjectsPage = lazyWithReload(() => import("./pages/ProjectsPage"));
+const TaskPage = lazyWithReload(() => import("./pages/TaskPage"));
+const ActivityPage = lazyWithReload(() => import("./pages/ActivityPage"));
+const DocumentsPage = lazyWithReload(() => import("./pages/DocumentsPage"));
+const RulesPage = lazyWithReload(() => import("./pages/RulesPage"));
+const ToolsPage = lazyWithReload(() => import("./pages/ToolsPage"));
+const AgentsPage = lazyWithReload(() => import("./pages/AgentsPage"));
+const AgentMemoryPage = lazyWithReload(() => import("./pages/AgentMemoryPage"));
+const MCPServersPage = lazyWithReload(() => import("./pages/MCPServersPage"));
+const WebsitesPage = lazyWithReload(() => import("./pages/WebsitesPage"));
+const WebsiteDetailPage = lazyWithReload(() => import("./pages/WebsiteDetailPage"));
+const FileGenerationPage = lazyWithReload(() => import("./pages/FileGenerationPage"));
+const ProjectDetailPage = lazyWithReload(() => import("./pages/ProjectDetailPage"));
+const ClientPage = lazyWithReload(() => import("./pages/ClientPage"));
+const UploadPage = lazyWithReload(() => import("./pages/UploadPage"));
+const TrainingPage = lazyWithReload(() => import("./pages/TrainingPage"));
+const ImagesPage = lazyWithReload(() => import("./pages/ImagesPage"));
+const AudioFoundryPage = lazyWithReload(() => import("./pages/AudioFoundryPage"));
+const VideoTextOverlayPage = lazyWithReload(() => import("./pages/VideoTextOverlayPage"));
+const VideoEditorPage = lazyWithReload(() => import("./pages/VideoEditorPage"));
+const BulkImportDocumentsPage = lazyWithReload(() => import("./pages/BulkImportDocumentsPage"));
+const CodeEditorPage = lazyWithReload(() => import("./pages/CodeEditorPage"));
+const ContentLibraryPage = lazyWithReload(() => import("./pages/ContentLibraryPage"));
+const ProgressTestPage = lazyWithReload(() => import("./pages/ProgressTestPage"));
+const WordPressSitesPage = lazyWithReload(() => import("./pages/WordPressSitesPage"));
+const WordPressPagesPage = lazyWithReload(() => import("./pages/WordPressPagesPage"));
+const StickyNotesPage = lazyWithReload(() => import("./pages/StickyNotesPage"));
+const DevToolsPage = lazyWithReload(() => import("./pages/DevToolsPage"));
+const PluginsPage = lazyWithReload(() => import("./pages/PluginsPage"));
+const ConnectionsPage = lazyWithReload(() => import("./pages/ConnectionsPage"));
+const ApprovalsPage = lazyWithReload(() => import("./pages/ApprovalsPage"));
+const SwarmPage = lazyWithReload(() => import("./pages/SwarmPage"));
+const AutoresearchPage = lazyWithReload(() => import("./pages/AutoresearchPage"));
+const OutreachPage = lazyWithReload(() => import("./pages/OutreachPage"));
+const VoiceChatPage = lazyWithReload(() => import("./pages/VoiceChatPage"));
+const SystemMapPage = lazyWithReload(() => import("./pages/SystemMapPage"));
+const FilmCrewPage = lazyWithReload(() => import("./pages/FilmCrewPage"));
+const MusicVideoPage = lazyWithReload(() => import("./pages/MusicVideoPage"));
+const CastStudioPage = lazyWithReload(() => import("./pages/CastStudioPage"));
+const CastMemberPage = lazyWithReload(() => import("./pages/CastMemberPage"));
 import Sidebar from "./components/layout/Sidebar";
 import SoftwareNav from "./components/layout/SoftwareNav";
 import ProgressFooterBar from "./components/layout/ProgressFooterBar";
 import { StatusProvider } from "./contexts/StatusContext";
 import { HealthProvider } from "./contexts/HealthContext";
 import BackendOfflineBanner from "./components/common/BackendOfflineBanner";
+import UpdateAppliedBanner from "./components/common/UpdateAppliedBanner";
 import ApiKeyRefusalNotice from "./components/common/ApiKeyRefusalNotice";
 import { SnackbarProvider } from "./components/common/SnackbarProvider";
 import { ErrorProvider } from "./components/common/ErrorProvider";
-import ErrorBoundary from "./components/common/ErrorBoundary";
+import ErrorBoundary, { ErrorResetContext } from "./components/common/ErrorBoundary";
 import { LayoutProvider } from "./contexts/LayoutContext";
 import { UnifiedProgressProvider } from './contexts/UnifiedProgressContext';
 import { VoiceProvider } from "./contexts/VoiceContext";
+import { VoiceSessionProvider } from "./contexts/VoiceSessionContext";
 import FloatingChatProvider from "./components/chat/FloatingChatProvider";
 import KeyboardShortcutsOverlay from "./components/common/KeyboardShortcutsOverlay";
 import useUncleNotifications from "./hooks/useUncleNotifications";
@@ -96,6 +99,7 @@ const AppLayout = ({ children }) => {
   useNavigationCancel();
   // Signal GPU orchestrator on page navigation for predictive model loading
   useGpuIntent();
+  const { pathname } = useLocation();
 
   const sidebarExpanded = useAppStore((state) => state.sidebarExpanded);
   const navChrome = useAppStore((state) => state.navChrome) || NAV_CHROME.SIDEBAR;
@@ -145,7 +149,11 @@ const AppLayout = ({ children }) => {
           {headers.map((Header, i) => (
             <Header key={i} />
           ))}
-          {children}
+          {/* A page that crashes keeps the shell around it. Every boundary
+              below clears on a route change without remounting the page. */}
+          <ErrorResetContext.Provider value={pathname}>
+            <ErrorBoundary>{children}</ErrorBoundary>
+          </ErrorResetContext.Provider>
         </Box>
         <ProgressFooterBar />
       </Box>
@@ -231,9 +239,12 @@ const AppContainer = () => {
         <Router
           future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
         >
+          {/* Inside the Router: the restart modal's API-key advice links to Settings. */}
+          <UpdateAppliedBanner />
           <UnifiedProgressProvider>
             <LayoutProvider>
               <VoiceProvider>
+              <VoiceSessionProvider>
                 <SnackbarProvider>
                   <UncleNotificationListener />
                   <ApiKeyRefusalNotice />
@@ -730,6 +741,7 @@ const AppContainer = () => {
                     <KeyboardShortcutsOverlay />
                   </ErrorProvider>
                 </SnackbarProvider>
+              </VoiceSessionProvider>
               </VoiceProvider>
             </LayoutProvider>
           </UnifiedProgressProvider>
@@ -742,7 +754,7 @@ const AppContainer = () => {
 
 function App() {
   return (
-    <ErrorBoundary>
+    <ErrorBoundary fullPage>
       <AppContainer />
     </ErrorBoundary>
   );

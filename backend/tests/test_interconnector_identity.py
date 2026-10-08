@@ -1,6 +1,6 @@
 """Stable, IP-INDEPENDENT node identity for the interconnector.
 
-Regression guard for the "ALPACA keeps cutting out" bug: a node reachable via
+Regression guard for the "client node keeps cutting out" bug: a node reachable via
 multiple paths (LAN / VPN / Tailscale) or with a changed DHCP lease used to
 register as a brand-new node each time, piling up duplicate stale rows. Identity
 is now keyed on the machine-stable node_id (hardware_profile["node_id"]) and
@@ -91,7 +91,7 @@ def test_registration_prunes_leftover_duplicate_rows(app):
     with app.app_context():
         for old_id, ip in [("old-1", "192.168.1.112"), ("old-2", "10.100.0.2")]:
             db.session.add(InterconnectorNode(
-                node_id=old_id, node_name="GX1-Alpaca", node_mode="client",
+                node_id=old_id, node_name="studio-client", node_mode="client",
                 host=ip, port=5002, status="disconnected", online=True,
                 hardware_profile=json.dumps({"hostname": "alpaca"})))
         db.session.commit()

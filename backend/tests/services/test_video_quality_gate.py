@@ -220,3 +220,262 @@ def test_status_text_names_the_flags(monkeypatch):
     assert "Quality: flagged — black frames: 3 of 9 sampled frames" in out.output
     assert "Quality: no problems found in the sampled frames" in out.output
     assert out.metadata["files"][0]["quality"]["flags"][0]["code"] == "black_frames"
+
+
+# ── The vision review's "not reviewed" state ─────────────────────────────────
+
+def _attach(made, **kwargs):
+    from backend.services import batch_video_generator as bvg
+
+    gen = bvg.BatchVideoGenerator.__new__(bvg.BatchVideoGenerator)
+    result = bvg.BatchVideoResult(item_id="item1", success=True, video_path="clip.mp4")
+    gen._attach_quality_metrics(result, video_path=str(made["clean"]), cinematic=True, **kwargs)
+    return result.metadata["quality"]
+
+
+def test_a_cinematic_clip_without_the_review_model_reads_not_reviewed(made, monkeypatch):
+    monkeypatch.setenv("GUAARDVARK_VIDEO_REVIEW_MODEL", "not-pulled-vlm:7b")
+    monkeypatch.setattr(vcm, "_installed_ollama_tags", lambda: {"gemma4:e2b"})
+    monkeypatch.setattr(vcm, "_extract_frames_b64", lambda *a, **k: pytest.fail("frames sampled"))
+
+    quality = _attach(made)
+
+    review = quality["vlm_review"]
+    assert review["status"] == "not_reviewed"
+    assert review["reason"] == "model_not_installed"
+    assert "not-pulled-vlm:7b" in review["message"]
+    assert "low_vlm_score" not in quality["flag_reasons"]
+
+
+def test_a_review_that_raises_is_recorded_not_dropped(made, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("ffmpeg vanished")
+
+    monkeypatch.setattr(vcm, "review_video_quality", boom)
+    quality = _attach(made)
+    assert quality["vlm_review"]["status"] == "not_reviewed"
+    assert quality["vlm_review"]["reason"] == "review_error"
+    assert "ffmpeg vanished" in quality["vlm_review"]["message"]
+
+
+def test_a_reviewed_clip_keeps_its_score_and_low_score_flag(made, monkeypatch):
+    monkeypatch.setattr(vcm, "review_video_quality", lambda *a, **k: {
+        "status": "reviewed", "available": True, "model": "m", "reason": None, "message": None,
+        "review": {"quality_score": 3},
+    })
+    quality = _attach(made)
+    assert quality["vlm_review"]["review"]["quality_score"] == 3
+    assert "low_vlm_score:3" in quality["flag_reasons"]
+
+
+def test_status_text_says_when_a_clip_was_not_reviewed(monkeypatch):
+    from backend.tools import image_tools
+
+    quality = {"flagged": False, "frames": {"readable": True}, "flags": [],
+               "vlm_review": vcm.not_reviewed("model_not_installed", model="minicpm-v4.5:latest")}
+    body = {"status": "completed", "stage": "done", "completed_videos": 1, "total_videos": 1, "results": [
+        {"success": True, "video_path": "a/videos/a.mp4", "metadata": {"quality": quality}},
+    ]}
+    def fake_http(method, path, *args, **kwargs):
+        if path.startswith("/api/batch-video/status/"):
+            return body
+        raise RuntimeError("404 not found")
+
+    monkeypatch.setattr(image_tools, "_http_json", fake_http)
+    tool = image_tools.GenerationStatusTool()
+    tool._context = {"transport": "mcp"}
+    out = tool.execute(batch_id="VideoBatch_x")
+    assert "Vision review: not reviewed — the review model minicpm-v4.5:latest is not installed" in out.output
+
+
+# ── The keyframe colour match ────────────────────────────────────────────────
+
+def _keyframe(tmp_path, rgb):
+    from PIL import Image
+    path = tmp_path / "keyframe.png"
+    Image.fromarray(rgb).save(path)
+    return str(path)
+
+
+def test_colour_match_reads_the_middle_frame_and_says_what_it_is(made, tmp_path):
+    match = vcm.colour_match(_keyframe(tmp_path, clips._scene(0)), made["clean"])
+    assert match["label"] == "colour match"
+    assert match["frame_index"] == clips.FRAMES // 2 and match["frames"] == clips.FRAMES
+    assert 0.5 < match["score"] <= 1.0
+
+
+def test_a_cinematic_clip_records_a_colour_match_not_an_identity_score(made, tmp_path, monkeypatch):
+    monkeypatch.setattr(vcm, "review_video_quality", lambda *a, **k: vcm.not_reviewed("no_frames"))
+    quality = _attach(made, keyframe_path=_keyframe(tmp_path, clips._scene(0)))
+    assert "identity" not in quality
+    assert quality["colour_match"]["label"] == "colour match"
+    assert quality["colour_match"]["frame_index"] == clips.FRAMES // 2
+    assert not any(code.startswith("low_colour_match") for code in quality["flag_reasons"])
+
+
+def test_a_clip_whose_palette_left_the_keyframe_is_flagged_as_colour_drift(made, tmp_path, monkeypatch):
+    import numpy as np
+
+    monkeypatch.setattr(vcm, "review_video_quality", lambda *a, **k: vcm.not_reviewed("no_frames"))
+    magenta = np.zeros((clips.HEIGHT, clips.WIDTH, 3), dtype=np.uint8)
+    magenta[..., 0] = magenta[..., 2] = 255
+    quality = _attach(made, keyframe_path=_keyframe(tmp_path, magenta))
+    flag = next(f for f in quality["flags"] if f["code"] == "low_colour_match")
+    assert flag["message"].startswith("colours drift from the keyframe: colour match")
+    assert f"at frame {clips.FRAMES // 2} of {clips.FRAMES}" in flag["message"]
+    assert "identity" not in flag["message"]
+
+
+# ── What a failed check does (T014: needs review, no automatic re-render) ────
+
+def test_every_flag_has_a_declared_outcome():
+    flags = (set(vcm._FLAG_TEXT) - set(vcm.OBSERVED_ONLY)) | {"low_vlm_score"}
+    assert flags <= set(vcm.QUALITY_FLAG_OUTCOME)
+    assert set(vcm.QUALITY_FLAG_OUTCOME.values()) == {vcm.NEEDS_REVIEW}
+
+
+def test_a_check_with_no_declared_outcome_still_holds_the_clip():
+    hold = vcm.review_hold({"flags": [{"code": "a_new_check", "message": "something new"}]})
+    assert hold == {"state": "needs_review", "codes": ["a_new_check"], "reasons": ["something new"]}
+    assert vcm.review_hold({"flags": [], "observations": [{"code": "frozen"}]}) is None
+
+
+@pytest.fixture
+def registered(monkeypatch):
+    """What reached the Documents registration seam, patched where it is read."""
+    calls = []
+    monkeypatch.setattr("backend.services.output_registration.ensure_subfolder", lambda *a, **k: None)
+    monkeypatch.setattr("backend.services.output_registration.register_file",
+                        lambda **kw: calls.append(Path(kw["physical_path"]).resolve()))
+    return calls
+
+
+def test_a_flagged_clip_is_held_for_review_and_not_registered(tmp_path, monkeypatch, made, registered):
+    status, batch_dir = _run_one(tmp_path, monkeypatch, made["washed_out"])
+    [result] = status.results
+    assert result.success and status.status == "completed"
+    assert result.review["state"] == "needs_review"
+    assert result.review["codes"] == ["washed_out"]
+    assert result.review["reasons"][0].startswith("washed out")
+    clip = (batch_dir / "item1" / "videos" / "clip.mp4").resolve()
+    assert clip not in registered
+    saved = json.loads((batch_dir / "batch_metadata.json").read_text())
+    assert saved["results"][0]["review"]["state"] == "needs_review"
+
+
+def test_a_held_clip_is_not_rendered_again_on_its_own(tmp_path, monkeypatch, made, registered):
+    from backend.services import batch_video_generator as bvg
+
+    renders = []
+    real = _Renderer.generate_video
+
+    def counted(self, request):
+        renders.append(request.metadata["item_id"])
+        return real(self, request)
+
+    monkeypatch.setattr(_Renderer, "generate_video", counted)
+    monkeypatch.setattr(bvg.BatchVideoGenerator, "start_batch_from_prompts",
+                        lambda *a, **k: pytest.fail("a held clip started a new batch"))
+    status, _ = _run_one(tmp_path, monkeypatch, made["washed_out"])
+    assert renders == ["item1"]
+    assert status.results[0].review["state"] == "needs_review"
+
+
+def test_a_clean_clip_is_not_held_and_is_registered(tmp_path, monkeypatch, made, registered):
+    status, batch_dir = _run_one(tmp_path, monkeypatch, made["clean"])
+    [result] = status.results
+    assert result.review is None
+    assert (batch_dir / "item1" / "videos" / "clip.mp4").resolve() in registered
+
+
+def _held_batch(tmp_path, made):
+    """A finished batch whose one clip a check held, as the generator keeps it."""
+    import threading
+
+    from backend.services import batch_video_generator as bvg
+
+    batch_dir = tmp_path / "VideoBatch_held"
+    clip = batch_dir / "item1" / "videos" / "clip.mp4"
+    clip.parent.mkdir(parents=True)
+    shutil.copyfile(made["washed_out"], clip)
+    gen = bvg.BatchVideoGenerator.__new__(bvg.BatchVideoGenerator)
+    gen.batch_lock = threading.Lock()
+    gen.base_output_dir = tmp_path
+    result = bvg.BatchVideoResult(
+        item_id="item1", success=True, video_path="item1/videos/clip.mp4",
+        review={"state": "needs_review", "codes": ["washed_out"], "reasons": ["washed out: spread 13"]},
+    )
+    status = bvg.BatchVideoStatus(
+        batch_id="VideoBatch_held", status="completed", total_videos=1, completed_videos=1,
+        results=[result], output_dir=str(batch_dir),
+        retry_data={"mode": "text", "prompts": ["a fox in snow"], "item_ids": ["item1"],
+                    "params": {"model": "wan22-5b", "seed": 42, "metadata": {"high_consistency": True}}},
+    )
+    gen.active_batches = {"VideoBatch_held": status}
+    return gen, status, clip
+
+
+def test_approving_a_held_clip_registers_it(tmp_path, made, registered):
+    from flask import Flask
+
+    gen, status, clip = _held_batch(tmp_path, made)
+    with Flask(__name__).app_context():
+        result = gen.approve_item("VideoBatch_held", "item1")
+    assert result.review["state"] == "approved"
+    assert result.review["reasons"] == ["washed out: spread 13"]
+    assert registered == [clip.resolve()]
+    saved = json.loads((Path(status.output_dir) / "batch_metadata.json").read_text())
+    assert saved["results"][0]["review"]["state"] == "approved"
+
+
+def test_re_render_is_one_new_batch_with_the_same_settings_and_a_fresh_seed(tmp_path, made, monkeypatch):
+    from types import SimpleNamespace
+
+    gen, status, _ = _held_batch(tmp_path, made)
+    started = []
+
+    def fake_start(prompts, **params):
+        started.append((prompts, params))
+        return SimpleNamespace(batch_id="VideoBatch_new", status="queued")
+
+    monkeypatch.setattr(gen, "start_batch_from_prompts", fake_start)
+    new = gen.rerender_item("VideoBatch_held", "item1")
+
+    assert new.batch_id == "VideoBatch_new"
+    [(prompts, params)] = started
+    assert prompts == ["a fox in snow"]
+    assert params["model"] == "wan22-5b" and params["seed"] is None
+    assert params["metadata"]["high_consistency"] is True
+    assert params["metadata"]["rerender_of"] == {"batch_id": "VideoBatch_held", "item_id": "item1"}
+    assert status.results[0].review["state"] == "rerendered"
+    assert status.results[0].review["rerender_batch_id"] == "VideoBatch_new"
+
+
+def test_re_render_refuses_a_batch_that_kept_no_per_clip_settings(tmp_path, made):
+    gen, status, _ = _held_batch(tmp_path, made)
+    status.retry_data = {"mode": "text", "prompts": ["a fox in snow"], "params": {}}
+    with pytest.raises(ValueError):
+        gen.rerender_item("VideoBatch_held", "item1")
+    assert status.results[0].review["state"] == "needs_review"
+
+
+def test_status_text_says_a_held_clip_waits_for_a_person(monkeypatch):
+    from backend.tools import image_tools
+
+    body = {"status": "completed", "stage": "done", "completed_videos": 1, "total_videos": 1, "results": [
+        {"success": True, "video_path": "a/videos/a.mp4",
+         "metadata": {"quality": {"flagged": True, "frames": {"readable": True},
+                                  "flags": [{"code": "washed_out", "message": "washed out: spread 13"}]}},
+         "review": {"state": "needs_review", "codes": ["washed_out"], "reasons": ["washed out: spread 13"]}},
+    ]}
+
+    def fake_http(method, path, *args, **kwargs):
+        if path.startswith("/api/batch-video/status/"):
+            return body
+        raise RuntimeError("404 not found")
+
+    monkeypatch.setattr(image_tools, "_http_json", fake_http)
+    tool = image_tools.GenerationStatusTool()
+    tool._context = {"transport": "mcp"}
+    out = tool.execute(batch_id="VideoBatch_x")
+    assert "Review: needs review — held until a person approves or re-renders it" in out.output

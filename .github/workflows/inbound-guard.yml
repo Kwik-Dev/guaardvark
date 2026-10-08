@@ -4,7 +4,9 @@
 # copy: pull_request_target runs this file as it is on the base branch, the
 # checkout is the base commit, and the head is fetched as git objects only.
 # Nothing from the pull request is executed and the token can only read.
-# Findings are annotations and a job summary; this check does not fail.
+# Findings are annotations and a job summary. The check fails only on a block:
+# a pull request from another repository that changes agent instructions or
+# recipes (steer.outside-contribution), or anything else the policy refuses.
 name: Inbound
 
 on:
@@ -19,9 +21,13 @@ jobs:
     name: Inbound code check
     runs-on: ubuntu-latest
     steps:
+      # The base branch as it is now, not pull_request.base.sha: that is where the
+      # pull request branched and it does not move, so on an older pull request
+      # it can predate the guard script, and its range would count anything the
+      # branch merged in from main since as inbound.
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.event.pull_request.base.ref }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -32,8 +38,21 @@ jobs:
 
       - name: Read what it brings in
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          SOURCE: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'ci' || 'pr-fork' }}
         run: >-
           python3 scripts/check_inbound.py scan
-          --range "${BASE_SHA}...refs/remotes/pull/head"
-          --source ci --github --exit-zero
+          --range "HEAD...refs/remotes/pull/head"
+          --source "$SOURCE" --github --exit-zero
+
+      - name: Refuse what the policy blocks
+        env:
+          SOURCE: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'ci' || 'pr-fork' }}
+        run: |
+          verdict=$(python3 scripts/check_inbound.py scan \
+            --range "HEAD...refs/remotes/pull/head" --source "$SOURCE" --json --exit-zero \
+            | python3 -c 'import json, sys; print(json.load(sys.stdin)["verdict"])')
+          echo "Inbound verdict for a ${SOURCE} pull request: ${verdict}"
+          if [ "$verdict" = "block" ]; then
+            echo "::error::Blocked by the inbound policy; see the annotations above and CONTRIBUTING.md (Agent behaviour is maintainer-written)."
+            exit 1
+          fi

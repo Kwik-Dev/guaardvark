@@ -1,9 +1,14 @@
 """Status transitions for social outreach draft rows.
 
     candidate -> drafted -> approved -> processing -> submitting -> posted
-                                             |              |
-    rejected <- (candidate, drafted,         +--> aborted <-+
-                 approved, processing)
+                                |            |              |
+                                |            +--> aborted <-+
+                                +--> unsupported
+    rejected <- (candidate, drafted, approved, processing)
+
+``unsupported`` means nothing in this install posts that action on that
+platform (a reply anywhere but YouTube, for one); the row keeps its draft and
+is not retried.
 
 ``processing`` means a poster has claimed the row and is driving the browser
 towards the composer; the row can still be rejected. ``submitting`` means the
@@ -13,6 +18,10 @@ Every change of status goes through ``move``, a compare-and-set in one UPDATE,
 so a reject and a poster racing for the same row cannot both win: either the
 reject lands and ``begin_submit`` refuses, or the submit has begun and the
 reject is refused.
+
+While public posting is stopped (``kill_switch.posting_stop_reason``),
+``claim`` and ``begin_submit`` refuse and an approved draft stays approved, so
+it waits for the stop to lift rather than being abandoned.
 """
 
 from __future__ import annotations
@@ -30,6 +39,7 @@ KNOWN_STATUSES = (
     "posted",
     "rejected",
     "aborted",
+    "unsupported",
 )
 
 # Approve only from drafted (human or unsupervised auto-approve path).
@@ -46,6 +56,9 @@ SUBMIT_FROM = frozenset({"processing"})
 
 # A poster giving up on a row it claimed.
 ABORT_FROM = frozenset({"processing", "submitting"})
+
+# An approved row no poster handles leaves the queue before it is claimed.
+UNSUPPORTED_FROM = frozenset({"approved"})
 
 # The reason a poster returns when ``begin_submit`` refused, so its caller can
 # tell a withdrawn row from a servo failure.
@@ -79,6 +92,8 @@ def reject_refusal(status: str | None) -> str:
         return base + ": it is already rejected and will not post"
     if status == "aborted":
         return base + ": posting it was abandoned and it will not be retried"
+    if status == "unsupported":
+        return base + ": nothing here can post that action on that platform, so it will not post"
     return base
 
 
@@ -147,15 +162,29 @@ def approve(audit_id: int, draft_text: Optional[str] = None) -> bool:
     return move(audit_id, "approved", APPROVE_FROM, **fields)
 
 
+def _posting_stopped() -> bool:
+    from backend.services.social_outreach import kill_switch
+
+    return kill_switch.posting_stopped()
+
+
 def claim(audit_id: int) -> bool:
-    """approved -> processing. False when the row is no longer approved."""
+    """approved -> processing. False when the row is no longer approved, or
+    while public posting is stopped (the row then stays approved)."""
+    if _posting_stopped():
+        return False
     return move(audit_id, "processing", CLAIM_FROM, abort_reason=_stamp("processing_since:"))
 
 
 def begin_submit(audit_id: int) -> bool:
     """processing -> submitting. A poster calls this immediately before the
     step that publishes and must not publish when it returns False: the row was
-    rejected (or reaped) while the poster was working."""
+    rejected (or reaped) while the poster was working, or public posting was
+    stopped. A stop hands the claim back (processing -> approved), so the
+    poster's give-up finds nothing in flight and the draft waits."""
+    if _posting_stopped():
+        move(audit_id, "approved", SUBMIT_FROM, abort_reason=None)
+        return False
     return move(audit_id, "submitting", SUBMIT_FROM, abort_reason=_stamp("submitting_since:"))
 
 
@@ -167,6 +196,12 @@ def submit_gate(audit_id: int) -> Callable[[], bool]:
 def abort_in_flight(audit_id: int, reason: str) -> bool:
     """processing/submitting -> aborted. Leaves a row that was rejected meanwhile alone."""
     return move(audit_id, "aborted", ABORT_FROM, abort_reason=(reason or "")[:512])
+
+
+def mark_unsupported(audit_id: int, reason: str) -> bool:
+    """approved -> unsupported, for a row no poster handles. Leaves a row that
+    was claimed or rejected meanwhile alone."""
+    return move(audit_id, "unsupported", UNSUPPORTED_FROM, abort_reason=(reason or "")[:512])
 
 
 def mark_posted(audit_id: int, posted_text: str) -> bool:

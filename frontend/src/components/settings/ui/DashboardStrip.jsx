@@ -5,18 +5,20 @@
 import React from "react";
 import { Box, LinearProgress, Paper, Typography } from "@mui/material";
 import { alpha } from "@mui/material/styles";
+import HelpTitle from "./HelpTitle";
 
 const TONE_KEY = { ok: "success", warn: "warning", error: "error", off: null };
 
 /**
  * @param {string} label
+ * @param {ReactNode} [help]   shown on hover over the label
  * @param {ReactNode} value
  * @param {string} [sub]
  * @param {"ok"|"warn"|"error"|"off"} [tone]   dot beside the label; omit for none
  * @param {number} [progress]   0..100 draws a bar under the value
  * @param {function} [onClick]  makes the tile a link
  */
-export const DashboardTile = ({ label, value, sub, tone, progress, onClick }) => (
+export const DashboardTile = ({ label, help, value, sub, tone, progress, onClick }) => (
   <Paper
     elevation={0}
     onClick={onClick}
@@ -58,7 +60,7 @@ export const DashboardTile = ({ label, value, sub, tone, progress, onClick }) =>
           : undefined,
       })}
     >
-      {label}
+      <HelpTitle help={help}>{label}</HelpTitle>
     </Typography>
     <Typography
       component="span"

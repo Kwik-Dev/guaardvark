@@ -90,6 +90,11 @@ def update_document_status(document_id, status, error_message=None):
     finally:
         session.close()
 
+# Returned by enhanced_code_aware_indexing when the document was left PENDING
+# for a later attempt: not a success, and not the document's fault.
+DEFERRED = "deferred"
+
+
 def enhanced_code_aware_indexing(file_path, document, document_id, update_progress):
     """Enhanced indexing that leverages Guaardvark's existing CodeChunker system"""
     try:
@@ -136,15 +141,16 @@ def enhanced_code_aware_indexing(file_path, document, document_id, update_progre
                 'preservation_mode': 'complete_file' if is_code_file and len(content) <= 50000 else 'semantic_chunks'
             }
 
-            # Store content and update all fields for code files
+            # Store content and metadata. The row stays INDEXING: index_document_task
+            # marks it INDEXED once this returns success, i.e. once it is searchable.
             if is_code_file:
                 session.execute(text("""
                     UPDATE documents
                     SET content = :content, is_code_file = :is_code_file, index_status = :index_status, indexed_at = :indexed_at,
                         file_metadata = :file_metadata, error_message = NULL
                     WHERE id = :document_id
-                """), {"content": content, "is_code_file": True, "index_status": 'INDEXED',
-                       "indexed_at": datetime.datetime.now().isoformat(),
+                """), {"content": content, "is_code_file": True, "index_status": 'INDEXING',
+                       "indexed_at": None,
                        "file_metadata": json.dumps(metadata), "document_id": document_id})
                 logger.info(f"Enhanced code file indexing completed for document {document_id}: {metadata['line_count']} lines, language: {metadata['language']}")
             else:
@@ -154,8 +160,8 @@ def enhanced_code_aware_indexing(file_path, document, document_id, update_progre
                     SET content = :content, is_code_file = :is_code_file, index_status = :index_status, indexed_at = :indexed_at,
                         file_metadata = :file_metadata, error_message = NULL
                     WHERE id = :document_id
-                """), {"content": content, "is_code_file": False, "index_status": 'INDEXED',
-                       "indexed_at": datetime.datetime.now().isoformat(),
+                """), {"content": content, "is_code_file": False, "index_status": 'INDEXING',
+                       "indexed_at": None,
                        "file_metadata": json.dumps(metadata), "document_id": document_id})
                 logger.info(f"Enhanced text file indexing completed for document {document_id}: {metadata['line_count']} lines")
 
@@ -190,8 +196,12 @@ def enhanced_code_aware_indexing(file_path, document, document_id, update_progre
                     logger.info(f"Successfully added document {document_id} to vector index")
                     update_progress(95, f'Vector indexing complete for {document["filename"]}')
                 else:
-                    vector_outcome = "failed"
-                    logger.warning(f"Vector indexing returned a failure for document {document_id}")
+                    from backend.services.indexing_service import vector_store_fallback_reason
+                    if vector_store_fallback_reason():
+                        vector_outcome = "deferred"
+                    else:
+                        vector_outcome = "failed"
+                        logger.warning(f"Vector indexing returned a failure for document {document_id}")
 
             except ImportError as import_error:
                 vector_outcome = "skipped"
@@ -208,6 +218,15 @@ def enhanced_code_aware_indexing(file_path, document, document_id, update_progre
             if vector_outcome == "failed":
                 logger.error(f"Document {document_id}: content stored but vector indexing FAILED — not searchable")
                 return False
+            if vector_outcome == "deferred":
+                # Nothing is wrong with the document: the persisted vector store is
+                # not in use in this worker (embedding backend unreachable at start).
+                # PENDING puts it back in the queue the resume task works from.
+                from backend.services.indexing_service import vector_store_fallback_reason
+                reason = vector_store_fallback_reason() or "vector store unavailable"
+                logger.warning(f"Document {document_id}: left PENDING, vector store not in use ({reason})")
+                update_document_status(document_id, "PENDING", f"Waiting for the vector store: {reason}")
+                return DEFERRED
 
             logger.info(
                 f"Indexed document {document_id} ('{document['filename']}', "
@@ -427,7 +446,15 @@ def index_document_task(document_id, process_id=None):
             logger.error(f"Enhanced indexing failed: {e}, falling back to simple indexing")
             update_progress(75, f'Using fallback indexing due to error for {document["filename"]}')
             success = simple_index_document(full_file_path, document_id)
-        
+
+        if success == DEFERRED:
+            message = f"Indexing deferred for {document['filename']}: vector store not in use; left PENDING"
+            logger.warning(message)
+            if progress_system:
+                progress_system.error_process(process_id, message)
+            return {'process_id': process_id, 'document_id': document_id,
+                    'filename': document['filename'], 'status': 'deferred'}
+
         if success:
             # Update progress: Finalizing
             update_progress(90, f'Finalizing indexing for {document["filename"]}')
@@ -452,7 +479,12 @@ def index_document_task(document_id, process_id=None):
                 'status': 'completed'
             }
         else:
-            error_msg = f"Indexing failed for document {document_id}"
+            try:
+                from backend.services.indexing_service import no_content_reason
+                reason = no_content_reason(document_id)
+            except Exception:
+                reason = None
+            error_msg = reason or f"Indexing failed for document {document_id}"
             logger.error(error_msg)
 
             # Update document status

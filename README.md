@@ -82,6 +82,8 @@ curl -fsSL https://raw.githubusercontent.com/Kwik-Dev/guaardvark/cloud-plus/inst
 > the installer's traps, and the macOS notes:
 > [docs/CLOUD_PLUS.md → Get it running](docs/CLOUD_PLUS.md#2-get-it-running).
 
+It is [install.sh](install.sh) from this repository: it clones to `~/guaardvark` and runs `./start.sh`. To read it before it runs, download it first (`curl -fsSL https://guaardvark.com/install.sh -o install.sh`, read it, then `bash install.sh`), or clone and start by hand as in [Quick Start](#quick-start).
+
 **Add it to Claude Code** (two lines, no clone):
 
 ```
@@ -239,7 +241,7 @@ A newer category: the coding agent runs the studio. Facts checked 2026-09-11 fro
 
 ### AgentBrain — Three-Tier Neural Routing
 
-Every message is routed through a three-tier decision engine that picks the fastest path to the right answer. Reflexes fire in under a millisecond. Instinct handles single-shot requests in one LLM call. Deliberation spins up a full ReACT reasoning loop when the problem demands it.
+Every message is routed through a three-tier decision engine that picks the fastest path to the right answer. Reflexes answer in under 100 ms with no model call. Instinct handles single-shot requests in one LLM call. Deliberation spins up a full ReACT reasoning loop when the problem demands it.
 
 | Tier | Name | Latency | LLM Calls | When It Fires |
 |------|------|---------|-----------|---------------|
@@ -465,6 +467,8 @@ The sections above cover the experience and differentiators. The rest of this RE
 > default — `./start.sh` installs 3.12 automatically (deadsnakes or uv). Manual
 > installs: use a 3.12 interpreter only.
 
+A fresh Ubuntu desktop has no `curl` or `git`; run `sudo apt install -y curl git` first.
+
 ```bash
 GUAARDVARK_REPO_URL=https://github.com/Kwik-Dev/guaardvark.git \
 GUAARDVARK_BRANCH=cloud-plus \
@@ -542,6 +546,8 @@ guaardvark completion zsh               # Shell completion script
 ```
 
 Config: `~/.guaardvark/cli.json` (legacy `~/.llx/config.json` is still read). Themes: `default`, `teal`, `musk`, `hacker`, `vader`, `guaardvark`, `day`, `auto`. Short terminals get a compact aardvark banner.
+
+While a reply is on its way, a status line says what is happening and for how long (`⠋ Searching the web… · 14s · esc to stop`). Piped and `--json` output never show it; `GUAARDVARK_NO_SPINNER=1` turns it off in a terminal too.
 
 ### Every route, when no command wraps it yet
 

@@ -21,7 +21,7 @@ Commands:
     {"op": "generate",
      "params": {
         "style_prompt": "...",
-        "negative_prompt": "...",   # optional, "" or absent = no neg steering
+        "negative_prompt": "...",   # accepted, never applied: ACE-Step v1 has no negative conditioning
         "lyrics": "...",
         "instrumental_only": false,
         "duration_s": 60.0,
@@ -31,7 +31,8 @@ Commands:
         "seed": null,
         "out_path": "/abs/path/to/output.wav"
      }}
-        -> {"ok": true, "samples": <int>, "channels": <int>, "duration_s": <float>}
+        -> {"ok": true, "samples": <int>, "channels": <int>, "duration_s": <float>,
+            "sample_rate": <int, as written: ACE-Step v1 writes 48000>}
         -> {"ok": false, "error": "..."}
 
     {"op": "unload"}
@@ -202,7 +203,14 @@ def _do_generate(params: dict[str, Any]) -> dict[str, Any]:
     seed = params.get("seed")
     out_path = params["out_path"]
 
-    effective_lyrics = "" if instrumental_only else lyrics
+    # "[instrumental]" is ACE-Step's own marker for no vocals (its UI says so). Empty
+    # lyrics are not the same thing: on plain-English prompts ("relaxing music for
+    # working", "blade runner style night city music") empty lyrics sang made-up words
+    # in 4 of 18 clips and drifted toward country/folk (CLAP country score 0.40-0.42,
+    # the level of a deliberate country render); the marker gave 0 of 18 and ~0.20.
+    # Measured 2026-10-03: 30 s clips, 60 steps, seeds 11/22/33, Whisper small.en + VAD
+    # for sung words, laion/clap-htsat-unfused for style.
+    effective_lyrics = "[instrumental]" if instrumental_only else lyrics
 
     # ACE-Step uses `infer_step` (not `num_inference_steps`) and `manual_seeds`
     # (a list, not a torch.Generator). The kwarg names diverge from the
@@ -212,7 +220,7 @@ def _do_generate(params: dict[str, Any]) -> dict[str, Any]:
     _eprint(
         f"[run_acestep] generate style={style_prompt[:60]!r} duration={duration_s:.1f}s "
         f"lyrics={len(effective_lyrics)}-chars instrumental={instrumental_only} "
-        f"neg={negative_prompt[:40]!r} guidance={guidance_scale} seed={seed}"
+        f"neg(not applied)={negative_prompt[:40]!r} guidance={guidance_scale} seed={seed}"
     )
 
     # Pass save_path/format so ACE-Step writes the WAV itself (using torchaudio
@@ -223,9 +231,9 @@ def _do_generate(params: dict[str, Any]) -> dict[str, Any]:
     # uses its model's native rate (44.1 kHz). The caller's requested
     # `sample_rate` is honored later via sf.info() reading the actual file.
     #
-    # `negative_prompt` may not be supported by every ACE-Step release — older
-    # checkpoints raise TypeError if we pass an unknown kwarg. Try-with then
-    # fall back keeps us forward-compatible without breaking pinned setups.
+    # ACE-Step v1 has no negative conditioning: ACEStepPipeline.__call__ takes no
+    # negative_prompt (acestep 0.2.0 raises TypeError on it), so it is never passed.
+    # The caller is told it was not applied.
     _progress(0.10, "composing")
 
     # Per-step diffusion progress. Only the diffusers-flavoured ACE-Step
@@ -257,20 +265,7 @@ def _do_generate(params: dict[str, Any]) -> dict[str, Any]:
     if callback_fn is not None:
         pipeline_kwargs["callback"] = callback_fn
         pipeline_kwargs["callback_steps"] = 1
-    if negative_prompt:
-        pipeline_kwargs["negative_prompt"] = negative_prompt
-    try:
-        result = _pipeline(**pipeline_kwargs)
-    except TypeError as e:
-        if "negative_prompt" in str(e) and "negative_prompt" in pipeline_kwargs:
-            _eprint(
-                f"[run_acestep] this ACE-Step build doesn't accept negative_prompt "
-                f"({e}); retrying without it"
-            )
-            pipeline_kwargs.pop("negative_prompt", None)
-            result = _pipeline(**pipeline_kwargs)
-        else:
-            raise
+    result = _pipeline(**pipeline_kwargs)
     _eprint(f"[run_acestep] pipeline returned: type={type(result).__name__}")
     _progress(0.95, "rendering")
 
@@ -288,6 +283,7 @@ def _do_generate(params: dict[str, Any]) -> dict[str, Any]:
             "samples": samples,
             "channels": channels,
             "duration_s": samples / actual_sr if actual_sr else 0.0,
+            "sample_rate": actual_sr,
         }
 
     # Fallback: pipeline didn't write a file, dig the audio out of the result.
@@ -330,6 +326,7 @@ def _do_generate(params: dict[str, Any]) -> dict[str, Any]:
         "samples": samples,
         "channels": channels,
         "duration_s": samples / sample_rate,
+        "sample_rate": sample_rate,
     }
 
 

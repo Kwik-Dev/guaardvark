@@ -242,20 +242,6 @@ const DeviceProfileModal = ({
             <FormControlLabel
               control={
                 <Checkbox
-                  checked={formData.requires_cpu_offload}
-                  onChange={handleInputChange}
-                  name="requires_cpu_offload"
-                  disabled={isSaving}
-                />
-              }
-              label="Requires CPU Offload (for large models)"
-            />
-          </Grid>
-
-          <Grid item xs={12}>
-            <FormControlLabel
-              control={
-                <Checkbox
                   checked={formData.is_default}
                   onChange={handleInputChange}
                   name="is_default"

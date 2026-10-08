@@ -7,19 +7,25 @@ import {
   PlayArrow as PlayIcon,
   Pause as PauseIcon,
   Science as ScienceIcon,
+  Refresh as RefreshIcon,
 } from '@mui/icons-material';
 import { useNavigate } from 'react-router-dom';
 import { io } from 'socket.io-client';
 import { SOCKET_URL } from '../../api/apiClient';
 import { ragAutoresearchService } from '../../api/ragAutoresearchService';
 import DashboardCardWrapper from './DashboardCardWrapper';
+import {
+  baselineText,
+  experimentLabel,
+  experimentsSummary,
+  runOutcome,
+} from '../../utils/autoresearchLabels';
 
 const RAGAutoresearchCard = React.forwardRef(
   ({ style, isMinimized, onToggleMinimize, cardColor, onCardColorChange, ...props }, ref) => {
   const navigate = useNavigate();
   const [status, setStatus] = useState(null);
   const [history, setHistory] = useState([]);
-  const [lastRun, setLastRun] = useState(null);
   const [loading, setLoading] = useState(false);
   const socketRef = useRef(null);
 
@@ -37,22 +43,13 @@ const RAGAutoresearchCard = React.forwardRef(
     } catch (e) { /* ignore */ }
   }, []);
 
-  const fetchLastRun = useCallback(async () => {
-    try {
-      const data = await ragAutoresearchService.listRuns();
-      const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-      const recent = (data.runs || []).find(
-        (r) => r.status === 'completed' && r.ended_at
-          && new Date(r.ended_at).getTime() >= cutoff,
-      );
-      setLastRun(recent || null);
-    } catch (e) { /* ignore */ }
-  }, []);
-
-  useEffect(() => {
+  const refresh = useCallback(() => {
     fetchStatus();
     fetchHistory();
-    fetchLastRun();
+  }, [fetchStatus, fetchHistory]);
+
+  useEffect(() => {
+    refresh();
 
     // Push updates via Socket.IO; the 30s poll below stays as fallback.
     try {
@@ -62,24 +59,11 @@ const RAGAutoresearchCard = React.forwardRef(
         transports: ['polling', 'websocket'],
       });
       socketRef.current = socket;
-
-      socket.on('autoresearch:experiment_complete', () => {
-        fetchStatus();
-        fetchHistory();
-      });
-
-      socket.on('autoresearch:run_complete', () => {
-        fetchStatus();
-        fetchHistory();
-        fetchLastRun();
-      });
+      socket.on('autoresearch:experiment_complete', refresh);
+      socket.on('autoresearch:run_complete', refresh);
     } catch (e) { /* socket unavailable — polling covers it */ }
 
-    const interval = setInterval(() => {
-      fetchStatus();
-      fetchHistory();
-      fetchLastRun();
-    }, 30000);
+    const interval = setInterval(refresh, 30000);
     return () => {
       if (socketRef.current) {
         socketRef.current.disconnect();
@@ -87,26 +71,41 @@ const RAGAutoresearchCard = React.forwardRef(
       }
       clearInterval(interval);
     };
-  }, [fetchStatus, fetchHistory, fetchLastRun]);
+  }, [refresh]);
 
   const handleStart = async () => {
     setLoading(true);
     try {
       await ragAutoresearchService.createRun({ budget_hours: 6 });
-      await fetchStatus();
-      await fetchLastRun();
     } catch (e) {
-      if (e.status !== 409) {
-        /* page / snackbar lives on Autoresearch; card stays quiet */
-      }
+      /* A refused run (422) shows below as "Not run: …"; the page has details. */
+    } finally {
       await fetchStatus();
-    } finally { setLoading(false); }
+      setLoading(false);
+    }
   };
 
   const handleStop = async () => {
     await ragAutoresearchService.stop();
     await fetchStatus();
   };
+
+  const openPage = () => navigate('/autoresearch');
+
+  const menuActions = [
+    status?.running
+      ? { label: 'Pause run', icon: <PauseIcon fontSize="small" />, onClick: handleStop }
+      : {
+          label: 'Start run',
+          icon: <PlayIcon fontSize="small" />,
+          onClick: handleStart,
+          disabled: loading || !status,
+        },
+    { label: 'Refresh', icon: <RefreshIcon fontSize="small" />, onClick: refresh },
+  ];
+
+  const lastRun = status?.last_run || null;
+  const outcome = runOutcome(lastRun);
 
   return (
     <DashboardCardWrapper
@@ -121,7 +120,9 @@ const RAGAutoresearchCard = React.forwardRef(
         <ScienceIcon fontSize="small" sx={{ color: status?.running ? 'success.main' : 'text.secondary', opacity: 0.8 }} />
       }
       {...props}
+      contextMenuActions={menuActions}
     >
+      <Box sx={{ height: '100%' }}>
       {!status ? (
         <Box sx={{ p: 1, textAlign: 'center' }}>
           <Typography variant="caption" color="text.secondary">Autoresearch unavailable</Typography>
@@ -158,33 +159,43 @@ const RAGAutoresearchCard = React.forwardRef(
           {status.running && <LinearProgress sx={{ mb: 1, borderRadius: 1 }} />}
 
           {/* Score */}
-          <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1 }}>
-            <Typography variant="caption">
-              Score: <strong>{status.baseline_score?.toFixed(3) || '\u2014'}</strong>
-            </Typography>
-            <Typography variant="caption" color="text.secondary">
-              {status.total_experiments} runs / {status.total_improvements} improvements
-            </Typography>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 1, mb: 1 }}>
+            <Typography variant="caption">{baselineText(status)}</Typography>
+            <Tooltip
+              title={
+                status.total_health_checks
+                  ? `${status.total_health_checks} test-suite health checks are not counted`
+                  : ''
+              }
+            >
+              <Typography variant="caption" color="text.secondary" sx={{ whiteSpace: 'nowrap' }}>
+                {experimentsSummary(status)}
+              </Typography>
+            </Tooltip>
           </Box>
 
-          {/* Last night's research */}
+          {/* Latest run, whatever its status */}
           {lastRun && (
             <Box sx={{ mb: 1 }}>
               <Typography variant="caption" color="text.secondary">
-                Last night's research:{' '}
+                Latest run:{' '}
                 <Link
                   component="button"
                   variant="caption"
-                  onClick={() => navigate('/autoresearch')}
+                  onClick={openPage}
                   sx={{ verticalAlign: 'baseline' }}
                 >
                   {lastRun.run_tag}
                 </Link>
                 {' '}
-                {lastRun.baseline_score != null ? lastRun.baseline_score.toFixed(3) : '—'}
-                {' → '}
-                {lastRun.best_score != null ? lastRun.best_score.toFixed(3) : '—'}
-                {lastRun.halt_reason ? ` (${lastRun.halt_reason})` : ''}
+                <Tooltip title={outcome.detail}>
+                  <Box
+                    component="span"
+                    sx={outcome.kind === 'not_run' ? { color: 'warning.main' } : undefined}
+                  >
+                    {outcome.text}
+                  </Box>
+                </Tooltip>
               </Typography>
             </Box>
           )}
@@ -194,23 +205,30 @@ const RAGAutoresearchCard = React.forwardRef(
             <Box sx={{ flex: 1, overflow: 'auto' }}>
               <Table size="small" sx={{ '& td': { py: 0.25, px: 0.5, fontSize: '0.7rem' } }}>
                 <TableBody>
-                  {history.map((exp) => (
-                    <TableRow key={exp.id}>
-                      <TableCell>{exp.parameter_changed}</TableCell>
-                      <TableCell>{exp.new_value}</TableCell>
-                      <TableCell>
-                        <Chip
-                          label={exp.status}
-                          size="small"
-                          color={exp.status === 'keep' ? 'success' : exp.status === 'crash' ? 'error' : 'default'}
-                          sx={{ height: 16, fontSize: '0.6rem' }}
-                        />
-                      </TableCell>
-                      <TableCell align="right">
-                        {exp.delta > 0 ? `+${exp.delta.toFixed(3)}` : exp.delta?.toFixed(3)}
-                      </TableCell>
-                    </TableRow>
-                  ))}
+                  {history.map((exp) => {
+                    const label = experimentLabel(exp);
+                    const isHealth = label.kind === 'health';
+                    return (
+                      <TableRow key={exp.id}>
+                        <TableCell>{isHealth ? 'test suite' : exp.parameter_changed}</TableCell>
+                        <TableCell>{exp.new_value}</TableCell>
+                        <TableCell>
+                          <Chip
+                            label={label.selfReported ? `${label.status} (self-reported)` : label.status}
+                            size="small"
+                            color={label.tone}
+                            variant={isHealth ? 'outlined' : 'filled'}
+                            sx={{ height: 16, fontSize: '0.6rem' }}
+                          />
+                        </TableCell>
+                        <TableCell align="right">
+                          {isHealth || typeof exp.delta !== 'number'
+                            ? '—'
+                            : exp.delta > 0 ? `+${exp.delta.toFixed(3)}` : exp.delta.toFixed(3)}
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
                 </TableBody>
               </Table>
             </Box>
@@ -225,6 +243,7 @@ const RAGAutoresearchCard = React.forwardRef(
           )}
         </Box>
       )}
+      </Box>
     </DashboardCardWrapper>
   );
 });

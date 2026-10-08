@@ -123,6 +123,9 @@ const CodeGenerationCard = React.forwardRef(
         onCardColorChange={onCardColorChange}
         title="Code Generation"
         {...props}
+        contextMenuActions={[
+          { label: "New Code", onClick: () => navigate("/code-editor") },
+        ]}
       >
         {isLoading && (
           <CircularProgress

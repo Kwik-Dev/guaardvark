@@ -11,6 +11,7 @@ import {
 import { alpha } from "@mui/material/styles";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import CheckIcon from "@mui/icons-material/Check";
+import MicIcon from "@mui/icons-material/Mic";
 import ThinkingCard from "./ThinkingCard";
 import { agentNoteCaption } from "./agentNoteCaptions";
 
@@ -160,6 +161,13 @@ const FloatingChatMessage = ({ message, msg, formatTime }) => {
                 lineHeight: 1.5,
               }}
             >
+              {m.voice && (
+                <MicIcon
+                  titleAccess="Spoken"
+                  data-testid="voice-message-badge"
+                  sx={{ fontSize: 13, verticalAlign: "-2px", mr: 0.5, opacity: 0.85 }}
+                />
+              )}
               {m.content || ""}
             </Typography>
             {m.agentNote && (

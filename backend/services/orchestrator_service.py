@@ -17,7 +17,7 @@ from typing import Dict, List, Any, Optional, Tuple, Set
 from dataclasses import dataclass, field
 import json
 
-from backend.services.agent_config import get_agent_config_manager
+from backend.services.agent_config import get_agent_config_manager, llm_for_agent
 from backend.services.agent_executor import AgentExecutor
 from backend.utils.llm_service import get_default_llm, ChatMessage, MessageRole, _safe_content
 
@@ -224,7 +224,12 @@ class OrchestratorService:
 
     def _create_plan(self, request: str) -> OrchestrationPlan:
         """Use the LLM to break the request into an ordered set of sub-tasks."""
-        agents = self.agent_config_manager.get_enabled_agents()
+        from backend.services.agent_config import AgentType
+        # The orchestrator plans; a step handed back to it would plan again.
+        agents = [
+            a for a in self.agent_config_manager.get_enabled_agents()
+            if a.agent_type != AgentType.ORCHESTRATOR
+        ]
         enabled_agent_ids = {a.id for a in agents}
         agents_desc = "\n".join(
             [
@@ -550,34 +555,21 @@ RULES:
         what the user actually asked for.
         """
         try:
-            from backend.services.agent_tools import ToolRegistry
-
             manager = self.agent_config_manager
             agent = manager.get_agent(agent_id)
             if not agent:
                 return {"success": False, "error": f"Agent '{agent_id}' not found"}
 
-            # Build a per-agent registry containing only this agent's tools,
-            # drawn from the lazily-cached global registry.
-            all_tools = self._get_all_tools()
-            agent_tools = ToolRegistry()
-            missing = []
-            for tool_name in agent.tools:
-                tool = all_tools.get_tool(tool_name)
-                if tool:
-                    agent_tools.register(tool)
-                else:
-                    missing.append(tool_name)
-
+            agent_tools, missing = self._get_all_tools().subset(agent.tools)
             if missing:
                 logger.warning(
                     f"Agent '{agent_id}' requested tools not in registry: {missing}"
                 )
 
-            # Compose session context: goal + original request + dependency results
+            # The agent's own instructions go into the system prompt through
+            # AgentExecutor(agent=...); this context is the delegated goal.
             session_parts = [
-                f"[DELEGATED TASK FROM ORCHESTRATOR]",
-                f"Agent: {agent.name}",
+                "[DELEGATED TASK FROM ORCHESTRATOR]",
                 f"Goal: {prompt}",
             ]
             if original_request:
@@ -595,7 +587,8 @@ RULES:
             session_context = "\n".join(session_parts)
 
             executor = AgentExecutor(
-                agent_tools, self.llm, max_iterations=agent.max_iterations
+                agent_tools, llm_for_agent(agent, self.llm),
+                max_iterations=agent.max_iterations, agent=agent,
             )
             result = executor.execute(prompt, session_context=session_context)
 

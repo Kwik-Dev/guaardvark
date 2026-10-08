@@ -10,27 +10,46 @@ import {
 import CollapsibleAlert from "./CollapsibleAlert";
 import { RefreshOutlined } from "@mui/icons-material";
 import { BrandLogo } from "../branding";
+import { isStaleModuleError, reloadOnceForStaleModule } from "../../utils/lazyWithReload";
 
-class ErrorBoundary extends React.Component {
+// The outermost boundary sits outside the MUI theme, whose defaults are light.
+// These are the variables AppContainer publishes from the active theme; the
+// fallbacks are index.css's dark defaults.
+const PAGE_COLOURS = {
+  page: "var(--bg-default, #121212)",
+  card: "var(--bg-paper, #1e1e1e)",
+  text: "var(--text-primary, #e0e0e0)",
+  muted: "var(--text-secondary, #a0a0a0)",
+};
+
+/** Default resetKey for every boundary below its provider (AppLayout provides the route). */
+export const ErrorResetContext = React.createContext(undefined);
+
+class ErrorBoundaryCore extends React.Component {
   constructor(props) {
     super(props);
-    this.state = { hasError: false, error: null, errorInfo: null };
+    this.state = { hasError: false, error: null, errorInfo: null, resetKey: props.resetKey };
   }
 
-  static getDerivedStateFromError(_error) {
-    // Update state so the next render will show the fallback UI
-    return { hasError: true };
+  static getDerivedStateFromProps(props, state) {
+    if (props.resetKey !== state.resetKey) {
+      return { hasError: false, error: null, errorInfo: null, resetKey: props.resetKey };
+    }
+    return null;
+  }
+
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
   }
 
   componentDidCatch(error, errorInfo) {
     // Log error details
     console.error("Error Boundary caught an error:", error, errorInfo);
-    
-    // Update state with error details
-    this.setState({
-      error: error,
-      errorInfo: errorInfo
-    });
+
+    // Code replaced on disk under this tab: one reload loads the new version.
+    reloadOnceForStaleModule(error);
+
+    this.setState({ errorInfo });
 
     // Optional: Send error to monitoring service
     // reportError(error, errorInfo);
@@ -48,7 +67,10 @@ class ErrorBoundary extends React.Component {
 
   render() {
     if (this.state.hasError) {
-      // Custom fallback UI
+      const { fullPage } = this.props;
+      // React.lazy keeps a failed import's rejection, so "Try Again" cannot
+      // recover it; only a reload fetches the new code.
+      const stale = isStaleModuleError(this.state.error);
       return (
         <Box
           sx={{
@@ -56,9 +78,11 @@ class ErrorBoundary extends React.Component {
             flexDirection: "column",
             alignItems: "center",
             justifyContent: "center",
-            minHeight: "100vh",
+            flexGrow: 1,
+            minHeight: fullPage ? "100vh" : "100%",
+            overflow: "auto",
             p: 4,
-            backgroundColor: "background.default"
+            backgroundColor: fullPage ? PAGE_COLOURS.page : "background.default",
           }}
         >
           <Paper
@@ -67,19 +91,26 @@ class ErrorBoundary extends React.Component {
               p: 4,
               maxWidth: 600,
               width: "100%",
-              textAlign: "center"
+              textAlign: "center",
+              ...(fullPage && { backgroundColor: PAGE_COLOURS.card, color: PAGE_COLOURS.text }),
             }}
           >
             <Box sx={{ mb: 2 }}>
               <BrandLogo size={64} variant="error" />
             </Box>
-            
+
             <Typography variant="h4" gutterBottom color="error">
-              Something went wrong
+              {stale ? "Guaardvark was updated" : "Something went wrong"}
             </Typography>
-            
-            <Typography variant="body1" color="text.secondary" paragraph>
-              The application encountered an unexpected error. This has been logged for investigation.
+
+            <Typography
+              variant="body1"
+              paragraph
+              sx={{ color: fullPage ? PAGE_COLOURS.muted : "text.secondary" }}
+            >
+              {stale
+                ? "This page's code changed while it was open. Reload to load the new version."
+                : "The application encountered an unexpected error. This has been logged for investigation."}
             </Typography>
 
             <Stack direction="row" spacing={2} sx={{ mb: 3 }}>
@@ -90,12 +121,14 @@ class ErrorBoundary extends React.Component {
               >
                 Reload Page
               </Button>
-              <Button
-                variant="outlined"
-                onClick={this.handleReset}
-              >
-                Try Again
-              </Button>
+              {!stale && (
+                <Button
+                  variant="outlined"
+                  onClick={this.handleReset}
+                >
+                  Try Again
+                </Button>
+              )}
             </Stack>
 
             {process.env.NODE_ENV === "development" && this.state.error && (
@@ -105,13 +138,13 @@ class ErrorBoundary extends React.Component {
                   <Typography variant="subtitle2" gutterBottom>
                     Error Details (Development Mode Only):
                   </Typography>
-                  <Typography variant="body2" component="pre" sx={{ 
+                  <Typography variant="body2" component="pre" sx={{
                     whiteSpace: "pre-wrap",
                     wordBreak: "break-word",
                     fontSize: "0.75rem"
                   }}>
                     {this.state.error.toString()}
-                    {this.state.errorInfo.componentStack}
+                    {this.state.errorInfo?.componentStack}
                   </Typography>
                 </CollapsibleAlert>
               </>
@@ -125,4 +158,17 @@ class ErrorBoundary extends React.Component {
   }
 }
 
-export default ErrorBoundary; 
+/**
+ * Catches a render error below it and shows the recovery card.
+ *
+ * @param {object}    props
+ * @param {ReactNode} props.children
+ * @param {unknown}   [props.resetKey]  a shown error clears when this changes; defaults to ErrorResetContext
+ * @param {boolean}   [props.fullPage]  for the boundary outside the theme provider
+ */
+const ErrorBoundary = ({ resetKey, ...props }) => {
+  const inheritedKey = React.useContext(ErrorResetContext);
+  return <ErrorBoundaryCore {...props} resetKey={resetKey ?? inheritedKey} />;
+};
+
+export default ErrorBoundary;

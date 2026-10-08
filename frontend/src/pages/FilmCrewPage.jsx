@@ -140,17 +140,30 @@ const FilmCrewPage = () => {
     noteDispatch(newProd.id, newProd);
   };
 
-  const handleApprove = async () => {
+  const handleApprove = async (options) => {
     if (!selectedProdId) return;
     setApproving(true);
     setError(null);
     try {
-      const result = await approveStoryboard(selectedProdId);
+      const result = await approveStoryboard(selectedProdId, {
+        confirmFlagged: options?.confirmFlagged === true,
+      });
       noteDispatch(selectedProdId, result);
       await fetchDetail(selectedProdId);
       await fetchProductions();
     } catch (err) {
-      setError(formatUiError(err?.response?.data?.error) || 'Failed to approve storyboard');
+      const flagged = err?.response?.data?.flagged_shots;
+      if (Array.isArray(flagged) && flagged.length) {
+        // The curator flagged shots this page had not shown yet: reload the
+        // cards so the next click asks about them.
+        await fetchDetail(selectedProdId, { quiet: true });
+        setError(
+          `${flagged.length} ${flagged.length === 1 ? 'shot was' : 'shots were'} flagged by the curator. ` +
+          'Look at them, then press Approve & Render again.'
+        );
+      } else {
+        setError(formatUiError(err?.response?.data?.error) || 'Failed to approve storyboard');
+      }
     } finally {
       setApproving(false);
     }

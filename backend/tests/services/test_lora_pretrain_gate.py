@@ -165,3 +165,34 @@ def test_is_bare_caption_and_coverage_warns(app):
             stats = caption_coverage_stats(s, paths)
             assert stats["bare_captions"] == 4
             assert stats["rich_captions"] == 0
+
+
+def test_an_unverified_angle_is_left_out_of_the_framing_tally(app):
+    with app.app_context():
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            paths = [_write_image(tmp, f"sample_{i}.png") for i in range(4)]
+            for p in paths:
+                Path(p).with_suffix(".txt").write_text(
+                    "a photo of tok, person, full body, red jacket\n", encoding="utf-8",
+                )
+            s = Subject(name="Hero", kind="character", trigger_word="tok", ref_image_paths=[])
+            db.session.add(s)
+            db.session.commit()
+            for i, p in enumerate(paths):
+                db.session.add(SubjectSample(
+                    subject_id=s.id,
+                    index=i,
+                    image_path=p,
+                    angle="full-body front",
+                    angle_state="unverified" if i == 0 else "verified",
+                    approved=True,
+                    status="done",
+                ))
+            db.session.commit()
+
+            gate = validate_cast_training(s, paths)
+            assert gate["images"] == 4
+            assert gate["angle_unverified"] == 1
+            assert gate["full_body_count"] == 3
+            assert sum(gate["framing"].values()) == 3

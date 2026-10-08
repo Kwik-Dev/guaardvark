@@ -1,0 +1,373 @@
+{
+  "decision": "image_intent",
+  "set_version": 1,
+  "provenance": "synthetic, hand-labelled for this test; not human-rated",
+  "options": [
+    "new_image",
+    "edit_image",
+    "neither"
+  ],
+  "items": [
+    {
+      "id": "img0",
+      "state": {
+        "message": "Draw me a cat wearing a top hat",
+        "has_recent_image": true
+      },
+      "want": "new_image",
+      "tags": [
+        "contrast"
+      ],
+      "note": "'wearing' reads as an edit verb to a keyword check"
+    },
+    {
+      "id": "img1",
+      "state": {
+        "message": "Can you draw a dragon over a castle at night?",
+        "has_recent_image": false
+      },
+      "want": "new_image",
+      "tags": [
+        "plain"
+      ]
+    },
+    {
+      "id": "img2",
+      "state": {
+        "message": "generate an image of a lighthouse at dusk",
+        "has_recent_image": true
+      },
+      "want": "new_image",
+      "tags": [
+        "contrast"
+      ]
+    },
+    {
+      "id": "img3",
+      "state": {
+        "message": "animate this logo spinning slowly",
+        "has_recent_image": true
+      },
+      "want": null,
+      "tags": [
+        "ambiguous"
+      ],
+      "note": "an animation of the logo already in the conversation: new media, or a change to the existing picture"
+    },
+    {
+      "id": "img4",
+      "state": {
+        "message": "make a picture of my dog as an astronaut",
+        "has_recent_image": false
+      },
+      "want": "new_image",
+      "tags": [
+        "plain"
+      ]
+    },
+    {
+      "id": "img5",
+      "state": {
+        "message": "How do I animate a CSS button on hover?",
+        "has_recent_image": true
+      },
+      "want": "neither",
+      "tags": [
+        "how_to",
+        "code"
+      ]
+    },
+    {
+      "id": "img6",
+      "state": {
+        "message": "Can you draw a conclusion from these numbers?",
+        "has_recent_image": true
+      },
+      "want": "neither",
+      "tags": [
+        "idiom"
+      ]
+    },
+    {
+      "id": "img7",
+      "state": {
+        "message": "Can you fix the grammar in this sentence?",
+        "has_recent_image": true
+      },
+      "want": "neither",
+      "tags": [
+        "catch_all"
+      ]
+    },
+    {
+      "id": "img8",
+      "state": {
+        "message": "How do I make an image responsive in CSS?",
+        "has_recent_image": true
+      },
+      "want": "neither",
+      "tags": [
+        "how_to",
+        "code"
+      ]
+    },
+    {
+      "id": "img9",
+      "state": {
+        "message": "Make sure the image path in config.yaml is correct",
+        "has_recent_image": true
+      },
+      "want": "neither",
+      "tags": [
+        "code"
+      ]
+    },
+    {
+      "id": "img10",
+      "state": {
+        "message": "Please add error handling to this function",
+        "has_recent_image": true
+      },
+      "want": "neither",
+      "tags": [
+        "code"
+      ]
+    },
+    {
+      "id": "img11",
+      "state": {
+        "message": "We should draw the line at 50 requests per minute",
+        "has_recent_image": true
+      },
+      "want": "neither",
+      "tags": [
+        "idiom"
+      ]
+    },
+    {
+      "id": "img12",
+      "state": {
+        "message": "make it bigger",
+        "has_recent_image": true
+      },
+      "want": "edit_image",
+      "tags": [
+        "contrast",
+        "pronoun_follow_up",
+        "flag_flipped"
+      ]
+    },
+    {
+      "id": "img13",
+      "state": {
+        "message": "add a red scarf to the horse",
+        "has_recent_image": true
+      },
+      "want": "edit_image",
+      "tags": [
+        "plain"
+      ]
+    },
+    {
+      "id": "img14",
+      "state": {
+        "message": "change the date format to ISO 8601",
+        "has_recent_image": true
+      },
+      "want": "neither",
+      "tags": [
+        "catch_all"
+      ]
+    },
+    {
+      "id": "img15",
+      "state": {
+        "message": "now change the sky in the last image to sunset",
+        "has_recent_image": true
+      },
+      "want": "edit_image",
+      "tags": [
+        "plain"
+      ]
+    },
+    {
+      "id": "img16",
+      "state": {
+        "message": "I'd like you to draw a cat",
+        "has_recent_image": false
+      },
+      "want": "new_image",
+      "tags": [
+        "plain"
+      ],
+      "note": "polite form, verb not first"
+    },
+    {
+      "id": "img17",
+      "state": {
+        "message": "make it bigger",
+        "has_recent_image": false
+      },
+      "want": "neither",
+      "tags": [
+        "contrast",
+        "flag_flipped"
+      ],
+      "note": "same text as img12, but nothing to edit"
+    },
+    {
+      "id": "img18",
+      "state": {
+        "message": "Can you change the background color of the navbar to dark blue in my CSS?",
+        "has_recent_image": true
+      },
+      "want": "neither",
+      "tags": [
+        "code"
+      ]
+    },
+    {
+      "id": "img19",
+      "state": {
+        "message": "Fix the typo in the second paragraph",
+        "has_recent_image": true
+      },
+      "want": "neither",
+      "tags": [
+        "catch_all"
+      ]
+    },
+    {
+      "id": "img20",
+      "state": {
+        "message": "Make a short video of waves rolling onto a beach",
+        "has_recent_image": false
+      },
+      "want": "new_image",
+      "tags": [
+        "plain"
+      ],
+      "note": "video counts as new media"
+    },
+    {
+      "id": "img21",
+      "state": {
+        "message": "Let's draw up a plan for the product launch",
+        "has_recent_image": false
+      },
+      "want": "neither",
+      "tags": [
+        "idiom"
+      ]
+    },
+    {
+      "id": "img22",
+      "state": {
+        "message": "Make the cat in the picture orange instead of grey",
+        "has_recent_image": true
+      },
+      "want": "edit_image",
+      "tags": [
+        "plain"
+      ]
+    },
+    {
+      "id": "img23",
+      "state": {
+        "message": "Now give him a red umbrella",
+        "has_recent_image": true
+      },
+      "want": "edit_image",
+      "tags": [
+        "contrast",
+        "pronoun_follow_up"
+      ]
+    },
+    {
+      "id": "img24",
+      "state": {
+        "message": "Create a logo for a bakery called Rise and Shine",
+        "has_recent_image": true
+      },
+      "want": "new_image",
+      "tags": [
+        "contrast"
+      ]
+    },
+    {
+      "id": "img25",
+      "state": {
+        "message": "Rotate the matrix 90 degrees in this Python function",
+        "has_recent_image": true
+      },
+      "want": "neither",
+      "tags": [
+        "code"
+      ],
+      "note": "'rotate' is an edit verb"
+    },
+    {
+      "id": "img26",
+      "state": {
+        "message": "Turn this paragraph into a bullet list",
+        "has_recent_image": true
+      },
+      "want": "neither",
+      "tags": [
+        "catch_all",
+        "contrast"
+      ],
+      "note": "'turn ... into' is an edit verb"
+    },
+    {
+      "id": "img27",
+      "state": {
+        "message": "Draw attention to the deadline in the email subject line",
+        "has_recent_image": true
+      },
+      "want": "neither",
+      "tags": [
+        "idiom"
+      ]
+    },
+    {
+      "id": "img28",
+      "state": {
+        "message": "Remove the person on the left",
+        "has_recent_image": true
+      },
+      "want": "edit_image",
+      "tags": [
+        "plain",
+        "flag_flipped"
+      ]
+    },
+    {
+      "id": "img29",
+      "state": {
+        "message": "What's in this image?",
+        "has_recent_image": true
+      },
+      "want": "neither",
+      "tags": [
+        "catch_all",
+        "contrast"
+      ],
+      "note": "describe, not edit"
+    },
+    {
+      "id": "img30",
+      "state": {
+        "message": "Remove the person on the left",
+        "has_recent_image": false
+      },
+      "want": "neither",
+      "tags": [
+        "contrast",
+        "flag_flipped",
+        "holdout"
+      ],
+      "note": "same text as img28, but nothing to edit"
+    }
+  ]
+}

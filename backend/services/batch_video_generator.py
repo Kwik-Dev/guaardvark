@@ -202,6 +202,11 @@ class BatchVideoResult:
     error: Optional[str] = None
     metadata: Dict = field(default_factory=dict)
     error_kind: Optional[str] = None  # job_types.RenderErrorKind value
+    # A finished clip that failed a quality check waits here for a person
+    # (video_consistency_metrics.QUALITY_FLAG_OUTCOME): {"state": "needs_review",
+    # "codes", "reasons"}, then "approved" or "rerendered" (with the new batch).
+    # None when no check held it.
+    review: Optional[Dict] = None
 
 
 @dataclass
@@ -228,12 +233,122 @@ class BatchVideoStatus:
     error_kind: Optional[str] = None
 
 
+class VideoRenameError(ValueError):
+    """A clip rename the caller has to change; ``status`` is the HTTP code for it."""
+
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
+
+
+# A rename may not switch a clip between these: the container stays what was rendered.
+_VIDEO_SUFFIXES = (".mp4", ".webm", ".avi", ".mov", ".mkv", ".gif")
+
+
+def _result_get(result, key):
+    """Field of a batch result held as a BatchVideoResult or as its JSON dict."""
+    return result.get(key) if isinstance(result, dict) else getattr(result, key, None)
+
+
+def _result_set(result, key, value) -> None:
+    if isinstance(result, dict):
+        result[key] = value
+    else:
+        setattr(result, key, value)
+
+
 AUTO_RETRY_ENV = "GUAARDVARK_VIDEO_AUTO_RETRY"
 
 
 def auto_retry_enabled() -> bool:
     """Retry a clip whose failure kind is retryable (off by default)."""
     return (os.environ.get(AUTO_RETRY_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def clip_quality_record(
+    video_path: str,
+    *,
+    expected: Optional[Dict] = None,
+    keyframe_path: Optional[str] = None,
+    cinematic: bool = False,
+    vlm_review: bool = False,
+) -> Optional[Dict]:
+    """The quality record of a finished clip, shared by Video Gen batches and
+    music-video cuts. Never raises; None only when the checks cannot be imported.
+
+    The frame checker's flags (``flags``: code and a plain message) mark a clip
+    that finished but is not usable; ``expected`` holds the width, height and
+    frame count the request resolved to. ``cinematic`` with a ``keyframe_path``
+    adds the keyframe colour match; ``vlm_review`` adds the vision review.
+    """
+    try:
+        from backend.services.video_consistency_metrics import (
+            compute_basic_video_stats,
+            inspect_video_frames,
+            colour_match,
+            QUALITY_THRESHOLDS,
+            review_video_quality,
+            not_reviewed,
+        )
+    except Exception as e:
+        logger.debug("quality metrics import failed: %s", e)
+        return None
+
+    quality: Dict = {"flagged": False, "flag_reasons": [], "flags": []}
+    try:
+        quality["stats"] = compute_basic_video_stats(video_path)
+    except Exception as e:
+        logger.debug("basic video stats failed: %s", e)
+
+    try:
+        check = inspect_video_frames(video_path, **(expected or {}))
+        quality["frames"] = {k: check.get(k) for k in (
+            "readable", "width", "height", "frames", "fps", "duration_s", "sampled", "metrics",
+            "observations")}
+        quality["flags"] = check.get("flags") or []
+        if quality["flags"]:
+            quality["flagged"] = True
+            quality["flag_reasons"].extend(f["code"] for f in quality["flags"])
+    except Exception as e:  # noqa: BLE001 — the checker must never fail a render
+        logger.warning("frame quality check skipped for %s: %s", video_path, e)
+
+    if cinematic and keyframe_path and Path(keyframe_path).exists():
+        # The keyframe's palette against the middle frame: a colour match,
+        # not a check of who is in the shot.
+        match = colour_match(
+            keyframe_path, video_path, frame_count=(quality.get("frames") or {}).get("frames"),
+        )
+        quality["colour_match"] = match
+        score = match.get("score")
+        if isinstance(score, (int, float)) and score < QUALITY_THRESHOLDS["colour_match_floor"]["value"]:
+            quality["flagged"] = True
+            quality["flag_reasons"].append(f"low_colour_match:{score:.2f}")
+            quality["flags"].append({
+                "code": "low_colour_match",
+                "message": (f"colours drift from the keyframe: colour match {score:.2f} "
+                            f"at frame {match['frame_index']} of {match['frames']}"),
+            })
+
+    # The VLM review, where the caller enables it. A review that did not
+    # produce a score is recorded as "not reviewed" with its reason, never
+    # left out: a missing review must not read as a clean pass.
+    if vlm_review:
+        try:
+            review = review_video_quality(video_path, annotate=False)
+        except Exception as e:  # noqa: BLE001 — the review must never fail a render
+            logger.warning("VLM video review failed for %s: %s", video_path, e)
+            review = not_reviewed("review_error", detail=str(e))
+        quality["vlm_review"] = review
+        if review.get("status") == "reviewed":
+            qscore = (review.get("review") or {}).get("quality_score")
+            if isinstance(qscore, (int, float)) and qscore < QUALITY_THRESHOLDS["vlm_score_floor"]["value"]:
+                quality["flagged"] = True
+                quality["flag_reasons"].append(f"low_vlm_score:{qscore}")
+                quality["flags"].append({
+                    "code": "low_vlm_score",
+                    "message": f"the vision review scored it {qscore}/10",
+                })
+    return quality
 
 
 class BatchVideoGenerator:
@@ -432,98 +547,157 @@ class BatchVideoGenerator:
     ) -> None:
         """Quality record for a completed clip (never raises / never fails the item).
 
-        ``video_path`` is the clip's absolute path. The frame checker's flags
-        (``quality.flags``: code and a plain message) mark a clip that finished
-        but is not usable; ``expected`` holds the width, height and frame count
-        the request resolved to."""
-        try:
-            from backend.services.video_consistency_metrics import (
-                compute_basic_video_stats,
-                inspect_video_frames,
-                score_identity_preservation,
-                review_video_quality,
-                annotate_asset,
-            )
-        except Exception as e:
-            logger.debug("quality metrics import failed: %s", e)
+        ``video_path`` is the clip's absolute path. See clip_quality_record for
+        what is checked; a flag holds the clip for review (review_hold). The VLM
+        review runs for cinematic and high-consistency runs."""
+        quality = clip_quality_record(
+            video_path, expected=expected, keyframe_path=keyframe_path,
+            cinematic=cinematic, vlm_review=bool(high_consistency or cinematic),
+        )
+        if quality is None:
             return
-
-        quality: Dict = {"flagged": False, "flag_reasons": [], "flags": []}
-        try:
-            quality["stats"] = compute_basic_video_stats(video_path)
-        except Exception as e:
-            logger.debug("basic video stats failed: %s", e)
-
-        try:
-            check = inspect_video_frames(video_path, **(expected or {}))
-            quality["frames"] = {k: check.get(k) for k in (
-                "readable", "width", "height", "frames", "fps", "duration_s", "sampled", "metrics",
-                "observations")}
-            quality["flags"] = check.get("flags") or []
-            if quality["flags"]:
-                quality["flagged"] = True
-                quality["flag_reasons"].extend(f["code"] for f in quality["flags"])
-        except Exception as e:  # noqa: BLE001 — the checker must never fail a render
-            logger.warning("frame quality check skipped for %s: %s", video_path, e)
-
-        if cinematic and keyframe_path and Path(keyframe_path).exists():
-            try:
-                # Sample a mid-frame via identity score against the keyframe still.
-                # score_identity_preservation expects image refs; extract one frame.
-                import subprocess
-                import tempfile
-                with tempfile.TemporaryDirectory() as td:
-                    frame_path = str(Path(td) / "mid.jpg")
-                    subprocess.run(
-                        [
-                            "ffmpeg", "-y", "-loglevel", "error",
-                            "-ss", "0.5", "-i", str(video_path),
-                            "-frames:v", "1", frame_path,
-                        ],
-                        capture_output=True,
-                        timeout=30,
-                    )
-                    if Path(frame_path).exists():
-                        identity = score_identity_preservation(
-                            [keyframe_path], frame_path, method="hist"
-                        )
-                        quality["identity"] = identity
-                        score = float(identity.get("score") or 0)
-                        if score < 0.5:
-                            quality["flagged"] = True
-                            quality["flag_reasons"].append(
-                                f"low_identity_score:{score:.2f}"
-                            )
-                            quality["flags"].append({
-                                "code": "low_identity_score",
-                                "message": f"the clip drifts from its keyframe: identity score {score:.2f}",
-                            })
-            except Exception as e:
-                logger.debug("identity scoring skipped: %s", e)
-
-        # Optional VLM review for high-consistency / cinematic runs (fail-open).
-        if high_consistency or cinematic:
-            try:
-                review = review_video_quality(video_path, annotate=False)
-                quality["vlm_review"] = review
-                if review.get("available"):
-                    qscore = (review.get("review") or {}).get("quality_score")
-                    if isinstance(qscore, (int, float)) and qscore < 5:
-                        quality["flagged"] = True
-                        quality["flag_reasons"].append(f"low_vlm_score:{qscore}")
-                        quality["flags"].append({
-                            "code": "low_vlm_score",
-                            "message": f"the vision review scored it {qscore}/10",
-                        })
-            except Exception as e:
-                logger.debug("VLM video review skipped: %s", e)
+        from backend.services.video_consistency_metrics import annotate_asset, review_hold
 
         batch_result.metadata = dict(batch_result.metadata or {})
         batch_result.metadata["quality"] = quality
+        batch_result.review = review_hold(quality)
         try:
             annotate_asset(video_path, {"quality": quality})
         except Exception:
             pass
+
+    @staticmethod
+    def _held_video_files(status: BatchVideoStatus, batch_dir: Path) -> set:
+        """Absolute paths of the clips whose review state is still "needs review"."""
+        from backend.services.video_consistency_metrics import NEEDS_REVIEW
+        from backend.services.comfyui_video_generator import resolve_generated_video_path
+        return {
+            resolve_generated_video_path(r, batch_dir).resolve()
+            for r in status.results
+            if r.video_path and (r.review or {}).get("state") == NEEDS_REVIEW
+        }
+
+    def _register_videos(self, status: BatchVideoStatus, videos: List[Path], model: Optional[str]) -> None:
+        """Register clips into the Documents/Files system. Never raises."""
+        if not videos:
+            return
+        batch_id = status.batch_id
+        try:
+            from flask import current_app
+            from backend.services.output_registration import ensure_subfolder, register_file
+            try:
+                app = current_app._get_current_object()
+            except RuntimeError:
+                # Worker thread has no request context — grab the singleton
+                # instead of rebuilding the entire Flask app from scratch.
+                from backend.app import get_or_create_app
+                app = get_or_create_app()
+            with app.app_context():
+                try:
+                    ensure_subfolder("Videos", batch_id)
+                    # What the clip is and who made it travels with the
+                    # Document: the editor keeps a soundtrack it knows is
+                    # there, and publishing can carry the attribution the
+                    # model's license asks for.
+                    file_meta = {"source": "batch_generation", "batch_id": batch_id, "model": model}
+                    try:
+                        from backend.services.video_model_registry import VIDEO_MODEL_REGISTRY
+                        lic = (VIDEO_MODEL_REGISTRY.get(model) or {}).get("license") or {}
+                        if lic.get("attribution"):
+                            file_meta["attribution"] = lic["attribution"]
+                    except Exception:
+                        pass
+                    audio_clips = {
+                        Path(r.video_path).name for r in status.results
+                        if r.success and r.video_path and (r.metadata or {}).get("has_audio") == "1"
+                    }
+                    for vid_file in videos:
+                        register_file(
+                            physical_path=str(vid_file),
+                            folder_name="Videos",
+                            subfolder_name=batch_id,
+                            file_metadata={**file_meta, "has_audio": vid_file.name in audio_clips},
+                        )
+                    logger.info(f"Registered batch {batch_id} videos into Documents system")
+                finally:
+                    from backend.models import db as _db
+                    _db.session.remove()
+        except Exception as reg_err:
+            logger.error(f"Failed to register batch videos: {reg_err}")
+
+    def _find_result(self, batch_id: str, item_id: str):
+        """(status, result) for a finished clip, or (status, None) / (None, None)."""
+        status = self.get_batch_status(batch_id)
+        if status is None:
+            return None, None
+        for r in status.results:
+            if r.item_id == item_id:
+                return status, r
+        return status, None
+
+    def approve_item(self, batch_id: str, item_id: str) -> Optional[BatchVideoResult]:
+        """A person has looked at a held clip and keeps it.
+
+        The review state becomes "approved" (the reasons stay on record) and the
+        clip gets the registration it was held back from. None when the batch or
+        clip is unknown; a clip that was never held is returned unchanged.
+        """
+        from backend.services.video_consistency_metrics import NEEDS_REVIEW
+        status, result = self._find_result(batch_id, item_id)
+        if result is None:
+            return None
+        if (result.review or {}).get("state") != NEEDS_REVIEW:
+            return result
+        result.review = {**result.review, "state": "approved",
+                         "approved_at": datetime.now().isoformat()}
+        self._save_metadata(status)
+        batch_dir = Path(status.output_dir or self._get_batch_dir(batch_id))
+        if result.video_path:
+            from backend.services.comfyui_video_generator import resolve_generated_video_path
+            clip = resolve_generated_video_path(result, batch_dir)
+            if clip.is_file():
+                model = ((status.retry_data or {}).get("params") or {}).get("model")
+                self._register_videos(status, [clip], model)
+        return result
+
+    def rerender_item(self, batch_id: str, item_id: str) -> Optional[BatchVideoStatus]:
+        """Render one clip again as a new batch, with the batch's saved settings
+        and a fresh seed, and mark the original "rerendered". The one-click
+        re-render a held clip offers; nothing calls it on its own.
+
+        Raises ValueError when the batch kept no settings to render from.
+        Returns None when the batch or clip is unknown.
+        """
+        status, result = self._find_result(batch_id, item_id)
+        if result is None:
+            return None
+        rd = status.retry_data or {}
+        ids = list(rd.get("item_ids") or [])
+        if item_id not in ids:
+            raise ValueError("this batch did not keep the settings to re-render one clip")
+        index = ids.index(item_id)
+        params = dict(rd.get("params") or {})
+        params["seed"] = None  # the same seed would render the same clip
+        params["metadata"] = {**dict(params.get("metadata") or {}),
+                              "rerender_of": {"batch_id": batch_id, "item_id": item_id}}
+        if rd.get("mode") == "image":
+            image_paths = rd.get("image_paths") or []
+            if index >= len(image_paths):
+                raise ValueError("this batch did not keep the image for that clip")
+            prompt = rd.get("prompt") or ""
+            if prompt:
+                params["prompt"] = prompt
+            new_status = self.start_batch_from_images(image_paths=[image_paths[index]], **params)
+        else:
+            prompts = rd.get("prompts") or []
+            if index >= len(prompts):
+                raise ValueError("this batch did not keep the prompt for that clip")
+            new_status = self.start_batch_from_prompts(prompts=[prompts[index]], **params)
+        result.review = {**(result.review or {}), "state": "rerendered",
+                         "rerender_batch_id": new_status.batch_id,
+                         "rerendered_at": datetime.now().isoformat()}
+        self._save_metadata(status)
+        return new_status
 
     @staticmethod
     def _expected_output(gen_request: VideoGenerationRequest) -> Dict:
@@ -848,7 +1022,11 @@ class BatchVideoGenerator:
         # until the deadline; a capacity refusal is terminal. Eviction belongs to
         # gpu_session once it has won the slot — this loop never reclaims.
         from backend.services.gpu_resource_policy import gpu_session, vram_probe_snapshot
-        from backend.services.job_operation_gate import GpuBusyError, GpuCapacityError
+        from backend.services.job_operation_gate import (
+            GpuBusyError,
+            GpuCapacityError,
+            gpu_wait_message,
+        )
         from backend.services.job_types import JobKind
         from backend.services.video_model_registry import vram_mb_for_model
 
@@ -870,6 +1048,7 @@ class BatchVideoGenerator:
         backoff_s = 2.0
         deadline = time.time() + admit_deadline_s
         need_mb = int(vram_mb) + 1024
+        last_refusal: Optional[BaseException] = None
 
         while True:
             if cancel_event and cancel_event.is_set():
@@ -882,11 +1061,7 @@ class BatchVideoGenerator:
                 return
 
             snap = vram_probe_snapshot()
-            wait_msg = (
-                f"Waiting for VRAM — "
-                f"{(snap.get('free_mb') or 0) / 1024:.1f}GB free, "
-                f"need ~{need_mb / 1024:.1f}GB"
-            )
+            wait_msg = gpu_wait_message(last_refusal, snap.get("free_mb"), need_mb)
             status.status = status.status if status.status in ("running", "queued", "pending") else "queued"
             if status.status == "pending":
                 status.status = "queued"
@@ -933,6 +1108,7 @@ class BatchVideoGenerator:
                 )
                 return
             except GpuBusyError as e:
+                last_refusal = e
                 remaining = deadline - time.time()
                 if remaining <= 0:
                     status.status = "error"
@@ -1118,6 +1294,8 @@ class BatchVideoGenerator:
                     try:
                         meta = dict(item.metadata or {})
                         meta.setdefault("item_id", item.id)
+                        # The ComfyUI progress bridge tags the clip's video_render events with it.
+                        meta.setdefault("batch_id", batch_request.batch_id)
                         meta["batch_controlled"] = True
                         if cast_lora_paths or cast_keyframe_image or getattr(batch_request, "subject_ids", None):
                             meta["cast"] = True
@@ -1392,54 +1570,16 @@ class BatchVideoGenerator:
             status.end_time = datetime.now()
             self._set_stage(status, "register" if status.completed_videos > 0 else "done")
 
-            # Register videos into Documents/Files system
+            # Register videos into Documents/Files system. A clip held for review
+            # waits: approve_item registers it once a person has looked.
             if status.completed_videos > 0:
-                try:
-                    from flask import current_app
-                    from backend.services.output_registration import ensure_subfolder, register_file
-                    try:
-                        app = current_app._get_current_object()
-                    except RuntimeError:
-                        # Worker thread has no request context — grab the singleton
-                        # instead of rebuilding the entire Flask app from scratch.
-                        from backend.app import get_or_create_app
-                        app = get_or_create_app()
-                    with app.app_context():
-                        try:
-                            batch_id = batch_request.batch_id
-                            ensure_subfolder("Videos", batch_id)
-                            batch_dir = Path(batch_request.output_dir)
-                            # What the clip is and who made it travels with the
-                            # Document: the editor keeps a soundtrack it knows is
-                            # there, and publishing can carry the attribution the
-                            # model's license asks for.
-                            file_meta = {"source": "batch_generation", "batch_id": batch_id,
-                                         "model": batch_request.model}
-                            try:
-                                from backend.services.video_model_registry import VIDEO_MODEL_REGISTRY
-                                lic = (VIDEO_MODEL_REGISTRY.get(batch_request.model) or {}).get("license") or {}
-                                if lic.get("attribution"):
-                                    file_meta["attribution"] = lic["attribution"]
-                            except Exception:
-                                pass
-                            audio_clips = {
-                                Path(r.video_path).name for r in status.results
-                                if r.success and r.video_path and (r.metadata or {}).get("has_audio") == "1"
-                            }
-                            # Register all video files found in the batch directory
-                            for vid_file in sorted(batch_dir.rglob("*.mp4")):
-                                register_file(
-                                    physical_path=str(vid_file),
-                                    folder_name="Videos",
-                                    subfolder_name=batch_id,
-                                    file_metadata={**file_meta, "has_audio": vid_file.name in audio_clips},
-                                )
-                            logger.info(f"Registered batch {batch_id} videos into Documents system")
-                        finally:
-                            from backend.models import db as _db
-                            _db.session.remove()
-                except Exception as reg_err:
-                    logger.error(f"Failed to register batch videos: {reg_err}")
+                batch_dir = Path(batch_request.output_dir)
+                held = self._held_video_files(status, batch_dir)
+                videos = [v for v in sorted(batch_dir.rglob("*.mp4")) if v.resolve() not in held]
+                if held:
+                    logger.info("Batch %s: %d clip(s) held for review, not registered yet",
+                                batch_request.batch_id, len(held))
+                self._register_videos(status, videos, batch_request.model)
 
             self._set_stage(status, "done")
 
@@ -1621,10 +1761,13 @@ class BatchVideoGenerator:
                 # Exact control-panel snapshot for "Adjust & Retry" (restore the UI verbatim).
                 "ui_config": params.get("ui_config"),
             }
+            # item_ids is index-paired with prompts / image_paths, so one clip
+            # can be rendered again on its own (rerender_item).
             if is_image_mode:
                 status.retry_data = {
                     "mode": "image",
                     "image_paths": image_paths_list,
+                    "item_ids": [i.id for i in items if getattr(i, "image_path", None)],
                     "prompt": prompts_list[0] if prompts_list else "",
                     "params": retry_params,
                 }
@@ -1632,6 +1775,7 @@ class BatchVideoGenerator:
                 status.retry_data = {
                     "mode": "text",
                     "prompts": prompts_list,
+                    "item_ids": [i.id for i in items],
                     "params": retry_params,
                 }
         except Exception:
@@ -1915,6 +2059,9 @@ class BatchVideoGenerator:
             "metadata": metadata,
             "display_name": metadata.get("display_name"),
             "is_running": is_running,
+            "stage": getattr(status, "stage", None),
+            "progress_pct": getattr(status, "progress_pct", None),
+            "current_item": getattr(status, "current_item", None),
         }
 
     def cancel_all_active(self, reason: str = "Cancelled by system shutdown") -> List[str]:
@@ -2101,18 +2248,247 @@ class BatchVideoGenerator:
         batch_dir = self._get_batch_dir(batch_id)
         if not batch_dir.exists():
             return False
-        metadata_file = batch_dir / "batch_metadata.json"
+
+        def _edit(_results, metadata):
+            metadata["display_name"] = new_name
+            return True
+
         try:
-            if metadata_file.exists():
-                with open(metadata_file, "r") as f:
-                    data = json.load(f)
-                data.setdefault("metadata", {})["display_name"] = new_name
-                with open(metadata_file, "w") as f:
-                    json.dump(data, f, indent=2)
+            self._edit_batch_record(batch_id, _edit)
             return True
         except Exception as e:  # pragma: no cover
             logger.error(f"Failed to rename batch {batch_id}: {e}")
             return False
+
+    def _edit_batch_record(self, batch_id: str, edit) -> bool:
+        """Apply ``edit(results, metadata) -> changed`` to a batch's record.
+
+        The in-memory record is what /status serves and what every later
+        _save_metadata writes back, so a batch held in memory is edited there
+        (under batch_lock) and then saved; a batch known only from disk has its
+        batch_metadata.json edited. ``results`` holds BatchVideoResult objects
+        in the first case and dicts in the second. Returns ``changed``.
+        """
+        with self.batch_lock:
+            status = self.active_batches.get(batch_id)
+            if status is not None:
+                if status.metadata is None:
+                    status.metadata = {}
+                changed = bool(edit(status.results, status.metadata))
+        if status is not None:
+            if changed:
+                self._save_metadata(status)
+            return changed
+        metadata_file = self._get_batch_dir(batch_id) / "batch_metadata.json"
+        if not metadata_file.exists():
+            return False
+        with open(metadata_file, "r") as f:
+            data = json.load(f)
+        if not isinstance(data.get("metadata"), dict):
+            data["metadata"] = {}
+        changed = bool(edit(data.setdefault("results", []), data["metadata"]))
+        if changed:
+            with open(metadata_file, "w") as f:
+                json.dump(data, f, indent=2)
+        return changed
+
+    @staticmethod
+    def _points_at(path_value, batch_dir: Path, target: Path) -> bool:
+        """Whether a result path (relative to the batch dir, or absolute) is ``target``."""
+        if not path_value:
+            return False
+        p = Path(path_value)
+        if not p.is_absolute():
+            p = batch_dir / p
+        return os.path.abspath(p) == os.path.abspath(target)
+
+    def delete_video(self, batch_id: str, video_rel: str) -> bool:
+        """Delete one clip and clear it from the batch record. False when absent.
+
+        Raises PathEscapesRoot for a path outside the batch directory.
+        """
+        batch_dir = self._get_batch_dir(batch_id)
+        target = contained(batch_dir, video_rel)
+        if not target.is_file():
+            return False
+        target.unlink()
+
+        def _edit(results, _metadata):
+            changed = False
+            for r in results:
+                if self._points_at(_result_get(r, "video_path"), batch_dir, target):
+                    _result_set(r, "video_path", None)
+                    changed = True
+            return changed
+
+        try:
+            self._edit_batch_record(batch_id, _edit)
+        except Exception as e:
+            logger.warning(f"Deleted {target.name} but could not update batch {batch_id}: {e}")
+        return True
+
+    @staticmethod
+    def _clip_rename_target(current: str, requested: str) -> str:
+        """The file name a clip rename writes; the clip keeps its extension.
+
+        Raises VideoRenameError for an empty name, a path, a different video
+        extension, or a name with no usable characters.
+        """
+        from werkzeug.utils import secure_filename
+
+        name = (requested or "").strip()
+        if not name:
+            raise VideoRenameError("Enter a new name.")
+        if "/" in name or "\\" in name:
+            raise VideoRenameError("Enter a file name only, without folders.")
+        ext = Path(current).suffix
+        given = Path(name).suffix
+        if ext and given.lower() != ext.lower():
+            if given.lower() in _VIDEO_SUFFIXES:
+                raise VideoRenameError(f"The video stays {ext}; keep that extension.")
+            name += ext
+        safe = secure_filename(name)
+        if not safe or (ext and (safe.lower() == ext.lower() or not safe.lower().endswith(ext.lower()))):
+            raise VideoRenameError("That name has no usable characters; use letters or digits.")
+        return safe
+
+    def rename_video(self, batch_id: str, video_rel: str, new_name: str) -> Dict:
+        """Rename one clip and everything that points at it.
+
+        ``video_rel`` is the clip's path relative to the batch directory, as
+        its result carries it; ``new_name`` is a bare file name, and the clip's
+        extension is added when it is left off. The thumbnail and the
+        .metrics.json sidecar follow the clip, and the batch record (in memory
+        and on disk) and the clip's Documents row are repointed. Returns
+        {"video_path", "thumbnail_path", "old_video_path"}, the result's paths
+        after and before. Raises VideoRenameError (with an HTTP status) for a
+        rename the caller has to change, PathEscapesRoot for a path outside
+        the batch.
+        """
+        batch_dir = self._get_batch_dir(batch_id)
+        src = contained(batch_dir, video_rel)
+        if not src.is_file():
+            raise VideoRenameError("Video not found.", 404)
+        dst = src.with_name(self._clip_rename_target(src.name, new_name))
+        old_rel = os.path.relpath(src, batch_dir)
+        out = {
+            "video_path": os.path.relpath(dst, batch_dir),
+            "thumbnail_path": None,
+            "old_video_path": old_rel,
+        }
+        if dst == src:
+            out["video_path"] = old_rel
+            return out
+        if dst.exists():
+            raise VideoRenameError(f"A file named {dst.name} already exists in this batch.", 409)
+
+        moved = []  # (from, to) renames to undo if the record cannot be saved
+        src.rename(dst)
+        moved.append((src, dst))
+
+        def _edit(results, _metadata):
+            changed = False
+            for r in results:
+                old_value = _result_get(r, "video_path")
+                if not self._points_at(old_value, batch_dir, src):
+                    continue
+                new_value = str(dst) if Path(old_value).is_absolute() else str(Path(old_value).with_name(dst.name))
+                _result_set(r, "video_path", new_value)
+                frames = _result_get(r, "frame_paths") or []
+                if any(self._points_at(fp, batch_dir, src) for fp in frames):
+                    _result_set(r, "frame_paths", [
+                        new_value if self._points_at(fp, batch_dir, src) else fp for fp in frames
+                    ])
+                thumb_value = _result_get(r, "thumbnail_path")
+                if thumb_value:
+                    new_thumb_value = self._move_clip_thumbnail(thumb_value, batch_dir, src, dst, moved)
+                    _result_set(r, "thumbnail_path", new_thumb_value)
+                    thumb_value = new_thumb_value
+                if not changed:
+                    out["video_path"], out["thumbnail_path"] = new_value, thumb_value
+                changed = True
+            return changed
+
+        try:
+            self._edit_batch_record(batch_id, _edit)
+        except Exception:
+            for a, b in reversed(moved):
+                try:
+                    b.rename(a)
+                except OSError as undo_err:
+                    logger.error(f"Could not undo rename {b} -> {a}: {undo_err}")
+            raise
+
+        sidecar = src.with_name(src.name + ".metrics.json")
+        new_sidecar = dst.with_name(dst.name + ".metrics.json")
+        if sidecar.exists() and not new_sidecar.exists():
+            try:
+                sidecar.rename(new_sidecar)
+            except OSError as e:
+                logger.warning(f"Could not move metrics sidecar for {dst.name}: {e}")
+        self._repoint_document(src, dst)
+        return out
+
+    @staticmethod
+    def _move_clip_thumbnail(thumb_value: str, batch_dir: Path, src: Path, dst: Path, moved: list) -> str:
+        """Rename a clip's ``<stem>_thumb.jpg`` to match the new clip name.
+
+        Returns the result's new thumbnail path, or ``thumb_value`` unchanged
+        when the thumbnail has another name, is missing, or the target exists.
+        """
+        thumb = Path(thumb_value)
+        thumb_abs = thumb if thumb.is_absolute() else batch_dir / thumb
+        if thumb.name != f"{src.stem}_thumb.jpg" or not thumb_abs.is_file():
+            return thumb_value
+        new_abs = thumb_abs.with_name(f"{dst.stem}_thumb.jpg")
+        if new_abs.exists():
+            return thumb_value
+        thumb_abs.rename(new_abs)
+        moved.append((thumb_abs, new_abs))
+        return str(new_abs) if thumb.is_absolute() else str(thumb.with_name(new_abs.name))
+
+    @staticmethod
+    def _repoint_document(old_path: Path, new_path: Path) -> None:
+        """Point the clip's Documents row at its new file name. Never raises.
+
+        The row's path is the file's location relative to UPLOAD_DIR, the way
+        output_registration.register_file wrote it.
+        """
+        try:
+            base = os.path.abspath(UPLOAD_DIR)
+            old_db_path = os.path.relpath(os.path.abspath(old_path), base)
+            new_db_path = os.path.relpath(os.path.abspath(new_path), base)
+            if old_db_path.startswith(".."):
+                return
+            from flask import has_app_context
+            from backend.models import Document, db
+            from backend.utils.filename_resolver import resolve_filename
+
+            def _apply():
+                try:
+                    doc = Document.query.filter_by(path=old_db_path).first()
+                    if doc is None:
+                        return
+                    doc.path = new_db_path
+                    doc.filename = resolve_filename(
+                        doc.folder_id, new_path.name, db.session, Document, exclude_id=doc.id,
+                    )
+                    db.session.commit()
+                except Exception:
+                    db.session.rollback()
+                    raise
+
+            if has_app_context():
+                _apply()
+            else:
+                from backend.app import get_or_create_app
+                with get_or_create_app().app_context():
+                    try:
+                        _apply()
+                    finally:
+                        db.session.remove()
+        except Exception as e:
+            logger.error(f"Clip renamed to {new_path.name} but its Documents row was not updated: {e}")
 
     def get_preview_thumbnail(self, batch_id: str) -> Optional[Path]:
         batch_dir = self._get_batch_dir(batch_id)

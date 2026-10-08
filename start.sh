@@ -2357,7 +2357,7 @@ ollama_pull_retry() {
 # get_active_embedding_model() throws. start.sh never pulled anything before.
 # This step: if Ollama is up and is missing a chat and/or embedding model, pull a
 # small hardware-appropriate default of each. Sizes are chosen by RAM + arch:
-#   ≤8GB RAM or aarch64  → chat llama3.2:1b   + embed nomic-embed-text
+#   ≤8GB RAM, or aarch64 without an NVIDIA GPU → chat llama3.2:1b + embed nomic-embed-text
 #   otherwise            → chat gemma4:e2b    + embed nomic-embed-text
 # gemma4:e2b (5.1B, vision) is the standard default because the agentic screen-
 # control system is validated against Gemma4; the small/ARM tier stays text-only
@@ -2401,7 +2401,11 @@ except Exception:
         vader_info "Model tier from hardware_policy: chat=$BOOT_CHAT_MODEL embed=$BOOT_EMBED_MODEL"
     else
         # Fallback: inline RAM/arch math (runs only when policy module not yet importable).
-        if [ "${BOOT_RAM_GB:-0}" -le 8 ] && [ "${BOOT_RAM_GB:-0}" -gt 0 ] || [ "$BOOT_ARCH" = "aarch64" ] || [ "$BOOT_ARCH" = "arm64" ]; then
+        _boot_small_arm=0
+        if { [ "$BOOT_ARCH" = "aarch64" ] || [ "$BOOT_ARCH" = "arm64" ]; } && [ ! -e /proc/driver/nvidia/version ]; then
+            _boot_small_arm=1
+        fi
+        if [ "${BOOT_RAM_GB:-0}" -le 8 ] && [ "${BOOT_RAM_GB:-0}" -gt 0 ] || [ "$_boot_small_arm" -eq 1 ]; then
             BOOT_CHAT_MODEL="${GUAARDVARK_DEFAULT_LLM:-llama3.2:1b}"
             vader_info "Model bootstrap: small-hardware tier (RAM=${BOOT_RAM_GB}GB arch=${BOOT_ARCH})"
         else
@@ -3482,6 +3486,16 @@ else
     vader_info "Run './start.sh --test' for comprehensive health diagnostics."
 fi
 echo ""
+
+# Said once, after the first start that gets this far; the marker keeps it from
+# repeating. Text only: nothing is sent anywhere.
+FIRST_START_MARKER="${HOME}/.guaardvark/first_start_note_shown"
+if [ "$TEST_MODE" -eq 0 ] && [ ! -e "$FIRST_START_MARKER" ]; then
+    echo -e "  ${VADER_GRAY}If Guaardvark is useful to you, a star on GitHub helps other people find it:${VADER_RESET}"
+    echo -e "  ${VADER_WHITE}https://github.com/guaardvark/guaardvark${VADER_RESET}"
+    echo ""
+    mkdir -p "${HOME}/.guaardvark" && : > "$FIRST_START_MARKER" 2>/dev/null || true
+fi
 
 # Advisory GPU-stack verification — never blocks boot.
 # Checks that each venv (backend + isolated audio/video) can run a real CUDA

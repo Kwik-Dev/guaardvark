@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import re
 import time
 from typing import Callable, Optional
 
@@ -22,11 +23,64 @@ from backend.services.social_outreach.reddit_outreach import (
     fetch_subreddit_rules,
     is_self_promo_banned,
     backend_url,
+    bidi_evaluate_json,
     SERVO_SETTLE_SECONDS,
 )
 from backend.services.social_outreach.transitions import WITHDRAWN_BEFORE_SUBMIT
 
 logger = logging.getLogger(__name__)
+
+# Reads the page after the submit: its address, and whether the title is on
+# it (outside any text box, compared with all whitespace removed).
+_POST_CHECK_JS = r"""(() => {
+  const squash = (s) => (s || '').replace(/\s+/g, '');
+  const want = squash(__TITLE__);
+  const SKIP = 'script, style, noscript, template, textarea, [contenteditable]:not([contenteditable="false"])';
+  let text = document.title || '';
+  const walk = (root) => {
+    const w = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => (n.nodeType === 1 && n.matches(SKIP))
+        ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+    });
+    let n;
+    while ((n = w.nextNode())) {
+      if (n.nodeType === 3) text += n.nodeValue;
+      else if (n.shadowRoot) walk(n.shadowRoot);
+    }
+  };
+  walk(document.body || document.documentElement);
+  return JSON.stringify({url: location.href, title_on_page: !!want && squash(text).includes(want)});
+})()"""
+
+
+def _is_post_url(url: str, subreddit: str) -> bool:
+    """True when ``url`` is a post in ``subreddit``: reddit.com/r/<sub>/comments/<id>/."""
+    from urllib.parse import urlparse
+
+    from backend.utils.hosts import host_matches
+
+    parsed = urlparse(url or "")
+    if not host_matches(parsed.hostname, "reddit.com"):
+        return False
+    pattern = rf"/r/{re.escape(subreddit)}/comments/[A-Za-z0-9]+(?:/|$)"
+    return re.match(pattern, parsed.path, re.IGNORECASE) is not None
+
+
+def _post_landed(subreddit: str, title: str) -> tuple[bool, str]:
+    """Read the page after the submit; ``(landed, url)``.
+
+    Landed means the browser is on the new post's page in ``subreddit`` and
+    the title is on it. A failed submit leaves the browser on /submit.
+    """
+    data, why = bidi_evaluate_json(_POST_CHECK_JS.replace("__TITLE__", json.dumps(title.strip())))
+    if data is None:
+        return False, f"page not readable ({why})"
+    url = str(data.get("url") or "")[:300]
+    if not _is_post_url(url, subreddit):
+        return False, url
+    if not data.get("title_on_page"):
+        return False, f"{url} (title not on the page)"
+    return True, url
 
 
 def _human_pause(min_s: float = 0.3, max_s: float = 2.0) -> None:
@@ -77,7 +131,8 @@ def _submit_post_via_servo(
       - Submit button
 
     The agent's see-think-act loop figures out the clicks; we just hand it
-    one task per stage.
+    one task per stage. Success also needs the page check after the submit
+    (``_post_landed``); otherwise the reason is ``submit_unverified: <url>``.
 
     ``before_submit`` is called once the text is typed and immediately before
     the step that publishes; when it returns False nothing is published and
@@ -151,6 +206,13 @@ def _submit_post_via_servo(
     if not submit_result.success:
         return False, f"submit_failed: {submit_result.reason}"
 
+    # The loop's "done" means a click changed the screen. The post counts
+    # only once the browser is on the new post with the title on it.
+    time.sleep(SERVO_SETTLE_SECONDS)
+    landed, where = _post_landed(subreddit, title)
+    logger.info("self_share: post-submit check r/%s: landed=%s %s", subreddit, landed, where)
+    if not landed:
+        return False, f"submit_unverified: {where}"
     return True, "ok"
 
 
@@ -181,6 +243,16 @@ class SelfShareLoop:
             return report
 
         rules = fetch_subreddit_rules(subreddit)
+        if rules is None:
+            report["reason"] = "rules_unreadable"
+            audit.log_outreach_event(
+                platform="reddit", action="abort",
+                target_url=f"{REDDIT_BASE}/r/{subreddit}",
+                status="aborted", abort_reason="rules_unreadable",
+                task_id=task_id,
+            )
+            report["aborted"] += 1
+            return report
         ban_match = is_self_promo_banned("\n".join(rules))
         if ban_match:
             report["reason"] = f"no_self_promo_rule:{ban_match}"

@@ -55,13 +55,16 @@ except ImportError as e:
 
 # Smart Query Routing System
 try:
-    from backend.utils.intent_classifier import classify_user_intent, IntentType, get_intent_context_limit
+    from backend.utils.intent_classifier import (
+        classify_user_intent, IntentType, get_intent_context_limit, offer_web_search,
+    )
     from backend.handlers.database_handler import create_database_handler
     logger.info("Smart routing system imported successfully")
 except ImportError as e:
     classify_user_intent = None
     IntentType = None
     get_intent_context_limit = None
+    offer_web_search = None
     create_database_handler = None
     logger.warning(f"Smart routing system not available: {e}")
 
@@ -506,11 +509,17 @@ class EnhancedChatManager:
         # ENHANCED: More specific file analysis detection to prevent auto-output
         # Only trigger file_analysis if user explicitly asks for analysis
         if any(w in msg_lower for w in ['analyze', 'review', 'examine', 'inspect', 'check']):
-            # Check if there's a file reference in the message
-            has_file_reference = any(w in msg_lower for w in ['file', 'document', 'code', 'upload']) or \
-                                any(ext in msg_lower for ext in ['.jsx', '.js', '.py', '.html', '.css', '.json', '.csv', '.txt', '.md'])
+            # A file named outside any typed link: "data.json" or "code" in
+            # https://example.com/code/data.json is part of the address.
+            outside_links = self._URL_RE.sub(" ", msg_lower)
+            has_file_reference = any(w in outside_links for w in ['file', 'document', 'code', 'upload']) or \
+                                any(ext in outside_links for ext in ['.jsx', '.js', '.py', '.html', '.css', '.json', '.csv', '.txt', '.md'])
             if has_file_reference:
                 return "file_analysis"
+            # "analyze https://example.com" reads the page it names.
+            if self._URL_RE.search(message):
+                return "website_analysis"
+            return "general_chat"
         elif any(w in msg_lower for w in ['what is', 'what does', 'explain', 'describe', 'tell me about']) and \
              any(w in msg_lower for w in ['file', 'document', 'code', 'upload']):
             # For general questions about files, use general_chat instead of auto-analysis
@@ -521,7 +530,9 @@ class EnhancedChatManager:
         elif any(w in msg_lower for w in ['bulk', 'batch', 'many']) and \
              any(w in msg_lower for w in ['csv', 'generate']):
             return "bulk_csv_generation"
-        elif any(w in msg_lower for w in ['website', 'url', 'http']):
+        elif self._URL_RE.search(message):
+            # Only a link the person typed. The words "website" or "url" are not
+            # a link, and a bare name like settings.py reads as a domain.
             return "website_analysis"
         elif any(w in msg_lower for w in ['generate', 'create', 'make']) and \
              any(w in msg_lower for w in ['file', 'csv']):
@@ -1536,8 +1547,32 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
         self._save_message(session_id, 'assistant', response, project_id=project_id)
         return {'response': response, 'session_id': session_id, 'enhanced': True}
 
+    # A greeting or acknowledgement that is the whole message, alone or a few
+    # in a row ("ok, thanks!"). Anchored and length-capped like
+    # unified_chat_engine.is_conversational: a greeting that opens a question
+    # ("hi, what does the handbook say about leave?") is not a simple message.
+    _SIMPLE_MESSAGE_MAX_CHARS = 80
+    _SIMPLE_PHRASES = (
+        r"(?:hello|hi|hey)(?: there)?", r"good (?:morning|afternoon|evening)",
+        r"how are you(?: doing)?(?: today)?", r"how do you do", r"what['’]?s up",
+        r"how(?: is|['’]?s) it going", r"(?:nice|pleased) to meet you", r"good to see you",
+        r"(?:thanks|thank you)(?: (?:so|very) much| a lot)?(?: for (?:your|the|all the) (?:help|time))?",
+        r"that['’]?s great", r"awesome", r"cool", r"nice",
+        r"ok", r"okay", r"yes", r"no", r"sure", r"fine", r"good", r"great", r"please",
+        r"(?:bye|goodbye)(?: for now)?", r"see you(?: later)?", r"(?:catch|talk to) you later",
+        r"have a (?:good|nice|great) (?:day|one|night|evening|weekend)",
+    )
+    _SIMPLE_MESSAGE_RE = re.compile(
+        r"^(?:{p})(?:[\s,.!?]+(?:{p}))*[\s,.!?]*$".format(
+            p="|".join(phrase.replace(" ", r"\s+") for phrase in _SIMPLE_PHRASES))
+    )
+
     def _is_simple_message(self, message: str) -> bool:
-        """Detect if a message is simple and doesn't need RAG processing"""
+        """Detect if a message is simple and doesn't need RAG processing.
+
+        Simple mode skips documents, web search and the intent classifier, so
+        only a message that is nothing but a greeting or acknowledgement
+        qualifies, or a few characters of punctuation."""
         message_lower = message.lower().strip()
 
         # Complex keywords that indicate RAG/analysis is needed
@@ -1554,21 +1589,9 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
         if any(keyword in message_lower for keyword in complex_keywords):
             return False
 
-        # Simple greeting patterns - use word boundaries to prevent substring matches
-        import re
-        simple_patterns = [
-            r'\bhello\b', r'\bhi\b(?!\w)', r'\bhey\b', r'\bgood morning\b', r'\bgood afternoon\b', r'\bgood evening\b',
-            r'\bhow are you\b', r'\bhow do you do\b', r'\bwhats up\b', r'\bhow is it going\b',
-            r'\bnice to meet you\b', r'\bpleased to meet you\b', r'\bgood to see you\b',
-            r'\bthanks\b', r'\bthank you\b', r'\bthats great\b', r'\bawesome\b', r'\bcool\b', r'\bnice\b',
-            r'\bok\b', r'\bokay\b', r'\byes\b', r'\bno\b', r'\bsure\b', r'\bfine\b', r'\bgood\b', r'\bgreat\b',
-            r'\bbye\b', r'\bgoodbye\b', r'\bsee you\b', r'\bcatch you later\b', r'\btalk to you later\b'
-        ]
-
-        # Check for WHOLE WORD matches, not substrings
-        for pattern in simple_patterns:
-            if re.search(pattern, message_lower):
-                return True
+        # The whole message, not a greeting word anywhere in it
+        if len(message_lower) < self._SIMPLE_MESSAGE_MAX_CHARS and self._SIMPLE_MESSAGE_RE.match(message_lower):
+            return True
 
         # Check if message is just punctuation or very short
         if len(message.strip()) <= 10 and not any(char.isalpha() for char in message):
@@ -1578,12 +1601,14 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
 
     # Words and phrases that signal a need for current information. Matched on
     # word boundaries: "now" must not fire on "know", nor "time" on "sometimes".
+    # Words that ask for live information or for a search by name. Generic words
+    # ("what is", "find", "check", "website", "time") are not here: "find my notes",
+    # "check my code" and "is my website config right?" would go out as queries.
     _CURRENT_INFO_INDICATORS = (
         'current', 'today', "today's", 'todays', 'now', 'latest', 'recent',
-        'what is', 'what are', 'check', 'find', 'search',
-        'website', 'site',
-        'temperature', 'weather', 'forecast', 'time', 'date',
-        'duckduckgo', 'ddg', 'google', 'search for', 'look up',
+        'temperature', 'weather', 'forecast',
+        'duckduckgo', 'ddg', 'google', 'search for', 'search the web', 'web search',
+        'search online', 'look up',
         'stock price', 'sports score', 'lottery', 'news about',
     )
     _CURRENT_INFO_RE = re.compile(
@@ -1591,60 +1616,51 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
     )
     # Bare domains ("example.com") without a scheme; scheme URLs are matched separately.
     _DOMAIN_RE = re.compile(r"\b[\w-]+\.(?:com|org|net)\b")
+    _URL_RE = re.compile(r"(?:https?://|www\.)[^\s]+")
+    # The search query is the user's message as typed, so anything longer than
+    # this is a paste or a brief rather than a query and is never sent.
+    _WEB_SEARCH_MAX_CHARS = 300
 
     def _should_use_web_search(self, message: str) -> bool:
-        """CHANGE 3: More permissive detection - trigger on any question or query that might need current info"""
-        message_lower = message.lower().strip()
+        """Return True only for a short message with a link, a domain or a
+        current-info word. Question shape, a trailing "?" and word count are
+        not signals: most chat messages have them, and a search sends the
+        message itself to the search engine. Pass the user's own text, not a
+        copy with the time context prepended, whose date words would match."""
+        if not message or len(message) > self._WEB_SEARCH_MAX_CHARS:
+            logger.debug(f"Web search skipped (message_len={len(message or '')})")
+            return False
 
-        # URL pattern detection
-        import re
-        has_url = bool(re.search(r'(?:https?://|www\.)[^\s]+', message))
-
-        # Check for current information indicators
-        needs_current_info = bool(
-            self._CURRENT_INFO_RE.search(message_lower)
+        message_lower = message.lower()
+        result = bool(
+            self._URL_RE.search(message)
             or self._DOMAIN_RE.search(message_lower)
+            or self._CURRENT_INFO_RE.search(message_lower)
         )
 
-        # Question words that often need current information - EXPANDED
-        question_patterns = [
-            r'what.*(?:is|are|was|were)',
-            r'how.*(?:is|are|was|were|to|do|does|did)',
-            r'when.*(?:did|will|is|was|are)',
-            r'where.*(?:is|are|was|were|can|to)',
-            r'who.*(?:is|are|was|were)',
-            r'why.*(?:is|are|was|were|do|does|did)',
-            r'can you.*(?:find|check|search|get|tell)',
-            r'please.*(?:find|check|search|get|tell)'
-        ]
-
-        has_question_pattern = any(re.search(pattern, message_lower) for pattern in question_patterns)
-
-        # Check if message ends with question mark
-        has_question_mark = message.strip().endswith('?')
-
-        # CHANGE 3: More permissive - trigger on questions, current info indicators, URLs, or longer queries
-        # Also check if web access is enabled - if so, be more aggressive about searching
-        from backend.utils.settings_utils import get_web_access
-        web_access_enabled = get_web_access()
-        
-        # If web access is enabled, be more permissive
-        if web_access_enabled:
-            # Trigger on any question, current info indicator, URL, or query with 4+ words
-            result = has_url or needs_current_info or has_question_pattern or has_question_mark or len(message.split()) >= 4
-        else:
-            # If disabled, only trigger on clear indicators
-            result = has_url or needs_current_info or has_question_pattern
-
         if result:
-            logger.info(
-                f"Web search enabled for message (message_len={len(message)}, "
-                f"web_access_setting={web_access_enabled})"
-            )
+            logger.info(f"Web search enabled for message (message_len={len(message)})")
         else:
-            logger.debug(f"Web search SKIPPED for: '{message[:50]}...'")
+            logger.debug(f"Web search skipped (message_len={len(message)})")
 
         return result
+
+    # _perform_web_search_safe outcomes that sent nothing to the search engine.
+    _WEB_SEARCH_NOT_SENT = ("disabled", "skipped_length")
+
+    def _web_search_offer(self, message: str, intent_type, web_search_result: Optional[Dict[str, Any]],
+                          reply: Optional[str] = None) -> Optional[Dict[str, str]]:
+        """The reply's offer to search the web for ``message`` (offer_web_search),
+        or None. A turn that sent a search offers nothing."""
+        if offer_web_search is None:
+            return None
+        if web_search_result and web_search_result.get("strategy_used") not in self._WEB_SEARCH_NOT_SENT:
+            return None
+        try:
+            return offer_web_search(message, intent_type=intent_type, reply=reply)
+        except Exception as e:
+            logger.debug(f"Web search offer skipped: {e}")
+            return None
 
     def _perform_web_search_safe(self, query: str) -> Dict[str, Any]:
         """BULLETPROOF: Safely perform web search with comprehensive error handling"""
@@ -1672,6 +1688,23 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
                     "error": "Web search disabled in settings",
                     "strategy_used": "disabled",
                     "user_message": "I cannot search the web as web access is disabled in system settings. You can enable it in Settings > Allow LLM Web Search. I'll use my training knowledge to help you instead.",
+                    "fallback_available": True
+                }
+
+            # Checked here as well, so a caller that skips _should_use_web_search
+            # still never sends a long message.
+            if len(query) > self._WEB_SEARCH_MAX_CHARS:
+                logger.info(f"Web search skipped, query too long (query_len={len(query)})")
+                return {
+                    "success": False,
+                    "error": "Message too long to search",
+                    "strategy_used": "skipped_length",
+                    "user_message": (
+                        f"I did not search the web: the message is longer than "
+                        f"{self._WEB_SEARCH_MAX_CHARS} characters, and a search would send all of it "
+                        "to the search engine. Ask a short question to search. "
+                        "I'll use my training knowledge to help you instead."
+                    ),
                     "fallback_available": True
                 }
 
@@ -1873,7 +1906,9 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
                     return self._handle_file_generation_request(session_id, enhanced_message, project_id=project_id)
                 elif detected_intent == "website_analysis":
                     logger.debug("Routing to website analysis handler")
-                    return self._handle_website_analysis_request(session_id, enhanced_message, project_id=project_id)
+                    website_result = self._handle_website_analysis_request(session_id, message, project_id=project_id)
+                    if website_result is not None:
+                        return website_result
                 elif detected_intent == "file_generation":
                     logger.debug("Routing to file generation handler")
                     return self._handle_file_generation_request(session_id, enhanced_message, project_id=project_id)
@@ -2127,14 +2162,20 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
                 "response_time": (datetime.now() - start_time).total_seconds()
             }
 
-    def _handle_website_analysis_request(self, session_id: str, message: str, project_id: int = None) -> Dict[str, Any]:
+    def _handle_website_analysis_request(self, session_id: str, message: str, project_id: int = None) -> Optional[Dict[str, Any]]:
         """Handle website analysis requests using web search API.
 
         The page is fetched only with web access on in Settings (off by
         default), the check the web tools make, and only from a public address
-        (see enhanced_web_search).
+        (see enhanced_web_search). ``message`` is the person's own text, and
+        only a link typed in it (scheme or www.) is read. A message longer than
+        _WEB_SEARCH_MAX_CHARS is a paste rather than a request to read a page:
+        returns None and the turn goes on as ordinary chat.
         """
         start_time = datetime.now()
+        if len(message) > self._WEB_SEARCH_MAX_CHARS:
+            logger.info(f"Website analysis skipped, message too long (message_len={len(message)})")
+            return None
         try:
             # Import web search functionality
             try:
@@ -2147,19 +2188,9 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
                     "response_time": (datetime.now() - start_time).total_seconds()
                 }
 
-            # Extract URL from message
-            import re
-            url_pattern = r'(?:https?://|www\.)[^\s]+'
-            urls = re.findall(url_pattern, message)
-
-            # If no URL found, try to extract domain names
-            if not urls:
-                # Look for domain patterns like "example.com" or "datacenterknowledge.com"
-                domain_pattern = r'\b[a-zA-Z0-9][a-zA-Z0-9\-]*[a-zA-Z0-9]\.[a-zA-Z]{2,}\b'
-                domains = re.findall(domain_pattern, message)
-                if domains:
-                    # Take the first domain found
-                    urls = [domains[0]]
+            # Only a typed link. A bare name is not one: settings.py and
+            # notes.md end in real country-code domains.
+            urls = self._URL_RE.findall(message)
 
             if not urls:
                 return {
@@ -2796,6 +2827,7 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
             )
 
             # SMART ROUTING SYSTEM - Route query before heavy processing
+            intent_type = None
             if classify_user_intent and not simple_mode:
                 try:
                     intent_type, confidence, intent_metadata = classify_user_intent(message)
@@ -2866,12 +2898,6 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
                         intent_metadata['command_fallback'] = True
                         intent_metadata['enhanced_command_processing'] = True
 
-                # Route WEB_SEARCH intent to trigger web search
-                if intent_type == IntentType.WEB_SEARCH:
-                    logger.info(f"Smart Router: WEB_SEARCH intent detected (confidence: {confidence:.2f}) - will trigger web search")
-                    intent_metadata['force_web_search'] = True
-                    intent_metadata['web_search_keywords'] = intent_metadata.get('keywords_found', [])
-
                 # Apply smart context limits based on intent
                 if intent_type and get_intent_context_limit:
                     context_limit = get_intent_context_limit(intent_type)
@@ -2909,9 +2935,10 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
             web_search_used = False
             web_search_context = ""  # Initialize web_search_context
 
-            # Check if web search is needed (from intent classifier OR pattern detection)
-            force_web_search = intent_metadata.get('force_web_search', False) if 'intent_metadata' in locals() else False
-            should_web_search = force_web_search or self._should_use_web_search(enhanced_message)
+            # The search query is the user's message, so only _should_use_web_search
+            # decides. A WEB_SEARCH classification sizes the context and nothing more:
+            # its keywords also fire on ordinary questions, which would send them out.
+            should_web_search = self._should_use_web_search(message)
 
             if not simple_mode and should_web_search:
                 logger.info(f"Web search triggered (message_len={len(message)})")
@@ -2930,8 +2957,10 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
             else:
                 logger.debug(
                     "Web search not triggered "
-                    f"(simple_mode={simple_mode}, should_use={self._should_use_web_search(enhanced_message) if not simple_mode else False})"
+                    f"(simple_mode={simple_mode}, should_use={self._should_use_web_search(message) if not simple_mode else False})"
                 )
+
+            web_search_offer = None if simple_mode else self._web_search_offer(message, intent_type, web_search_result)
 
             # Retrieve relevant RAG context if enabled and not in simple mode
             rag_context = []
@@ -3464,9 +3493,17 @@ You are analyzing code files. When responding to questions about code:
                     simple_mode = True
                     rag_context = []
 
+            # The reply can show the model lacks current facts; ask again with it.
+            if not simple_mode:
+                web_search_offer = self._web_search_offer(message, intent_type, web_search_result,
+                                                          reply=full_response)
+
             # Save assistant response
             logger.info(f"Enhanced chat: Saving assistant response...")
-            self._save_message(session_id, 'assistant', full_response, project_id=project_id)
+            self._save_message(
+                session_id, 'assistant', full_response, project_id=project_id,
+                extra_data={'web_search_offer': web_search_offer} if web_search_offer else None,
+            )
             logger.info(f"Enhanced chat: Assistant response saved")
 
             # Commit database changes
@@ -3556,6 +3593,7 @@ You are analyzing code files. When responding to questions about code:
                 'web_search_used': web_search_used,
                 'web_search_successful': web_search_result.get("success", False) if web_search_result else False,
                 'web_search_strategy': web_search_result.get("strategy_used", "none") if web_search_result else "none",
+                'web_search_offer': web_search_offer,
                 'token_usage': {
                     'estimated_input_tokens': self._estimate_tokens(enhanced_message_with_context),
                     'estimated_output_tokens': self._estimate_tokens(full_response)
@@ -4828,7 +4866,8 @@ def get_chat_history(session_id: str):
                 for key in ('imageUrl', 'imageFileName', 'messageType',
                             'relatedImageUrl', 'imageAnalysis', 'analysisDetails',
                             'generatedImages', 'agentThinkingSteps',
-                            'orchestratorPlan', 'orchestratorPlanId'):
+                            'orchestratorPlan', 'orchestratorPlanId',
+                            'web_search_offer'):
                     if key in msg.extra_data:
                         msg_data[key] = msg.extra_data[key]
                 # Restore tool call steps for unified chat rendering

@@ -20,7 +20,7 @@ Flask-SocketIO==5.3.6
 flask-cors==6.0.0
 alembic==1.20.0
 anthropic>=1.7.0
-python-dotenv==1.2.3
+python-dotenv==1.2.4
 
 # Background Tasks & Caching
 celery==5.6.3
@@ -155,7 +155,7 @@ plyer>=2.1.0           # Native notifications
 faster-whisper>=1.2.1
 
 # Code Intelligence Dependencies
-tree-sitter>=0.22.0
+tree-sitter>=0.26.0
 tree-sitter-python>=0.25.0
 tree-sitter-javascript>=0.25.0
 tree-sitter-typescript>=0.23.2

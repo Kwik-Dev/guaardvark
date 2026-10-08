@@ -321,6 +321,10 @@ const SemanticSearchCard = React.forwardRef(
           </Box>
         }
         {...props}
+        contextMenuActions={[
+          { label: "Reload history", onClick: loadHistory },
+          isSending && { label: "Stop generating", onClick: handleStop },
+        ]}
       >
             {error && (
               <CollapsibleAlert severity="error" sx={{ mb: 1 }}>

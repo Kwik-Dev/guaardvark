@@ -1,77 +1,123 @@
 // frontend/src/pages/AgentsPage.jsx
-// Agents Management Page - View and configure specialized agents
-// Version 1.0
+// The built-in agents as small tiles in four groups. A click opens the editor;
+// a right-click offers Edit, Test, Enable/Disable, Copy id and Reset.
 /* eslint-env browser */
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import PageLayout from "../components/layout/PageLayout";
 import CollapsibleAlertSnackbar from "../components/common/CollapsibleAlertSnackbar";
 import {
+  Alert,
   Box,
-  Typography,
-  Grid,
-  Card,
-  CardContent,
-  CardActions,
-  Button,
-  Chip,
   CircularProgress,
-  Divider,
-  IconButton,
-  Tooltip,
   Dialog,
-  DialogTitle,
-  DialogContent,
   DialogActions,
+  DialogContent,
+  DialogTitle,
   TextField,
-  Switch,
-  FormControlLabel,
-  Paper,
 } from "@mui/material";
 import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import {
   Refresh,
-  Edit,
-  SmartToy,
   PlayArrow,
-  ContentCopy,
+  SmartToyOutlined,
   CheckCircle,
   Error as ErrorIcon,
 } from "@mui/icons-material";
+import { alpha } from "@mui/material/styles";
 import EmptyState from "../components/common/EmptyState";
-import SmartToyOutlined from "@mui/icons-material/SmartToyOutlined";
-import { getAgents, toggleAgent, updateAgent, executeAgent } from "../api/agentsService";
-import { useStatus } from "../contexts/StatusContext";
+import EntityContextMenu from "../components/common/EntityContextMenu";
 import { ContextualLoader } from "../components/common/LoadingStates";
+import { ActionButton, Cluster } from "../components/settings/ui";
+import AgentTile, { agentEdits } from "../components/agents/AgentTile";
+import AgentEditDialog, { ResetAgentDialog } from "../components/agents/AgentEditDialog";
+import useContextMenu from "../hooks/useContextMenu";
+import { executeAgent, getAgents, resetAgent, toggleAgent } from "../api/agentsService";
+import { createPlan } from "../api/orchestratorService";
+import { useStatus } from "../contexts/StatusContext";
+
+const GROUPS = [
+  {
+    key: "create",
+    label: "Create",
+    help: "Agents that write pages, code and data files.",
+    order: ["content_creator", "code_assistant", "data_analyst"],
+  },
+  {
+    key: "web",
+    label: "Web",
+    help: "Agents that search, read and drive web pages. They need web access on in Settings.",
+    order: ["research_agent", "browser_automation"],
+  },
+  {
+    key: "computer",
+    label: "This computer",
+    help: "Agents that act on this machine: the agent's own screen, the desktop and media playback.",
+    order: ["agent_vision_control", "desktop_automation", "media_control"],
+  },
+  {
+    key: "routing",
+    label: "Routing",
+    help: "General Assistant takes what no specialist matches; Task Orchestrator splits a multi-step request across agents.",
+    order: ["general_assistant", "orchestrator_agent"],
+  },
+];
+
+const isOrchestrator = (agent) => agent?.agent_type === "orchestrator";
+
+function groupAgents(agents) {
+  const known = new Set(GROUPS.map((g) => g.key));
+  const groups = GROUPS.map((group) => ({
+    ...group,
+    agents: agents
+      .filter((a) => a.group === group.key)
+      .sort((a, b) => {
+        const ia = group.order.indexOf(a.id);
+        const ib = group.order.indexOf(b.id);
+        return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+      }),
+  }));
+  const other = agents.filter((a) => !known.has(a.group));
+  if (other.length) groups.push({ key: "other", label: "Other", help: "", agents: other });
+  return groups.filter((g) => g.agents.length > 0);
+}
+
+
+// Small fixed-width tiles, like the Interconnector tile on Settings: they wrap
+// instead of stretching across the row when a group has only one or two agents.
+const TILE_GRID = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fill, minmax(200px, 240px))",
+  gap: 1.25,
+};
 
 const AgentsPage = () => {
   const { activeModel, isLoadingModel, modelError } = useStatus();
   const [agents, setAgents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [snackbar, setSnackbar] = useState({ open: false, message: "", severity: "info" });
 
-  const [snackbar, setSnackbar] = useState({
-    open: false,
-    message: "",
-    severity: "info",
-  });
+  const [editingId, setEditingId] = useState(null);
+  const [resetTarget, setResetTarget] = useState(null);
+  const [resetting, setResetting] = useState(false);
 
-  const [editOpen, setEditOpen] = useState(false);
-  const [editingAgent, setEditingAgent] = useState(null);
-  const [editValues, setEditValues] = useState({ max_iterations: 10, system_prompt: "" });
-  const [editSaving, setEditSaving] = useState(false);
-
-  const [testOpen, setTestOpen] = useState(false);
   const [testAgent, setTestAgent] = useState(null);
   const [testMessage, setTestMessage] = useState("");
   const [testContextJson, setTestContextJson] = useState("{}");
   const [testRunning, setTestRunning] = useState(false);
   const [testResult, setTestResult] = useState(null);
 
-  const loadAgents = async () => {
+  const menu = useContextMenu();
+
+  const notify = useCallback((message, severity = "success") => {
+    setSnackbar({ open: true, message, severity });
+  }, []);
+  const notifyError = useCallback((message) => notify(message, "error"), [notify]);
+
+  const loadAgents = useCallback(async () => {
     setLoading(true);
     setError(null);
-
     try {
       const response = await getAgents();
       if (response?.success) {
@@ -84,205 +130,140 @@ const AgentsPage = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     loadAgents();
+  }, [loadAgents]);
+
+  const groups = useMemo(() => groupAgents(agents), [agents]);
+  const editing = agents.find((a) => a.id === editingId) || null;
+
+  const replaceAgent = useCallback((updated) => {
+    if (!updated?.id) return;
+    // The list entry has no tools_detail; keep the shape GET /api/agents returns.
+    const { tools_detail: _detail, ...entry } = updated;
+    setAgents((prev) => prev.map((a) => (a.id === entry.id ? { ...a, ...entry } : a)));
   }, []);
 
-  const groupedAgents = useMemo(() => {
-    const groups = {};
-    for (const a of agents) {
-      const type = a.agent_type || "unknown";
-      if (!groups[type]) groups[type] = [];
-      groups[type].push(a);
-    }
-    return groups;
-  }, [agents]);
+  const handleToggle = useCallback(
+    async (agent) => {
+      try {
+        const res = await toggleAgent(agent.id);
+        if (res?.success) {
+          if (res.agent) replaceAgent(res.agent);
+          else setAgents((prev) => prev.map((a) => (a.id === agent.id ? { ...a, enabled: res.enabled } : a)));
+          notify(`${agent.name} ${res.enabled ? "enabled" : "disabled"}`);
+        } else {
+          notifyError(res?.error || "Toggle failed");
+        }
+      } catch (err) {
+        notifyError(err?.message || "Toggle failed");
+      }
+    },
+    [notify, notifyError, replaceAgent],
+  );
 
-  const copyToClipboard = (text) => {
-    navigator.clipboard.writeText(text);
-    setSnackbar({ open: true, message: "Copied to clipboard", severity: "success" });
-  };
+  const copyId = useCallback(
+    async (agent) => {
+      try {
+        await navigator.clipboard.writeText(agent.id);
+        notify(`Copied ${agent.id}`);
+      } catch (_err) {
+        notifyError("Could not copy to the clipboard");
+      }
+    },
+    [notify, notifyError],
+  );
 
-  const handleToggle = async (agent) => {
+  const confirmReset = async () => {
+    if (!resetTarget) return;
+    setResetting(true);
     try {
-      const res = await toggleAgent(agent.id);
+      const res = await resetAgent(resetTarget.id);
       if (res?.success) {
-        setAgents((prev) =>
-          prev.map((a) => (a.id === agent.id ? { ...a, enabled: res.enabled } : a)),
-        );
-        setSnackbar({
-          open: true,
-          message: `Agent ${agent.name} ${res.enabled ? "enabled" : "disabled"}`,
-          severity: "success",
-        });
+        replaceAgent(res.agent);
+        notify(`${resetTarget.name} reset to default`);
+        setResetTarget(null);
       } else {
-        setSnackbar({ open: true, message: res?.error || "Toggle failed", severity: "error" });
+        notifyError(res?.error || "Reset failed");
       }
     } catch (err) {
-      setSnackbar({ open: true, message: err?.message || "Toggle failed", severity: "error" });
-    }
-  };
-
-  const openEdit = (agent) => {
-    setEditingAgent(agent);
-    setEditValues({
-      max_iterations: agent.max_iterations ?? 10,
-      system_prompt: agent.system_prompt ?? "",
-    });
-    setEditOpen(true);
-  };
-
-  const saveEdit = async () => {
-    if (!editingAgent) return;
-    setEditSaving(true);
-
-    try {
-      const updates = {
-        max_iterations: Number(editValues.max_iterations) || 1,
-        system_prompt: editValues.system_prompt || "",
-      };
-
-      const res = await updateAgent(editingAgent.id, updates);
-      if (res?.success) {
-        setAgents((prev) => prev.map((a) => (a.id === editingAgent.id ? res.agent : a)));
-        setSnackbar({ open: true, message: "Agent updated", severity: "success" });
-        setEditOpen(false);
-      } else {
-        setSnackbar({ open: true, message: res?.error || "Update failed", severity: "error" });
-      }
-    } catch (err) {
-      setSnackbar({ open: true, message: err?.message || "Update failed", severity: "error" });
+      notifyError(err?.message || "Reset failed");
     } finally {
-      setEditSaving(false);
+      setResetting(false);
     }
   };
 
-  const openTest = (agent) => {
+  const openTest = useCallback((agent) => {
     setTestAgent(agent);
     setTestMessage("");
     setTestContextJson("{}");
     setTestResult(null);
-    setTestOpen(true);
-  };
+  }, []);
 
   const runTest = async () => {
     if (!testAgent) return;
-
-    setTestRunning(true);
-    setTestResult(null);
-
     let context = {};
     try {
       context = testContextJson?.trim() ? JSON.parse(testContextJson) : {};
     } catch (_e) {
-      setTestRunning(false);
       setTestResult({ success: false, error: "Context must be valid JSON" });
       return;
     }
-
+    setTestRunning(true);
+    setTestResult(null);
     try {
-      const res = await executeAgent({
-        agent_id: testAgent.id,
-        message: testMessage,
-        context,
-      });
+      // The orchestrator does not run through /agents/execute; a test shows the plan it would make.
+      const res = isOrchestrator(testAgent)
+        ? await createPlan(testMessage, context)
+        : await executeAgent({ agent_id: testAgent.id, message: testMessage, context });
       setTestResult(res);
-
-      if (res?.success) {
-        setSnackbar({ open: true, message: "Agent executed", severity: "success" });
-      } else {
-        setSnackbar({ open: true, message: res?.error || "Agent execution failed", severity: "error" });
-      }
     } catch (err) {
       setTestResult({ success: false, error: err?.message || "Agent execution failed" });
-      setSnackbar({ open: true, message: err?.message || "Agent execution failed", severity: "error" });
     } finally {
       setTestRunning(false);
     }
   };
 
-  const renderAgentCard = (agent) => (
-    <Card
-      key={agent.id}
-      sx={{
-        height: "100%",
-        display: "flex",
-        flexDirection: "column",
-        opacity: agent.enabled ? 1 : 0.65,
-        "&:hover": { boxShadow: 4 },
-      }}
-    >
-      <CardContent sx={{ flexGrow: 1 }}>
-        <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 1 }}>
-          <SmartToy fontSize="small" color="action" />
-          <Typography variant="h6" sx={{ flexGrow: 1 }}>
-            {agent.name}
-          </Typography>
-          <Tooltip title="Copy agent id">
-            <IconButton size="small" onClick={() => copyToClipboard(agent.id)}>
-              <ContentCopy fontSize="small" />
-            </IconButton>
-          </Tooltip>
-        </Box>
+  const testOk = testResult?.success && (isOrchestrator(testAgent) || testResult?.result?.success);
 
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 2, minHeight: 40 }}>
-          {agent.description}
-        </Typography>
-
-        <Divider sx={{ my: 1 }} />
-
-        <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", alignItems: "center", mt: 1 }}>
-          <Chip label={agent.agent_type || "unknown"} size="small" variant="outlined" />
-          <Chip label={`max: ${agent.max_iterations ?? 10}`} size="small" variant="outlined" />
-          {Array.isArray(agent.tools) && agent.tools.slice(0, 6).map((t) => (
-            <Chip key={t} label={t} size="small" />
-          ))}
-          {Array.isArray(agent.tools) && agent.tools.length > 6 && (
-            <Chip label={`+${agent.tools.length - 6} more`} size="small" variant="outlined" />
-          )}
-        </Box>
-
-        <Box sx={{ mt: 2 }}>
-          <FormControlLabel
-            control={<Switch checked={!!agent.enabled} onChange={() => handleToggle(agent)} />}
-            label={agent.enabled ? "Enabled" : "Disabled"}
-          />
-        </Box>
-      </CardContent>
-
-      <CardActions sx={{ justifyContent: "space-between", px: 2, pb: 2 }}>
-        <Button size="small" startIcon={<Edit />} onClick={() => openEdit(agent)} variant="outlined">
-          Edit
-        </Button>
-        <Button size="small" startIcon={<PlayArrow />} onClick={() => openTest(agent)} variant="contained">
-          Test
-        </Button>
-      </CardActions>
-    </Card>
-  );
+  const menuActions = (agent) => {
+    if (!agent) return [];
+    const edits = agentEdits(agent);
+    return [
+      { label: "Edit", onClick: () => setEditingId(agent.id) },
+      { label: "Test", onClick: () => openTest(agent) },
+      { label: agent.enabled ? "Disable" : "Enable", onClick: () => handleToggle(agent) },
+      { label: "Copy id", onClick: () => copyId(agent) },
+      {
+        label: "Reset to default",
+        dividerBefore: true,
+        disabled: edits.length === 0,
+        onClick: () => setResetTarget(agent),
+      },
+    ];
+  };
 
   return (
     <PageLayout
       title="Agents"
       variant="standard"
       actions={
-        <Button size="small" startIcon={<Refresh />} onClick={loadAgents} disabled={loading}>
+        <ActionButton startIcon={<Refresh />} onClick={loadAgents} disabled={loading}>
           Refresh
-        </Button>
+        </ActionButton>
       }
       modelStatus
       activeModel={isLoadingModel ? "Loading..." : modelError ? "Error" : activeModel}
     >
-
       {error && (
         <CollapsibleAlert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>
           {error}
         </CollapsibleAlert>
       )}
 
-      {loading ? (
+      {loading && agents.length === 0 ? (
         <Box sx={{ display: "flex", justifyContent: "center", py: 4 }}>
           <ContextualLoader loading message="Loading agents..." showProgress={false} inline />
         </Box>
@@ -293,58 +274,58 @@ const AgentsPage = () => {
           description="Agents will appear here once configured"
         />
       ) : (
-        <Box sx={{ display: "flex", flexDirection: "column", gap: 3 }}>
-          {Object.entries(groupedAgents).map(([agentType, list]) => (
-            <Paper key={agentType} elevation={0} sx={{ p: 2, border: 1, borderColor: "divider" }}>
-              <Typography variant="h6" sx={{ textTransform: "capitalize", mb: 2 }}>
-                {agentType.replaceAll("_", " ")} ({list.length})
-              </Typography>
-              <Grid container spacing={3}>
-                {list.map((agent) => (
-                  <Grid item xs={12} sm={6} md={4} key={agent.id}>
-                    {renderAgentCard(agent)}
-                  </Grid>
+        <Box sx={{ display: "flex", flexDirection: "column", gap: 2.5 }}>
+          {groups.map((group) => (
+            <Cluster key={group.key} label={group.label} help={group.help || undefined}>
+              <Box sx={TILE_GRID}>
+                {group.agents.map((agent) => (
+                  <AgentTile
+                    key={agent.id}
+                    agent={agent}
+                    onOpen={(a) => setEditingId(a.id)}
+                    onContextMenu={(event, a) => menu.open(event, a)}
+                  />
                 ))}
-              </Grid>
-            </Paper>
+              </Box>
+            </Cluster>
           ))}
         </Box>
       )}
 
-      {/* Edit Dialog */}
-      <Dialog open={editOpen} onClose={() => setEditOpen(false)} maxWidth="md" fullWidth>
-        <DialogTitle>Edit Agent: {editingAgent?.name}</DialogTitle>
-        <DialogContent>
-          <TextField
-            fullWidth
-            label="Max iterations"
-            type="number"
-            value={editValues.max_iterations}
-            onChange={(e) => setEditValues((p) => ({ ...p, max_iterations: e.target.value }))}
-            sx={{ mt: 1, mb: 2 }}
-            inputProps={{ min: 1, max: 50 }}
-          />
-          <TextField
-            fullWidth
-            label="System prompt"
-            value={editValues.system_prompt}
-            onChange={(e) => setEditValues((p) => ({ ...p, system_prompt: e.target.value }))}
-            multiline
-            minRows={8}
-          />
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setEditOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={saveEdit} disabled={editSaving}>
-            {editSaving ? "Saving..." : "Save"}
-          </Button>
-        </DialogActions>
-      </Dialog>
+      <EntityContextMenu
+        anchorPosition={menu.anchorPosition}
+        onClose={menu.close}
+        actions={menuActions(menu.payload)}
+      />
 
-      {/* Test Dialog */}
-      <Dialog open={testOpen} onClose={() => setTestOpen(false)} maxWidth="md" fullWidth>
-        <DialogTitle>Test Agent: {testAgent?.name}</DialogTitle>
+      <AgentEditDialog
+        agent={editing}
+        onClose={() => setEditingId(null)}
+        onSaved={(updated) => {
+          replaceAgent(updated);
+          notify("Agent updated");
+        }}
+        onToggle={handleToggle}
+        onTest={openTest}
+        onError={notifyError}
+      />
+
+      <ResetAgentDialog
+        agent={resetTarget}
+        open={Boolean(resetTarget)}
+        busy={resetting}
+        onConfirm={confirmReset}
+        onClose={() => setResetTarget(null)}
+      />
+
+      <Dialog open={Boolean(testAgent)} onClose={() => setTestAgent(null)} maxWidth="md" fullWidth>
+        <DialogTitle>Test {testAgent?.name}</DialogTitle>
         <DialogContent>
+          {isOrchestrator(testAgent) && (
+            <Alert severity="info" sx={{ mb: 2 }}>
+              Shows the plan the orchestrator makes for this message; the steps are not run.
+            </Alert>
+          )}
           <TextField
             fullWidth
             label="Message"
@@ -361,46 +342,52 @@ const AgentsPage = () => {
             onChange={(e) => setTestContextJson(e.target.value)}
             sx={{ mb: 2 }}
             multiline
-            minRows={4}
+            minRows={3}
           />
-
           {testResult && (
-            <Box sx={{ mt: 2 }}>
+            <Box sx={{ mt: 1 }}>
               <CollapsibleAlert
-                severity={testResult?.success && testResult?.result?.success ? "success" : "error"}
-                icon={testResult?.success && testResult?.result?.success ? <CheckCircle /> : <ErrorIcon />}
+                severity={testOk ? "success" : "error"}
+                icon={testOk ? <CheckCircle /> : <ErrorIcon />}
                 sx={{ mb: 2 }}
               >
-                {testResult?.success && testResult?.result?.success
-                  ? `Execution complete (${testResult?.result?.iterations || 0} iterations)`
+                {testOk
+                  ? isOrchestrator(testAgent)
+                    ? "Plan made"
+                    : `Execution complete (${testResult?.result?.iterations || 0} iterations)`
                   : testResult?.error || testResult?.result?.error || "Execution failed"}
               </CollapsibleAlert>
-              <Paper
-                sx={{
+              <Box
+                component="pre"
+                sx={(theme) => ({
+                  m: 0,
                   p: 2,
-                  bgcolor: "grey.100",
+                  borderRadius: 1,
+                  bgcolor: theme.palette.action.hover,
+                  color: "text.primary",
+                  border: `1px solid ${alpha(theme.palette.text.primary, 0.08)}`,
                   fontFamily: "monospace",
                   fontSize: 12,
                   whiteSpace: "pre-wrap",
                   maxHeight: 300,
                   overflow: "auto",
-                }}
+                })}
               >
                 {JSON.stringify(testResult, null, 2)}
-              </Paper>
+              </Box>
             </Box>
           )}
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setTestOpen(false)}>Close</Button>
-          <Button
-            variant="contained"
-            startIcon={testRunning ? <CircularProgress size={16} /> : <PlayArrow />}
+          <ActionButton onClick={() => setTestAgent(null)}>Close</ActionButton>
+          <ActionButton
+            kind="primary"
+            startIcon={testRunning ? <CircularProgress size={14} color="inherit" /> : <PlayArrow />}
             onClick={runTest}
             disabled={testRunning || !testMessage.trim()}
           >
             Run
-          </Button>
+          </ActionButton>
         </DialogActions>
       </Dialog>
 

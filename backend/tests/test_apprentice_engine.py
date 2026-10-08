@@ -113,6 +113,97 @@ class TestPreconditionCheck:
         result = engine._check_precondition("Login form visible")
         assert result["matches"] is False
 
+    @staticmethod
+    def _reply_with(mock_analyzer, text):
+        vision_mock = MagicMock()
+        vision_mock.success = True
+        vision_mock.description = "Dashboard showing"
+        mock_analyzer.analyze.return_value = vision_mock
+
+        text_mock = MagicMock()
+        text_mock.success = True
+        text_mock.description = text
+        mock_analyzer.text_query.return_value = text_mock
+
+    def test_fallback_matches_false(self, engine, mock_analyzer):
+        # Not valid JSON, and contains the word "matches".
+        self._reply_with(mock_analyzer, "matches: false, the dashboard is showing")
+
+        result = engine._check_precondition("Login form visible")
+        assert result["matches"] is False
+        assert result["checked"] is True
+
+    def test_fenced_json_false(self, engine, mock_analyzer):
+        self._reply_with(
+            mock_analyzer,
+            '```json\n{"matches": false, "description": "Dashboard, not login form"}\n```',
+        )
+
+        result = engine._check_precondition("Login form visible")
+        assert result["matches"] is False
+        assert result["checked"] is True
+
+    def test_string_false(self, engine, mock_analyzer):
+        self._reply_with(mock_analyzer, '{"matches": "false", "description": "Dashboard showing"}')
+
+        result = engine._check_precondition("Login form visible")
+        assert result["matches"] is False
+        assert result["checked"] is True
+
+    def test_missing_key(self, engine, mock_analyzer):
+        self._reply_with(mock_analyzer, '{"description": "The screen matches the login form"}')
+
+        result = engine._check_precondition("Login form visible")
+        assert result["matches"] is False
+        assert result["checked"] is False
+
+    def test_does_not_match_prose(self, engine, mock_analyzer):
+        self._reply_with(mock_analyzer, "The screen does not match: it shows a dashboard, not the login form.")
+
+        result = engine._check_precondition("Login form visible")
+        assert result["matches"] is False
+        assert result["checked"] is True
+
+    def test_plain_yes_is_match(self, engine, mock_analyzer):
+        self._reply_with(mock_analyzer, "Yes, the login form is visible.")
+
+        result = engine._check_precondition("Login form visible")
+        assert result["matches"] is True
+        assert result["checked"] is True
+
+    def test_vision_failure_fails_closed(self, engine, mock_analyzer):
+        vision_mock = MagicMock()
+        vision_mock.success = False
+        vision_mock.error = "vision model not loaded"
+        mock_analyzer.analyze.return_value = vision_mock
+
+        result = engine._check_precondition("Login form visible")
+        assert result["matches"] is False
+        assert result["checked"] is False
+        mock_analyzer.text_query.assert_not_called()
+
+    def test_text_failure_fails_closed(self, engine, mock_analyzer):
+        vision_mock = MagicMock()
+        vision_mock.success = True
+        vision_mock.description = "Login form with fields"
+        mock_analyzer.analyze.return_value = vision_mock
+
+        text_mock = MagicMock()
+        text_mock.success = False
+        text_mock.error = "text model not loaded"
+        mock_analyzer.text_query.return_value = text_mock
+
+        result = engine._check_precondition("Login form visible")
+        assert result["matches"] is False
+        assert result["checked"] is False
+
+    def test_exception_fails_closed(self, engine, mock_screen):
+        mock_screen.capture.side_effect = RuntimeError("no display")
+
+        result = engine._check_precondition("Login form visible")
+        assert result["matches"] is False
+        assert result["checked"] is False
+
 
 class TestStepExecution:
     def test_execute_click_step(self, engine, demo_steps, mock_servo):
@@ -176,3 +267,103 @@ class TestAttemptResult:
         )
         assert result.success is True
         assert result.steps_completed == 5
+
+
+def _vision_reply(mock_analyzer, text, success=True):
+    reply = MagicMock()
+    reply.success = success
+    reply.description = text
+    reply.error = None if success else "vision model not loaded"
+    mock_analyzer.analyze.return_value = reply
+
+
+class TestSupervisedReplay:
+    @pytest.fixture
+    def click_steps(self):
+        # No precondition, so the only vision call is the confidence estimate.
+        return [
+            {"step_index": 0, "action_type": "click", "target_description": "the Save button",
+             "element_context": "", "precondition": ""},
+            {"step_index": 1, "action_type": "click", "target_description": "the Close button",
+             "element_context": "", "precondition": ""},
+        ]
+
+    def test_low_confidence_without_confirmation_aborts(self, engine, mock_analyzer, mock_servo,
+                                                         click_steps, monkeypatch):
+        monkeypatch.setattr("backend.services.apprentice_engine.QUESTION_TIMEOUT", 0.05)
+        _vision_reply(mock_analyzer, '{"visible": false, "confidence": 0.1}')
+        emitted = []
+
+        result = engine.execute(click_steps, autonomy_level="supervised",
+                                emit_fn=lambda name, data: emitted.append(name))
+
+        assert result.success is False
+        assert result.failure_reason == "Timeout waiting for confirmation at step 0"
+        assert result.steps_completed == 0
+        assert result.step_results == []
+        assert emitted == ["step_preview"]
+        mock_servo.click_target.assert_not_called()
+
+    def test_low_confidence_with_confirmation_runs(self, engine, mock_analyzer, mock_servo, click_steps):
+        _vision_reply(mock_analyzer, '{"visible": false, "confidence": 0.1}')
+        engine._wait_for_confirmation = MagicMock(return_value={"confirmed": True})
+
+        result = engine.execute(click_steps, autonomy_level="supervised")
+
+        assert result.success is True
+        assert engine._wait_for_confirmation.call_count == 2
+        assert mock_servo.click_target.call_count == 2
+
+    def test_high_confidence_runs_without_asking(self, engine, mock_analyzer, mock_servo, click_steps):
+        _vision_reply(mock_analyzer, '{"visible": true, "confidence": 0.9}')
+        engine._wait_for_confirmation = MagicMock(return_value=None)
+
+        result = engine.execute(click_steps, autonomy_level="supervised")
+
+        assert result.success is True
+        engine._wait_for_confirmation.assert_not_called()
+        assert mock_servo.click_target.call_count == 2
+
+    def test_not_visible_with_high_confidence_asks(self, engine, mock_analyzer, mock_servo, click_steps):
+        _vision_reply(mock_analyzer, '{"visible": false, "confidence": 0.9}')
+        engine._wait_for_confirmation = MagicMock(return_value=None)
+
+        result = engine.execute(click_steps, autonomy_level="supervised")
+
+        assert result.success is False
+        engine._wait_for_confirmation.assert_called_once()
+        mock_servo.click_target.assert_not_called()
+
+
+class TestConfidenceEstimate:
+    STEP = {"step_index": 0, "action_type": "click", "target_description": "the Save button"}
+
+    @pytest.mark.parametrize("reply, expected", [
+        ('{"visible": false, "confidence": 0.9}', 0.0),
+        ("The Save button is not visible on this screen.", 0.0),
+        ("Yes, it is visible.", 0.0),
+        ('```json\n{"visible": true, "confidence": 0.85}\n```', 0.85),
+        ('Here you go: {"visible": "true", "confidence": "0.7"}', 0.7),
+        ('{"visible": "false", "confidence": 0.9}', 0.0),
+        ('{"visible": true, "confidence": 0.9,}', 0.9),
+        ('{"confidence": 0.9}', 0.0),
+        ('{"visible": true}', 0.0),
+        ('{"visible": true, "confidence": "high"}', 0.0),
+        ('{"visible": true, "confidence": 7}', 1.0),
+        ("asdf ;; <garbage>", 0.0),
+        ("", 0.0),
+    ])
+    def test_reply_is_read_fail_closed(self, engine, mock_analyzer, reply, expected):
+        _vision_reply(mock_analyzer, reply)
+
+        assert engine._estimate_confidence(self.STEP) == pytest.approx(expected)
+
+    def test_analyzer_failure_scores_zero(self, engine, mock_analyzer):
+        _vision_reply(mock_analyzer, "", success=False)
+
+        assert engine._estimate_confidence(self.STEP) == 0.0
+
+    def test_capture_error_scores_zero(self, engine, mock_screen):
+        mock_screen.capture.side_effect = RuntimeError("no display")
+
+        assert engine._estimate_confidence(self.STEP) == 0.0

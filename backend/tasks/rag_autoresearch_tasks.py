@@ -76,7 +76,8 @@ def create_autoresearch_tasks(celery_app):
             from backend.services.rag_autoresearch_service import get_autoresearch_service
             svc = get_autoresearch_service()
             if svc.eval_harness.is_stale():
-                logger.info("Eval set is stale after indexing — will regenerate on next run")
+                logger.info("Eval set looks stale after indexing; runs do not regenerate it. "
+                            "Regenerate eval pairs on the Autoresearch page.")
         except Exception as e:
             logger.error(f"Post-index eval check failed: {e}")
 

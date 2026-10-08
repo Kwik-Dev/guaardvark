@@ -20,6 +20,11 @@ from typing import Dict, List, Any, Optional, Callable
 logger = logging.getLogger(__name__)
 
 from backend.utils.display_paths import display_params
+# Shared with AgentExecutor, which refuses these calls instead of showing a card.
+from backend.services.agent_tools import (
+    consent_reference as _consent_reference,
+    tool_needs_approval_card as _tool_needs_approval_card,
+)
 from backend.utils.text_cut import cut_on_whitespace
 from backend.utils.inline_reasoning import (
     InlineReasoningStream, REASONING, RETRACT, VISIBLE, split_inline_reasoning,
@@ -62,6 +67,48 @@ _ANSWER_NOT_TOOL_LIST_NUDGE = (
 _TOOL_LIST_ECHO_FALLBACK_TEXT = (
     "The model echoed its tool list instead of answering. Please try again, or turn "
     "thinking off with /thinking."
+)
+
+# A reply that says a search is under way, or will report back, when no tool ran
+# in it. Nothing keeps running once a reply ends, so the claim is false.
+_SEARCH_IN_PROGRESS_RE = re.compile(
+    r"\bi(?: am|'m|’m) (?:now |currently |still )?"
+    r"(?:searching|scanning|checking|looking through|going through|combing through)\b"
+    r"|\bi(?:'ll|’ll| will) (?:let you know|report back|get back to you)\b"
+    r"[^.!?\n]{0,80}\b(?:find|found|result|search)",
+    re.IGNORECASE,
+)
+# A reply that says a search ran. True only if a tool ran this turn or in the
+# reply before (a recap of earlier results); see _claims_unrun_search.
+_SEARCH_DONE_RE = re.compile(
+    r"\bi(?: have|'ve|’ve) (?:now )?(?:completed|finished|done|performed|run|ran) "
+    r"(?:the|a|my) (?:search|scan|check|lookup)\b"
+    r"|\bi (?:searched|scanned|looked through|went through) (?:your|the|all)\b",
+    re.IGNORECASE,
+)
+_CLAIMED_SEARCH_NUDGE = (
+    "Your reply says a search is running or has run, but no tool ran in this reply, and "
+    "nothing keeps running after a reply ends. If the user wants the search, call the tool "
+    "now: find_records for Guaardvark's projects, clients, documents and other records, "
+    "find_files for files on this computer. Otherwise tell the user plainly that you have "
+    "not searched."
+)
+# Added when the repeat claims it again, or when this turn had no tools to call.
+_CLAIMED_SEARCH_NOTE = "Note: no search ran for this reply."
+# A message asking to find or look something up. Answered with no tool call,
+# the model reported a match in a document that does not exist.
+_LOOKUP_REQUEST_RE = re.compile(
+    r"\b(?:find|search(?:ed|ing)?|look\s+(?:up|for)|locate|lookup)\b"
+    r"|\bcheck (?:the|your|for|if|whether)\b"
+    r"|\bsee if (?:you can|there)\b|\bis there (?:a|an|any)\b|\bdo (?:we|i) have\b",
+    re.IGNORECASE,
+)
+_LOOKUP_REQUEST_NUDGE = (
+    "The user asked you to find or look something up, and this reply calls no tool, so "
+    "nothing in it has been checked. Look it up now: find_records for Guaardvark's "
+    "projects, clients, documents and other records, find_files for file names on this "
+    "computer, search_knowledge_base for what documents say. If it was a how-to question, "
+    "answer it instead."
 )
 
 # A reply that opens with a tool signature the way the TOOLS prompt block prints
@@ -131,9 +178,18 @@ def _looks_like_tool_list_echo(text: str, tool_names) -> bool:
 
 TOOL_EMBEDDING_CACHE = os.path.join(CACHE_DIR, "tool_embeddings.json")
 
-# Abort flags for in-progress sessions
-_abort_flags: Dict[str, bool] = {}
+# Stop state for chat turns, kept per turn rather than per session. Every stop
+# request bumps the session's stop count, and a turn is stopped once the count
+# has moved past the mark it began with. Nothing lowers the count, so starting
+# or finishing one turn cannot revive another that was stopped during its slow
+# start (routing, retrieval) before its first check.
+_stop_counts: Dict[str, int] = {}
+# Mark of the newest turn begun on each session; a stopped turn whose mark is
+# lower has been replaced by a newer message.
+_newest_turn_marks: Dict[str, int] = {}
 _abort_lock = threading.Lock()
+# Per thread: (session_id, mark) of each turn the thread is running, innermost last.
+_turn_local = threading.local()
 
 # Approval events for human-in-the-loop
 _approval_events: Dict[str, threading.Event] = {}
@@ -209,31 +265,6 @@ def _served_output_url(path: Optional[str]) -> Optional[str]:
     return f"/api/outputs/{m.group(1)}/{m.group(2)}" if m else None
 
 
-def _consent_reference(tool, params: Dict[str, Any]) -> Optional[str]:
-    """The reference image a consent-gated tool would use, or None."""
-    if not getattr(tool, "consent_gate", False):
-        return None
-    ref = params.get("image") or ""
-    return ref or None
-
-
-def _tool_needs_approval_card(tool, tool_name: str, params: Dict[str, Any], preapproved: set) -> bool:
-    """Whether this call must pause for the card.
-
-    A consent-gated tool whose reference image already has a consent record
-    does not ask again: the record is the durable answer.
-    """
-    if not tool or not getattr(tool, "requires_approval", False) or tool_name in preapproved:
-        return False
-    if getattr(tool, "consent_gate", False):
-        ref = _consent_reference(tool, params)
-        if ref:
-            from backend.services.consent_records import has_consent
-            if has_consent(ref):
-                return False
-    return True
-
-
 def _approval_detail(tool, tool_name: str, params: Dict[str, Any], reasoning: str = "") -> Dict[str, Any]:
     """One entry of ``tool_details`` in ``chat:tool_approval_request``.
 
@@ -265,21 +296,74 @@ def _record_approved_consent(tool, params: Dict[str, Any], session_id: str) -> N
 
 
 def set_abort_flag(session_id: str):
-    """Signal that a session should abort its current generation."""
+    """Stop every turn running on a session. Turns begun afterwards run normally."""
     with _abort_lock:
-        _abort_flags[session_id] = True
+        _stop_counts[session_id] = _stop_counts.get(session_id, 0) + 1
 
 
-def clear_abort_flag(session_id: str):
-    """Clear the abort flag for a session."""
+def begin_new_turn(session_id: str) -> int:
+    """Stop the turns already running on a session and open a new one.
+
+    For a new message from the user. Returns the new turn's mark, to pass to
+    begin_turn() on the thread that runs it and to turn_replaced().
+    """
     with _abort_lock:
-        _abort_flags.pop(session_id, None)
+        mark = _stop_counts.get(session_id, 0) + 1
+        _stop_counts[session_id] = mark
+        _newest_turn_marks[session_id] = mark
+        return mark
+
+
+def _turn_stack() -> list:
+    stack = getattr(_turn_local, "turns", None)
+    if stack is None:
+        stack = _turn_local.turns = []
+    return stack
+
+
+def begin_turn(session_id: str, mark: Optional[int] = None) -> None:
+    """Bind a chat turn to this thread, so is_aborted() answers for it.
+
+    With no mark, the thread joins the turn it is already running for the
+    session, or opens one that leaves other turns alone. Pair with end_turn().
+    """
+    stack = _turn_stack()
+    if mark is None:
+        mark = next((m for sid, m in reversed(stack) if sid == session_id), None)
+    if mark is None:
+        with _abort_lock:
+            mark = _stop_counts.get(session_id, 0)
+            _newest_turn_marks[session_id] = max(_newest_turn_marks.get(session_id, 0), mark)
+    stack.append((session_id, mark))
+
+
+def end_turn(session_id: str) -> None:
+    """Release this thread's innermost turn for the session."""
+    stack = _turn_stack()
+    for i in range(len(stack) - 1, -1, -1):
+        if stack[i][0] == session_id:
+            del stack[i]
+            return
 
 
 def is_aborted(session_id: str) -> bool:
-    """Check if a session has been aborted."""
+    """True when the turn this thread is running for the session was stopped.
+
+    A thread running no turn for the session gets the session-wide answer: a
+    stop has arrived since the newest turn began.
+    """
+    mark = next((m for sid, m in reversed(_turn_stack()) if sid == session_id), None)
     with _abort_lock:
-        return _abort_flags.get(session_id, False)
+        stops = _stop_counts.get(session_id, 0)
+        if mark is None:
+            mark = _newest_turn_marks.get(session_id, 0)
+        return stops > mark
+
+
+def turn_replaced(session_id: str, mark: int) -> bool:
+    """True once a newer message has opened a turn after this one was stopped."""
+    with _abort_lock:
+        return _newest_turn_marks.get(session_id, 0) > mark
 
 
 # Conversational messages that don't need tools or RAG
@@ -317,6 +401,8 @@ CORE_TOOLS = [
     "delete_memory",
     "agent_status",  # cheap introspection — agent should always be able to report its state
     "list_documents",  # registered in tool_registry_init but unreachable: system-map finding a21f45035732cf31
+    "find_records",  # projects, clients, documents and the other records the pages show
+    "find_files",  # files on disk by name
 ]
 BROWSER_TOOLS = ["browser_navigate", "browser_click", "browser_fill", "browser_screenshot",
                  "browser_extract", "browser_wait", "browser_execute_js", "browser_get_html"]
@@ -329,6 +415,9 @@ DESKTOP_TOOLS = ["app_launch", "app_list", "app_focus", "gui_click", "gui_type",
                  "gui_hotkey", "gui_screenshot", "notification_send",
                  "clipboard_get", "clipboard_set", "gui_locate_image"]
 WEB_TOOLS = ["analyze_website", "fetch_url"]
+# A successful call to one of these means the reply already read the web, so it
+# carries no offer to search.
+_WEB_LOOKUP_TOOLS = frozenset({"web_search", *WEB_TOOLS})
 MEDIA_TOOLS = ["media_play", "media_control", "media_volume", "media_status"]
 IMAGE_TOOLS = ["generate_image", "generate_animation", "generate_video"]
 # Tools that consume an attached (or last-edited) photo. Pinned whenever a
@@ -360,12 +449,38 @@ _IMAGE_GEN_INTENT_RE = re.compile(
     r"generate\s+(an?\s+)?image|create\s+(an?\s+)?image|make\s+an?\s+image"
     r"|make\s+a\s+picture|generate\s+a\s+photo|render\s+(an?\s+)?image"
     r"|make\s+a\s+video|create\s+a\s+video|generate\s+(a\s+)?video"
-    r"|generate\s+a\s+gif|generate_image|/imagine|\bdraw\b|\banimate\b",
+    r"|generate\s+a\s+gif|generate_image|/imagine",
     re.IGNORECASE,
 )
 
-# An explicit slash command is always honoured, even in command-only mode.
-_SLASH_MEDIA_RE = re.compile(r"^\s*/(imagine|image|video)\b", re.IGNORECASE)
+# Without a picture noun, "draw", "sketch" and "animate" ask for one only when they open
+# the message ("draw me a duck"), and never before an idiom ("draw a conclusion").
+_DRAW_VERB = (
+    r"(?:draw|sketch|animate)\b(?!\s+(?:(?:a|an|the|some|any|my|our)\s+)?"
+    r"(?:conclusions?|lines?|attention|parallels?|comparisons?|distinctions?|inspiration"
+    r"|blood|breath|straws?|lots|up|on|upon|from|out|near|back)\b)"
+)
+_DRAW_REQUEST_RE = re.compile(
+    r"^\s*(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)?" + _DRAW_VERB,
+    re.IGNORECASE,
+)
+# Anywhere in the message: enough to offer the image tools to the chat model,
+# which then decides ("I'd like you to draw a cat").
+_DRAW_MENTION_RE = re.compile(r"\b" + _DRAW_VERB, re.IGNORECASE)
+
+# A create verb with the picture noun at most three words after it ("make me a
+# quick picture"), so "make sure the image path is right" is not a request.
+_CREATE_PICTURE_RE = re.compile(
+    r"\b(?:generate|draw|sketch|make|create|render|paint|visuali[sz]e)\s+(?:me\s+|us\s+)?"
+    r"(?:(?!sure\b|certain\b)[\w-]+\s+){0,3}?"
+    r"(?:image|picture|photo|illustration|gif|animation|video)s?\b",
+    re.IGNORECASE,
+)
+
+# An explicit slash command is always honoured, even in command-only mode:
+# /imagine and /image make a picture, /video a clip.
+_SLASH_IMAGE_RE = re.compile(r"^\s*/(?:imagine|image)\b", re.IGNORECASE)
+_SLASH_VIDEO_RE = re.compile(r"^\s*/video\b", re.IGNORECASE)
 
 
 def _media_requires_explicit_command() -> bool:
@@ -398,6 +513,40 @@ _IMAGE_GEN_NEGATIVE_PATTERNS = (
     r"\bdescribe (this|the|that) (image|photo|picture)\b",
     r"\b(analyze|explain) (this|the|that) (image|photo|picture)\b",
 )
+# "How do I ...", "how to ...": asks how something is done, not for it to be done.
+_HOW_TO_QUESTION_RE = re.compile(r"^\s*how\s+(?:do|can|could|should|would|does|to)\b", re.IGNORECASE)
+# Image requests only: a how-to question or front-end work ("how do I animate a
+# CSS button", "make an image responsive") is a question for the chat model.
+_IMAGE_REQUEST_NEGATIVE_PATTERNS = _IMAGE_GEN_NEGATIVE_PATTERNS + (
+    _HOW_TO_QUESTION_RE.pattern,
+    r"\b(?:css|html|javascript|jsx?|tsx|react|svg|keyframes?|hover|tailwind|stylesheet)\b",
+)
+
+# Edit verbs for a picture already on screen ("add a scarf", "make it bigger").
+_IMAGE_EDIT_VERB_RE = re.compile(
+    r"\b(add|put|place|insert|remove|delete|erase|change|replace|swap|recolou?r|"
+    r"brighten|darken|enlarge|shrink|resize|rescale|scale|zoom|increase|decrease|"
+    r"crop|rotate|flip|blur|sharpen|fix|adjust|edit|retouch|restyle|repaint|dress|"
+    r"turn\s+.+\binto\b|wear(?:ing|s)?|make\s+(?:it|him|her|them|this|the|that|his|its)|"
+    r"give\s+(?:him|her|them|it|the|this))\b",
+    re.IGNORECASE,
+)
+# The same verbs fit text and code ("fix the grammar", "add error handling"); with
+# one of these topics and no picture word, the message is not about the image.
+_TEXT_OR_CODE_TOPIC_RE = re.compile(
+    r"\b(grammar|spelling|typos?|sentences?|paragraphs?|wording|essay|email|code|function"
+    r"|method|bugs?|errors?|exceptions?|tests?|query|sql|regex|script|variable|config|json"
+    r"|yaml|csv|date\s+format)\b",
+    re.IGNORECASE,
+)
+_PICTURE_WORD_RE = re.compile(
+    r"\b(image|picture|photo|pic|render|background|foreground|sky|scene)\b", re.IGNORECASE,
+)
+# Names an existing picture outright: "the last image", "that photo".
+_NAMES_THE_IMAGE_RE = re.compile(
+    r"\b(?:the|that|this|last|previous)\s+(?:image|picture|photo|pic|render)\b", re.IGNORECASE,
+)
+_REFERS_BACK_RE = re.compile(r"\b(?:it|this)\b", re.IGNORECASE)
 # For chat context, only expose the tools the LLM should actually call
 # agent_mode_start/stop are internal — the LLM should use agent_task_execute directly
 AGENT_CONTROL_TOOLS = ["agent_task_execute", "agent_screen_capture"]
@@ -603,40 +752,123 @@ TOOL_CONTEXT_KEYWORDS = {
 }
 
 
-def _has_explicit_image_gen_intent(msg_lower: str) -> bool:
+def _has_explicit_image_gen_intent(msg_lower: str, draw_anywhere: bool = False) -> bool:
     """True when the message explicitly asks to create new image/video media."""
-    if _IMAGE_GEN_INTENT_RE.search(msg_lower):
+    if _IMAGE_GEN_INTENT_RE.search(msg_lower) or _CREATE_PICTURE_RE.search(msg_lower):
         return True
-    if re.search(r"\b(generate|draw|make|create|render|visuali[sz]e)\b", msg_lower):
-        if re.search(r"\b(image|picture|photo|illustration|gif|animation|video)\b", msg_lower):
-            return True
-    return False
+    draw_re = _DRAW_MENTION_RE if draw_anywhere else _DRAW_REQUEST_RE
+    return bool(draw_re.search(msg_lower))
 
 
-def user_wants_image_generation(message: str) -> bool:
-    """Strict gate: create new media vs describe/reference existing images or prompts."""
+def _is_new_image_request(msg_lower: str, draw_anywhere: bool = False) -> bool:
+    if not _has_explicit_image_gen_intent(msg_lower, draw_anywhere):
+        return False
+    return not any(re.search(pat, msg_lower) for pat in _IMAGE_REQUEST_NEGATIVE_PATTERNS)
+
+
+def _image_generation_gate(message: str, draw_anywhere: bool) -> bool:
     if not message or not message.strip():
         return False
     from backend.tools.video_pipeline_tools import is_music_video_request, is_film_crew_request
     if is_music_video_request(message) or is_film_crew_request(message):
         return False
     msg_lower = message.lower()
-    if _SLASH_MEDIA_RE.match(msg_lower):
+    if _SLASH_IMAGE_RE.match(msg_lower):
         return True
     if _media_requires_explicit_command():
         return False
-    if not _has_explicit_image_gen_intent(msg_lower):
+    if (not draw_anywhere and _VIDEO_INTENT_RE.search(msg_lower)
+            and not _STILL_OR_ANIMATION_NOUN_RE.search(msg_lower)):
+        # Making a video is user_wants_video_generation's call; a message it turned
+        # down ("why does it take so long to generate a video?") is not a picture request.
         return False
-    for pat in _IMAGE_GEN_NEGATIVE_PATTERNS:
-        if re.search(pat, msg_lower):
-            return False
-    return True
+    return _is_new_image_request(msg_lower, draw_anywhere)
+
+
+def user_wants_image_generation(message: str) -> bool:
+    """Strict gate: create new media vs describe/reference existing images or prompts.
+
+    A match starts an image job with no model in the loop, so a mid-sentence
+    "draw" does not count here; see _wants_image_tools.
+    """
+    return _image_generation_gate(message, draw_anywhere=False)
+
+
+def _wants_image_tools(message: str) -> bool:
+    """Whether to offer the image tools to the chat model.
+
+    Wider than user_wants_image_generation: "I'd like you to draw a cat" does not
+    start a job directly, but the model needs generate_image to act on it.
+    """
+    return _image_generation_gate(message, draw_anywhere=True)
+
+
+def user_wants_image_edit(message: str, has_recent_image: bool,
+                          has_stale_image: bool = False) -> bool:
+    """True when the message asks to change a picture the session already has.
+
+    has_recent_image: a picture is attached to this turn, or one was made since the
+    last plain chat turn. has_stale_image: the session has an older picture, which
+    a follow-up edits only when it names it ("change the sky in the last image").
+    """
+    if not message or not (has_recent_image or has_stale_image):
+        return False
+    if not _IMAGE_EDIT_VERB_RE.search(message):
+        return False
+    if _TEXT_OR_CODE_TOPIC_RE.search(message) and not _PICTURE_WORD_RE.search(message):
+        return False
+    msg_lower = message.lower()
+    # "/video make it rain" and "make a video of it" ask for a video; the video
+    # step animates the picture in focus instead.
+    if _SLASH_VIDEO_RE.match(msg_lower) or user_wants_video_generation(message):
+        return False
+    # "how do I remove the background in GIMP?" asks for steps, not an edit.
+    if _HOW_TO_QUESTION_RE.search(message):
+        return False
+    names_image = bool(_NAMES_THE_IMAGE_RE.search(msg_lower))
+    # "Draw me a cat wearing a top hat" has an edit verb but asks for a new picture.
+    new_request = (bool(_SLASH_IMAGE_RE.match(msg_lower) or _SLASH_VIDEO_RE.match(msg_lower))
+                   or _is_new_image_request(msg_lower))
+    if new_request and not names_image and not _REFERS_BACK_RE.search(msg_lower):
+        return False
+    return has_recent_image or names_image
 
 
 # Create-verb within reach of "video" — "generate a video of X", "make me a short
 # video showing Y". Bare references ("what is in this video of my trip") don't match.
 _VIDEO_INTENT_RE = re.compile(
     r"\b(generate|create|make|render|produce)\b[^.?!]{0,40}\bvideo\b", re.IGNORECASE
+)
+
+# A request for a new clip opens the message or one of its sentences, optionally
+# after "please" / "can you", with "video" at most five words after the verb as
+# its object: "make a video of a fox", "can you generate a short cinematic video
+# of rain". "Why does it take so long to generate a video?", "make sure the video
+# plays", "make a list of video ideas" and "make a video call" only mention one.
+_VIDEO_REQUEST_RE = re.compile(
+    r"(?:^|[.!?;:,]\s+)\s*(?:(?:ok(?:ay)?|now|so|also|then|and|hey)\s+)?"
+    r"(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)?"
+    r"(?:(?:i(?:'d|\s+would)\s+like|i\s+(?:want|need))\s+you\s+to\s+|let'?s\s+)?"
+    r"(?:generate|create|make|render|produce)\s+(?:me\s+|us\s+)?"
+    r"(?:(?!(?:sure|certain|the|this|that|these|those|my|your|our|his|her|its|their"
+    r"|of|for|to|about|with|from|in|on|at|into|and|or|than|then)\b)[\w'-]+\s+){0,8}?"
+    r"video\b(?!\s+(?:games?|calls?|chats?|conferenc\w*|cards?|edit\w*|players?|codecs?"
+    r"|drivers?|scripts?|files?|formats?)\b)",
+    re.IGNORECASE,
+)
+# Video software named in the message: making a video there is the user's own job.
+_VIDEO_SOFTWARE_PATTERN = (
+    r"\b(?:premiere\s+pro|after\s+effects|davinci|final\s+cut|imovie|capcut|camtasia|filmora"
+    r"|kdenlive|shotcut|openshot|obs\s+studio|clipchamp|ffmpeg|handbrake|movie\s+maker"
+    r"|vegas\s+pro)\b"
+    r"|\b(?:in|with|using)\s+(?:adobe\s+)?(?:premiere|resolve|obs|canva|blender|powerpoint)\b"
+)
+# How-to and front-end questions (as for images) plus questions about video software.
+_VIDEO_REQUEST_NEGATIVE_PATTERNS = _IMAGE_REQUEST_NEGATIVE_PATTERNS + (_VIDEO_SOFTWARE_PATTERN,)
+# A picture or animation named alongside "video" keeps a message open to the image path.
+_STILL_OR_ANIMATION_NOUN_RE = re.compile(
+    r"\b(?:image|picture|photo|illustration|drawing|painting|gif|animation|animated|animate)s?\b",
+    re.IGNORECASE,
 )
 
 # Strip "generate a video of…" / "/video " chrome so the video model gets pure scene text.
@@ -663,15 +895,17 @@ def user_wants_video_generation(message: str) -> bool:
     if is_music_video_request(message) or is_film_crew_request(message):
         return False
     msg_lower = message.lower()
-    if _SLASH_MEDIA_RE.match(msg_lower):
+    if _SLASH_VIDEO_RE.match(msg_lower):
         return True
+    if _SLASH_IMAGE_RE.match(msg_lower):
+        return False
     if _media_requires_explicit_command():
         return False
-    if not (_VIDEO_INTENT_RE.search(msg_lower) or msg_lower.startswith("video of ")):
+    if not (_VIDEO_REQUEST_RE.search(msg_lower) or msg_lower.startswith("video of ")):
         return False
     if any(w in msg_lower for w in ("gif", "animate", "animation", "animated")):
         return False
-    for pat in _IMAGE_GEN_NEGATIVE_PATTERNS:
+    for pat in _VIDEO_REQUEST_NEGATIVE_PATTERNS:
         if re.search(pat, msg_lower):
             return False
     return True
@@ -742,6 +976,42 @@ def ollama_eof_user_message(error_str: str, model_name: str, *, has_media: bool 
     )
 
 
+_KEYWORD_RE_CACHE: Dict[tuple, re.Pattern] = {}
+
+
+def _keyword_regex(keywords) -> re.Pattern:
+    """One regex for a keyword list, each keyword matched as whole words."""
+    key = tuple(keywords)
+    pattern = _KEYWORD_RE_CACHE.get(key)
+    if pattern is None:
+        parts = []
+        for kw in key:
+            kw = (kw or "").lower()
+            if not kw:
+                continue
+            # Edges that are punctuation or space (".py", "/vision", "ls ") match as written.
+            left = r"(?<!\w)" if (kw[0].isalnum() or kw[0] == "_") else ""
+            if kw[-1].isalpha():
+                right = r"s?(?!\w)"  # a plural counts: "gpus", "files"
+            elif kw[-1].isalnum() or kw[-1] == "_":
+                right = r"(?!\w)"
+            else:
+                right = ""
+            parts.append(left + re.escape(kw) + right)
+        pattern = re.compile("|".join(parts) or r"(?!)")
+        _KEYWORD_RE_CACHE[key] = pattern
+    return pattern
+
+
+def _mentions_keyword(msg_lower: str, keywords) -> bool:
+    """True when one of the keywords is in the message as whole words.
+
+    "supermarket" does not contain the outreach keyword "market", "display" not
+    the media keyword "play", "last" not the repo keyword "ast".
+    """
+    return bool(_keyword_regex(keywords).search(msg_lower or ""))
+
+
 def select_tools_for_context(message: str, all_tool_names: List[str], max_tools: int = 25) -> List[str]:
     """Select most relevant tools based on message content."""
     # No tools for conversational messages
@@ -755,9 +1025,9 @@ def select_tools_for_context(message: str, all_tool_names: List[str], max_tools:
     matched_categories = set()
     for category, (keywords, tools) in TOOL_CONTEXT_KEYWORDS.items():
         if category == "image":
-            if not user_wants_image_generation(message):
+            if not _wants_image_tools(message):
                 continue
-        elif not any(kw in msg_lower for kw in keywords):
+        elif not _mentions_keyword(msg_lower, keywords):
             continue
         keyword_matched = True
         matched_categories.add(category)
@@ -777,7 +1047,7 @@ def select_tools_for_context(message: str, all_tool_names: List[str], max_tools:
         excluded_from_padding = set(BROWSER_TOOLS + WEB_TOOLS + DESKTOP_TOOLS)
         # Also exclude agent_mode_start/stop — LLM should not call these directly
         excluded_from_padding.update(["agent_mode_start", "agent_mode_stop", "agent_status"])
-    if not user_wants_image_generation(message):
+    if not _wants_image_tools(message):
         excluded_from_padding.update(IMAGE_TOOLS)
 
     # Only pad with extra tools if keywords actually matched a category
@@ -802,7 +1072,7 @@ def _pin_repo_intel_tools(message: str, selected: List[str], all_tool_names: Lis
     so a downstream cap never truncates them). Cheap: 3 tools, ~60 prompt tokens.
     """
     msg = (message or "").lower()
-    if not any(kw in msg for kw in REPO_INTEL_KEYWORDS):
+    if not _mentions_keyword(msg, REPO_INTEL_KEYWORDS):
         return selected
     available = set(all_tool_names)
     pinned = [t for t in REPO_INTEL_TOOLS if t in available and t not in selected]
@@ -841,8 +1111,10 @@ def _held_rag_ready(step_info: Dict[str, Any]) -> bool:
 
 
 def _asks_about_code(message: str) -> bool:
-    msg = (message or "").lower()
-    return any(kw in msg for kw in CODE_SEARCH_KEYWORDS)
+    """True when the message names a code keyword as whole words: "route" is
+    not found in "router", nor "class " in "subclass ". Keywords that start
+    with punctuation (".py") still match after a file name ("app.py")."""
+    return _mentions_keyword((message or "").lower(), CODE_SEARCH_KEYWORDS)
 
 
 def _pin_code_search_tools(message: str, selected: List[str], all_tool_names: List[str]) -> List[str]:
@@ -867,7 +1139,7 @@ def _pin_knowledge_nav_tools(message: str, selected: List[str], all_tool_names: 
     Cheap: four tools, ~80 prompt tokens, and only on a clear keyword match.
     """
     msg = (message or "").lower()
-    if not any(kw in msg for kw in KNOWLEDGE_NAV_KEYWORDS):
+    if not _mentions_keyword(msg, KNOWLEDGE_NAV_KEYWORDS):
         return selected
     available = set(all_tool_names)
     pinned = [t for t in KNOWLEDGE_NAV_TOOLS_PINNED if t in available and t not in selected]
@@ -936,7 +1208,7 @@ def _pin_workstation_tools(message: str, selected: List[str], all_tool_names: Li
     matches — same pattern as _pin_repo_intel_tools.
     """
     msg = (message or "").lower()
-    if not any(kw in msg for kw in WORKSTATION_KEYWORDS):
+    if not _mentions_keyword(msg, WORKSTATION_KEYWORDS):
         return selected
     available = set(all_tool_names)
     pinned = [t for t in WORKSTATION_TOOLS if t in available and t not in selected]
@@ -961,16 +1233,16 @@ def _pin_image_edit_tools(has_image: bool, selected: List[str], all_tool_names: 
     return extra + list(selected) if extra else selected
 
 
-_IMAGE_RETRY_PHRASES = (
-    "try again", "retry", "please retry", "try once more", "retry please",
+# The whole message is the retry ("try again", "retry please"); a question that
+# contains the word ("how do I retry a failed HTTP request?") is not one.
+_IMAGE_RETRY_RE = re.compile(
+    r"(?:please\s+)?(?:try\s+again|retry|try\s+once\s+more)(?:,?\s+please|\s+now)?\s*[.!?]*",
+    re.IGNORECASE,
 )
 
 
 def _is_image_retry_message(message: str) -> bool:
-    msg = (message or "").strip().lower()
-    if not msg:
-        return False
-    return any(phrase in msg for phrase in _IMAGE_RETRY_PHRASES)
+    return bool(_IMAGE_RETRY_RE.fullmatch((message or "").strip()))
 
 
 # Identity generate: new scene, same face. Must not steal "put a hat on this person".
@@ -1005,17 +1277,21 @@ def user_wants_identity_generate(message: str) -> bool:
     """True for 'this person as …' / 'put this person in …'; false for 'put a hat on this person'."""
     if not (message or "").strip():
         return False
-    if _EDIT_ON_PERSON_RE.search(message):
+    if _HOW_TO_QUESTION_RE.search(message) or _EDIT_ON_PERSON_RE.search(message):
         return False
     return bool(_IDENTITY_INTENT_RE.search(message))
 
 
+# The named photo tools run with no model in the loop, so "how do I remove the
+# background in GIMP?" must not start one.
 def user_wants_background_remove(message: str) -> bool:
-    return bool(_BG_REMOVE_RE.search(message or ""))
+    message = message or ""
+    return bool(_BG_REMOVE_RE.search(message)) and not _HOW_TO_QUESTION_RE.search(message)
 
 
 def user_wants_outpaint(message: str) -> bool:
-    return bool(_OUTPAINT_RE.search(message or ""))
+    message = message or ""
+    return bool(_OUTPAINT_RE.search(message)) and not _HOW_TO_QUESTION_RE.search(message)
 
 
 def parse_outpaint_pad(message: str) -> dict:
@@ -1077,7 +1353,7 @@ def _pin_image_generation_tools(
     TOOL_CONTEXT_KEYWORDS (same phrases select_tools_for_context uses).
     """
     keywords, tools = TOOL_CONTEXT_KEYWORDS["image"]
-    should_pin = user_wants_image_generation(message)
+    should_pin = _wants_image_tools(message)
     if not should_pin and session_id and _SESSION_PENDING_IMAGE_PROMPT.get(session_id):
         if _is_image_retry_message(message):
             should_pin = True
@@ -1092,6 +1368,16 @@ def _pin_image_generation_tools(
 # new attachment ("make the horse bigger") re-edits the previous result. Process-global
 # keyed by session_id; lost on restart (then a re-attach is needed), which is fine.
 _SESSION_LAST_EDIT: Dict[str, str] = {}
+# Sessions whose last turn produced that picture. A plain chat turn ends the focus;
+# after that a follow-up edits the picture only when it names it ("the last image").
+_SESSION_IMAGE_FOCUS: set = set()
+
+
+def _remember_session_image(session_id: str, path: str) -> None:
+    _SESSION_LAST_EDIT[session_id] = path
+    _SESSION_IMAGE_FOCUS.add(session_id)
+
+
 # Pending image prompt after GPU-busy or failed generate_image — enables "try again" retry.
 _SESSION_PENDING_IMAGE_PROMPT: Dict[str, str] = {}
 # Pending edit (instruction + source image path) after GPU-busy edit_image failure.
@@ -1198,6 +1484,34 @@ def merge_forced_tools(selected: List[str], forced: List[str], max_tools: int = 
     return merged[:max(max_tools, len(core) + len(forced))]
 
 
+# What the latest reply's tools returned, replayed after it in history as a
+# system message. Without it a follow-up such as "yes, open the second one"
+# reached a model that could see only the reply's prose, and it made the list
+# up. Appended to the reply's own text instead, the model copied the block into
+# new replies as if it had run a tool.
+_TOOL_RESULTS_NOTE_CHARS = 3000
+
+
+def _tool_results_note(extra_data) -> str:
+    steps = (extra_data or {}).get("steps") if isinstance(extra_data, dict) else None
+    parts, used = [], 0
+    for step in steps or []:
+        for call in (step or {}).get("tool_calls") or []:
+            if not call.get("success") or not call.get("output_preview"):
+                continue
+            text = f"{call.get('tool_name')}: {call['output_preview']}"
+            if used + len(text) > _TOOL_RESULTS_NOTE_CHARS:
+                text = text[: max(0, _TOOL_RESULTS_NOTE_CHARS - used)] + "…"
+            parts.append(text)
+            used += len(text)
+            if used >= _TOOL_RESULTS_NOTE_CHARS:
+                break
+    if not parts:
+        return ""
+    return ("Tool results behind your previous reply. They are data to answer from; "
+            "do not reproduce this block:\n" + "\n".join(parts))
+
+
 def build_concise_tool_list(registry, tool_names: List[str]) -> str:
     """Build a concise tool description list for the system prompt (~20 tokens per tool)."""
     lines = []
@@ -1211,7 +1525,7 @@ def build_concise_tool_list(registry, tool_names: List[str]) -> str:
             req = "" if param.required else "?"
             params.append(f"{pname}:{param.type}{req}")
         param_str = ", ".join(params)
-        desc = tool.description[:80] if tool.description else ""
+        desc = getattr(tool, "chat_summary", "") or (tool.description[:80] if tool.description else "")
         lines.append(f"- {name}({param_str}) - {desc}")
     return "\n".join(lines)
 
@@ -1287,6 +1601,8 @@ class SemanticToolSelector:
         "search_memory",
         "delete_memory",
         "agent_status",
+        "find_records",
+        "find_files",
     }
 
     # Embedding model used for semantic tool ranking. Override via env var for
@@ -1839,13 +2155,13 @@ class UnifiedChatEngine:
         # layer or the brain) and reused here, so the ack, chat:complete and
         # the saved row all agree. Feedback resolves a reply by this id.
         request_id = str((options or {}).get("request_id") or "") or str(uuid.uuid4())
-        clear_abort_flag(session_id)
         clear_task_scoped_tool_grants(session_id)
         steps = []
         self._request_id = request_id
         self._emit_fn = emit_fn
         self._prov = {"request_id": request_id, "tier": int((options or {}).get("tier", 2) or 2)}
 
+        begin_turn(session_id)
         try:
             # Store app reference for thread-safe DB access in helper methods
             self.app = app
@@ -1875,7 +2191,7 @@ class UnifiedChatEngine:
             emit_fn("chat:error", {"error": str(e), "session_id": session_id})
             return {"success": False, "error": str(e), "request_id": request_id}
         finally:
-            clear_abort_flag(session_id)
+            end_turn(session_id)
 
     def _format_interface_context(self, options: Dict[str, Any]) -> str:
         """Return caller-supplied context for injection into the active turn.
@@ -2049,6 +2365,12 @@ class UnifiedChatEngine:
             if gen_result is not None:
                 return gen_result
 
+        # The chat model has this turn, so the conversation has moved off the last picture,
+        # and a "try again" offered after a failed render applied to the turn before this one.
+        _SESSION_IMAGE_FOCUS.discard(session_id)
+        _SESSION_PENDING_IMAGE_PROMPT.pop(session_id, None)
+        _SESSION_PENDING_IMAGE_EDIT.pop(session_id, None)
+
         # Resolve the per-request "thinking" preference for thinking-capable models
         # (gemma4:12b, qwen3, deepseek-r1, ...). Precedence: explicit per-chat override
         # from the /thinking command (options["think"]) > global default Setting
@@ -2084,6 +2406,11 @@ class UnifiedChatEngine:
             rag_context = self._retrieve_rag_context(message)
 
         # 3. Route-aware tool selection (skipped for social / skip_tools path)
+        # A "yes" to the assistant's own offer is selected for by what was
+        # offered: "yes" alone matches no tool, and the selectors read it as
+        # small talk and return none.
+        accepted_offer = str((options or {}).get("accepted_offer") or "").strip()
+        selection_text = f"{accepted_offer}\n{message}" if accepted_offer else message
         model_name = getattr(self.llm, "model", "unknown")
         self._prov_note("model", model_name)
         _skip_tools = bool(getattr(self, "_skip_tools", False) or options.get("skip_tools"))
@@ -2095,12 +2422,12 @@ class UnifiedChatEngine:
             rules_persona = self._load_rules(model_name)
 
             # Ask the router what this message needs (if available)
-            routed_tools = self._get_routed_tools(message)
+            routed_tools = self._get_routed_tools(selection_text)
 
             try:
-                selected_tools = self._semantic_selector.select(message, self.registry)
+                selected_tools = self._semantic_selector.select(selection_text, self.registry)
             except Exception:
-                selected_tools = select_tools_for_context(message, self.registry.list_tools())
+                selected_tools = select_tools_for_context(selection_text, self.registry.list_tools())
 
             # Merge router's tool suggestions with semantic selection (router takes priority)
             if routed_tools:
@@ -2110,19 +2437,19 @@ class UnifiedChatEngine:
                         merged.append(t)
                 selected_tools = merged
 
-            selected_tools = _pin_repo_intel_tools(message, selected_tools, self.registry.list_tools())
-            selected_tools = _pin_code_search_tools(message, selected_tools, self.registry.list_tools())
-            selected_tools = _pin_knowledge_nav_tools(message, selected_tools, self.registry.list_tools())
-            selected_tools = _pin_workstation_tools(message, selected_tools, self.registry.list_tools())
+            selected_tools = _pin_repo_intel_tools(selection_text, selected_tools, self.registry.list_tools())
+            selected_tools = _pin_code_search_tools(selection_text, selected_tools, self.registry.list_tools())
+            selected_tools = _pin_knowledge_nav_tools(selection_text, selected_tools, self.registry.list_tools())
+            selected_tools = _pin_workstation_tools(selection_text, selected_tools, self.registry.list_tools())
             selected_tools = _pin_image_edit_tools(bool(self._image_data), selected_tools, self.registry.list_tools())
             selected_tools = _pin_image_generation_tools(
-                message, selected_tools, self.registry.list_tools(), session_id=session_id,
+                selection_text, selected_tools, self.registry.list_tools(), session_id=session_id,
             )
 
             # Semantic selector can return CORE-only when embeddings are cold; keyword
             # router still knows which category matched — merge so action tools survive.
             if not _skip_tools:
-                keyword_tools = select_tools_for_context(message, self.registry.list_tools())
+                keyword_tools = select_tools_for_context(selection_text, self.registry.list_tools())
                 merged = list(selected_tools)
                 for t in keyword_tools:
                     if t not in merged and len(merged) < 25:
@@ -2133,7 +2460,7 @@ class UnifiedChatEngine:
             # of its configured keywords) go in ahead of the rest.
             try:
                 selected_tools = merge_forced_tools(
-                    selected_tools, select_mcp_tools_for_message(message, self.registry),
+                    selected_tools, select_mcp_tools_for_message(selection_text, self.registry),
                     max_tools=25,
                 )
             except Exception as exc:
@@ -2258,7 +2585,7 @@ class UnifiedChatEngine:
 
         # History messages
         for msg in history:
-            role = "user" if msg["role"] == "user" else "assistant"
+            role = msg["role"] if msg["role"] in ("user", "system") else "assistant"
             ollama_messages.append({"role": role, "content": msg["content"]})
 
         # Dynamic context as user message (CLI/runtime context + RAG + web results)
@@ -2280,6 +2607,12 @@ class UnifiedChatEngine:
         self._local_facts_this_turn = any(name != PAGE_PROVIDER_NAME for name, _ in _entries)
         if provider_context:
             context_parts.append(f"Current context:\n{provider_context}")
+        _accepted = str(_opts.get("accepted_offer") or "").strip()
+        if _accepted:
+            context_parts.append(
+                f'The user\'s reply accepts what you offered in your last message: "{_accepted}" '
+                "Do it now: call the tool for it in this reply."
+            )
         if rag_context and not hold_rag_for_code:
             from backend.services.chat_prompt_blocks import CHAT_KB_CONTEXT_HEADER
             context_parts.append(f"{CHAT_KB_CONTEXT_HEADER}\n{rag_context}")
@@ -2326,6 +2659,15 @@ class UnifiedChatEngine:
                 else:
                     # Last-ditch: attach raw image (multimodal) if the guide dog failed.
                     user_msg["images"] = [self._image_data]
+        elif options.get("camera_frame"):
+            # The live camera frame is context for a model that can see. It is
+            # not self._image_data, so RAG still runs and no edit intercept
+            # takes it; a text-only model has the scene text added above.
+            from backend.utils.chat_utils import is_vision_model
+            if is_vision_model(model_name):
+                from backend.utils.vision_context_utils import CAMERA_FRAME_NOTE
+                user_msg["content"] = f"{CAMERA_FRAME_NOTE}\n\n{user_msg['content']}"
+                user_msg["images"] = [options["camera_frame"]]
         ollama_messages.append(user_msg)
 
         # 5. Save user message to DB (with image metadata if present)
@@ -2376,6 +2718,7 @@ class UnifiedChatEngine:
 
         wrap_up_nudge_pushed = False
         tool_list_echo_retried = False
+        claimed_search_retried = False
         for iteration in range(1, self.max_iterations + 1):
             if is_aborted(session_id):
                 emit_fn("chat:complete", {
@@ -2510,9 +2853,12 @@ class UnifiedChatEngine:
                         .replace("[/tool_call]", "</tool_call>")
                         .replace("[tool]", "<tool>")
                         .replace("[/tool]", "</tool>"))
-                    # Convert [param_name]value[/param_name] back to XML
-                    parse_input = re.sub(r'\[(\w+)\]', r'<\1>', parse_input)
-                    parse_input = re.sub(r'\[/(\w+)\]', r'</\1>', parse_input)
+                    # Convert [param_name]value[/param_name] back to XML. Models also
+                    # mix the two forms ("[name>albenze</name>"); left alone, that
+                    # parameter was dropped and the call ran with none.
+                    parse_input = re.sub(r'\[/(\w+)[\]>]', r'</\1>', parse_input)
+                    parse_input = re.sub(r'\[(\w+)[\]>]', r'<\1>', parse_input)
+                    parse_input = re.sub(r'<(/?\w+)\]', r'<\1>', parse_input)
                 parsed = parse_tool_calls_xml(parse_input)
 
             # 6d. No tool calls -> final answer
@@ -2541,6 +2887,28 @@ class UnifiedChatEngine:
                         continue
                     final_text = _TOOL_LIST_ECHO_FALLBACK_TEXT
                     emit_fn("chat:token", {"content": final_text, "session_id": session_id})
+                # no tool was even attempted this turn (steps is per turn)
+                _claims = not steps and self._claims_unrun_search(final_text, session_id)
+                _unlooked = (not steps and not _skip_tools
+                             and bool(_LOOKUP_REQUEST_RE.search(selection_text)))
+                if not options.get("skip_nudges") and (_claims or _unlooked):
+                    if not claimed_search_retried and not _skip_tools and not is_aborted(session_id):
+                        claimed_search_retried = True
+                        logger.info(
+                            f"[UNIFIED_ENGINE] iter={iteration} no tool ran for a "
+                            f"{'claimed search' if _claims else 'lookup request'}; re-asking once"
+                        )
+                        # The reply was streamed as it was written; take it off the screen.
+                        emit_fn("chat:token", {"content": "", "reset": True, "session_id": session_id})
+                        ollama_messages.append({
+                            "role": "system",
+                            "content": _CLAIMED_SEARCH_NUDGE if _claims else _LOOKUP_REQUEST_NUDGE,
+                        })
+                        continue
+                    # Still no tool: whatever the reply says it found, nothing was checked.
+                    logger.info(f"[UNIFIED_ENGINE] iter={iteration} still no tool for a lookup; noting it")
+                    final_text = f"{final_text.rstrip()}\n\n{_CLAIMED_SEARCH_NOTE}"
+                    emit_fn("chat:token", {"content": f"\n\n{_CLAIMED_SEARCH_NOTE}", "session_id": session_id})
                 logger.info(f"[UNIFIED_ENGINE] iter={iteration} NO tool calls, returning final answer")
                 final_text = re.sub(r'\u003c/?(?:tool_call|tool|observation)[^\u003e]*\u003e', '', final_text).strip()
 
@@ -2853,9 +3221,16 @@ class UnifiedChatEngine:
                 from backend.services.tool_confirmation import trusted_caller
                 approval_mark = (trusted_caller("chat_approval") if t_name in human_approved
                                  else contextlib.nullcontext())
+                # Several calls in one step run on pool threads, which have no
+                # Flask app context: a tool that reads the database there failed
+                # with "Working outside of application context".
+                from flask import has_app_context
+                app_ctx = (self.app.app_context()
+                           if getattr(self, "app", None) is not None and not has_app_context()
+                           else contextlib.nullcontext())
                 try:
                     exec_params = inject_chat_image_model(t_name, dict(t_params or {}), options)
-                    with approval_mark:
+                    with app_ctx, approval_mark:
                         res = self.registry.execute_tool(
                             t_name,
                             on_output=on_output,
@@ -2946,7 +3321,10 @@ class UnifiedChatEngine:
                     if out:
                         tool_output_snippets.append(out[:300])
 
-                preview_limit = 1200 if tool_name == "edit_code" else 200
+                # A lookup's result is what the next message refers to ("open the
+                # second one"); history replays this preview, so keep enough of it.
+                _declared = int(getattr(self.registry.get_tool(tool_name), "observation_chars", 500) or 500)
+                preview_limit = 1200 if tool_name == "edit_code" else (2000 if _declared > 500 else 200)
                 step_call = {
                     "tool_name": tool_name,
                     "params": params,
@@ -3184,6 +3562,8 @@ class UnifiedChatEngine:
             except Exception:
                 logger.exception("[UNIFIED_ENGINE] finalize_fn failed; keeping the model's draft")
 
+        web_search_offer = self._web_search_offer(message, steps, session_id, reply=accumulated_response)
+
         # 7. Emit complete
         emit_fn("chat:complete", {
             "response": accumulated_response,
@@ -3196,6 +3576,7 @@ class UnifiedChatEngine:
             "thinking": final_thinking,
             "truncated": final_truncated,
             "synthesized": synthesized,
+            "web_search_offer": web_search_offer,
         })
 
         # 8. Save assistant message (only if we have actual content)
@@ -3220,6 +3601,8 @@ class UnifiedChatEngine:
                 extra_data["generatedImages"] = generated_images
             if final_thinking:
                 extra_data["thinking"] = final_thinking
+            if web_search_offer:
+                extra_data["web_search_offer"] = web_search_offer
             # Pull agent-loop thinking steps emitted during this turn so they
             # survive hard refresh. Empty list if no agent task ran. Drains the
             # service's accumulator so the next turn starts fresh.
@@ -3250,7 +3633,26 @@ class UnifiedChatEngine:
             "session_id": session_id,
             "token_usage": token_usage,
             "synthesized": synthesized,
+            "web_search_offer": web_search_offer,
         }
+
+    def _web_search_offer(self, message: str, steps: List[Dict[str, Any]],
+                          session_id: str, reply: Optional[str] = None) -> Optional[Dict[str, str]]:
+        """The reply's offer to search the web for ``message`` (offer_web_search),
+        or None. Nothing is offered once a web tool has answered this turn, for
+        facts a host supplied for the turn, or for a stopped turn."""
+        if is_aborted(session_id) or getattr(self, "_local_facts_this_turn", False):
+            return None
+        for step in steps:
+            for call in step.get("tool_calls") or []:
+                if call.get("tool_name") in _WEB_LOOKUP_TOOLS and call.get("success"):
+                    return None
+        try:
+            from backend.utils.intent_classifier import offer_web_search
+            return offer_web_search(message, reply=reply)
+        except Exception as e:
+            logger.debug(f"Web search offer skipped: {e}")
+            return None
 
     # ── Media command direct intercept ─────────────────────────────────────
     # Patterns and their media tool + param extraction. Bypasses the LLM loop.
@@ -3626,7 +4028,7 @@ class UnifiedChatEngine:
                     if _fn:
                         _local = os.path.join(OUTPUT_DIR, "generated_images", _fn)
                         if os.path.exists(_local):
-                            _SESSION_LAST_EDIT[session_id] = _local
+                            _remember_session_image(session_id, _local)
                 except Exception:
                     pass
 
@@ -3823,10 +4225,16 @@ class UnifiedChatEngine:
 
         return None  # Not a media command
 
-    def _chat_image_source(self, session_id: str) -> Optional[str]:
-        """Attached photo this turn, else the last image this session produced."""
+    def _chat_image_source(self, session_id: str, message: str = "") -> Optional[str]:
+        """Attached photo this turn, else the last image this session produced.
+
+        The last image counts while it is in focus (made since the last plain chat
+        turn) or when the message names it ("the last image"), as for follow-up edits.
+        """
         if getattr(self, "_image_data", None):
             return self._materialize_attached_image()
+        if session_id not in _SESSION_IMAGE_FOCUS and not _NAMES_THE_IMAGE_RE.search(message or ""):
+            return None
         img_path = _SESSION_LAST_EDIT.get(session_id)
         if img_path and os.path.exists(img_path):
             return img_path
@@ -3836,7 +4244,7 @@ class UnifiedChatEngine:
                                 emit_fn: Callable, request_id: str,
                                 options: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         """Identity / background-remove / outpaint intercepts. Run before generic edit."""
-        img_path = self._chat_image_source(session_id)
+        img_path = self._chat_image_source(session_id, message)
         if not img_path:
             return None
 
@@ -3877,27 +4285,24 @@ class UnifiedChatEngine:
         calling the edit tool, so the dispatch is not left to the model. Returns a
         result dict when handled, else None to fall through to normal chat (so
         'what is this?' still routes to the vision/describe path)."""
-        if not re.search(
-            r"\b(add|put|place|insert|remove|delete|erase|change|replace|swap|recolou?r|"
-            r"brighten|darken|enlarge|shrink|resize|rescale|scale|zoom|increase|decrease|"
-            r"crop|rotate|flip|blur|sharpen|fix|adjust|edit|retouch|restyle|repaint|dress|"
-            r"turn\s+.+\binto\b|wear(?:ing|s)?|make\s+(?:it|him|her|them|this|the|that|his|its)|"
-            r"give\s+(?:him|her|them|it|the|this))\b",
-            message or "", re.IGNORECASE):
-            return None
-        if not self.registry.get_tool("edit_image"):
-            return None
         # Source image: a freshly attached image, else this session's last result
         # (FOLLOW-UP edits — "the horse is too small, make it bigger"). Bail to normal
         # chat if there is nothing to edit.
-        if getattr(self, "_image_data", None):
-            img_path = self._materialize_attached_image()
-            followup = False
-        else:
-            img_path = _SESSION_LAST_EDIT.get(session_id)
-            if img_path and not os.path.exists(img_path):
-                img_path = None
-            followup = True
+        attached = bool(getattr(self, "_image_data", None))
+        last = None if attached else _SESSION_LAST_EDIT.get(session_id)
+        if last and not os.path.exists(last):
+            last = None
+        focus = session_id in _SESSION_IMAGE_FOCUS
+        if not user_wants_image_edit(
+            message,
+            has_recent_image=attached or bool(last and focus),
+            has_stale_image=bool(last and not focus),
+        ):
+            return None
+        if not self.registry.get_tool("edit_image"):
+            return None
+        img_path = self._materialize_attached_image() if attached else last
+        followup = not attached
         if not img_path:
             return None
         instruction = (message or "").strip()
@@ -3966,7 +4371,7 @@ class UnifiedChatEngine:
                 if _fn:
                     _local = os.path.join(OUTPUT_DIR, "generated_images", _fn)
                     if os.path.exists(_local):
-                        _SESSION_LAST_EDIT[session_id] = _local
+                        _remember_session_image(session_id, _local)
             except Exception:
                 pass
         if result.success and image_url:
@@ -4096,10 +4501,29 @@ class UnifiedChatEngine:
             return None
 
         prompt = _VIDEO_CHROME_RE.sub("", message).strip() or message.strip()
-        logger.info("Video-gen direct (natural lang): generate_video(prompt=%r)", prompt[:80])
+        params = {"prompt": prompt}
+        first_frame = self._video_first_frame(message, session_id)
+        if first_frame:
+            params["first_image"] = first_frame
+        logger.info("Video-gen direct (natural lang): generate_video(prompt=%r, first_image=%s)",
+                    prompt[:80], bool(first_frame))
         return self._run_direct_tool_execution(
-            "generate_video", {"prompt": prompt}, session_id, emit_fn, request_id, message, options
+            "generate_video", params, session_id, emit_fn, request_id, message, options
         )
+
+    def _video_first_frame(self, message: str, session_id: str) -> Optional[str]:
+        """The picture a video request animates, when it points back at one
+        ("/video make it rain", "make a video of this"): an image attached to
+        this turn, else the session's last picture while it is in focus. A
+        request that names its own scene gets no first frame."""
+        if not _REFERS_BACK_RE.search(message or ""):
+            return None
+        if getattr(self, "_image_data", None):
+            return self._materialize_attached_image()
+        last = _SESSION_LAST_EDIT.get(session_id)
+        if last and session_id in _SESSION_IMAGE_FOCUS and os.path.exists(last):
+            return last
+        return None
 
     def _pipeline_usage_notice(
         self, session_id: str, emit_fn: Callable, request_id: str,
@@ -4961,6 +5385,28 @@ class UnifiedChatEngine:
             logger.warning(f"[VISION] All pasted image analysis attempts failed: {e}")
             return None
 
+    def _claims_unrun_search(self, text: str, session_id: str) -> bool:
+        """True when a reply with no tool call says a search is running, or says
+        one ran when the previous reply ran no tool either (a recap of earlier
+        results is allowed)."""
+        if not text:
+            return False
+        if _SEARCH_IN_PROGRESS_RE.search(text):
+            return True
+        if not _SEARCH_DONE_RE.search(text):
+            return False
+        try:
+            from backend.models import LLMMessage
+            row = (LLMMessage.query
+                   .filter_by(session_id=session_id, role="assistant")
+                   .order_by(LLMMessage.timestamp.desc())
+                   .first())
+            steps = ((row.extra_data or {}).get("steps") if row else None) or []
+            return not steps
+        except Exception:
+            logger.debug("previous reply's tools unavailable for %s", session_id, exc_info=True)
+            return True
+
     def _load_history(self, session_id: str, limit: int = 20) -> List[Dict[str, str]]:
         """Load conversation history from DB (thread-safe with app context)."""
         try:
@@ -4993,6 +5439,7 @@ class UnifiedChatEngine:
                         "role": "assistant",
                         "content": "Earlier conversation summary:\n" + summary.summary[:1800],
                     })
+                last_reply = next((m for m in reversed(messages) if m.role == "assistant"), None)
                 for m in messages:
                     content = m.content
                     # Add image context marker if message had an image
@@ -5001,6 +5448,10 @@ class UnifiedChatEngine:
                             fname = m.extra_data.get("imageFileName", "image")
                             content = f"[User attached an image: {fname}] {content}"
                     result.append({"role": m.role, "content": content})
+                    if m is last_reply:
+                        note = _tool_results_note(m.extra_data)
+                        if note:
+                            result.append({"role": "system", "content": note})
                 return result
             finally:
                 if ctx:

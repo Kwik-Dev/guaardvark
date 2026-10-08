@@ -88,12 +88,14 @@ def create_celery_app():
             'backend.tasks.task_scheduler_celery.recover_stuck_tasks': {'queue': 'default'},
             'backend.tasks.task_scheduler_celery.scheduler_health_check': {'queue': 'health'},
             'indexing.resume_pending_tick': {'queue': 'indexing'},
-            'training.finetune_model': {'queue': 'training_gpu'},
-            'training.export_gguf': {'queue': 'training_gpu'},
+            # The training worker supervises fine-tunes; the trainer itself is a
+            # subprocess holding the cross-process GPU lease (training_runner).
+            'training.finetune_model': {'queue': 'training'},
+            'training.export_gguf': {'queue': 'training'},
             'training.parse_transcripts': {'queue': 'training'},
             'training.filter_dataset': {'queue': 'training'},
             'training.import_ollama': {'queue': 'training'},
-            'training.full_pipeline': {'queue': 'training_gpu'},
+            'training.full_pipeline': {'queue': 'training'},
             'training.*': {'queue': 'training'},
             'maintenance.daily_backup': {'queue': 'default'},
             'backend.celery_tasks_isolated.*': {'queue': 'default'},
@@ -208,12 +210,11 @@ def create_celery_app():
             },
             # Scan belief_update memories and stage PendingFix rows where ≥N
             # sessions have agreed a knowledge-file line is wrong. Idempotent
-            # (skips groups that already have an open proposal) and review-
-            # gated (PendingFix never auto-applies). The original opt-in
-            # design (lesson_reconciler.py:22-26) feared auto-fired file edits
-            # — those don't happen here. Disable with
-            # GUAARDVARK_RECONCILER_BEAT_DISABLED=1 if you want the old cadence
-            # back without removing the schedule entry.
+            # (skips groups with an open, applied or rejected proposal) and
+            # review-gated (PendingFix never auto-applies), so no file is
+            # edited behind the user's back. Disable with
+            # GUAARDVARK_RECONCILER_BEAT_DISABLED=1 without removing the
+            # schedule entry.
             'memory-reconcile-belief-updates': {
                 'task': 'memory.reconcile_belief_updates',
                 'schedule': 21600.0,  # 6 hours

@@ -54,11 +54,33 @@ def test_correct_token_passes_middleware(client):
     assert resp.status_code == 200
 
 
+def test_a_plan_outside_the_guaardvark_root_is_refused(client, monkeypatch, tmp_path):
+    root = tmp_path / "guaardvark"
+    root.mkdir()
+    monkeypatch.setenv("GUAARDVARK_ROOT", str(root))
+    repo = _make_dirty_repo(tmp_path)
+    plan = repo / "plan.md"
+    plan.write_text("# plan\n## task one\ndo a thing\n")
+
+    resp = client.post(
+        "/swarm/launch",
+        headers=HEADERS,
+        json={"plan_path": str(plan), "repo_path": str(repo), "self_code": True},
+    )
+    assert resp.status_code == 400
+    assert "plan_path must be inside" in resp.json()["detail"]
+
+
 def test_self_code_dirty_repo_no_ack_returns_409(client, monkeypatch, tmp_path):
     import service.app as app_module
 
+    # Plans resolve inside GUAARDVARK_ROOT. The repo sits elsewhere, so only
+    # self_code=True can trigger the guard here.
+    root = tmp_path / "guaardvark"
+    root.mkdir()
+    monkeypatch.setenv("GUAARDVARK_ROOT", str(root))
     repo = _make_dirty_repo(tmp_path)
-    plan = repo / "plan.md"
+    plan = root / "plan.md"
     plan.write_text("# plan\n## task one\ndo a thing\n")
 
     class DirtyStatus:

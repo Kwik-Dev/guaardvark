@@ -1,0 +1,449 @@
+{
+  "decision": "screen_or_chat",
+  "set_version": 1,
+  "provenance": "synthetic, hand-labelled for this test; not human-rated",
+  "options": [
+    "screen_task",
+    "chat"
+  ],
+  "items": [
+    {
+      "id": "scr0",
+      "state": {
+        "message": "open the downloads folder",
+        "screen_active": true
+      },
+      "want": "screen_task",
+      "tags": [
+        "plain"
+      ]
+    },
+    {
+      "id": "scr1",
+      "state": {
+        "message": "close that window",
+        "screen_active": true
+      },
+      "want": "screen_task",
+      "tags": [
+        "plain"
+      ]
+    },
+    {
+      "id": "scr2",
+      "state": {
+        "message": "Open Firefox and go to wikipedia.org",
+        "screen_active": true
+      },
+      "want": "screen_task",
+      "tags": [
+        "plain"
+      ]
+    },
+    {
+      "id": "scr3",
+      "state": {
+        "message": "Click the blue Submit button",
+        "screen_active": true
+      },
+      "want": "screen_task",
+      "tags": [
+        "plain"
+      ]
+    },
+    {
+      "id": "scr4",
+      "state": {
+        "message": "Scroll down to the bottom of the page",
+        "screen_active": true
+      },
+      "want": "screen_task",
+      "tags": [
+        "plain"
+      ]
+    },
+    {
+      "id": "scr5",
+      "state": {
+        "message": "Type 'hello world' into the text editor",
+        "screen_active": true
+      },
+      "want": "screen_task",
+      "tags": [
+        "contrast"
+      ]
+    },
+    {
+      "id": "scr6",
+      "state": {
+        "message": "Switch to the terminal tab",
+        "screen_active": true
+      },
+      "want": "screen_task",
+      "tags": [
+        "plain"
+      ]
+    },
+    {
+      "id": "scr7",
+      "state": {
+        "message": "Turn the volume down to 30%",
+        "screen_active": true
+      },
+      "want": "screen_task",
+      "tags": [
+        "plain"
+      ]
+    },
+    {
+      "id": "scr8",
+      "state": {
+        "message": "Take a screenshot and save it to the desktop",
+        "screen_active": true
+      },
+      "want": "screen_task",
+      "tags": [
+        "plain"
+      ]
+    },
+    {
+      "id": "scr9",
+      "state": {
+        "message": "Minimize everything",
+        "screen_active": true
+      },
+      "want": "screen_task",
+      "tags": [
+        "plain"
+      ]
+    },
+    {
+      "id": "scr10",
+      "state": {
+        "message": "Search YouTube for lo-fi music and play the first result",
+        "screen_active": true
+      },
+      "want": "screen_task",
+      "tags": [
+        "plain"
+      ]
+    },
+    {
+      "id": "scr11",
+      "state": {
+        "message": "Rename notes.txt on the desktop to todo.txt",
+        "screen_active": true
+      },
+      "want": "screen_task",
+      "tags": [
+        "plain"
+      ]
+    },
+    {
+      "id": "scr12",
+      "state": {
+        "message": "Go back to the previous page",
+        "screen_active": true
+      },
+      "want": "screen_task",
+      "tags": [
+        "plain"
+      ]
+    },
+    {
+      "id": "scr13",
+      "state": {
+        "message": "Maximize the spreadsheet window",
+        "screen_active": true
+      },
+      "want": "screen_task",
+      "tags": [
+        "plain"
+      ]
+    },
+    {
+      "id": "scr14",
+      "state": {
+        "message": "Read me the error message in the dialog on screen",
+        "screen_active": true
+      },
+      "want": "screen_task",
+      "tags": [
+        "contrast",
+        "check_screen"
+      ]
+    },
+    {
+      "id": "scr15",
+      "state": {
+        "message": "what's 15% of 80?",
+        "screen_active": true
+      },
+      "want": "chat",
+      "tags": [
+        "plain",
+        "calculation"
+      ]
+    },
+    {
+      "id": "scr16",
+      "state": {
+        "message": "Write a haiku about autumn",
+        "screen_active": true
+      },
+      "want": "chat",
+      "tags": [
+        "plain",
+        "writing"
+      ]
+    },
+    {
+      "id": "scr17",
+      "state": {
+        "message": "Explain how DNS works",
+        "screen_active": true
+      },
+      "want": "chat",
+      "tags": [
+        "plain"
+      ]
+    },
+    {
+      "id": "scr18",
+      "state": {
+        "message": "What's the capital of Australia?",
+        "screen_active": true
+      },
+      "want": "chat",
+      "tags": [
+        "plain"
+      ]
+    },
+    {
+      "id": "scr19",
+      "state": {
+        "message": "Translate 'good morning' into Spanish",
+        "screen_active": true
+      },
+      "want": "chat",
+      "tags": [
+        "plain",
+        "writing"
+      ]
+    },
+    {
+      "id": "scr20",
+      "state": {
+        "message": "Write a Python function that checks whether a number is prime",
+        "screen_active": true
+      },
+      "want": "chat",
+      "tags": [
+        "code",
+        "writing"
+      ]
+    },
+    {
+      "id": "scr21",
+      "state": {
+        "message": "How do I open a terminal on Ubuntu?",
+        "screen_active": true
+      },
+      "want": "chat",
+      "tags": [
+        "how_to"
+      ]
+    },
+    {
+      "id": "scr22",
+      "state": {
+        "message": "Thanks, that's perfect!",
+        "screen_active": true
+      },
+      "want": "chat",
+      "tags": [
+        "plain"
+      ]
+    },
+    {
+      "id": "scr23",
+      "state": {
+        "message": "Tell me a joke",
+        "screen_active": true
+      },
+      "want": "chat",
+      "tags": [
+        "plain"
+      ]
+    },
+    {
+      "id": "scr24",
+      "state": {
+        "message": "What's the difference between a list and a tuple in Python?",
+        "screen_active": true
+      },
+      "want": "chat",
+      "tags": [
+        "code"
+      ]
+    },
+    {
+      "id": "scr25",
+      "state": {
+        "message": "Give me three ideas for a team lunch",
+        "screen_active": true
+      },
+      "want": "chat",
+      "tags": [
+        "plain",
+        "writing"
+      ]
+    },
+    {
+      "id": "scr26",
+      "state": {
+        "message": "Summarise the plot of Hamlet in two sentences",
+        "screen_active": true
+      },
+      "want": "chat",
+      "tags": [
+        "plain",
+        "writing"
+      ]
+    },
+    {
+      "id": "scr27",
+      "state": {
+        "message": "What keyboard shortcut closes a window in Windows?",
+        "screen_active": true
+      },
+      "want": "chat",
+      "tags": [
+        "how_to",
+        "contrast"
+      ]
+    },
+    {
+      "id": "scr28",
+      "state": {
+        "message": "Convert 5 miles to kilometres",
+        "screen_active": true
+      },
+      "want": "chat",
+      "tags": [
+        "plain",
+        "calculation"
+      ]
+    },
+    {
+      "id": "scr29",
+      "state": {
+        "message": "Draft a polite email declining a meeting",
+        "screen_active": true
+      },
+      "want": "chat",
+      "tags": [
+        "plain",
+        "writing"
+      ]
+    },
+    {
+      "id": "scr30",
+      "state": {
+        "message": "Has the file copy in the file manager finished yet?",
+        "screen_active": true
+      },
+      "want": "screen_task",
+      "tags": [
+        "contrast",
+        "check_screen",
+        "holdout"
+      ]
+    },
+    {
+      "id": "scr31",
+      "state": {
+        "message": "What does the warning in the bottom corner of the browser say?",
+        "screen_active": true
+      },
+      "want": "screen_task",
+      "tags": [
+        "contrast",
+        "check_screen",
+        "holdout"
+      ]
+    },
+    {
+      "id": "scrq0",
+      "state": {
+        "message": "summarise what you see",
+        "screen_active": true
+      },
+      "want": null,
+      "tags": [
+        "ambiguous"
+      ],
+      "note": "either reading holds: the screen, an attached image, or the conversation so far"
+    },
+    {
+      "id": "scrq1",
+      "state": {
+        "message": "Is this right?",
+        "screen_active": true
+      },
+      "want": null,
+      "tags": [
+        "ambiguous"
+      ],
+      "note": "either reading holds: something on the screen or the last chat reply"
+    },
+    {
+      "id": "scrq2",
+      "state": {
+        "message": "Check my email",
+        "screen_active": true
+      },
+      "want": null,
+      "tags": [
+        "ambiguous"
+      ],
+      "note": "either reading holds: open the mail client on screen, or a mail integration"
+    },
+    {
+      "id": "scrq3",
+      "state": {
+        "message": "What time is it?",
+        "screen_active": true
+      },
+      "want": null,
+      "tags": [
+        "ambiguous"
+      ],
+      "note": "either reading holds: read the clock on screen, or answer from the system time"
+    },
+    {
+      "id": "scrq4",
+      "state": {
+        "message": "play some music",
+        "screen_active": true
+      },
+      "want": null,
+      "tags": [
+        "ambiguous"
+      ],
+      "note": "either reading holds: a player on screen, or the media tools"
+    },
+    {
+      "id": "scrq5",
+      "state": {
+        "message": "write a note saying buy milk",
+        "screen_active": true
+      },
+      "want": null,
+      "tags": [
+        "ambiguous"
+      ],
+      "note": "either reading holds: type it into an open editor, or reply with the text"
+    }
+  ]
+}

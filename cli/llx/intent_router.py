@@ -8,11 +8,54 @@ from __future__ import annotations
 
 import re
 import shlex
+import shutil
+from pathlib import Path
 
-from llx.command_catalog import COMMAND_TREE
+from llx.command_catalog import BARE_ONLY_COMMANDS, BARE_OR_NUMBER_COMMANDS, COMMAND_TREE
 
 _AUDIO_EXT = (".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac")
 _SCRIPT_EXT = (".txt", ".md", ".fountain", ".fdx")
+
+
+def _first_word(text: str) -> str:
+    try:
+        parts = shlex.split(text)
+    except ValueError:
+        parts = text.split()
+    return parts[0] if parts else ""
+
+
+def _path_exists(token: str, cwd: Path | None, *, file_only: bool = False) -> bool:
+    if not token:
+        return False
+    path = Path(token).expanduser()
+    if not path.is_absolute():
+        path = (cwd or Path.cwd()) / path
+    try:
+        return path.is_file() if file_only else path.exists()
+    except OSError:
+        return False
+
+
+def _starts_with_program(tail: str, cwd: Path | None) -> bool:
+    """True when the tail's first word is a program on PATH or a script that exists.
+
+    "run pytest -q" and "run ./build.sh" qualify; "run through the plan" does not.
+    A word with a slash is a path, resolved against the REPL's folder rather than
+    looked up on PATH, because that folder is where /run executes it.
+    """
+    first = _first_word(tail)
+    if not first:
+        return False
+    if "/" not in first and shutil.which(first):
+        return True
+    return _path_exists(first, cwd, file_only=True)
+
+
+def _names_test_target(tail: str, cwd: Path | None) -> bool:
+    """True when the tail starts with an existing path (pytest node ids allowed)."""
+    first = _first_word(tail)
+    return _path_exists(first.split("::", 1)[0], cwd)
 
 
 def _music_video_args(tail: str) -> list[str]:
@@ -113,8 +156,10 @@ _NL_INTENT_RULES: list[tuple[re.Pattern[str], str, list[str] | None]] = [
     (re.compile(r"^(?:cat|read|show|view)\s+(?:file\s+)?(.+)$", re.I), "read", None),
     (re.compile(r"^(?:grep|search|find)\s+(.+)$", re.I), "grep", None),
     (re.compile(r"^(?:edit|fix|update|implement|change)\s+(.+)$", re.I), "edit", None),
+    # run/test are checked again in resolve_repl_line: English that only starts
+    # with these verbs ("run through the plan", "check the weather") is chat.
     (re.compile(r"^(?:run|exec|execute|sh)\s+(.+)$", re.I), "run", None),
-    (re.compile(r"^(?:test|pytest|check)\s*(.*)$", re.I), "test", None),
+    (re.compile(r"^(?:test|pytest|check)\b\s*(.*)$", re.I), "test", None),
     (re.compile(r"^(?:todo|task|tasks?)\s*(.*)$", re.I), "todo", None),
     (re.compile(r"^(?:context|status|state|where am i)\s*$", re.I), "context", []),
     (re.compile(r"^(?:suggest|what tools?|recommend tools?)\s*$", re.I), "suggest", []),
@@ -128,8 +173,12 @@ _NL_INTENT_RULES: list[tuple[re.Pattern[str], str, list[str] | None]] = [
 ]
 
 
-def resolve_repl_line(line: str) -> tuple[str, list[str]] | None:
-    """Return (command, args) for SlashRouter, or None to use chat."""
+def resolve_repl_line(line: str, cwd: Path | None = None) -> tuple[str, list[str]] | None:
+    """Return (command, args) for SlashRouter, or None to use chat.
+
+    cwd is the REPL's working folder; script and test paths named on the line
+    must exist there (default: the process working directory).
+    """
     raw = line.strip()
     if not raw or raw.startswith("/"):
         return None
@@ -156,6 +205,10 @@ def resolve_repl_line(line: str) -> tuple[str, list[str]] | None:
                 payload = payload[9:].strip()
             return cmd, [payload] if payload else []
         tail = (match.group(1) or "").strip()
+        if cmd == "run" and not _starts_with_program(tail, cwd):
+            return None
+        if cmd == "test" and tail and not _names_test_target(tail, cwd):
+            return None
         if cmd in ("ls", "read", "grep", "edit", "run", "test", "cd", "todo"):
             # pass the whole tail as single arg string; slash handler will shlex if needed
             return cmd, [tail] if tail else []
@@ -185,6 +238,12 @@ def resolve_repl_line(line: str) -> tuple[str, list[str]] | None:
         return None
 
     cmd = parts[0].lower()
+    if cmd in BARE_ONLY_COMMANDS and len(parts) > 1:
+        return None
+    if cmd in BARE_OR_NUMBER_COMMANDS and (
+        len(parts) > 2 or (len(parts) == 2 and not parts[1].isdigit())
+    ):
+        return None
     if cmd in COMMAND_TREE:
         return cmd, parts[1:]
 

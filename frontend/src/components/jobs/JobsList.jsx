@@ -47,6 +47,9 @@ import {
 import * as apiService from "../../api";
 import { Button } from "@mui/material";
 import { useUnifiedProgress } from "../../contexts/UnifiedProgressContext";
+import EntityContextMenu from "../common/EntityContextMenu";
+import useContextMenu from "../../hooks/useContextMenu";
+import copyText from "../../utils/copyText";
 
 const STATUS_COLORS = {
   pending: "default",
@@ -63,6 +66,15 @@ const _formatDuration = (seconds) => {
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
   return `${(seconds / 3600).toFixed(1)}h`;
 };
+
+// Indexing jobs that are pending, failed or paused can be re-queued.
+const canResumeIndexing = (job) =>
+  ["pending", "failed", "paused"].includes(job.status) &&
+  Boolean(
+    job.kind?.includes("index") ||
+      job.label?.toLowerCase().includes("index") ||
+      job.metadata?.process_type === "indexing",
+  );
 
 const _formatRelative = (iso) => {
   if (!iso) return "—";
@@ -95,6 +107,7 @@ const JobsList = ({ title: _title, subtitle: _subtitle, kinds }) => {
   const isClearMenuOpen = Boolean(clearMenuAnchorEl);
 
   const [indexingPaused, setIndexingPaused] = useState(false);
+  const rowMenu = useContextMenu();
 
   const handleClearHistory = async (kindsToClear) => {
     setLoading(true);
@@ -222,6 +235,34 @@ const JobsList = ({ title: _title, subtitle: _subtitle, kinds }) => {
     for (const j of src) counts[j.status] = (counts[j.status] || 0) + 1;
     return counts;
   }, [activeRows, historyRows, tab]);
+
+  const handleCancelJob = async (job) => {
+    try {
+      const res = await cancelJob(job.id);
+      if (res?.cancelled) {
+        // Optimistic — mark cancelled in the local list.
+        setActiveRows((prev) => prev.map((r) =>
+          r.id === job.id ? { ...r, status: "cancelled", cancellable: false } : r
+        ));
+        setSelected((cur) => (cur && cur.id === job.id ? { ...cur, status: "cancelled", cancellable: false } : cur));
+      } else {
+        setError(res?.reason || "Cancel refused");
+      }
+    } catch (e) {
+      setError(formatUiError(e.response?.data?.error) || e.message || "Cancel failed");
+    }
+  };
+
+  const handleResumeIndexing = async () => {
+    try {
+      const res = await apiService.resumePendingIndexing();
+      alert(res?.message || "Resume pending indexing triggered (will re-queue matching docs)");
+      await refreshActive();
+      setSelected(null);
+    } catch (e) {
+      alert("Resume failed: " + (e.message || e));
+    }
+  };
 
   const toggleStatus = (status) => {
     setStatusFilter((prev) => {
@@ -362,6 +403,7 @@ const JobsList = ({ title: _title, subtitle: _subtitle, kinds }) => {
                   key={j.id}
                   hover
                   onClick={() => setSelected(j)}
+                  onContextMenu={(e) => rowMenu.open(e, j)}
                   sx={{ cursor: "pointer" }}
                 >
                   <TableCell>{j.label}</TableCell>
@@ -395,6 +437,30 @@ const JobsList = ({ title: _title, subtitle: _subtitle, kinds }) => {
           </Table>
         </Paper>
       </Stack>
+
+      <EntityContextMenu
+        anchorPosition={rowMenu.anchorPosition}
+        onClose={rowMenu.close}
+        actions={
+          rowMenu.payload
+            ? [
+                { label: "Details", onClick: () => setSelected(rowMenu.payload) },
+                { label: "Copy ID", onClick: () => copyText(rowMenu.payload.id) },
+                canResumeIndexing(rowMenu.payload) && {
+                  label: "Resume / Re-index",
+                  onClick: handleResumeIndexing,
+                  dividerBefore: true,
+                },
+                rowMenu.payload.cancellable && {
+                  label: "Cancel job",
+                  onClick: () => handleCancelJob(rowMenu.payload),
+                  color: "error.main",
+                  dividerBefore: !canResumeIndexing(rowMenu.payload),
+                },
+              ]
+            : []
+        }
+      />
 
       {/* Detail drawer */}
       <Drawer anchor="right" open={!!selected} onClose={() => setSelected(null)}>
@@ -474,47 +540,21 @@ const JobsList = ({ title: _title, subtitle: _subtitle, kinds }) => {
                   variant="outlined"
                   color="error"
                   fullWidth
-                  onClick={async () => {
-                    try {
-                      const res = await cancelJob(selected.id);
-                      if (res?.cancelled) {
-                        // Optimistic — mark cancelled in the local list.
-                        setActiveRows((prev) => prev.map((r) =>
-                          r.id === selected.id ? { ...r, status: "cancelled", cancellable: false } : r
-                        ));
-                        setSelected({ ...selected, status: "cancelled", cancellable: false });
-                      } else {
-                        setError(res?.reason || "Cancel refused");
-                      }
-                    } catch (e) {
-                      setError(formatUiError(e.response?.data?.error) || e.message || "Cancel failed");
-                    }
-                  }}
+                  onClick={() => handleCancelJob(selected)}
                 >
                   Cancel job
                 </Button>
               )}
               {/* Resume/retry for pending or failed indexing-related jobs */}
-              {(["pending", "failed", "paused"].includes(selected.status)) && (
-                (selected.kind?.includes("index") || selected.label?.toLowerCase().includes("index") || (selected.metadata?.process_type === "indexing")) && (
-                  <Button
-                    variant="outlined"
-                    color="success"
-                    fullWidth
-                    onClick={async () => {
-                      try {
-                        const res = await apiService.resumePendingIndexing();
-                        alert(res?.message || "Resume pending indexing triggered (will re-queue matching docs)");
-                        await refreshActive();
-                        setSelected(null);
-                      } catch (e) {
-                        alert("Resume failed: " + (e.message || e));
-                      }
-                    }}
-                  >
-                    Resume / Re-index
-                  </Button>
-                )
+              {canResumeIndexing(selected) && (
+                <Button
+                  variant="outlined"
+                  color="success"
+                  fullWidth
+                  onClick={handleResumeIndexing}
+                >
+                  Resume / Re-index
+                </Button>
               )}
             </Stack>
           )}

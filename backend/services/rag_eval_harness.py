@@ -24,6 +24,8 @@ from backend.config import (
 # A document below this many characters of extracted text cannot yield an
 # eval chunk; it is not corpus, whatever its row count says.
 EVAL_MIN_TEXT_CHARS = 50
+# Document.index_status of a document whose chunks are in the search index.
+INDEXED_STATUS = "INDEXED"
 
 
 def document_text(doc) -> str:
@@ -44,6 +46,15 @@ def document_text(doc) -> str:
     if unprintable > len(head) * 0.05:
         return ""
     return text
+
+
+def same_model(a: Optional[str], b: Optional[str]) -> bool:
+    """Whether two Ollama model names refer to the same model ("gemma4" and
+    "gemma4:latest" do). False when either is unknown."""
+    def norm(name):
+        name = (name or "").strip().lower()
+        return name if ":" in name.rsplit("/", 1)[-1] else f"{name}:latest"
+    return bool(a and b) and norm(a) == norm(b)
 from backend.services.rag_experiment_agent import _extract_json
 from backend.utils.clock import utcnow
 from backend.utils.text_cut import cut_on_whitespace
@@ -114,6 +125,7 @@ class RAGEvalHarness:
     def __init__(self):
         self._llms = {}  # role -> LLM instance
         self.judge_model_name = None  # resolved lazily; recorded in the ledger
+        self.answer_model_name = None
         self.single_model_judging = False
         self._llm_calls = 0
         self._deadline = None
@@ -184,8 +196,46 @@ class RAGEvalHarness:
                 self.judge_model_name = getattr(llm, "model", None) or "active"
 
         if llm is not None:
+            if role == "answer":
+                self.answer_model_name = getattr(llm, "model", None) or "active"
             self._llms[role] = llm
         return llm
+
+    def reset_models(self) -> None:
+        """Drop the cached LLMs so the next call resolves the judge and answer
+        models from the current settings. A long-lived worker otherwise keeps
+        the judge it first resolved, whatever the setting says now."""
+        self._llms = {}
+        self.judge_model_name = None
+        self.answer_model_name = None
+        self.single_model_judging = False
+
+    def judge_status(self) -> dict:
+        """Which model grades eval answers, and whether it is a different
+        model from the one that writes them.
+
+        The answer role runs on the saved active chat model. With no
+        `autoresearch_judge_model`, or one naming that same model, the model
+        grades its own answers and scores carry self-confirmation bias.
+        """
+        configured = self._model_setting("autoresearch_judge_model")
+        try:
+            from backend.utils.llm_service import get_saved_active_model_name
+            answer = get_saved_active_model_name()
+        except Exception:
+            answer = None
+        if not configured:
+            problem = "judge_unset"
+        elif same_model(configured, answer):
+            problem = "judge_same_as_answer_model"
+        else:
+            problem = None
+        return {
+            "configured": configured,
+            "answer_model": answer,
+            "independent": problem is None,
+            "problem": problem,
+        }
 
     def begin_experiment_budget(self, duration_s: float = None, call_budget: int = None):
         """Start the per-experiment wall-clock and LLM-call budgets."""
@@ -248,19 +298,53 @@ class RAGEvalHarness:
             raise LLMUnavailableError(f"LLM call failed for role '{role}': {e}") from e
 
     def text_document_count(self) -> int:
-        """Documents that carry enough extracted text to yield an eval chunk.
+        """INDEXED documents that carry enough extracted text to yield an
+        eval chunk.
 
         Images, audio and unextracted binaries sit in the same table with an
         empty `content`; counting them made a folder of 26 PNGs look like a
         corpus (2026-08-29) and the run failed later with "no eval pairs".
+        A document that is not indexed cannot be retrieved, so a question cut
+        from it can only measure a miss.
         """
         from backend.models import Document, db
         from sqlalchemy import func
         candidates = db.session.query(Document).filter(
+            Document.index_status == INDEXED_STATUS,
             Document.content.isnot(None),
             func.length(Document.content) >= EVAL_MIN_TEXT_CHARS,
         ).all()
         return sum(1 for d in candidates if document_text(d))
+
+    def eval_source_status(self) -> dict:
+        """Index state of the documents the active eval pairs were cut from.
+
+        Returns {"active", "indexed", "not_indexed", "by_status"}; by_status
+        counts pairs per Document.index_status, with "NO_SOURCE" for a pair
+        whose document is unknown or deleted.
+        """
+        from backend.models import Document, EvalPair, db
+        from sqlalchemy import func
+        rows = (
+            db.session.query(Document.index_status, func.count(EvalPair.id))
+            .select_from(EvalPair)
+            .outerjoin(Document, EvalPair.source_doc_id == Document.id)
+            .filter(EvalPair.is_active.isnot(False))
+            .group_by(Document.index_status)
+            .all()
+        )
+        by_status = {}
+        for status, n in rows:
+            key = status or "NO_SOURCE"
+            by_status[key] = by_status.get(key, 0) + int(n or 0)
+        active = sum(by_status.values())
+        indexed = by_status.get(INDEXED_STATUS, 0)
+        return {
+            "active": active,
+            "indexed": indexed,
+            "not_indexed": active - indexed,
+            "by_status": by_status,
+        }
 
     def has_sufficient_corpus(self) -> bool:
         """Enough TEXT documents are indexed for a meaningful eval set."""
@@ -352,7 +436,7 @@ class RAGEvalHarness:
                 f"Insufficient corpus: {n_text} text docs < {AUTORESEARCH_MIN_CORPUS_SIZE} minimum"
             )
             return []
-        documents = Document.query.all()
+        documents = Document.query.filter(Document.index_status == INDEXED_STATUS).all()
 
         sampled = random.sample(documents, min(len(documents), target_count * 3))
         generation_id = f"gen-{utcnow().strftime('%Y%m%d-%H%M%S')}"
@@ -567,9 +651,12 @@ class RAGEvalHarness:
             chunk_hashes = [pair["source_chunk_hash"]]
 
         if chunk_hashes:
+            # Pair hashes are of chunker output; indexed chunks carry a context
+            # prefix in their text and the chunker output in metadata.
+            from backend.utils.contextual_prepender import source_text
             relevant_ids = list(chunk_hashes)
             for r in results:
-                text = r.get("text", "") or ""
+                text = source_text(r.get("text", ""), r.get("metadata"))
                 retrieved_ids.append(hashlib.sha256(text.encode()).hexdigest())
         else:
             doc_id = pair.get("source_doc_id")
@@ -679,7 +766,7 @@ class RAGEvalHarness:
         pairs = list(pairs if pairs is not None else self._get_active_eval_pairs())
         if not pairs:
             return {
-                "composite_score": 0.0, "num_pairs": 0, "details": [],
+                "composite_score": 0.0, "num_pairs": 0, "judged_pairs": 0, "details": [],
                 "parse_fail_ratio": 0.0, "parse_fail_crash": False,
             }
 
@@ -711,6 +798,7 @@ class RAGEvalHarness:
         result = {
             "composite_score": round(avg_composite, 4),
             "num_pairs": len(details),
+            "judged_pairs": len(usable),
             "details": details,
             "parse_fail_ratio": round(parse_fail_ratio, 4),
             "parse_fail_crash": parse_fail_ratio > AUTORESEARCH_PARSE_FAIL_CRASH_RATIO,

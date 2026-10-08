@@ -49,6 +49,32 @@ class TestPropose:
             assert not (proposal["parameter"] == "top_k" and proposal["new_value"] in [8, 10])
 
 
+class TestBooleanProposals:
+    CURRENT = {"top_k": 5, "reranking_enabled": True, "query_expansion": False}
+
+    def test_false_string_against_false_is_not_a_change(self):
+        agent = RAGExperimentAgent()
+        reply = '{"parameter": "query_expansion", "new_value": "false", "hypothesis": "off"}'
+        with patch.object(agent, "_call_llm", return_value=reply):
+            proposal = agent.propose_experiment([], dict(self.CURRENT), phase=1)
+        assert proposal["source"] != "llm"
+
+    def test_false_string_against_true_proposes_a_real_false(self):
+        agent = RAGExperimentAgent()
+        reply = '{"parameter": "reranking_enabled", "new_value": "false", "hypothesis": "off"}'
+        with patch.object(agent, "_call_llm", return_value=reply):
+            proposal = agent.propose_experiment([], dict(self.CURRENT), phase=1)
+        assert proposal["source"] == "llm"
+        assert proposal["new_value"] is False
+
+    def test_unrecognised_boolean_is_not_proposed(self):
+        agent = RAGExperimentAgent()
+        reply = '{"parameter": "query_expansion", "new_value": "maybe", "hypothesis": "?"}'
+        with patch.object(agent, "_call_llm", return_value=reply):
+            proposal = agent.propose_experiment([], dict(self.CURRENT), phase=1)
+        assert proposal["source"] != "llm"
+
+
 class TestPhaseTransition:
     def test_should_advance_phase_after_plateau(self):
         """Advances phase after 10 consecutive discards."""

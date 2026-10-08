@@ -1,13 +1,15 @@
 // frontend/src/components/settings/ui/SettingsPanel.jsx
 // One panel of the Settings page: a title, an optional one-line description,
-// optional header actions, and a body of clusters. `danger` is reserved for the
-// single panel that holds destructive actions.
+// optional header actions, and a body of clusters. `help` explains the panel on
+// hover over the title. `danger` is reserved for the single panel that holds
+// destructive actions.
 
 import React from "react";
 import { Box, Paper, Typography } from "@mui/material";
 import { alpha } from "@mui/material/styles";
+import HelpTitle from "./HelpTitle";
 
-const SettingsPanel = ({ id, title, description, actions, danger = false, children, sx }) => (
+const SettingsPanel = ({ id, title, help, description, actions, danger = false, children, sx }) => (
   <Paper
     id={id}
     component="section"
@@ -38,7 +40,7 @@ const SettingsPanel = ({ id, title, description, actions, danger = false, childr
         component="h2"
         sx={{ fontSize: "0.85rem", fontWeight: 700, color: danger ? "error.main" : "text.primary", whiteSpace: "nowrap" }}
       >
-        {title}
+        <HelpTitle help={help}>{title}</HelpTitle>
       </Typography>
       {description && (
         <Typography

@@ -154,6 +154,8 @@ import numpy as _np
 import backend.config as config
 from backend import rule_utils
 from backend.utils.project_config import load_config
+# Imported at startup so its boot id, boot time and version describe this process.
+from backend.utils import update_state
 
 from packaging import version
 if version.parse(_np.__version__) < version.parse("1.26.0"):
@@ -563,20 +565,19 @@ def _initialize_app_components(app):
             # mid-render) must NOT orphan a long render on a single slow probe.
             COMFYUI_DOWN_STREAK = 60
 
-            # A single missed 2 s probe is normal while ComfyUI's HTTP thread
-            # starves behind a pegged GPU; only sustained silence counts as down.
-            COMFYUI_DOWN_GRACE = 30  # seconds of consecutive failed probes
+            # ComfyUI's HTTP handler stops answering for tens of seconds while it
+            # loads a large model or samples on a pegged GPU, but its port still
+            # accepts connections; only a refused connection means it has exited.
+            # A "down" verdict reaps the render and cancels its batch, so a busy
+            # ComfyUI must never count as down. Sustained refusal is still needed.
+            COMFYUI_DOWN_GRACE = 30  # seconds of consecutive refused probes
             comfy_fail_since = {"t": None}
 
             def _comfyui_is_down() -> bool:
+                from backend.utils.comfyui_liveness import DOWN, probe_comfyui
                 try:
-                    from backend.config import config as _cfg
-                    import requests as _requests
-                    url = getattr(_cfg, "COMFYUI_URL", None) or os.environ.get(
-                        "GUAARDVARK_COMFYUI_URL", "http://127.0.0.1:8188"
-                    )
-                    resp = _requests.get(url, timeout=2)
-                    failed = resp.status_code != 200
+                    from backend.config import COMFYUI_URL
+                    failed = probe_comfyui(COMFYUI_URL) == DOWN
                 except Exception:
                     failed = True
                 if not failed:
@@ -1211,6 +1212,20 @@ def _initialize_app_components(app):
             get_confine_tool_paths()
     except Exception as e:
         app.logger.warning(f"Could not load the tool path limit setting: {e}")
+    # The image batch worker reads this from its own thread, too.
+    try:
+        with app.app_context():
+            from backend.utils.settings_utils import get_image_keep_loaded_minutes
+            get_image_keep_loaded_minutes()
+    except Exception as e:
+        app.logger.warning(f"Could not load the keep-image-model setting: {e}")
+    # LLM debug logging is written from the agent brain's threads as well.
+    try:
+        with app.app_context():
+            from backend.utils.settings_utils import get_llm_debug
+            get_llm_debug()
+    except Exception as e:
+        app.logger.warning(f"Could not load the LLM debug setting: {e}")
     try:
         with app.app_context():
             from backend.services.inbound_guard_service import get_mode
@@ -1357,8 +1372,18 @@ try:
                 # Generated samples graduate into Training Data after successful train.
                 ("subject_samples", "promoted_to_training", "ALTER TABLE subject_samples ADD COLUMN IF NOT EXISTS promoted_to_training BOOLEAN NOT NULL DEFAULT FALSE"),
                 ("subject_samples", "promoted_at", "ALTER TABLE subject_samples ADD COLUMN IF NOT EXISTS promoted_at TIMESTAMP"),
+                # Whether a sample's angle label was read from the image or is unverified.
+                ("subject_samples", "angle_state", "ALTER TABLE subject_samples ADD COLUMN IF NOT EXISTS angle_state VARCHAR(16)"),
                 ("production_shots", "scene_mood", "ALTER TABLE production_shots ADD COLUMN IF NOT EXISTS scene_mood VARCHAR(64)"),
                 ("production_shots", "character_name", "ALTER TABLE production_shots ADD COLUMN IF NOT EXISTS character_name VARCHAR(255)"),
+                # Storyboard curator advice per shot, and who ticked the approval.
+                ("production_shots", "approved_by", "ALTER TABLE production_shots ADD COLUMN IF NOT EXISTS approved_by VARCHAR(16)"),
+                ("production_shots", "curator_advice", "ALTER TABLE production_shots ADD COLUMN IF NOT EXISTS curator_advice JSON"),
+                # Which voice spoke each shot's line, and any fallback.
+                ("production_shots", "voice_record", "ALTER TABLE production_shots ADD COLUMN IF NOT EXISTS voice_record JSON"),
+                # The screenwriter's per-production text and cast pin for a linked subject.
+                ("production_subjects", "script_description", "ALTER TABLE production_subjects ADD COLUMN IF NOT EXISTS script_description TEXT"),
+                ("production_subjects", "cast_required", "ALTER TABLE production_subjects ADD COLUMN IF NOT EXISTS cast_required BOOLEAN"),
                 # Local source folder for swarm/agent code runs (added Phase 2).
                 ("websites", "local_path", "ALTER TABLE websites ADD COLUMN IF NOT EXISTS local_path VARCHAR(2048)"),
                 # Autoresearch 2.0 (2026-08-10): honest eval pairs + experiment
@@ -1982,6 +2007,10 @@ def health_check():
     }
     if started_by:
         payload["started_by"] = started_by
+    try:
+        payload.update(update_state.restart_state(project_root, __version__))
+    except Exception:
+        app.logger.debug("restart state unavailable for /health", exc_info=True)
     return jsonify(payload), 200
 
 @app.route("/api/health/db")

@@ -1,8 +1,12 @@
 """
 Outreach cog — quietly watches configured channels for messages we can usefully
-respond to (Ollama / ComfyUI / local-AI / RAG / self-hosted topics), drafts a
-reply via the backend's /api/social-outreach/draft-comment endpoint, and either
-posts it (full-auto) or queues it for review (supervised).
+respond to (Ollama / ComfyUI / local-AI / RAG / self-hosted topics) and drafts a
+reply via the backend's /api/social-outreach/draft-comment endpoint. The backend
+queues the draft for review, or marks it approved when it may post on its own.
+
+Replies are sent only by poll_approved_drafts, for approved drafts, after the
+cadence check, the claim and the /submit step (where a reject still stops it).
+Drafting never sends.
 
 This is the lowest-risk path of the three loops: API-only, no servo, no browser.
 If something goes wrong here it's confined to a Discord channel — no shadow-ban
@@ -38,6 +42,10 @@ DEFAULT_POLL_SECONDS = 600
 
 # How far back to look on first run / when no last_seen is saved.
 INITIAL_LOOKBACK_SECONDS = 30 * 60
+
+# A reply that went out but that /record-post did not take counts against
+# cadence here for the backend's daily window; after that it is not retried.
+UNRECORDED_WINDOW_SECONDS = 24 * 3600
 
 
 # Local-side relevance regex — matches the persona.RELEVANCE_KEYWORDS list on
@@ -76,6 +84,12 @@ class OutreachCog(commands.Cog):
         self._seen: dict[int, "OrderedDict[int, None]"] = {}
         self._last_seen_ts: dict[int, float] = {}
         self._load_seen()
+
+        # Replies that went out but that /record-post did not take (a 403 while
+        # outreach is switched off, a network error). The backend's cadence
+        # does not know them, so the cadence check counts them, and each poll
+        # offers them to /record-post again. Oldest first; in memory only.
+        self._unrecorded: list[dict] = []
 
         # Hook the loop interval AFTER reading config so poll_seconds takes effect.
         self.poll_loop.change_interval(seconds=self.poll_seconds)
@@ -129,6 +143,8 @@ class OutreachCog(commands.Cog):
         except Exception:
             return
 
+        await self._retry_unrecorded()
+
         try:
             approved = await self.api._get("/social-outreach/approved")
         except Exception as e:
@@ -154,9 +170,9 @@ class OutreachCog(commands.Cog):
                 if cadence.get("redis") == "unavailable":
                     logger.info("outreach: discord cadence redis unavailable, skipping post")
                     break
-                posts = int(cadence.get("posts_in_24h") or 0)
+                posts = int(cadence.get("posts_in_24h") or 0) + len(self._unrecorded)
                 cap = int(cadence.get("daily_cap") or 8)
-                last_ago = cadence.get("last_post_seconds_ago")
+                last_ago = self._last_post_seconds_ago(cadence.get("last_post_seconds_ago"))
                 min_gap = int(cadence.get("min_gap_s") or 1800)
                 if posts >= cap:
                     logger.info("outreach: discord daily cap hit (%s/%s)", posts, cap)
@@ -209,24 +225,61 @@ class OutreachCog(commands.Cog):
                         logger.info("outreach: draft %s not sent, submit refused: %s", audit_id, e)
                         continue
                     await msg.reply(draft, mention_author=False)
-
-                    await self.api._post(
-                        "/social-outreach/record-post",
-                        json={
-                            "audit_id": audit_id,
-                            "platform": "discord",
-                            "posted_text": draft,
-                            "target_url": target_url,
-                            "target_thread_id": str(msg_id),
-                        },
-                    )
                     posted_this_tick = True
+
+                    await self._record_post({
+                        "audit_id": audit_id,
+                        "platform": "discord",
+                        "posted_text": draft,
+                        "target_url": target_url,
+                        "target_thread_id": str(msg_id),
+                    })
             except discord.NotFound:
                 logger.warning("outreach: msg %s not found, rejecting draft %s", msg_id, audit_id)
                 await self._give_up(audit_id)
             except Exception as e:
                 logger.warning("outreach: failed to post approved draft %s: %s", audit_id, e)
                 await self._give_up(audit_id)
+
+    async def _record_post(self, payload: dict) -> None:
+        """Tell the backend a reply went out.
+
+        When /record-post does not take it, the reply still counts: it is kept
+        in ``_unrecorded`` for the cadence check and retried on each poll.
+        """
+        try:
+            await self.api._post("/social-outreach/record-post", json=payload)
+        except Exception as e:
+            logger.error(
+                "outreach: draft %s WAS SENT but record-post failed (%s); counting it against "
+                "discord cadence here and retrying each poll",
+                payload.get("audit_id"), e,
+            )
+            self._unrecorded.append({"payload": payload, "sent_at": time.time()})
+
+    async def _retry_unrecorded(self) -> None:
+        now = time.time()
+        pending = []
+        for item in self._unrecorded:
+            audit_id = item["payload"].get("audit_id")
+            if now - item["sent_at"] > UNRECORDED_WINDOW_SECONDS:
+                logger.error("outreach: draft %s was sent but never recorded; no longer retried", audit_id)
+                continue
+            try:
+                await self.api._post("/social-outreach/record-post", json=item["payload"])
+                logger.info("outreach: draft %s recorded on retry", audit_id)
+            except Exception as e:
+                logger.warning("outreach: draft %s still not recorded: %s", audit_id, e)
+                pending.append(item)
+        self._unrecorded = pending
+
+    def _last_post_seconds_ago(self, backend_ago) -> Optional[int]:
+        """Seconds since the last Discord reply: the backend's figure, or the
+        newest unrecorded reply when that is more recent."""
+        if not self._unrecorded:
+            return backend_ago
+        local_ago = int(time.time() - self._unrecorded[-1]["sent_at"])
+        return local_ago if backend_ago is None else min(int(backend_ago), local_ago)
 
     async def _give_up(self, audit_id) -> None:
         """Reject a claimed draft that could not be sent.
@@ -378,31 +431,9 @@ class OutreachCog(commands.Cog):
             msg.channel.id, msg.id, grade, would_post, supervised, len(draft),
         )
 
-        if supervised or not would_post or not draft:
-            return  # queued in audit, not posted
-
-        try:
-            sent = await msg.reply(draft, mention_author=False)
-        except discord.Forbidden:
-            logger.warning("outreach: no send perms in channel %s", msg.channel.id)
-            return
-        except Exception as e:
-            logger.warning("outreach: failed to post reply: %s", e)
-            return
-
-        try:
-            await self.api._post(
-                "/social-outreach/record-post",
-                json={
-                    "audit_id": audit_id,
-                    "platform": "discord",
-                    "posted_text": draft,
-                    "target_url": target_url,
-                    "target_thread_id": str(msg.id),
-                },
-            )
-        except Exception as e:
-            logger.warning("outreach: record-post failed (post still went out, audit may be stale): %s", e)
+        # A would_post draft is stored as approved; poll_approved_drafts sends it.
+        if would_post and draft and not supervised:
+            logger.info("outreach: draft %s approved, poll_approved_drafts will send it", audit_id)
 
 
 async def setup(bot: commands.Bot):

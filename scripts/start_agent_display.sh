@@ -741,7 +741,7 @@ user_pref("browser.ml.chat.enabled", false);
 user_pref("browser.ml.enable", false);
 user_pref("permissions.default.desktop-notification", 2);
 user_pref("browser.startup.page", 1);
-user_pref("browser.startup.homepage", "https://www.google.com/");
+user_pref("browser.startup.homepage", "about:blank");
 user_pref("media.autoplay.default", 5);
 FIREFOXJS
             fi

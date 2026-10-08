@@ -14,6 +14,8 @@ import {
 import CollapsibleAlert from "../common/CollapsibleAlert";
 import { useNavigate } from "react-router-dom";
 import DashboardCardWrapper from "./DashboardCardWrapper";
+import EntityContextMenu from "../common/EntityContextMenu";
+import useContextMenu from "../../hooks/useContextMenu";
 import { getProjects } from "../../api";
 import { getLogoUrl } from "../../config/logoConfig";
 
@@ -33,6 +35,7 @@ const ProjectManagerCard = React.forwardRef(
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState(null);
     const navigate = useNavigate();
+    const rowMenu = useContextMenu();
 
     const fetchProjects = useCallback(async () => {
       setIsLoading(true);
@@ -66,6 +69,7 @@ const ProjectManagerCard = React.forwardRef(
         onCardColorChange={onCardColorChange}
         title="Project Manager"
         {...props}
+        contextMenuActions={[{ label: "Refresh", onClick: fetchProjects }]}
       >
         {isLoading && (
           <CircularProgress
@@ -107,6 +111,7 @@ const ProjectManagerCard = React.forwardRef(
                   },
                 }}
                 onClick={() => navigate(`/projects?projectId=${project.id}`)}
+                onContextMenu={(e) => rowMenu.open(e, project)}
                 className="non-draggable"
               >
                 {project.client?.logo_path && (
@@ -143,6 +148,24 @@ const ProjectManagerCard = React.forwardRef(
           </List>
           // --- END MODIFICATION ---
         )}
+        <EntityContextMenu
+          anchorPosition={rowMenu.anchorPosition}
+          onClose={rowMenu.close}
+          actions={
+            rowMenu.payload
+              ? [
+                  { label: "Open", onClick: () => navigate(`/projects/${rowMenu.payload.id}`) },
+                  { label: "Edit…", onClick: () => navigate(`/projects?projectId=${rowMenu.payload.id}`) },
+                  {
+                    label: "Files",
+                    onClick: () => navigate(`/documents?project_id=${rowMenu.payload.id}`),
+                    dividerBefore: true,
+                  },
+                  { label: "Schedule Task", onClick: () => navigate(`/tasks?project_id=${rowMenu.payload.id}`) },
+                ]
+              : []
+          }
+        />
       </DashboardCardWrapper>
     );
   },

@@ -109,6 +109,8 @@ PROTECTED_FILE_PREFIXES = (
     '/api/files/mkdir',
     '/api/files/rename',
     '/api/files/browse-server',
+    # Reads files anywhere on the server to describe a training dataset.
+    '/api/training/datasets/',
 )
 
 # Endpoints protected only on DELETE
@@ -174,6 +176,11 @@ MUTATION_PROTECTED_PREFIXES = (
     # GPU control (stop Ollama, force-release leases, evict) and upscaling jobs.
     '/api/gpu',
     '/api/upscaling',
+    # Installing or removing the training libraries runs pip in the backend's
+    # Python environment; their status stays readable.
+    '/api/training/libraries/',
+    # Downloading or deleting a training base model; the list stays readable.
+    '/api/training/base-models/',
 )
 
 # Mutation-only protection for routes whose id sits mid-path: (prefix, suffix).

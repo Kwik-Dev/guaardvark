@@ -370,19 +370,26 @@ def _bidi_fill_and_submit_comment(comment_text: str) -> tuple[bool, str]:
               b => /^\\s*Comment\\s*$/i.test((b.innerText || '').trim())
             );
           }}
-          if (btn && !btn.disabled) {{
+          // A disabled Comment button means YouTube did not register the
+          // text; a keyboard submit would not post it either.
+          if (btn && btn.disabled) {{
+            return JSON.stringify({{
+              ok:false, stage:'comment_button_disabled', filled_len: filled.length
+            }});
+          }}
+          if (btn) {{
             btn.click();
             return JSON.stringify({{
               ok:true, stage:'clicked_submit', filled_len: filled.length
             }});
           }}
+          // No Comment button found at all: try the Ctrl+Enter shortcut.
           ce.dispatchEvent(new KeyboardEvent('keydown', {{
             key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
             ctrlKey: true, bubbles: true, cancelable: true,
           }}));
           return JSON.stringify({{
             ok: true, stage: 'ctrl_enter', filled_len: filled.length,
-            btn_disabled: !!(btn && btn.disabled),
           }});
         }})()"""
         fill_d = _eval(4, js_fill)
@@ -402,63 +409,113 @@ def _bidi_fill_and_submit_comment(comment_text: str) -> tuple[bool, str]:
             pass
 
 
-def _verify_youtube_text_in_dom(comment_text: str) -> tuple[bool, str]:
-    """Return (True, msg) if a needle of comment_text appears in the page DOM."""
-    import json as _json
-    import websocket as _ws2
+# Words that mean the comment did not go through. Looked for only in the
+# comment box and the toast area, never in the comments themselves.
+_YT_SUBMIT_ERROR = re.compile(r"sign in to|something went wrong|try again", re.IGNORECASE)
 
-    # Prefer an ASCII-stable needle — curly apostrophes in drafts often diverge
-    # from what the page stores after paste.
+# Reads the comment section after a submit. Comment bodies are the
+# #content-text of the comment renderers (ytd-comment-view-model in the
+# current layout, ytd-comment-renderer in the older one); composers are the
+# contenteditable roots inside the comment boxes. Text is compared with all
+# whitespace removed, so line breaks and emoji images do not break a match.
+_YT_VERIFY_JS = r"""(() => {
+  const squash = (s) => (s || '').replace(/\s+/g, '');
+  const want = squash(__NEEDLE__);
+  const wantAscii = squash(__ASCII_NEEDLE__);
+  // A few ASCII characters left from a mostly non-ASCII text would match
+  // other people's comments.
+  const asciiOk = wantAscii.length >= 20;
+  const BOX = 'ytd-comment-simplebox-renderer, ytd-commentbox';
+  const COMPOSER = '#contenteditable-root, [contenteditable]:not([contenteditable="false"]), textarea';
+  const rendered = (el) => el.getClientRects().length > 0;
+
+  const bodies = new Set();
+  for (const el of document.querySelectorAll(
+      'ytd-comment-view-model #content-text, ytd-comment-renderer #content-text, ytd-comments #content-text')) {
+    if (!el.closest(BOX)) bodies.add(el);
+  }
+  let inComments = false;
+  for (const el of bodies) {
+    const t = squash(el.textContent);
+    if ((want && t.includes(want)) || (asciiOk && t.includes(wantAscii))) { inComments = true; break; }
+  }
+
+  // Only composers on screen: a failed submit leaves its box open, while a
+  // collapsed box may keep text the poster never typed.
+  const composers = new Set();
+  for (const box of document.querySelectorAll(BOX)) {
+    for (const c of box.querySelectorAll(COMPOSER)) if (rendered(c)) composers.add(c);
+  }
+  let composerChars = 0;
+  for (const c of composers) {
+    composerChars += squash(c.tagName === 'TEXTAREA' ? c.value : (c.innerText || c.textContent)).length;
+  }
+
+  // Text of the comment boxes outside their composers, plus open toasts.
+  const parts = [];
+  for (const box of document.querySelectorAll(BOX)) {
+    if (!rendered(box) || (box.parentElement && box.parentElement.closest(BOX))) continue;
+    const w = document.createTreeWalker(box, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => (n.nodeType === 1 && n.matches(COMPOSER))
+        ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+    });
+    let n;
+    while ((n = w.nextNode())) if (n.nodeType === 3) parts.push(n.nodeValue);
+  }
+  for (const t of document.querySelectorAll('tp-yt-paper-toast, yt-notification-action-renderer')) {
+    if (rendered(t)) parts.push(t.textContent || '');
+  }
+
+  return JSON.stringify({
+    in_comments: inComments,
+    comments_seen: bodies.size,
+    composers: composers.size,
+    composer_chars: composerChars,
+    box_text: parts.join(' ').replace(/\s+/g, ' ').trim().slice(0, 2000),
+    url: location.href,
+  });
+})()"""
+
+
+def _verify_youtube_text_in_dom(comment_text: str) -> tuple[bool, str]:
+    """Is ``comment_text`` a posted comment on the open YouTube page?
+
+    Posted means the start of the text is in a rendered comment or reply
+    body, every comment-box composer is empty, and neither the comment box
+    nor a toast shows an error. Returns ``(posted, reason)``; on failure the
+    reason names each check that failed.
+    """
+    import json as _json
+
+    from backend.services.social_outreach.reddit_outreach import bidi_evaluate_json
+
+    # Also try an ASCII-only needle: emoji and curly quotes in a draft can
+    # render differently on the page.
     raw = (comment_text or "").strip()
     needle = raw[:60]
     ascii_needle = re.sub(r"[^\x20-\x7E]", " ", raw)[:50].strip()
     if not needle:
         return False, "empty_needle"
-    try:
-        ws = _ws2.create_connection(
-            f"ws://localhost:{BIDI_PORT}/session", timeout=3, suppress_origin=True,
-        )
-        ws.send(_json.dumps({"id": 1, "method": "session.new", "params": {"capabilities": {}}}))
-        if _json.loads(ws.recv()).get("type") != "success":
-            ws.close()
-            return False, "bidi_session_failed"
-        ws.send(_json.dumps({"id": 2, "method": "browsingContext.getTree", "params": {}}))
-        ctxs = _json.loads(ws.recv()).get("result", {}).get("contexts", [])
-        if not ctxs:
-            ws.close()
-            return False, "no_browsing_context"
-        ctx_id = ctxs[0]["context"]
-        check_js = (
-            "(() => {"
-            "  const needle = " + _json.dumps(needle) + ";"
-            "  const ascii = " + _json.dumps(ascii_needle) + ";"
-            "  const body = (document.body && document.body.innerText) || '';"
-            "  const found = body.includes(needle) || (ascii && body.includes(ascii));"
-            "  const err = /sign in to|something went wrong|try again/i.test(body);"
-            "  return JSON.stringify({found, err, url: location.href});"
-            "})()"
-        )
-        ws.send(_json.dumps({
-            "id": 3, "method": "script.evaluate",
-            "params": {
-                "expression": check_js,
-                "target": {"context": ctx_id},
-                "awaitPromise": False,
-            },
-        }))
-        v = _json.loads(ws.recv()).get("result", {}).get("result", {}).get("value", "")
-        try:
-            ws.send(_json.dumps({"id": 99, "method": "session.end", "params": {}}))
-        except Exception:
-            pass
-        ws.close()
-        if not v:
-            return False, "empty_evaluate"
-        d = _json.loads(v)
-        ok = bool(d.get("found")) and not bool(d.get("err"))
-        return ok, f"found={d.get('found')} err={d.get('err')} url={d.get('url')}"
-    except Exception as e:
-        return False, f"verify_exception: {e}"
+    literals = {"__NEEDLE__": _json.dumps(needle), "__ASCII_NEEDLE__": _json.dumps(ascii_needle)}
+    expression = re.sub(r"__(?:ASCII_)?NEEDLE__", lambda m: literals[m.group(0)], _YT_VERIFY_JS)
+    d, why = bidi_evaluate_json(expression)
+    if d is None:
+        return False, f"page_not_readable: {why}"
+
+    seen = int(d.get("comments_seen") or 0)
+    failed = []
+    if not d.get("in_comments"):
+        failed.append(f"not_in_comment_bodies (comments_seen={seen})")
+    composer_chars = int(d.get("composer_chars") or 0)
+    if composer_chars:
+        failed.append(f"composer_not_empty ({composer_chars} chars left)")
+    error = _YT_SUBMIT_ERROR.search(d.get("box_text") or "")
+    if error:
+        failed.append(f"error_in_comment_box ({error.group(0)!r})")
+    url = str(d.get("url") or "")[:200]
+    if failed:
+        return False, f"{'; '.join(failed)} url={url}"
+    return True, f"in a comment body (comments_seen={seen}) url={url}"
 
 
 # ---------------------------------------------------------------------------

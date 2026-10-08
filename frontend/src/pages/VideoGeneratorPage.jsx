@@ -78,8 +78,13 @@ import {
   fitAreaToRatio,
 } from "../constants/videoGeneratorPresets";
 import QualityFlagsPill from "../components/videogen/QualityFlagsPill";
+import VlmReviewPill from "../components/videogen/VlmReviewPill";
+import ColourMatchPill from "../components/videogen/ColourMatchPill";
+import ClipReviewHold, { ReviewStatePill } from "../components/videogen/ClipReviewHold";
 import RenderFailureNote from "../components/videogen/RenderFailureNote";
 import { refusalText } from "../utils/renderFailure";
+import { applicableAdapters as applicableAdapterModels } from "../utils/videoAdapters";
+import { applyClipRename, applyClipRenameToPlayer, clipFileName } from "../utils/videoRename";
 import VideoGenEffectiveSettings from "../components/videogen/VideoGenEffectiveSettings";
 import LiveLatentPreview from "../components/videogen/LiveLatentPreview";
 import { videoGenStageLabel } from "../components/videogen/stageLabels";
@@ -101,6 +106,9 @@ import {
 } from "@mui/icons-material";
 
 import { formatUiError } from "../utils/uiError";
+import EntityContextMenu from "../components/common/EntityContextMenu";
+import useContextMenu from "../hooks/useContextMenu";
+import lazyWithReload from "../utils/lazyWithReload";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 
@@ -124,7 +132,7 @@ const formatVideoDate = (isoStr) => {
 };
 
 // Lazy import for VideoModelsModal
-const VideoModelsModal = React.lazy(() => import("../components/modals/VideoModelsModal"));
+const VideoModelsModal = lazyWithReload(() => import("../components/modals/VideoModelsModal"));
 
 const VideoGeneratorPage = ({ embedded = false }) => {
   const [inputMode, setInputMode] = useState("text");
@@ -418,6 +426,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   const [highlightModelId, setHighlightModelId] = useState(null);
   const [confirmAction, setConfirmAction] = useState(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
+  const resultMenu = useContextMenu();
+  const batchMenu = useContextMenu();
 
   // Pull the authoritative model list + readiness. Extracted so we can re-run it
   // after the user closes the install modal (a freshly-installed model should
@@ -705,20 +715,10 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     return { width, height };
   }, [aspectRatio, videoSize, model, modelMeta]);
 
-  // A speed profile's LoRAs are trained for that profile's steps, cfg and shift, and
-  // Wan's pair is split per expert; offered here they would stack on both experts at
-  // the base settings. The profile picker is the only way to use them.
-  const applicableAdapters = useMemo(() => {
-    const owned = new Set();
-    Object.values(modelCaps?.speed_profiles || {}).forEach((spec) => {
-      if (spec?.lora) owned.add(spec.lora);
-      Object.values(spec?.loras || {}).forEach((id) => owned.add(id));
-    });
-    return (adapterModels || []).filter((m) => {
-      const applies = m.applies_to || [];
-      return (applies.length === 0 || applies.includes(model)) && !owned.has(m.id);
-    });
-  }, [adapterModels, model, modelCaps]);
+  const applicableAdapters = useMemo(
+    () => applicableAdapterModels(adapterModels, model, modelCaps?.speed_profiles),
+    [adapterModels, model, modelCaps],
+  );
   const applicableEncoders = useMemo(
     () => (encoderModels || []).filter((m) => (m.applies_to || []).includes(model)),
     [encoderModels, model],
@@ -955,6 +955,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     handleDeleteBatch,
     handleCancelBatch,
     handleRetryBatch,
+    handleApproveClip,
+    handleRerenderClip,
     handleClearCompletedQueue,
   } = useBatchVideo({ setError, setSuccess, computedParams });
 
@@ -1515,29 +1517,41 @@ const VideoGeneratorPage = ({ embedded = false }) => {
           startPollingStatus(batchId);
         }
         await fetchBatches();
+      } else {
+        const body = await res.json().catch(() => ({}));
+        setError(`Couldn't delete the video: ${refusalText(body) || res.statusText}`);
       }
     } catch (e) {
-      // ignore
+      setError(`Couldn't delete the video: ${e.message}`);
     }
   };
 
-  const handleRenameVideo = async (batchId, videoName) => {
-    const newName = window.prompt("Enter new video filename (include extension)", videoName);
-    if (!newName) return;
+  // The server answers with the clip's new paths; the page repoints its cards and
+  // an open player from them, so Play serves the renamed file without a reload.
+  const handleRenameVideo = async (batchId, videoPath) => {
+    const current = clipFileName(videoPath);
+    const newName = window.prompt("Rename video (the extension stays the same)", current);
+    if (newName === null || !newName.trim() || newName.trim() === current) return;
     try {
-      const res = await fetch(`${API_BASE}/batch-video/video/${batchId}/${encodePathSegments(videoName)}/rename`, {
+      const res = await fetch(`${API_BASE}/batch-video/video/${batchId}/${encodePathSegments(videoPath)}/rename`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ new_name: newName }),
+        body: JSON.stringify({ new_name: newName.trim() }),
       });
-      if (res.ok) {
-        if (activeBatchId === batchId) {
-          startPollingStatus(batchId);
-        }
-        await fetchBatches();
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || !body.success) {
+        setError(`Couldn't rename the video: ${refusalText(body) || res.statusText}`);
+        return;
       }
+      const renamed = body.data;
+      setBatchStatus((prev) => applyClipRename(prev, batchId, renamed));
+      setVideoPlayer((prev) => applyClipRenameToPlayer(prev, batchId, renamed, (path) =>
+        `${API_BASE}/batch-video/video/${batchId}/${encodePathSegments(PathFromUrl(path))}`,
+      ));
+      setSuccess(`Renamed to ${clipFileName(renamed.video_path)}.`);
+      fetchBatches();
     } catch (e) {
-      // ignore
+      setError(`Couldn't rename the video: ${e.message}`);
     }
   };
 
@@ -1575,6 +1589,99 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     }
     return Object.entries(KEYFRAME_MODEL_OPTIONS).filter(([key]) => key !== "from-lora");
   }, [castIdentityLocked]);
+
+  // Shared by the result and batch buttons and their right-click menus.
+  const openResultPlayer = (res, idx, videoUrl) => {
+    const playable = currentResults.filter(r => r.video_path);
+    const playIdx = playable.findIndex(r => r.item_id === res.item_id);
+    setVideoPlayer({
+      url: videoUrl,
+      title: res.video_path?.split("/").pop() || `Video ${idx + 1}`,
+      batchId: batchStatus.batch_id,
+      results: playable,
+      currentIndex: playIdx >= 0 ? playIdx : 0,
+    });
+  };
+
+  const confirmDeleteVideo = (batchId, res) => setConfirmAction({
+    title: "Delete this video?",
+    description: "Removes the file. Other clips in the batch stay.",
+    facts: [{ label: "File", value: PathFromUrl(res.video_path) }],
+    keeps: "the rest of this batch, other batches, the form",
+    confirmLabel: "Delete video",
+    run: () => handleDeleteVideo(batchId, PathFromUrl(res.video_path)),
+  });
+
+  const confirmCancelBatch = (b) => setConfirmAction({
+    title: "Cancel this batch?",
+    description: "Stops the GPU job. Clips already written stay on disk.",
+    facts: [{ label: "Batch", value: b.display_name || b.batch_id.slice(0, 8) }],
+    keeps: "finished videos in this batch, the form, other batches",
+    confirmLabel: "Cancel batch",
+    run: () => handleCancelBatch(b.batch_id),
+  });
+
+  const confirmDeleteBatch = (b) => setConfirmAction({
+    title: `Delete "${b.display_name || `Batch ${b.batch_id.slice(0, 8)}`}"?`,
+    description: "Removes this batch and every video in it.",
+    facts: [{ label: "Videos", value: String(b.completed_videos ?? 0) }],
+    keeps: "other batches, installed models, and the prompt in the form",
+    confirmLabel: "Delete batch",
+    run: () => handleDeleteBatch(b.batch_id),
+  });
+
+  const resultMenuActions = () => {
+    if (!resultMenu.payload || !batchStatus) return [];
+    const { res, idx, videoUrl } = resultMenu.payload;
+    const batchId = batchStatus.batch_id;
+    const held = res.success && res.review?.state === "needs_review";
+    return [
+      videoUrl && { label: "Play", onClick: () => openResultPlayer(res, idx, videoUrl) },
+      videoUrl && { label: "Open in new tab", onClick: () => window.open(videoUrl, "_blank") },
+      held && { label: "Approve clip", onClick: () => handleApproveClip(batchId, res.item_id), dividerBefore: true },
+      held && { label: "Re-render clip", onClick: () => handleRerenderClip(batchId, res.item_id) },
+      !res.video_path && res.frame_paths?.length > 0 && {
+        label: "Combine Frames",
+        onClick: () => handleCombineFrames(batchId, res.item_id),
+      },
+      res.video_path && {
+        label: "Rename…",
+        onClick: () => handleRenameVideo(batchId, PathFromUrl(res.video_path)),
+        dividerBefore: true,
+      },
+      res.video_path && {
+        label: "Delete video…",
+        onClick: () => confirmDeleteVideo(batchId, res),
+        color: "error.main",
+      },
+    ];
+  };
+
+  const batchMenuActions = () => {
+    const b = batchMenu.payload;
+    if (!b) return [];
+    const running = b.status === "running" || b.status === "pending" || b.status === "processing";
+    const finished = b.status === "completed" || b.status === "error" || b.status === "cancelled";
+    return [
+      {
+        label: "Open",
+        onClick: () => {
+          setActiveBatchId(b.batch_id);
+          startPollingStatus(b.batch_id);
+        },
+      },
+      b.status === "completed" && { label: "Download All Videos", onClick: () => handleDownloadBatch(b.batch_id) },
+      finished && { label: "Adjust & Retry", onClick: () => handleAdjustRetry(b.batch_id) },
+      b.status === "error" && b.can_retry && { label: "Retry", onClick: () => handleRetryBatch(b.batch_id) },
+      running && { label: "Cancel batch…", onClick: () => confirmCancelBatch(b), dividerBefore: true },
+      {
+        label: "Delete batch…",
+        onClick: () => confirmDeleteBatch(b),
+        color: "error.main",
+        dividerBefore: !running,
+      },
+    ];
+  };
 
   return (
     <PageLayout title={embedded ? undefined : "Video Generation"} variant={embedded ? "fullscreen" : "standard"} noPadding={embedded}>
@@ -2691,14 +2798,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                             >
                               <IconButton
                                 size="small"
-                                onClick={() => setConfirmAction({
-                                  title: "Cancel this batch?",
-                                  description: "Stops the GPU job. Clips already written stay on disk.",
-                                  facts: [{ label: "Batch", value: q.display_name || q.batch_id.slice(0, 8) }],
-                                  keeps: "finished videos in this batch, the form, other batches",
-                                  confirmLabel: "Cancel batch",
-                                  run: () => handleCancelBatch(q.batch_id),
-                                })}
+                                onClick={() => confirmCancelBatch(q)}
                                 aria-label="cancel batch"
                               >
                                 <CloseIcon fontSize="small" />
@@ -2883,7 +2983,10 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                       : null;
                     return (
                     <Grid item xs={12} sm={6} key={res.item_id}>
-                      <Card variant="outlined">
+                      <Card
+                        variant="outlined"
+                        onContextMenu={(e) => resultMenu.open(e, { res, idx, videoUrl })}
+                      >
                         <CardContent sx={{ pb: 1 }}>
                           <Box
                             sx={{
@@ -2898,15 +3001,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                             }}
                             onClick={() => {
                               if (!videoUrl) return;
-                              const playable = currentResults.filter(r => r.video_path);
-                              const playIdx = playable.findIndex(r => r.item_id === res.item_id);
-                              setVideoPlayer({
-                                url: videoUrl,
-                                title: res.video_path?.split("/").pop() || `Video ${idx + 1}`,
-                                batchId: batchStatus.batch_id,
-                                results: playable,
-                                currentIndex: playIdx >= 0 ? playIdx : 0,
-                              });
+                              openResultPlayer(res, idx, videoUrl);
                             }}
                           >
                             {thumbUrl || liveThumb ? (
@@ -2933,33 +3028,30 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                             )}
                           </Box>
                           <Stack direction="row" spacing={0.5} alignItems="center" flexWrap="wrap">
-                            <Chip
-                              label={res.success ? "Ready" : "Error"}
-                              color={res.success ? "success" : "error"}
-                              size="small"
-                            />
+                            {/* A held clip is not "Ready": its pill says it waits for a person. */}
+                            {res.review?.state !== "needs_review" && (
+                              <Chip
+                                label={res.success ? "Ready" : "Error"}
+                                color={res.success ? "success" : "error"}
+                                size="small"
+                              />
+                            )}
+                            {res.success && <ReviewStatePill review={res.review} />}
                             {res.frame_paths?.length > 0 && (
                               <Chip label={`${res.frame_paths.length}f`} size="small" variant="outlined" />
                             )}
-                            {res.metadata?.quality?.vlm_review?.available &&
-                              typeof res.metadata.quality.vlm_review.review?.quality_score === "number" && (
-                              <Chip
-                                label={`QA ${res.metadata.quality.vlm_review.review.quality_score}/10`}
-                                size="small"
-                                color={res.metadata.quality.vlm_review.review.quality_score >= 5 ? "success" : "warning"}
-                                variant="outlined"
-                              />
-                            )}
-                            {typeof res.metadata?.quality?.identity?.score === "number" && (
-                              <Chip
-                                label={`ID ${Math.round(res.metadata.quality.identity.score * 100)}%`}
-                                size="small"
-                                variant="outlined"
-                              />
-                            )}
+                            <VlmReviewPill review={res.metadata?.quality?.vlm_review} />
+                            <ColourMatchPill quality={res.metadata?.quality} />
                             <QualityFlagsPill quality={res.metadata?.quality} />
                           </Stack>
                           {!res.success && <RenderFailureNote failure={res.failure} error={res.error} />}
+                          {res.success && (
+                            <ClipReviewHold
+                              review={res.review}
+                              onApprove={() => handleApproveClip(batchStatus.batch_id, res.item_id)}
+                              onRerender={() => handleRerenderClip(batchStatus.batch_id, res.item_id)}
+                            />
+                          )}
                         </CardContent>
                         <CardActions sx={{ pt: 0 }}>
                           {videoUrl && (
@@ -2967,17 +3059,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                               size="small"
                               variant="contained"
                               startIcon={<PlayIcon />}
-                              onClick={() => {
-                                const playable = currentResults.filter(r => r.video_path);
-                                const playIdx = playable.findIndex(r => r.item_id === res.item_id);
-                                setVideoPlayer({
-                                  url: videoUrl,
-                                  title: res.video_path?.split("/").pop() || `Video ${idx + 1}`,
-                                  batchId: batchStatus.batch_id,
-                                  results: playable,
-                                  currentIndex: playIdx >= 0 ? playIdx : 0,
-                                });
-                              }}
+                              onClick={() => openResultPlayer(res, idx, videoUrl)}
                             >
                               Play
                             </Button>
@@ -2999,14 +3081,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                               </IconButton>
                               <IconButton
                                 size="small"
-                                onClick={() => setConfirmAction({
-                                  title: "Delete this video?",
-                                  description: "Removes the file. Other clips in the batch stay.",
-                                  facts: [{ label: "File", value: PathFromUrl(res.video_path) }],
-                                  keeps: "the rest of this batch, other batches, the form",
-                                  confirmLabel: "Delete video",
-                                  run: () => handleDeleteVideo(batchStatus.batch_id, PathFromUrl(res.video_path)),
-                                })}
+                                onClick={() => confirmDeleteVideo(batchStatus.batch_id, res)}
                               >
                                 <CloseIcon fontSize="small" />
                               </IconButton>
@@ -3026,6 +3101,11 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                     );
                   })}
                 </Grid>
+                <EntityContextMenu
+                  anchorPosition={resultMenu.anchorPosition}
+                  onClose={resultMenu.close}
+                  actions={resultMenu.isOpen ? resultMenuActions() : []}
+                />
 
                 {(batchStatus.status === 'error' || batchStatus.status === 'cancelled') && (
                   <Box sx={{ display: 'flex', justifyContent: 'flex-end', mt: 2 }}>
@@ -3107,6 +3187,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                         setActiveBatchId(b.batch_id);
                         startPollingStatus(b.batch_id);
                       }}
+                      onContextMenu={(e) => batchMenu.open(e, b)}
                       sx={{
                         cursor: 'pointer',
                         position: 'relative',
@@ -3194,14 +3275,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                               className="batch-delete"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                setConfirmAction({
-                                  title: `Delete "${rawName}"?`,
-                                  description: "Removes this batch and every video in it.",
-                                  facts: [{ label: "Videos", value: String(videoCount) }],
-                                  keeps: "other batches, installed models, and the prompt in the form",
-                                  confirmLabel: "Delete batch",
-                                  run: () => handleDeleteBatch(b.batch_id),
-                                });
+                                confirmDeleteBatch(b);
                               }}
                               sx={{
                                 position: 'absolute', top: 4, left: 4,
@@ -3231,6 +3305,11 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                 })}
               </Grid>
               </Box>
+              <EntityContextMenu
+                anchorPosition={batchMenu.anchorPosition}
+                onClose={batchMenu.close}
+                actions={batchMenu.isOpen ? batchMenuActions() : []}
+              />
               {batches.length === 0 && (
                 <Box sx={{ textAlign: 'center', py: 4 }}>
                   <VideoIcon sx={{ fontSize: 48, color: 'text.disabled', mb: 1 }} />
@@ -3245,14 +3324,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
           {/* Legacy batch controls — keep for running/pending batches */}
           {batches.filter(b => b.status === "running" || b.status === "pending" || b.status === "processing").map((b) => (
             <Box key={`ctrl-${b.batch_id}`} sx={{ mt: 1 }}>
-              <Button size="small" color="warning" variant="outlined" onClick={() => setConfirmAction({
-                title: "Cancel this batch?",
-                description: "Stops the GPU job. Clips already written stay on disk.",
-                facts: [{ label: "Batch", value: b.display_name || b.batch_id.slice(0, 8) }],
-                keeps: "finished videos in this batch, the form, other batches",
-                confirmLabel: "Cancel batch",
-                run: () => handleCancelBatch(b.batch_id),
-              })}>
+              <Button size="small" color="warning" variant="outlined" onClick={() => confirmCancelBatch(b)}>
                 Cancel {b.display_name || b.batch_id.slice(0, 8)}
               </Button>
             </Box>

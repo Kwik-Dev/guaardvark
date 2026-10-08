@@ -360,16 +360,23 @@ def cancel_publish(pid):
 
 
 # --- settings ----------------------------------------------------------------
-@connections_bp.route("/settings", methods=["GET"])
-def get_publish_settings():
+def _publish_settings() -> dict:
+    """The publish switches, plus the stop on all public posting. The stop is
+    reported here but switched from the Outreach page (/api/social-outreach)."""
     from backend.services.connections import gates
 
-    return jsonify(
-        {
-            "publish_enabled": gates.publish_enabled(),
-            "publish_supervised": gates.publish_supervised(),
-        }
-    ), 200
+    stop_reason = gates.posting_stop_reason()
+    return {
+        "publish_enabled": gates.publish_enabled(),
+        "publish_supervised": gates.publish_supervised(),
+        "posting_stopped": stop_reason is not None,
+        "posting_stop_reason": stop_reason,
+    }
+
+
+@connections_bp.route("/settings", methods=["GET"])
+def get_publish_settings():
+    return jsonify(_publish_settings()), 200
 
 
 @connections_bp.route("/settings", methods=["POST"])
@@ -381,9 +388,4 @@ def set_publish_settings():
         gates.set_publish_enabled(bool(payload["publish_enabled"]))
     if "publish_supervised" in payload:
         gates.set_publish_supervised(bool(payload["publish_supervised"]))
-    return jsonify(
-        {
-            "publish_enabled": gates.publish_enabled(),
-            "publish_supervised": gates.publish_supervised(),
-        }
-    ), 200
+    return jsonify(_publish_settings()), 200

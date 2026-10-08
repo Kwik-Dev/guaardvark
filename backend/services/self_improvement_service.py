@@ -20,14 +20,39 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# Test runs this service starts never reach a database. An address nothing
+# listens on, not an unset DATABASE_URL: config replaces a missing one with the
+# default local address, which is a stock install's own database.
+_UNREACHABLE_DATABASE_URL = "postgresql://self-improvement-tests@127.0.0.1:1/none"
+
+
+# The tests the self-check and the snapshot read as the system's health. Tests
+# that drive a live model are marked integration (conftest_sandbox.requires_llm)
+# and left out: they pass or fail by the model's draw, and a "fix" for one would
+# change working code.
+_HEALTH_RUN_TESTS = (
+    "backend/tests/test_self_improvement.py",
+    "backend/tests/test_code_tools.py",
+    "-m", "not integration",
+)
+
+
+def _test_env(**extra) -> Dict[str, str]:
+    env = dict(os.environ)
+    env.update(DATABASE_URL=_UNREACHABLE_DATABASE_URL, GUAARDVARK_MODE="test", **extra)
+    return env
 
 
 def _is_codebase_locked() -> bool:
@@ -116,6 +141,7 @@ class SelfImprovementService:
         self._running = False
         self._current_run = None
         self._current_run_id = None  # tagged onto every progress event so the UI can pin
+        self._current_trigger = None  # handed to edit_code with the run id
         logger.info("SelfImprovementService initialized")
 
     def _emit_progress(self, stage: str, detail: str = "", progress: float = 0.0, **extra):
@@ -140,12 +166,22 @@ class SelfImprovementService:
         except Exception:
             pass  # Socket may not be available in test mode
 
-    def _is_safe_to_run(self) -> bool:
+    def _gates_open(self) -> bool:
+        """The codebase is unlocked and self-improvement is switched on.
+
+        A running scan re-reads these between fixes, so locking the codebase
+        or switching self-improvement off stops it at the next one.
+        """
         if _is_codebase_locked():
             logger.warning("Self-improvement blocked: codebase is locked")
             return False
         if not _is_self_improvement_enabled():
             logger.info("Self-improvement is disabled")
+            return False
+        return True
+
+    def _is_safe_to_run(self) -> bool:
+        if not self._gates_open():
             return False
         if self._running:
             logger.warning("Self-improvement already running")
@@ -197,16 +233,39 @@ class SelfImprovementService:
         return False
 
     def _finish_cancelled(self, run_record, start_time: float, changes: List[Dict]) -> Dict[str, Any]:
-        """Close out a run that hit a cancel checkpoint, keeping what it did."""
+        """Close out a run that hit a cancel checkpoint, keeping the fixes it staged."""
         from backend.models import db
         run_record.status = self.CANCELLED
         run_record.changes_made = json.dumps(changes)
         run_record.duration_seconds = time.time() - start_time
         db.session.commit()
-        self._emit_progress("cancelled", f"Stopped after {len(changes)} fix(es)", 1.0,
-                            status=self.CANCELLED, fixes_applied=len(changes))
+        self._emit_progress("cancelled", f"Stopped after {len(changes)} fix(es) staged", 1.0,
+                            status=self.CANCELLED, fixes_staged=len(changes))
         return {"success": False, "cancelled": True, "run_id": run_record.id,
-                "fixes_applied": len(changes), "changes": changes}
+                "fixes_staged": len(changes), "changes": changes}
+
+    @staticmethod
+    def _staged_fixes(run_id: Optional[int]) -> list:
+        """PendingFix rows this run staged, oldest first."""
+        if run_id is None:
+            return []
+        from backend.models import PendingFix
+        return PendingFix.query.filter_by(run_id=run_id).order_by(PendingFix.id).all()
+
+    @staticmethod
+    def _staged_changes(fixes: list, failure: Dict[str, str],
+                        answer: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """One change record per staged fix for ``failure``.
+
+        The agent's closing answer describes the fix when it gave one; the
+        staged row's own description is the fallback.
+        """
+        answer_text = (answer or {}).get("fix_description") or ""
+        return [
+            {"file": f.file_path, "test": failure["test_name"], "pending_fix_id": f.id,
+             "fix_description": (answer_text or f.fix_description or "")[:500]}
+            for f in fixes
+        ]
 
     def dispatch_precheck(self) -> Dict[str, Any]:
         """Public, side-effect-free check of whether a directed dispatch can run.
@@ -254,6 +313,32 @@ class SelfImprovementService:
                 })
         return failures
 
+    def _confirm_failures(self, failures: List[Dict[str, str]], root: str):
+        """(failures that fail again, failures that passed when re-run).
+
+        Re-runs only the failing tests. If the re-run cannot be read (it
+        errors, or fails without naming a test), the first run's failures
+        stand."""
+        if not failures:
+            return failures, []
+        node_ids = [f"{f['file']}::{f['test_name']}" for f in failures]
+        try:
+            rerun = subprocess.run(
+                ["python3", "-m", "pytest", *node_ids, "-v", "--tb=short", "--no-header"],
+                capture_output=True, text=True, timeout=300, cwd=root, env=_test_env(),
+            )
+        except Exception as e:
+            logger.warning(f"Re-running the failing tests failed ({e}); acting on the first run")
+            return failures, []
+        again = {(f["file"], f["test_name"]) for f in self._parse_test_failures(rerun.stdout + rerun.stderr)}
+        if rerun.returncode != 0 and not again:
+            return failures, []
+        confirmed = [f for f in failures if (f["file"], f["test_name"]) in again]
+        flaky = [f for f in failures if (f["file"], f["test_name"]) not in again]
+        if flaky:
+            logger.info(f"Self-check: {len(flaky)} failure(s) passed on a re-run and are left alone as flaky")
+        return confirmed, flaky
+
     def snapshot_pytest(self, timeout: int = 120) -> Dict[str, Any]:
         """Analysis-only pytest snapshot. Never dispatches fixes or writes files.
 
@@ -270,12 +355,10 @@ class SelfImprovementService:
         root = os.environ.get("GUAARDVARK_ROOT", ".")
         try:
             result = subprocess.run(
-                ["python3", "-m", "pytest",
-                 "backend/tests/test_self_improvement.py",
-                 "backend/tests/test_code_tools.py",
+                ["python3", "-m", "pytest", *_HEALTH_RUN_TESTS,
                  "-q", "--tb=no", "--no-header"],
                 capture_output=True, text=True, timeout=timeout, cwd=root,
-                env={**os.environ, "GUAARDVARK_MODE": "test"},
+                env=_test_env(),
             )
         except subprocess.TimeoutExpired:
             return {"ok": False, "skipped": False, "reason": "pytest_timeout",
@@ -294,13 +377,21 @@ class SelfImprovementService:
         }
 
     def run_self_check(self) -> Dict[str, Any]:
-        """Mode 1: Run test suite, identify failures, dispatch agent to fix."""
+        """Mode 1: Run test suite, identify failures, dispatch agent to fix.
+
+        Each fix the agent stages is tested against its failing test file in a
+        scratch copy of the checkout (_verify_fix), and the result is written
+        on the pending fix for the person who reviews it.
+        """
         if not self._is_safe_to_run():
             return {"success": False, "reason": "Self-improvement cannot run"}
 
         self._running = True
+        self._current_trigger = "scheduled"
         start_time = time.time()
         run_record = None
+        run_id = None
+        error = None
         self._emit_progress("starting", "Initializing self-check", 0.0)
 
         try:
@@ -312,7 +403,8 @@ class SelfImprovementService:
             )
             db.session.add(run_record)
             db.session.commit()
-            self._current_run_id = run_record.id
+            run_id = run_record.id
+            self._current_run_id = run_id
 
             # Re-emit now that we have a run_id so late subscribers still catch it
             self._emit_progress("starting", "Initializing self-check", 0.05,
@@ -320,22 +412,26 @@ class SelfImprovementService:
             self._emit_progress("testing", "Running test suite", 0.1)
             root = os.environ.get("GUAARDVARK_ROOT", ".")
             result = subprocess.run(
-                ["python3", "-m", "pytest", "backend/tests/test_self_improvement.py",
-                 "backend/tests/test_code_tools.py", "-v", "--tb=short", "--no-header"],
+                ["python3", "-m", "pytest", *_HEALTH_RUN_TESTS, "-v", "--tb=short", "--no-header"],
                 capture_output=True, text=True, timeout=300, cwd=root,
-                env={**os.environ, "GUAARDVARK_MODE": "test"},
+                env=_test_env(),
             )
 
             test_output = result.stdout + result.stderr
             failures = self._parse_test_failures(test_output)
+            # Some of these tests drive the model and fail now and then. A test
+            # that passes when run again is flaky, not broken, and a "fix" for it
+            # would change working code: only failures that repeat are acted on.
+            failures, flaky = self._confirm_failures(failures, root)
 
             run_record.test_results_before = json.dumps({
                 "total_failures": len(failures),
                 "failures": failures,
+                "flaky": flaky,
                 "return_code": result.returncode,
             })
 
-            if self._cancel_requested(run_record.id):
+            if self._cancel_requested(run_id):
                 return self._finish_cancelled(run_record, start_time, [])
 
             self._emit_progress("analyzed", f"Found {len(failures)} failure(s)", 0.3,
@@ -348,75 +444,93 @@ class SelfImprovementService:
                 self._emit_progress("complete", "All tests passing", 1.0, status="success")
                 return {"success": True, "message": "All tests passing", "failures": 0}
 
+            if not failures and flaky:
+                run_record.status = "success"
+                run_record.duration_seconds = time.time() - start_time
+                db.session.commit()
+                message = f"{len(flaky)} failure(s) passed on a re-run; left alone as flaky"
+                self._emit_progress("complete", message, 1.0, status="success")
+                return {"success": True, "message": message, "failures": 0, "flaky": len(flaky)}
+
             # Return code nonzero but parser found nothing — record as unparsed failure
             if not failures and result.returncode != 0:
                 failures = [{"file": "unknown", "test_name": "unparsed_failure", "error": test_output[-500:]}]
 
+            # A fix counts only when the agent staged a PendingFix for this run;
+            # its closing answer alone ("I could not find the problem") is not one.
             changes = []
+            verifications = []
             for i, failure in enumerate(failures):
-                if self._cancel_requested(run_record.id):
+                if self._cancel_requested(run_id):
                     return self._finish_cancelled(run_record, start_time, changes)
-                if not self._is_safe_to_run():
+                # Not _is_safe_to_run: this run is the one running, so it would always stop here.
+                if not self._gates_open():
                     break
                 progress = 0.3 + (0.6 * (i / max(len(failures), 1)))
                 self._emit_progress("fixing", f"Fixing {failure['test_name']} ({i+1}/{len(failures)})",
                                     progress, current_fix=i+1, total_fixes=len(failures))
-                change = self._attempt_fix(failure)
-                if change:
-                    changes.append(change)
+                before = {f.id for f in self._staged_fixes(run_id)}
+                answer = self._attempt_fix(failure)
+                new = [f for f in self._staged_fixes(run_id) if f.id not in before]
+                staged = self._staged_changes(new, failure, answer)
+                if new and not self._cancel_requested(run_id):
+                    self._emit_progress("verifying", f"Testing the fix for {failure['test_name']} in a scratch copy",
+                                        progress, current_fix=i+1, total_fixes=len(failures))
+                    verification = self._verify_fix([failure["file"]], new)
+                    self._attach_verification(new, verification)
+                    summary = {k: verification.get(k) for k in
+                               ("tests", "all_passed", "total_failures", "return_code", "error")}
+                    for change in staged:
+                        change["verification"] = summary
+                    verifications.append({"test": failure["test_name"],
+                                          "pending_fix_ids": [f.id for f in new], **verification})
+                changes.extend(staged)
 
-            if self._cancel_requested(run_record.id):
+            if self._cancel_requested(run_id):
                 return self._finish_cancelled(run_record, start_time, changes)
 
-            # Verification: re-run tests to confirm fixes worked
-            if changes:
-                self._emit_progress("verifying", "Re-running tests to verify fixes", 0.9)
-                test_files = ["backend/tests/test_self_improvement.py", "backend/tests/test_code_tools.py"]
-                verify_results = self._verify_fix(test_files)
-                run_record.test_results_after = json.dumps(verify_results)
-                if not verify_results["all_passed"]:
-                    logger.warning(f"Verification failed: {verify_results['total_failures']} failures remain")
-                    run_record.status = "unverified"
-                else:
-                    logger.info("Verification passed: all tests passing after fixes")
-
             run_record.changes_made = json.dumps(changes)
-            # Only set success if verification passed (or no changes to verify)
-            if run_record.status != "unverified":
-                run_record.status = "success" if changes else "failed"
+            if verifications:
+                run_record.test_results_after = json.dumps(verifications)
+            fixes_verified = sum(1 for c in changes if (c.get("verification") or {}).get("all_passed"))
+            if changes:
+                run_record.status = "success"
+                message = f"{len(changes)} fix(es) staged for review"
+            else:
+                run_record.status = "failed"
+                message = f"No fix staged for {len(failures)} failure(s)"
+                run_record.error_message = message
             run_record.duration_seconds = time.time() - start_time
             db.session.commit()
 
-            if changes and run_record.status != "unverified":
+            if changes:
                 self._broadcast_learnings(changes, run_record)
 
-            self._emit_progress("complete", f"{len(changes)} fix(es) applied", 1.0,
-                                status=run_record.status, fixes_applied=len(changes),
-                                failures_found=len(failures))
+            self._emit_progress("complete", message, 1.0,
+                                status=run_record.status, fixes_staged=len(changes),
+                                fixes_verified=fixes_verified, failures_found=len(failures))
 
             return {
-                "success": True,
+                "success": bool(changes),
+                "run_id": run_id,
+                "message": message,
                 "failures_found": len(failures),
-                "fixes_applied": len(changes),
+                "fixes_staged": len(changes),
+                "fixes_verified": fixes_verified,
                 "changes": changes,
             }
 
         except Exception as e:
+            error = e
             logger.error(f"Self-check failed: {e}", exc_info=True)
             self._emit_progress("error", str(e)[:200], 0.0, status="failed")
-            if run_record:
-                run_record.status = "failed"
-                run_record.error_message = str(e)
-                run_record.duration_seconds = time.time() - start_time
-                try:
-                    from backend.models import db
-                    db.session.commit()
-                except Exception:
-                    pass
             return {"success": False, "reason": str(e)}
         finally:
+            if run_id is not None:
+                self._fail_if_still_running(run_id, error, time.time() - start_time)
             self._running = False
             self._current_run_id = None
+            self._current_trigger = None
 
     def _attempt_fix(self, failure: Dict[str, str], message: str = None) -> Optional[Dict[str, Any]]:
         """Dispatch code_assistant agent to fix a test failure (or run `message`)."""
@@ -436,6 +550,7 @@ class SelfImprovementService:
                 tool_registry=registry,
                 llm=None,  # uses default from Settings
                 max_iterations=agent_config.max_iterations,
+                agent=agent_config,
             )
 
             message = message or (
@@ -450,9 +565,10 @@ class SelfImprovementService:
                 _self_improvement_context=True,
                 _reasoning=message,
                 _run_id=self._current_run_id,
+                _trigger=getattr(self, "_current_trigger", None),
             )
 
-            result = executor.execute(message, session_context=agent_config.system_prompt)
+            result = executor.execute(message)
 
             if result and result.final_answer:
                 return {
@@ -467,31 +583,164 @@ class SelfImprovementService:
             logger.error(f"Agent fix attempt failed for {failure['test_name']}: {e}", exc_info=True)
             return None
 
-    def _verify_fix(self, test_files):
-        """Re-run tests after agent fixes to verify they pass."""
+    # The same limit as the self-check's own test run.
+    VERIFY_TIMEOUT_SECONDS = 300
+
+    def _verify_fix(self, test_files: List[str], fixes: list) -> Dict[str, Any]:
+        """Run the failing test file(s) with staged fixes applied, in a scratch copy.
+
+        The copy is a temporary git worktree, in the system temp dir, of the
+        checkout as it is now (uncommitted changes to tracked files included);
+        the fixes' exact replacements are made there and nowhere else, and the
+        copy is removed afterwards. Only the named test files run, with
+        GUAARDVARK_MODE=test, GUAARDVARK_ROOT pointing at the copy and
+        DATABASE_URL pointed at an address nothing listens on, so the tests cannot reach a database.
+
+        Returns all_passed, total_failures, failures and return_code from that
+        run, the test files run, and ``error`` saying why nothing ran (no test
+        file, no git checkout, a fix that no longer matches, a timeout).
+        """
+        result: Dict[str, Any] = {
+            "tests": self._runnable_test_files(test_files), "all_passed": False,
+            "total_failures": 0, "failures": [], "return_code": None, "error": None,
+        }
+        if not result["tests"]:
+            result["error"] = "no failing test file to run"
+            return result
+
+        root = Path(os.environ.get("GUAARDVARK_ROOT", ".")).resolve()
+        scratch = Path(tempfile.mkdtemp(prefix="guaardvark-verify-"))
+        tree = scratch / "checkout"
+        made = False
         try:
-            root = os.environ.get("GUAARDVARK_ROOT", ".")
-            result = subprocess.run(
-                ["python3", "-m", "pytest"] + test_files + ["-v", "--tb=short", "--no-header"],
-                capture_output=True, text=True, timeout=300, cwd=root,
-                env={**os.environ, "GUAARDVARK_MODE": "test"},
+            # HEAD when the working tree has no changes or git cannot record them.
+            snapshot = self._git(root, "stash", "create")
+            base = snapshot.stdout.strip() if snapshot.returncode == 0 else ""
+            added = self._git(root, "worktree", "add", "--detach", str(tree), base or "HEAD")
+            if added.returncode != 0:
+                detail = (added.stderr or added.stdout or "").strip()[-200:]
+                result["error"] = f"could not make a scratch copy: {detail}"
+                return result
+            made = True
+
+            for fix in fixes:
+                problem = self._apply_in_copy(fix, root, tree)
+                if problem:
+                    result["error"] = problem
+                    return result
+
+            env = _test_env(GUAARDVARK_ROOT=str(tree))
+            run = subprocess.run(
+                ["python3", "-m", "pytest", *result["tests"], "-v", "--tb=short", "--no-header"],
+                capture_output=True, text=True, timeout=self.VERIFY_TIMEOUT_SECONDS,
+                cwd=str(tree), env=env,
             )
-            failures = self._parse_test_failures(result.stdout + result.stderr)
-            return {
-                "total_failures": len(failures),
-                "failures": failures,
-                "return_code": result.returncode,
-                "all_passed": result.returncode == 0 and len(failures) == 0,
-            }
+            failures = self._parse_test_failures(run.stdout + run.stderr)
+            result.update(failures=failures, total_failures=len(failures),
+                          return_code=run.returncode,
+                          all_passed=run.returncode == 0 and not failures)
+        except subprocess.TimeoutExpired as e:
+            result["error"] = f"timed out after {e.timeout:g} s"
         except Exception as e:
             logger.error(f"Verification run failed: {e}")
-            return {"total_failures": -1, "failures": [], "return_code": -1, "all_passed": False}
+            result["error"] = f"{type(e).__name__}: {e}"
+        finally:
+            self._remove_scratch_copy(root, tree, scratch, made)
+        return result
+
+    @staticmethod
+    def _runnable_test_files(test_files: List[str]) -> List[str]:
+        """Relative .py paths that stay inside the checkout, each once."""
+        runnable: List[str] = []
+        for name in test_files or []:
+            name = (name or "").strip()
+            path = Path(name)
+            if (not name.endswith(".py") or path.is_absolute() or ".." in path.parts
+                    or name in runnable):
+                continue
+            runnable.append(name)
+        return runnable
+
+    @staticmethod
+    def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", "-C", str(root), *args],
+                              capture_output=True, text=True, timeout=120)
+
+    @staticmethod
+    def _apply_in_copy(fix, root: Path, tree: Path) -> Optional[str]:
+        """Make one staged replacement in the scratch copy; the reason when it cannot be made."""
+        old, new = fix.original_content, fix.proposed_new_content
+        if old is None or new is None:
+            return f"pending fix #{fix.id} has no exact replacement to apply"
+        path = Path(fix.file_path)
+        if not path.is_absolute():
+            path = root / path
+        try:
+            relative = path.resolve().relative_to(root)
+        except ValueError:
+            return f"pending fix #{fix.id} is outside the checkout"
+        target = tree / relative
+        if (target.is_symlink() or not target.is_file()
+                or not target.resolve().is_relative_to(tree.resolve())):
+            return f"{relative.as_posix()} is not a tracked file in the scratch copy"
+        text = target.read_text(encoding="utf-8")
+        if text.count(old) != 1:
+            return f"pending fix #{fix.id} no longer matches {relative.as_posix()}"
+        target.write_text(text.replace(old, new, 1), encoding="utf-8")
+        return None
+
+    def _remove_scratch_copy(self, root: Path, tree: Path, scratch: Path, made: bool) -> None:
+        """Remove the scratch worktree and its temp dir; never raises."""
+        try:
+            if made and self._git(root, "worktree", "remove", "--force", str(tree)).returncode != 0:
+                shutil.rmtree(tree, ignore_errors=True)
+                self._git(root, "worktree", "prune")
+        except Exception as e:
+            logger.warning(f"Could not remove the scratch copy {tree}: {e}")
+        shutil.rmtree(scratch, ignore_errors=True)
+
+    @staticmethod
+    def _verification_note(verification: Dict[str, Any]) -> str:
+        """One line on the pending fix saying how its failing test did."""
+        from backend.utils.display_paths import display_text
+        tests = ", ".join(verification.get("tests") or []) or "the failing test"
+        if verification.get("error"):
+            return f"Scratch-copy test run: not run ({display_text(verification['error'])})."
+        if verification.get("all_passed"):
+            return f"Scratch-copy test run: {tests} passed with this fix applied."
+        failures = verification.get("failures") or []
+        if failures:
+            names = ", ".join(f["test_name"] for f in failures[:5])
+            if len(failures) > 5:
+                names += f" and {len(failures) - 5} more"
+            return f"Scratch-copy test run: {tests} fails with this fix applied ({names})."
+        return (f"Scratch-copy test run: {tests} did not pass with this fix applied "
+                f"(pytest exit code {verification.get('return_code')}).")
+
+    def _attach_verification(self, fixes: list, verification: Dict[str, Any]) -> None:
+        """Add the verification line to each fix's description.
+
+        The description is what the Fixes dialog shows every reviewer, and
+        approving a fix replaces its review notes.
+        """
+        from backend.models import db
+        note = self._verification_note(verification)
+        for fix in fixes:
+            fix.fix_description = f"{fix.fix_description}\n\n{note}" if fix.fix_description else note
+        db.session.commit()
 
     def _broadcast_learnings(self, changes: List[Dict], run_record):
-        """Create InterconnectorLearning records and broadcast to family."""
+        """Create InterconnectorLearning records and broadcast to family.
+
+        Only staged fixes (records carrying a pending_fix_id) are learnings; an
+        agent's answer without one is not sent to other machines.
+        """
+        staged = [c for c in changes if c.get("pending_fix_id")]
+        if not staged:
+            return
         try:
             from backend.models import db, InterconnectorLearning
-            for change in changes:
+            for change in staged:
                 learning = InterconnectorLearning(
                     source_node_id=os.environ.get("GUAARDVARK_NODE_ID", "local"),
                     learning_type="bug_fix",
@@ -532,6 +781,8 @@ class SelfImprovementService:
             return
 
         self._running = True
+        run_id = None
+        error = None
         try:
             from backend.models import db, SelfImprovementRun
             run_record = SelfImprovementRun(
@@ -541,25 +792,71 @@ class SelfImprovementService:
             )
             db.session.add(run_record)
             db.session.commit()
+            run_id = run_record.id
+            # _attempt_fix hands these to edit_code, which stages PendingFix rows under
+            # the run; "reactive" marks it unattended, like a scheduled run.
+            self._current_run_id = run_id
+            self._current_trigger = "reactive"
 
             failure = {
                 "file": file,
                 "test_name": f"runtime_error_line_{line}",
                 "error": f"{error_type} at {file}:{line}\n{traceback_str[:500]}",
             }
-            change = self._attempt_fix(failure)
+            answer = self._attempt_fix(failure)
 
+            # Same rule as a directed run: success means a fix was staged.
+            changes = self._staged_changes(self._staged_fixes(run_record.id), failure, answer)
             if self._cancel_requested(run_record.id):
                 run_record.status = self.CANCELLED
+            elif changes:
+                run_record.status = "success"
             else:
-                run_record.status = "success" if change else "failed"
-            run_record.changes_made = json.dumps([change] if change else [])
+                run_record.status = "failed"
+                run_record.error_message = (
+                    (answer or {}).get("fix_description") or "agent produced no answer")
+            run_record.changes_made = json.dumps(changes)
             db.session.commit()
 
         except Exception as e:
+            error = e
             logger.error(f"Self-healing failed: {e}", exc_info=True)
         finally:
+            if run_id is not None:
+                self._fail_if_still_running(run_id, error)
             self._running = False
+            self._current_run_id = None
+            self._current_trigger = None
+
+    def _fail_if_still_running(self, run_id: int, error: Optional[BaseException],
+                               duration_seconds: Optional[float] = None) -> None:
+        """Close a run row its runner left 'running' as failed, with the error.
+
+        Otherwise /scans, /runs and the scan progress view report the run as
+        live forever. A row already closed (success, failed, cancelled) is
+        left as it is.
+        """
+        from backend.models import db, SelfImprovementRun
+        try:
+            # The error may have left the session mid-transaction.
+            db.session.rollback()
+            run = db.session.get(SelfImprovementRun, run_id)
+            if run is None or run.status != "running":
+                return
+            run.status = "failed"
+            run.error_message = (
+                f"{type(error).__name__}: {error}" if error is not None
+                else "Stopped before it finished"
+            )
+            if duration_seconds is not None:
+                run.duration_seconds = duration_seconds
+            db.session.commit()
+        except Exception as e:
+            logger.error(f"Could not close self-improvement run {run_id}: {e}")
+            try:
+                db.session.rollback()
+            except Exception:
+                pass
 
     def submit_directed_task(
         self, description: str, target_files: List[str] = None, priority: str = "medium",
@@ -576,6 +873,8 @@ class SelfImprovementService:
             return {"success": False, "reason": "Self-improvement cannot run"}
 
         self._running = True
+        run_id = None
+        error = None
         try:
             from backend.models import db, SelfImprovementRun
             run_record = SelfImprovementRun(
@@ -585,8 +884,9 @@ class SelfImprovementService:
             )
             db.session.add(run_record)
             db.session.commit()
+            run_id = run_record.id
 
-            self._current_run_id = run_record.id
+            self._current_run_id = run_id
             change = None
             if proposal:
                 change = self._stage_proposal(proposal, run_record.id)
@@ -628,9 +928,12 @@ class SelfImprovementService:
             return {"success": bool(staged), "change": change,
                     "pending_fix_ids": [f.id for f in staged]}
         except Exception as e:
+            error = e
             logger.error(f"Directed improvement failed: {e}", exc_info=True)
             return {"success": False, "reason": str(e)}
         finally:
+            if run_id is not None:
+                self._fail_if_still_running(run_id, error)
             self._running = False
             self._current_run_id = None
 
@@ -873,6 +1176,17 @@ class SelfImprovementService:
             logger.info(f"Scale factor review: approved={review.get('approved')} "
                         f"directive={review.get('directive')}")
 
+            # Only a review that returned approved True or False happened;
+            # anything else is recorded as not reviewed, never as approved.
+            approved = review.get("approved")
+            reason = review.get("reason") or ""
+            if approved is True:
+                reviewed_by, review_notes = "uncle_claude", reason or None
+            elif approved is False:
+                reviewed_by, review_notes = "uncle_claude", f"rejected: {reason or 'no reason given'}"
+            else:
+                reviewed_by, review_notes = None, f"not reviewed: {reason or 'no verdict returned'}"
+
             # Stage as pending fix regardless of review outcome —
             # human can always approve/reject from the Settings UI
             try:
@@ -885,7 +1199,8 @@ class SelfImprovementService:
                     proposed_diff=proposed_diff,
                     severity="low",
                     status="proposed",
-                    reviewed_by="uncle_claude" if reviewed and advisor.is_available() else "pending",
+                    reviewed_by=reviewed_by,
+                    review_notes=review_notes,
                 )
                 db.session.add(fix)
                 db.session.commit()
@@ -953,9 +1268,12 @@ class SelfImprovementService:
 
         # Call LLM to extract the insight
         try:
-            from backend.utils.llm_service import run_llm_chat_prompt
+            from backend.utils.llm_service import is_llm_failure_reply, run_llm_chat_prompt
             prompt = self._DISTILL_PROMPT.format(task=task, steps=formatted_steps)
             insight = run_llm_chat_prompt(prompt)
+            if is_llm_failure_reply(insight):
+                logger.warning(f"Distillation skipped: the model call failed ({insight.strip()})")
+                return
             if not insight or len(insight.strip()) < 10:
                 logger.warning("Distillation returned empty/short result, skipping")
                 return

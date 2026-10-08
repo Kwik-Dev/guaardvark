@@ -31,6 +31,29 @@ bp = Blueprint("production_api", __name__, url_prefix="/api/production")
 log = logging.getLogger(__name__)
 
 
+def _production_cast(prod_id: int) -> list:
+    """(Subject, ProductionSubject) for every subject linked to the production."""
+    from backend.models import Subject, ProductionSubject
+    return (
+        db.session.query(Subject, ProductionSubject)
+        .join(ProductionSubject, ProductionSubject.subject_id == Subject.id)
+        .filter(ProductionSubject.production_id == prod_id)
+        .all()
+    )
+
+
+def _cast_required(subject, link) -> bool:
+    """Whether this production needs a trained LoRA for ``subject``.
+
+    The production's own script decides, through the pin the screenwriter stored
+    on the link; a link with no pin defers to the Subject, then to its kind.
+    """
+    pinned = getattr(link, "cast_required", None)
+    return effective_cast_required(
+        pinned if pinned is not None else subject.cast_required, subject.kind
+    )
+
+
 VALID_CAST_ACTIONS = {"use_existing_lora", "train_from_uploads", "train_from_generated"}
 
 
@@ -56,6 +79,9 @@ def _shot_to_dict(shot):
     return {
         "id": shot.id, "scene_number": shot.scene_number, "shot_number": shot.shot_number,
         "description": shot.description, "approved": shot.approved,
+        "approved_by": shot.approved_by,
+        "curator_advice": shot.curator_advice,
+        "voice_record": shot.voice_record,
         "storyboard_image_path": shot.storyboard_image_path,
         "storyboard_image_url": image_url,
         "video_clip_path": shot.video_clip_path,
@@ -155,30 +181,24 @@ def get_production_subjects(prod_id):
     Screenwriter agent extracted from the script. The CastingPanel uses this
     to know which Subjects need a cast action.
     """
-    from backend.models import Subject, ProductionSubject
     p = db.session.get(Production, prod_id)
     if p is None:
         return jsonify({"error": "not_found"}), 404
 
-    # Look up the actual Subject rows via the ProductionSubject join table.
-    subjects = (
-        db.session.query(Subject)
-        .join(ProductionSubject)
-        .filter(ProductionSubject.production_id == prod_id)
-        .all()
-    )
-
     out = []
-    for s in subjects:
+    for s, link in _production_cast(prod_id):
         out.append({
             "id": s.id, "name": s.name, "kind": s.kind,
             "description": s.description,
+            # What this production's script said about the subject; the library
+            # description above is shared with every production that casts it.
+            "script_description": link.script_description,
             "ref_image_paths": s.ref_image_paths or [],
             "lora_path": s.lora_path,
             "training_status": s.training_status,
             # Resolved cast requirement: True = identity-locked, needs a LoRA
             # before casting can be confirmed; False = generated inline.
-            "cast_required": effective_cast_required(s.cast_required, s.kind),
+            "cast_required": _cast_required(s, link),
         })
 
     return jsonify({"subjects": out})
@@ -344,21 +364,14 @@ def cast_subject(prod_id, subject_id):
 @bp.post("/<int:prod_id>/casting/confirm")
 def confirm_casting(prod_id):
     """User-gated transition from casting to cinematography after all subjects have a cast plan."""
-    from backend.models import Subject, ProductionSubject
-
     prod = db.session.get(Production, prod_id)
     if prod is None:
         return jsonify({"error": "production not found"}), 404
     if prod.current_stage != "casting":
         return jsonify({"error": f"production is at stage '{prod.current_stage}', not casting"}), 409
 
-    subjects = (
-        db.session.query(Subject)
-        .join(ProductionSubject)
-        .filter(ProductionSubject.production_id == prod_id)
-        .all()
-    )
-    if not subjects:
+    cast = _production_cast(prod_id)
+    if not cast:
         return jsonify({"error": "production has no subjects to cast"}), 400
 
     # Only identity-locked cast members (cast_required) must have a trained
@@ -367,8 +380,8 @@ def confirm_casting(prod_id):
     # confirmable when the screenwriter over-extracted it.
     incomplete = [
         {"id": s.id, "name": s.name, "training_status": s.training_status}
-        for s in subjects
-        if effective_cast_required(s.cast_required, s.kind)
+        for s, link in cast
+        if _cast_required(s, link)
         and not (s.lora_path or s.training_status in {"training", "trained"})
     ]
     if incomplete:
@@ -379,8 +392,8 @@ def confirm_casting(prod_id):
     # the render silently produces an off-model character.
     stale = [
         {"id": s.id, "name": s.name, "lora_path": s.lora_path}
-        for s in subjects
-        if effective_cast_required(s.cast_required, s.kind)
+        for s, link in cast
+        if _cast_required(s, link)
         and s.training_status == "trained"
         and not _lora_on_disk(s.lora_path)
     ]
@@ -401,7 +414,7 @@ def confirm_casting(prod_id):
         "production_id": prod_id,
         "current_stage": prod.current_stage,
         "status": prod.status,
-        "subjects_confirmed": len(subjects),
+        "subjects_confirmed": len(cast),
         **dispatch,
     })
 
@@ -416,8 +429,30 @@ def approve_storyboard(prod_id):
 
     from backend.models import ProductionShot
     shots = ProductionShot.query.filter_by(production_id=prod_id).all()
+
+    # A frame the curator flagged is approved only when the caller says so
+    # explicitly, after the person has seen the list.
+    flagged = [s for s in shots if _curator_flagged(s)]
+    body = request.get_json(silent=True) or {}
+    if flagged and body.get("confirm_flagged") is not True:
+        listed = ", ".join(f"{s.scene_number}.{s.shot_number}" for s in flagged)
+        return jsonify({
+            "error": (
+                f"{len(flagged)} shot(s) were flagged by the curator: {listed}. "
+                "Approve again with confirm_flagged to render them anyway."
+            ),
+            "flagged_shots": [
+                {
+                    "id": s.id, "scene_number": s.scene_number, "shot_number": s.shot_number,
+                    "reason": (s.curator_advice or {}).get("reason"),
+                }
+                for s in flagged
+            ],
+        }), 409
+
     for s in shots:
         s.approved = True
+        s.approved_by = "person"
     db.session.commit()
 
     svc = ProductionService(db.session)
@@ -430,8 +465,16 @@ def approve_storyboard(prod_id):
         "production_id": prod_id,
         "current_stage": prod.current_stage,
         "shots_approved": len(shots),
+        "flagged_approved": [s.id for s in flagged],
         **dispatch,
     })
+
+
+def _curator_flagged(shot) -> bool:
+    """True when the curator flagged this frame and no person has approved it."""
+    if (shot.curator_advice or {}).get("verdict") != "flag":
+        return False
+    return not (shot.approved and shot.approved_by == "person")
 
 
 @bp.post("/<int:prod_id>/storyboard/shot/<int:shot_id>/regenerate")
@@ -447,6 +490,9 @@ def regenerate_shot(prod_id, shot_id):
 
     shot.regen_count = (shot.regen_count or 0) + 1
     shot.approved = False
+    shot.approved_by = None
+    # The advice was about the frame being replaced.
+    shot.curator_advice = None
     db.session.commit()
 
     regen_job_id: str | None = None

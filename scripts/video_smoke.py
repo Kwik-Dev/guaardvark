@@ -16,6 +16,9 @@ Every clip is the smallest the model accepts, so a full run stays short:
   steps       min_steps, else default_steps; no speed profile, no upscale, no
               frame interpolation, prompt enhancement off
 The prompt, seed and start frame are fixed so runs compare over time.
+--width, --height, --frames, --steps and --seed replace those for every clip, so
+one request can be rendered on two machines and compared (see
+scripts/video_box_fingerprint.py).
 
 Results go to data/outputs/video_smoke/<time>/ (gitignored): results.json and
 the clips. Nothing is installed or downloaded: a model that is not ready is
@@ -26,6 +29,7 @@ Examples:
   python scripts/video_smoke.py --dry-run
   python scripts/video_smoke.py --keep-going
   python scripts/video_smoke.py --models wan22-5b,ltx23-distilled-fp8 --mode t2v
+  python scripts/video_smoke.py --models wan22-5b --mode t2v --width 1280 --height 704 --frames 121
 """
 from __future__ import annotations
 
@@ -119,10 +123,18 @@ def plan(models: list, *, only=None, mode: str = "both") -> tuple:
     return runs, skipped
 
 
+def apply_overrides(runs: list, *, width=None, height=None, frames=None, steps=None, seed=None) -> list:
+    """The runs with whatever size, length, steps and seed were given on the command line."""
+    given = {"width": width, "height": height, "duration_frames": frames, "num_inference_steps": steps,
+             "seed": seed}
+    chosen = {k: v for k, v in given.items() if v is not None}
+    return [{**run, **chosen} for run in runs]
+
+
 def request_body(run: dict, start_frame: str | None) -> tuple:
     """(route, body) for one run."""
     body = {
-        "model": run["model"], "seed": SEED,
+        "model": run["model"], "seed": run.get("seed", SEED),
         "duration_frames": run["duration_frames"], "fps": run["fps"],
         "width": run["width"], "height": run["height"],
         "num_inference_steps": run["num_inference_steps"], "steps_explicit": "true",
@@ -257,10 +269,10 @@ def default_base() -> str:
     return f"{url.rstrip('/')}/api" if url else "http://127.0.0.1:5000/api"
 
 
-def _write(out_dir: Path, records: list, skipped: list, started: str) -> Path:
+def _write(out_dir: Path, records: list, skipped: list, started: str, seed: int = SEED) -> Path:
     path = out_dir / "results.json"
     path.write_text(json.dumps({
-        "started": started, "prompt": PROMPT, "seed": SEED,
+        "started": started, "prompt": PROMPT, "seed": seed,
         "passed": sum(passed(r) for r in records), "total": len(records),
         "runs": records, "skipped": skipped,
     }, indent=2))
@@ -279,6 +291,11 @@ def main(argv=None) -> int:
                                     "(default: a fixed frame written under the output folder)")
     ap.add_argument("--timeout", type=int, default=3600, help="seconds per clip before it is cancelled")
     ap.add_argument("--out", help="output folder (default data/outputs/video_smoke/<time>)")
+    ap.add_argument("--width", type=int, help="canvas width for every clip (default: the model's smallest)")
+    ap.add_argument("--height", type=int, help="canvas height for every clip (default: the model's smallest)")
+    ap.add_argument("--frames", type=int, help="frames per clip (default: about one second, on the model's grid)")
+    ap.add_argument("--steps", type=int, help="sampling steps (default: the model's min_steps, else default_steps)")
+    ap.add_argument("--seed", type=int, default=SEED, help=f"seed for every clip (default {SEED})")
     args = ap.parse_args(argv)
 
     import requests
@@ -288,6 +305,8 @@ def main(argv=None) -> int:
     models = ((listing.get("data") or {}).get("models")) or []
     only = [m.strip() for m in (args.models or "").split(",") if m.strip()] or None
     runs, skipped = plan(models, only=only, mode=args.mode)
+    runs = apply_overrides(runs, width=args.width, height=args.height, frames=args.frames, steps=args.steps,
+                           seed=args.seed)
     started = time.strftime("%Y%m%d-%H%M%S")
     out_dir = Path(args.out) if args.out else ROOT / "data" / "outputs" / "video_smoke" / started
 
@@ -315,19 +334,19 @@ def main(argv=None) -> int:
                   flush=True)
             record = run_one(session, args.base, run, start_frame, out_dir, args.timeout)
             records.append(record)
-            _write(out_dir, records, skipped, started)
+            _write(out_dir, records, skipped, started, args.seed)
             if not passed(record) and not args.keep_going:
                 print("stopping at the first failure (--keep-going renders the rest)")
                 break
     except Interrupted as stop:
         records.append(stop.record)
-        _write(out_dir, records, skipped, started)
+        _write(out_dir, records, skipped, started, args.seed)
         print(f"\ninterrupted; the clip in flight was cancelled.\n{table(records)}\nresults: {out_dir / 'results.json'}")
         return 130
     print(table(records))
     for s in skipped:
         print(f"skip {s['model']}: {s['reason']}")
-    print(f"results: {_write(out_dir, records, skipped, started)}")
+    print(f"results: {_write(out_dir, records, skipped, started, args.seed)}")
     return 0 if records and all(passed(r) for r in records) and len(records) == len(runs) else 1
 
 

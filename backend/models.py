@@ -3449,6 +3449,11 @@ class SubjectSample(db.Model):
     index = db.Column(db.Integer, nullable=False)
     # Shot variation metadata (from ShotDesigner / angle taxonomy).
     angle = db.Column(db.String(128), nullable=True)
+    # Whether `angle` was read from the finished image by the vision check:
+    # 'verified', 'unverified' (check could not run; the planned label stands and
+    # the training gate leaves the sample out of its framing tally), or NULL for
+    # rows that were never checked.
+    angle_state = db.Column(db.String(16), nullable=True)
     framing = db.Column(db.String(64), nullable=True)
     expression = db.Column(db.String(128), nullable=True)
     lighting = db.Column(db.String(128), nullable=True)
@@ -3486,6 +3491,7 @@ class SubjectSample(db.Model):
             "subject_id": self.subject_id,
             "index": self.index,
             "angle": self.angle,
+            "angle_state": self.angle_state,
             "framing": self.framing,
             "expression": self.expression,
             "lighting": self.lighting,
@@ -3526,6 +3532,14 @@ class ProductionSubject(db.Model):
         db.ForeignKey("subjects.id", name="fk_production_subject_subject_id", ondelete="CASCADE"),
         nullable=False, index=True,
     )
+    # What this production's screenwriter said about the subject, and whether
+    # its script makes the subject an identity-locked cast member. Kept here
+    # rather than on the Subject, which the Cast Library shares across
+    # productions: one film's script must not rewrite another film's character.
+    # NULL cast_required (a row not written by the screenwriter) defers to the
+    # Subject's own setting.
+    script_description = db.Column(db.Text, nullable=True)
+    cast_required = db.Column(db.Boolean, nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=db.func.now())
     __table_args__ = (db.UniqueConstraint("production_id", "subject_id", name="uq_production_subject"),)
 
@@ -3562,6 +3576,16 @@ class ProductionShot(db.Model):
     storyboard_image_path = db.Column(db.String(512), nullable=True)
     video_clip_path = db.Column(db.String(512), nullable=True)
     approved = db.Column(db.Boolean, nullable=False, default=False)
+    # Who set `approved`: 'person' (the storyboard approval) or 'curator' (a
+    # pre-tick from the vision curator, advice only). NULL when nobody has.
+    approved_by = db.Column(db.String(16), nullable=True)
+    # The curator's advice on the current frame: {"verdict": "approve"|"flag",
+    # "reason": str, "confidence": int}. NULL until it has judged this frame.
+    curator_advice = db.Column(db.JSON, nullable=True)
+    # Which voice spoke this shot's line in the last render, and every way it
+    # differs from the one asked for (swarm.clients.build_voice_record). NULL
+    # for a shot with no voiced line or not rendered yet.
+    voice_record = db.Column(db.JSON, nullable=True)
     regen_count = db.Column(db.Integer, nullable=False, default=0)
 
     production = db.relationship(

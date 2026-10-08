@@ -110,14 +110,9 @@ class ClineBackend(BaseBackend):
     name = "cline"
     requires_internet = False
 
-    def spawn(self, worktree_path: str, task: SwarmTask, config: dict[str, Any]) -> AgentProcess:
-        wt = Path(worktree_path)
-        log_file = wt / LOG_FILE
-
+    def command_prefix(self, config: dict[str, Any]) -> list[str]:
         model = config.get("model", "ollama/gemma4:e4b")
         extra_args = config.get("args", [])
-
-        prompt = self._build_prompt(task)
 
         # Resolve which CLI is actually installed, then probe its flags so we
         # build an argv the binary understands (openclaw uses different flags
@@ -131,23 +126,33 @@ class ClineBackend(BaseBackend):
             command = config.get("command", "cline")
             profile = {"message_flag": None, "model_flag": None, "ok": False}
 
-        cline_parts = [command]
+        parts = [command]
         if profile.get("ok"):
             model_flag = profile.get("model_flag")
             if model and model_flag:
-                cline_parts.extend([model_flag, model])
-            cline_parts.extend(extra_args)
-            message_flag = profile.get("message_flag") or "--message"
-            cline_parts.extend([message_flag, prompt])
+                parts.extend([model_flag, model])
+            parts.extend(extra_args)
+            parts.append(profile.get("message_flag") or "--message")
         else:
             # Probe failed — fall back to the original command shape and log it.
             logger.warning(
                 f"CLI probe failed for {command!r}; falling back to default 'cline' argv shape"
             )
             if model:
-                cline_parts.extend(["--model", model])
-            cline_parts.extend(extra_args)
-            cline_parts.extend(["--message", prompt])
+                parts.extend(["--model", model])
+            parts.extend(extra_args)
+            parts.append("--message")
+        return parts
+
+    def spawn(self, worktree_path: str, task: SwarmTask, config: dict[str, Any]) -> AgentProcess:
+        wt = Path(worktree_path)
+        log_file = wt / LOG_FILE
+
+        model = config.get("model", "ollama/gemma4:e4b")
+
+        prompt = self._build_prompt(task)
+
+        cline_parts = self.command_prefix(config) + [prompt]
 
         cline_cmd = " ".join(_shell_quote(p) for p in cline_parts)
 

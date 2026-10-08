@@ -85,19 +85,28 @@ def web_access_block_reason(action: str) -> Optional[str]:
     return disabled
 
 
+# Last llm_debug value read from the database. Worker threads without an app
+# context (the agent brain, Tier 3) use it instead of reading the setting as off.
+_llm_debug_seen: Optional[bool] = None
+
+
 def get_llm_debug() -> bool:
     """Return True if LLM debug logging is enabled."""
+    global _llm_debug_seen
+    env_value = os.environ.get("GUAARDVARK_LLM_DEBUG", "").lower() == "true"
     if not db or not Setting:
-        return os.environ.get("GUAARDVARK_LLM_DEBUG", "").lower() == "true"
+        return env_value
     try:
         if has_app_context():
             setting = db.session.get(Setting, "llm_debug")
+            _llm_debug_seen = setting.value == "true" if setting else None
             if setting:
-                return setting.value == "true"
-        return os.environ.get("GUAARDVARK_LLM_DEBUG", "").lower() == "true"
+                return _llm_debug_seen
+            return env_value
+        return _llm_debug_seen if _llm_debug_seen is not None else env_value
     except Exception as e:
         logger.error(f"Failed to read llm_debug setting: {e}")
-        return os.environ.get("GUAARDVARK_LLM_DEBUG", "").lower() == "true"
+        return env_value
 
 
 def get_rules_enabled() -> bool:
@@ -274,3 +283,35 @@ def set_confine_tool_paths(enabled: bool) -> None:
     global _confine_tool_paths
     save_setting("confine_tool_paths", "true" if enabled else "false")
     _confine_tool_paths = bool(enabled)
+
+
+# Minutes an image model stays loaded after a batch, waiting for the next one.
+# 0 (the default) unloads it as the batch ends. Read by the batch worker thread,
+# which has no app context, so it is cached like confine_tool_paths.
+IMAGE_KEEP_LOADED_MAX_MINUTES = 240
+_image_keep_loaded_minutes: Optional[int] = None
+
+
+def _clamp_keep_minutes(value) -> int:
+    try:
+        minutes = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(IMAGE_KEEP_LOADED_MAX_MINUTES, minutes))
+
+
+def get_image_keep_loaded_minutes() -> int:
+    global _image_keep_loaded_minutes
+    if has_app_context() or _image_keep_loaded_minutes is None:
+        _image_keep_loaded_minutes = _clamp_keep_minutes(
+            get_setting("image_keep_loaded_minutes", default=0)
+        )
+    return _image_keep_loaded_minutes
+
+
+def set_image_keep_loaded_minutes(minutes) -> int:
+    global _image_keep_loaded_minutes
+    minutes = _clamp_keep_minutes(minutes)
+    save_setting("image_keep_loaded_minutes", str(minutes))
+    _image_keep_loaded_minutes = minutes
+    return minutes

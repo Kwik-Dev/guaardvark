@@ -6,7 +6,9 @@ Tier 1 (Reflexes):     <100ms, 0 LLM calls — pattern-matched direct actions
 Tier 2 (Instinct):     1-3s,   1 LLM call  — single pre-warmed shot
 Tier 3 (Deliberation): 5-30s,  3-10 calls  — full ReACT loop
 
-Every message enters at Tier 1 and escalates only if needed.
+Every message enters at Tier 1; a reflex that fails falls through to Tier 2.
+Tier 3 is chosen up front for multi-step requests (_needs_deliberation); a
+Tier 2 reply is not escalated after it has been sent.
 """
 
 import json
@@ -23,8 +25,10 @@ from backend.services.brain_state import (
     ReflexResult,
 )
 from backend.services.step_budget import StepBudget, TierTelemetry
+from backend.utils.llm_debug_logger import log_decision
 from backend.services.unified_chat_engine import (
-    clear_abort_flag,
+    begin_turn,
+    end_turn,
     is_aborted,
 )
 
@@ -127,6 +131,56 @@ SOCIAL_TIER2_PATTERNS = re.compile(
 # Back-compat alias (tests / imports)
 CONVERSATIONAL_PASSTHROUGH = SOCIAL_TIER2_PATTERNS
 
+# A bare "yes" answers whatever the assistant just offered. On the social path
+# it reached the model with no tools, so "Would you like me to search your
+# files?" / "Yes" got a reply saying a search was under way, and none ran.
+AFFIRMATION_PATTERNS = re.compile(
+    r"^(yes|yeah|yep|yup|y|ok(ay)?|sure|please|please do|yes please|go ahead|please go ahead|"
+    r"do it|go for it|absolutely|of course|definitely|certainly|alright|fine|sounds good)"
+    r"[\s?!.,]*$",
+    re.IGNORECASE,
+)
+
+# An offer to act, or an announcement that an action is under way, in the
+# assistant's last reply.
+_OFFER_PATTERNS = re.compile(
+    r"would you like me to|do you want me to|shall i\b|should i\b|want me to\b|"
+    r"\bif you(?:'d| would)? like me to\b|\bif you want me to\b|"
+    r"\bi can\b[^.?!\n]{0,160}\bif you(?:'d| would)? like|"
+    r"\bi(?: am|'m|’m) (?:now |currently |still )?(?:searching|looking|checking|scanning)\b|"
+    r"\bi(?:'ll|’ll| will) let you know\b",
+    re.IGNORECASE,
+)
+
+
+def pending_offer(assistant_text: Optional[str]) -> Optional[str]:
+    """The sentence of the assistant's last reply that offered or announced an
+    action, or None. Offers close a reply, so only the tail is read."""
+    if not assistant_text:
+        return None
+    tail = str(assistant_text).strip()[-800:]
+    for sentence in reversed(re.split(r"(?<=[.?!])\s+", tail)):
+        if _OFFER_PATTERNS.search(sentence):
+            return sentence.strip()[:300]
+    return None
+
+
+def _last_assistant_text(app, session_id: str) -> Optional[str]:
+    """Content of the newest assistant message in the session, or None."""
+    if not app or not session_id:
+        return None
+    try:
+        with app.app_context():
+            from backend.models import LLMMessage
+            row = (LLMMessage.query
+                   .filter_by(session_id=session_id, role="assistant")
+                   .order_by(LLMMessage.timestamp.desc())
+                   .first())
+            return row.content if row else None
+    except Exception as e:
+        logger.debug("last assistant message unavailable for %s: %s", session_id, e)
+        return None
+
 # Pure-chat openers that don't need a screenshot (subset used by gemma4 direct)
 NO_SCREEN_CONTEXT = SOCIAL_TIER2_PATTERNS
 
@@ -203,7 +257,12 @@ def _persist_turn(app, session_id: str, role: str, content: str, extra: Optional
     new_id = None
     try:
         with app.app_context():
-            from backend.models import LLMMessage, db
+            from backend.models import LLMMessage, LLMSession, db
+            # A new chat whose first turn is answered here has no session row
+            # yet, and the message's foreign key needs one.
+            if db.session.get(LLMSession, session_id) is None:
+                db.session.add(LLMSession(id=session_id, user="default", project_id=project_id))
+                db.session.flush()
             msg = LLMMessage(
                 session_id=session_id,
                 role=role,
@@ -301,10 +360,6 @@ class AgentBrain:
         except Exception:
             pass
 
-        # Clear any abort flag from a previous request on this session
-        # so we don't immediately abort ourselves.
-        clear_abort_flag(session_id)
-
         # === Direct slash / direct_tool bypass (e.g. /imagine) ===
         # Must short-circuit BEFORE any LLM or tier routing. This avoids the
         # chat model being involved at all (prevents the Ollama EOF / reload
@@ -354,6 +409,7 @@ class AgentBrain:
         # is consistent with direct /imagine. Skip gemma-direct even if screen active.
         force_standard_image = is_pure_image_request(message, options)
 
+        begin_turn(session_id)
         try:
             # -- Gemma4 direct path: no chains, no routing, no bloated prompts --
             # Gemma4 has native vision + pointing + tool use. Just send it the
@@ -457,6 +513,19 @@ class AgentBrain:
                     prompt_key="vision", budget=budget,
                 )
 
+            # -- "Yes" to the assistant's own offer: do it, with tools --
+            if AFFIRMATION_PATTERNS.fullmatch(message.strip()):
+                offer = pending_offer(_last_assistant_text(app, session_id))
+                if offer:
+                    tier_used = 2
+                    route_intent = "accepted_offer"
+                    budget.charge(1, 2, "accepted offer")
+                    return self._instinct(
+                        session_id, message, {**(options or {}), "accepted_offer": offer},
+                        emit_fn, app, project_id=project_id,
+                        is_voice_message=is_voice_message, budget=budget,
+                    )
+
             # -- Social / conversational (Tier 2, skip_tools, real LLM) --
             if SOCIAL_TIER2_PATTERNS.fullmatch(message.strip()):
                 tier_used = 2
@@ -503,30 +572,9 @@ class AgentBrain:
                 budget=budget,
             )
 
-            # Check for escalation signals in the response
-            if result.get("needs_escalation"):
-                escalated_from = 2
-                escalation_reason = result.get(
-                    "escalation_reason", "model signaled multi-step needed"
-                )
-                tier_used = 3
-                budget.on_escalation(2, cost=2, reason="tier2 escalation signal")
-                try:
-                    from backend.api.memory_api import get_memories_for_context
-                    get_memories_for_context(
-                        limit=5, max_tokens=300, query=message, session_id=session_id
-                    )
-                    budget.charge(1, 2, "context query on escalation")
-                except Exception:
-                    pass
-                result = self._deliberate(
-                    session_id, message, options, emit_fn, app,
-                    project_id=project_id, image_data=image_data,
-                    image_url=image_url, is_voice_message=is_voice_message,
-                    initial_context=result,
-                    budget=budget, request_id=request_id,
-                )
-
+            # Tier 2 cannot escalate from here: the engine has already emitted
+            # and saved its reply, so a Tier 3 run now would answer twice.
+            # Escalation has to be decided inside the engine before it replies.
             return result
 
         except Exception as e:
@@ -541,6 +589,7 @@ class AgentBrain:
             }
 
         finally:
+            end_turn(session_id)
             # Record telemetry
             elapsed_ms = int((time.monotonic() - start_time) * 1000)
             telemetry = TierTelemetry(
@@ -1210,36 +1259,35 @@ class AgentBrain:
                 budget=budget,
             )
 
-            # Post-response narration check
+            # A reply that names a tool without calling it is logged, never run.
+            # By this point the reply has been streamed and saved, the tool's
+            # arguments could only be guessed from the user's message, and the
+            # engine already re-asks inside its own loop when a search was
+            # skipped. The engine reports tool calls per step, not as tools_used.
             response_text = result.get("response", "")
-            if response_text and not result.get("tools_used"):
+            ran_tools = any(
+                isinstance(s, dict) and s.get("tool_calls")
+                for s in (result.get("steps") or [])
+            )
+            if response_text and not skip_tools and not ran_tools:
                 narrated = self._extract_narrated_tool_intent(
                     response_text, message
                 )
                 if narrated:
-                    tool_name, params = narrated
                     logger.info(
-                        f"Narration detected: '{tool_name}' — executing directly"
+                        f"[narration] reply named '{narrated[0]}' without calling it "
+                        "(logged, not executed)"
                     )
-                    tool_result = self.state.tool_registry.execute_tool(
-                        tool_name, **params
-                    )
-                    if tool_result.success:
-                        # Re-emit with actual tool result
-                        output = tool_result.output
-                        if isinstance(output, dict):
-                            formatted = "\n".join(
-                                f"{k}: {v}" for k, v in output.items()
-                                if v and k != "metadata"
-                            )
-                        else:
-                            formatted = str(output)
-                        self._emit_response(
-                            emit_fn, session_id, formatted,
-                            result.get("request_id", ""),
-                        )
-                        result["response"] = formatted
-                        result["narration_intercepted"] = True
+                    # backend.log keeps WARNING and up; the per-session trail in
+                    # llm_debug.log (Settings > LLM debug) is where this is read.
+                    # That setting is read from the database, so the call needs
+                    # an app context; engine.chat has already left its own.
+                    decision = {"session_id": session_id, "tool": narrated[0]}
+                    if app is not None:
+                        with app.app_context():
+                            log_decision("agent_brain", "NARRATED_TOOL_NOT_RUN", decision)
+                    else:
+                        log_decision("agent_brain", "NARRATED_TOOL_NOT_RUN", decision)
 
             result["tier"] = 2
             return result
@@ -1299,6 +1347,11 @@ class AgentBrain:
         try:
             from backend.services.agent_executor import AgentExecutor
 
+            # Tier 3 bypasses the engine, which saves the question for the other
+            # tiers; save it before the run so it survives a crash or a reload.
+            if app and message and (options or {}).get("persist", True) is not False:
+                _persist_turn(app, session_id, "user", message, None, project_id=project_id)
+
             if budget is None:
                 budget = StepBudget.from_total(self.TOTAL_STEP_CAP)
             iters = min(self.state.max_agent_iterations, budget.remaining)
@@ -1315,10 +1368,8 @@ class AgentBrain:
             executor.set_tool_context(session_id=session_id)
 
             # Build session context from initial Tier 2 result if escalated.
-            # Include explicit budget status so Tier 3 "knows" how much effort has already been spent.
+            # The step budget reaches the model through the executor's prompts.
             session_context = ""
-            if budget:
-                session_context += f"\n{budget.to_context()}"
             if initial_context:
                 prev_response = initial_context.get("response", "")
                 prev_tools = initial_context.get("tools_used", [])
@@ -1341,6 +1392,9 @@ class AgentBrain:
             response_text = result.final_answer if result.success else (
                 result.error or "I wasn't able to complete that task."
             )
+            # The executor's facts check: False when the answer names things
+            # the tool results do not contain. The chat shows a note for it.
+            verified = result.verified if result.success else None
 
             # Drain agent thinking steps (from any agent_task_execute that ran
             # inside the executor). Live streaming of steps relies on the
@@ -1356,7 +1410,10 @@ class AgentBrain:
             except Exception:
                 pass
 
-            self._emit_response(emit_fn, session_id, response_text, request_id or "")
+            self._emit_response(
+                emit_fn, session_id, response_text, request_id or "",
+                complete_extra={"verified": verified} if verified is not None else None,
+            )
 
             # Persist the assistant turn (Tier 3 direct path bypasses legacy
             # UnifiedChatEngine which normally does the save + drain). Mirrors
@@ -1366,6 +1423,8 @@ class AgentBrain:
                 extra = {}
                 if agent_thinking_steps:
                     extra["agentThinkingSteps"] = agent_thinking_steps
+                if verified is not None:
+                    extra["verified"] = verified
                 extra["provenance"] = _brain_provenance(
                     request_id, 3, getattr(self.state.llm, "model", None), agent_thinking_steps)
                 _persist_turn(app, session_id, "assistant", clean or response_text, extra,
@@ -1377,6 +1436,7 @@ class AgentBrain:
                 "iterations": result.iterations,
                 "tier": 3,
                 "agentThinkingSteps": agent_thinking_steps,
+                "verified": verified,
             }
 
         except Exception as e:
@@ -1474,9 +1534,11 @@ class AgentBrain:
     # -- Response formatting ------------------------------------------------
 
     def _emit_response(
-        self, emit_fn: Callable, session_id: str, response: str, request_id: str
+        self, emit_fn: Callable, session_id: str, response: str, request_id: str,
+        complete_extra: Optional[Dict[str, Any]] = None,
     ):
-        """Emit a complete response via Socket.IO."""
+        """Emit a complete response via Socket.IO. complete_extra adds
+        fields to the chat:complete payload (e.g. the Tier 3 facts check)."""
         emit_fn("chat:response", {
             "response": response,
             "session_id": session_id,
@@ -1487,6 +1549,7 @@ class AgentBrain:
             "request_id": request_id,
             "response": response,
             "steps": [],
+            **(complete_extra or {}),
         })
 
     def _build_result(

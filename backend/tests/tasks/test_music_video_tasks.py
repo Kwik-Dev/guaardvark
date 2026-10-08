@@ -37,6 +37,33 @@ class _SendRecorder:
 
 
 @pytest.fixture(autouse=True)
+def stage_plugins(monkeypatch):
+    """Records the plugins each stage asks for and starts none.
+
+    The stage tasks import plugin_bridge.ensure_plugins_for_stage at call time.
+    The real one builds the PluginManager, whose boot restores and kills plugin
+    processes on this machine, then starts the stage's plugins (Ollama, the
+    video editor, ComfyUI)."""
+    calls = []
+    monkeypatch.setattr("backend.services.plugin_bridge.ensure_plugins_for_stage",
+                        lambda context, stage, **kw: calls.append((context, stage)))
+    return calls
+
+
+@pytest.fixture
+def no_plugin_manager(monkeypatch):
+    """Records, and refuses, any reach for the PluginManager itself."""
+    reached = []
+
+    def refuse(*args, **kwargs):
+        reached.append(True)
+        raise AssertionError("the PluginManager was reached from a unit test")
+
+    monkeypatch.setattr("backend.plugins.plugin_manager.get_plugin_manager", refuse)
+    return reached
+
+
+@pytest.fixture(autouse=True)
 def _resolve_i2v(monkeypatch):
     monkeypatch.setattr(
         "backend.services.video_model_registry.resolve_active_video_model",
@@ -73,14 +100,13 @@ class _Resp:
 
 # --- analyzer ----------------------------------------------------------------
 
-def test_analyzer_seeds_cut_plan_and_gates(app, sent, monkeypatch, tmp_path):
+def test_analyzer_seeds_cut_plan_and_gates(app, sent, monkeypatch, tmp_path, stage_plugins, no_plugin_manager):
     svc = MusicVideoService(db.session)
     song = tmp_path / "song.wav"
     song.write_bytes(b"x")
     mv = _mk(svc, song_path=str(song))
     svc.advance_if_predecessor(mv.id, expected_predecessor="draft")  # → analyzing
 
-    monkeypatch.setattr(mvt, "ensure_plugin_running", lambda *a, **k: None)
     structure = {
         "tempo_bpm": 120.0, "duration_seconds": 10.0,
         "beat_times": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
@@ -103,9 +129,13 @@ def test_analyzer_seeds_cut_plan_and_gates(app, sent, monkeypatch, tmp_path):
     # the mock silently misses whenever another test imported the engine first.
     import backend.services.director_service as director_service
     monkeypatch.setattr(director_service, "_generate_storyline_and_prompts", _fake_director)
+    monkeypatch.setattr(director_service, "_resolve_model", lambda m: m)  # no Ollama lookup
 
     mvt.run_analyzer(mv.id)
     db.session.refresh(mv)
+    assert mv.status != "failed_analyzing", mv.error_blob
+    assert stage_plugins == [("music-video", "analyzing")]
+    assert no_plugin_manager == []
     assert mv.cut_plan and len(mv.cut_plan) >= 1
     assert mv.clips and all(c["status"] == "pending" for c in mv.clips)
     # Director prompts are seeded per cut (distinct, not the global style).
@@ -117,6 +147,56 @@ def test_analyzer_seeds_cut_plan_and_gates(app, sent, monkeypatch, tmp_path):
     # advances to the USER GATE, dispatches nothing.
     assert mv.current_stage == "awaiting_approval"
     assert sent.calls == []
+
+
+def test_analyzer_stores_the_guarded_prompts_not_the_raw_shot_text(
+        app, sent, monkeypatch, tmp_path, stage_plugins, no_plugin_manager):
+    svc = MusicVideoService(db.session)
+    song = tmp_path / "song.wav"
+    song.write_bytes(b"x")
+    mv = _mk(svc, song_path=str(song))
+    svc.advance_if_predecessor(mv.id, expected_predecessor="draft")  # → analyzing
+    style = mv.style_prompt
+
+    structure = {
+        "tempo_bpm": 120.0, "duration_seconds": 6.0,
+        "beat_times": [1.0, 2.0, 3.0, 4.0, 5.0],
+        "sections": [{"label": "drop", "start": 0.0, "end": 6.0, "mean_energy": 1.0}],
+    }
+    monkeypatch.setattr(mvt.requests, "post", lambda *a, **k: _Resp(structure), raising=False)
+    cut_plan = [
+        {"index": i, "start_s": 2.0 * i, "end_s": 2.0 * (i + 1), "energy": 0.9, "section_label": "drop"}
+        for i in range(3)
+    ]
+    monkeypatch.setattr(mvt, "compute_cut_plan", lambda *a, **k: [dict(c) for c in cut_plan])
+
+    # An LLM that answers every cut with the same shot.
+    import backend.services.music_video_director as director
+    def _same_shot_director(style_prompt, plan, **kw):
+        return {
+            "prompts": [f"a lone crow on a wire, {style_prompt}" for _ in plan],
+            "treatment": None,
+            "shots": [{"index": c["index"], "prompt": "a lone crow on a wire"} for c in plan],
+        }
+    monkeypatch.setattr(director, "_generate_storyline_and_prompts", _same_shot_director)
+    import backend.services.director_service as director_service
+    monkeypatch.setattr(director_service, "_generate_storyline_and_prompts", _same_shot_director)
+    monkeypatch.setattr(director_service, "_resolve_model", lambda m: m)  # no Ollama lookup
+
+    mvt.run_analyzer(mv.id)
+    db.session.refresh(mv)
+    assert mv.status != "failed_analyzing", mv.error_blob
+    assert mv.current_stage == "awaiting_approval"
+    assert stage_plugins == [("music-video", "analyzing")]
+    assert no_plugin_manager == []
+
+    expected = director._ensure_distinct_and_energy_aware(
+        [f"a lone crow on a wire, {style}"] * 3, cut_plan, style,
+    )
+    stored = [c["prompt"] for c in mv.clips]
+    assert stored == expected
+    assert len(set(stored)) == 3
+    assert all(p.endswith(style) for p in stored)
 
 
 # --- clip generator (per-clip cursor) ----------------------------------------
@@ -522,3 +602,148 @@ def test_song_lyrics_reach_the_director_as_thematic_guidance(app):
     assert "we drove all night under a paper moon" in note
     mv.song_document_id = None
     assert mvt._song_lyrics_guidance(mv) is None
+
+
+# --- the clip quality check on each cut (same record as a Video Gen clip) ----
+
+def _render_cut(app, monkeypatch, tmp_path, source_clip, settings=None):
+    """Run _generate_one_clip with the model's output being ``source_clip``.
+
+    The still, the video model, the GPU gate and the fill are stubbed where
+    _generate_one_clip reads them; the quality check runs for real on the clip.
+    """
+    import shutil
+
+    import backend.services.comfyui_image_generator as cig
+    import backend.services.comfyui_video_generator as cvg
+    import backend.services.job_operation_gate as jog
+    from backend.tests.fixtures import video_quality_clips as clips
+
+    svc = MusicVideoService(db.session)
+    mv = _mk(svc, settings={"i2v_engine": "wan", **(settings or {})})
+    clip = {"index": 0, "start": 0.0, "end": 2.0, "clip_path": None, "status": "pending",
+            "prompt": "a fox in snow"}
+    mv.clips = [clip]
+    db.session.commit()
+
+    from PIL import Image
+    still = tmp_path / "still.png"
+    Image.fromarray(clips._scene(0)).save(still)
+
+    class _Img:
+        def __init__(self, **kw):
+            pass
+
+        def generate_image(self, **kw):
+            return str(still)
+    monkeypatch.setattr(cig, "ComfyUIImageGenerator", _Img)
+
+    out = tmp_path / "i2v.mp4"
+    shutil.copyfile(source_clip, out)
+
+    class _Result:
+        success = True
+        video_path = str(out)
+        error = None
+
+    class _Gen:
+        def generate_video(self, req):
+            # generate_video resolves the request to what it rendered.
+            req.width, req.height = clips.WIDTH, clips.HEIGHT
+            req.duration_frames, req.interpolation_multiplier = clips.FRAMES, 1
+            return _Result()
+    monkeypatch.setattr(cvg, "get_video_generator", lambda: _Gen())
+
+    class _Gate:
+        @contextlib.contextmanager
+        def gpu_exclusive(self, *a, **k):
+            yield
+    monkeypatch.setattr(jog, "get_gate", lambda: _Gate())
+    monkeypatch.setattr(mvt, "_comfyui_free_vram", lambda: None)
+    monkeypatch.setattr(mvt, "fill_clip_to_duration",
+                        lambda src, target_s, o, **kw: (Path(o).write_bytes(b"x"), o)[1])
+
+    mvt._generate_one_clip(mv, clip)
+    db.session.refresh(mv)
+    return mv
+
+
+@pytest.fixture(scope="module")
+def cut_clips(tmp_path_factory):
+    pytest.importorskip("av")
+    from backend.tests.fixtures import video_quality_clips as clips
+    root = tmp_path_factory.mktemp("cuts")
+    return {name: getattr(clips, name)(root / f"{name}.mp4") for name in ("clean", "washed_out")}
+
+
+def test_a_rendered_cut_gets_quality_metadata(app, monkeypatch, tmp_path, cut_clips):
+    import backend.services.video_consistency_metrics as vcm
+    monkeypatch.setattr(vcm, "review_video_quality", lambda *a, **k: pytest.fail("VLM ran without being asked"))
+
+    mv = _render_cut(app, monkeypatch, tmp_path, cut_clips["clean"])
+
+    [cut] = mv.clips
+    assert cut["status"] == "done"
+    quality = cut["quality"]
+    assert quality["frames"]["readable"] is True
+    assert quality["flags"] == [] and quality["flagged"] is False
+    assert quality["colour_match"]["label"] == "colour match"
+    assert "vlm_review" not in quality
+    assert cut["review"] is None
+
+
+def test_a_flagged_cut_is_held_for_review(app, monkeypatch, tmp_path, cut_clips):
+    mv = _render_cut(app, monkeypatch, tmp_path, cut_clips["washed_out"])
+    [cut] = mv.clips
+    assert cut["status"] == "done"
+    assert cut["review"]["state"] == "needs_review"
+    # Washed out, and its palette has left the keyframe's.
+    assert cut["review"]["codes"] == ["washed_out", "low_colour_match"]
+
+
+def test_the_vision_review_runs_on_a_cut_only_where_enabled(app, monkeypatch, tmp_path, cut_clips):
+    import backend.services.video_consistency_metrics as vcm
+    monkeypatch.setattr(vcm, "review_video_quality", lambda *a, **k: {
+        "status": "reviewed", "available": True, "model": "m", "reason": None, "message": None,
+        "review": {"quality_score": 3},
+    })
+    mv = _render_cut(app, monkeypatch, tmp_path, cut_clips["clean"], settings={"high_consistency": True})
+    [cut] = mv.clips
+    assert cut["quality"]["vlm_review"]["review"]["quality_score"] == 3
+    assert cut["review"]["codes"] == ["low_vlm_score"]
+
+
+def test_a_held_cut_keeps_the_video_from_being_assembled(app, sent, tmp_path):
+    svc = MusicVideoService(db.session)
+    mv = _mk(svc)
+    mv.current_stage = "generating"
+    mv.status = "generating"
+    f0 = tmp_path / "c0.mp4"; f0.write_bytes(b"x")
+    f1 = tmp_path / "c1.mp4"; f1.write_bytes(b"x")
+    mv.clips = [
+        {"index": 0, "start": 0.0, "end": 2.0, "clip_path": str(f0), "status": "done", "review": None},
+        {"index": 1, "start": 2.0, "end": 4.0, "clip_path": str(f1), "status": "done",
+         "review": {"state": "needs_review", "codes": ["black_frames"], "reasons": ["black frames"]}},
+    ]
+    db.session.commit()
+
+    mvt.run_clip_generator(mv.id)
+    db.session.refresh(mv)
+    assert mv.current_stage == "generating"
+    assert sent.calls == []  # no assembler, and no re-render of the held cut
+
+
+def test_an_approved_cut_lets_the_video_assemble(app, sent, tmp_path):
+    svc = MusicVideoService(db.session)
+    mv = _mk(svc)
+    mv.current_stage = "generating"
+    mv.status = "generating"
+    f0 = tmp_path / "c0.mp4"; f0.write_bytes(b"x")
+    mv.clips = [{"index": 0, "start": 0.0, "end": 2.0, "clip_path": str(f0), "status": "done",
+                 "review": {"state": "approved", "codes": ["black_frames"], "reasons": ["black frames"]}}]
+    db.session.commit()
+
+    mvt.run_clip_generator(mv.id)
+    db.session.refresh(mv)
+    assert mv.current_stage == "assembling"
+    assert ("music_video.run_assembler", (mv.id,)) in sent.calls

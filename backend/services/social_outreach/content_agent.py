@@ -13,9 +13,10 @@ feature_hint). No live Reddit fetch — that was Recon's job.
 
 Doesn't post. Doesn't call the servo. The servo path is Phase 3 (Outreach),
 which already exists in tick_process_approved_drafts. When unsupervised
-(kill on, not supervised, grade ≥ MIN_GRADE, cadence OK), Content promotes
-straight to ``approved`` — same would_post gate as /draft-comment — so
-YouTube chain-draft matches Reddit unsupervised behavior.
+(kill on, not supervised, grade ≥ MIN_GRADE, cadence OK, independent check
+ran and passed), Content promotes straight to ``approved`` — same would_post
+gate as /draft-comment — so YouTube chain-draft matches Reddit unsupervised
+behavior.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ import json
 import logging
 from typing import Optional
 
-from backend.services.social_outreach import audit, external_grader, persona
+from backend.services.social_outreach import audit, external_grader, gates, persona
 
 logger = logging.getLogger(__name__)
 
@@ -39,14 +40,6 @@ REPLY_TO_OWN_VIDEO_SYSTEM_BLOCK is different (we're not asking "would a
 stranger flag this as promo?", we're asking "is this a real engagement?"),
 so 0.6+ posts there. Set just below MIN_GRADE rather than equal to it to
 make the difference explicit if someone wants to retune later."""
-
-MIN_EXTERNAL_GRADE = 0.5
-"""Second-opinion threshold (different model, rubric-based). Lower than the
-self-grade threshold because the rubric is binary on each axis (each item is
-0 or 1) — 0.5 means "passes 2 of 4". Below this we reject even if the
-self-grade was high. If the external grader is unavailable (model not loaded,
-call failed) we skip this gate; treat-as-pass keeps the pipeline moving rather
-than blocking on infra problems."""
 
 DEFAULT_BATCH_SIZE = 5
 """How many candidates one tick processes. Keep small — each draft is an LLM
@@ -200,24 +193,30 @@ class ContentAgent:
         # Reply path skips the external grader entirely — its rubric was
         # tuned for outreach comments ("would a stranger flag this as
         # promotional?"), which scores replies-to-fans as low even when
-        # the reply is good. We keep the self-grade threshold (MIN_REPLY_GRADE)
-        # and let the supervised-approval UI catch any obvious misses.
+        # the reply is good. We keep the self-grade threshold (MIN_REPLY_GRADE).
+        # With no independent check, an unsupervised reply waits for approval
+        # (gates.independent_ok) rather than posting on its self-grade.
+        # A share has no thread for the rubric at all; gates holds every share.
         if row.action == "reply":
-            ext = {"skipped": True, "reason": "skip_for_reply_action"}
+            ext = {"checked": False, "skipped": True, "reason": "skip_for_reply_action"}
+        elif row.action == "share":
+            ext = {"checked": False, "skipped": True, "reason": "share_not_graded"}
         else:
             # Second-opinion grade — different model family, rubric-based,
             # blind to the self-grade. Drafter is biased toward its own
             # output; this catches generic, off-tone, or oversold comments
-            # that the writer rated highly. If the grader is unavailable we
-            # skip rather than block on infra.
+            # that the writer rated highly. If the grader is unavailable the
+            # draft is not rejected; the would_post gate below decides
+            # whether it may still post.
             ext = external_grader.grade_draft_externally(draft_text, thread_context)
-        if not ext.get("skipped") and ext.get("grade", 0.0) < MIN_EXTERNAL_GRADE:
-            reason = f"external_grade_too_low:{ext['grade']:.2f} ({ext.get('reason', '')[:120]})"
+        if gates.independent_check_label(ext) == "failed":
+            missed = ",".join(q for q in external_grader.RUBRIC_QUESTIONS if not ext.get(q))
+            reason = f"external_check_failed:{missed or 'not_passed'} ({ext.get('reason', '')[:120]})"
             audit.mark_rejected(audit_id, reason)
             return {
                 "status": "rejected",
                 "grade": grade,
-                "reason": "external_grade_too_low",
+                "reason": "external_check_failed",
                 "external": ext,
             }
 
@@ -261,20 +260,30 @@ class ContentAgent:
         # caller-pending mutations under celery.
         #
         # Unsupervised parity with /draft-comment: when enabled, not
-        # supervised, grade ≥ MIN_GRADE, and cadence allows → approved
-        # so tick_process_approved_drafts can post without a human click.
+        # supervised, grade ≥ MIN_GRADE, cadence allows, and the independent
+        # check ran and passed → approved so tick_process_approved_drafts can
+        # post without a human click. An unchecked draft is held as drafted,
+        # and so is one whose thread recon could not put to the thread-fit
+        # judge (relevance_skipped in the candidate payload).
         from backend.services.social_outreach import kill_switch
         enabled = kill_switch.is_enabled()
         supervised = kill_switch.is_supervised()
         cadence_ok, cadence_reason = kill_switch.cadence_allows_post(row.platform)
+        relevance_unchecked = bool(payload.get("relevance_skipped"))
+        independent_pass, independent_reason = gates.independent_ok(
+            ext, supervised=supervised, action=row.action,
+            relevance_unchecked=relevance_unchecked,
+        )
         would_post = (
             enabled
             and not supervised
             and cadence_ok
             and grade >= MIN_GRADE
             and bool((draft_text or "").strip())
+            and independent_pass
         )
         promote_status = "approved" if would_post else "drafted"
+        hold_reason = None if independent_pass else independent_reason
 
         promoted = audit.mark_drafted_from_candidate(
             audit_id,
@@ -305,11 +314,15 @@ class ContentAgent:
                 "subreddit": payload.get("subreddit"),
                 "self_grade": grade,
                 "external_grade": ext.get("grade"),
+                "external_passed": ext.get("passed"),
+                "external_checked": bool(ext.get("checked")),
                 "external_skipped": ext.get("skipped", False),
                 "external_reason": ext.get("reason", ""),
+                "relevance_unchecked": relevance_unchecked,
                 "promoted_status": promote_status,
                 "would_post": would_post,
                 "cadence_block": cadence_reason if not cadence_ok else None,
+                "hold_reason": hold_reason,
             },
         )
 
@@ -319,6 +332,7 @@ class ContentAgent:
             "reason": None,
             "external": ext,
             "would_post": would_post,
+            "hold_reason": hold_reason,
         }
 
     def draft_batch(self, batch_size: int = DEFAULT_BATCH_SIZE) -> dict:
@@ -326,24 +340,48 @@ class ContentAgent:
 
         Stops at batch_size to keep individual ticks bounded — a celery beat
         every few minutes will drain the queue eventually.
+
+        A row whose drafting raises is rejected as ``draft_crashed`` and
+        counted under errors, and the rows after it are still drafted. Left
+        as a candidate it would head the oldest-first query again and stop
+        every later tick at the same row.
         """
-        from backend.models import SocialOutreachLog
-        rows = (
-            SocialOutreachLog.query
-            .filter(SocialOutreachLog.status == "candidate")
-            .order_by(SocialOutreachLog.created_at.asc())
-            .limit(batch_size)
-            .all()
-        )
+        from backend.models import SocialOutreachLog, db
+        from backend.services.social_outreach import transitions
+        row_ids = [
+            row.id for row in (
+                SocialOutreachLog.query
+                .filter(SocialOutreachLog.status == "candidate")
+                .order_by(SocialOutreachLog.created_at.asc())
+                .limit(batch_size)
+                .all()
+            )
+        ]
         report = {
-            "considered": len(rows),
+            "considered": len(row_ids),
             "drafted": 0,
             "approved": 0,
             "rejected": 0,
             "errors": 0,
         }
-        for row in rows:
-            outcome = self.draft_candidate(row.id)
+        for row_id in row_ids:
+            try:
+                outcome = self.draft_candidate(row_id)
+            except Exception as e:
+                logger.exception("ContentAgent.draft_batch: drafting %s raised", row_id)
+                report["errors"] += 1
+                db.session.rollback()
+                # Only a row still waiting as a candidate is rejected; one the
+                # crash caught after promotion keeps its draft.
+                if not transitions.move(
+                    row_id, "rejected", ("candidate",),
+                    abort_reason=f"draft_crashed: {type(e).__name__}: {e}"[:512],
+                ):
+                    logger.warning(
+                        "ContentAgent.draft_batch: %s was no longer a candidate after the crash; left as is",
+                        row_id,
+                    )
+                continue
             status = outcome["status"]
             if status == "drafted":
                 report["drafted"] += 1

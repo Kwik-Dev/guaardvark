@@ -238,6 +238,14 @@ def adapt_demo_step(row) -> Job:
     )
 
 
+# The fields a ProgressEvent carries itself; everything else in a flattened
+# event dict is the producer's additional_data.
+_PROGRESS_EVENT_FIELDS = frozenset({
+    "job_id", "process_id", "progress", "message", "status",
+    "process_type", "processType", "timestamp", "additional_data",
+})
+
+
 def adapt_unified_progress(event: dict[str, Any]) -> Job:
     """Adapt a UnifiedProgress in-memory ProgressEvent dict.
 
@@ -264,6 +272,12 @@ def adapt_unified_progress(event: dict[str, Any]) -> Job:
         except (TypeError, ValueError):
             progress = None
 
+    additional = event.get("additional_data")
+    if not isinstance(additional, dict):
+        # ProgressEvent.to_dict (the job_progress emit) spreads additional_data
+        # into the top level; gather it back so batch_id and wait reasons survive.
+        additional = {k: v for k, v in event.items() if k not in _PROGRESS_EVENT_FIELDS}
+
     return Job(
         id=f"{kind.value}:{native_id}",
         kind=kind,
@@ -277,7 +291,7 @@ def adapt_unified_progress(event: dict[str, Any]) -> Job:
         metadata={
             "process_type": process_type,
             "process_id": process_id,
-            "additional_data": event.get("additional_data") or {},
+            "additional_data": additional,
         },
     )
 
@@ -394,9 +408,11 @@ def adapt_video_gen(status) -> Job:
     if isinstance(status, dict):
         stage = status.get("stage")
         progress_pct = status.get("progress_pct")
+        current_item = status.get("current_item")
     else:
         stage = getattr(status, "stage", None)
         progress_pct = getattr(status, "progress_pct", None)
+        current_item = getattr(status, "current_item", None)
     label = f"VideoGen: {display}"
     if stage and stage not in ("queued", "done"):
         label = f"VideoGen [{stage}]: {display}"
@@ -431,6 +447,10 @@ def adapt_video_gen(status) -> Job:
             "is_running": is_running,
             "queue_position": metadata.get("queue_position"),
             "stage": stage,
+            # Set while the batch waits for the GPU (batch_video_generator._run_batch);
+            # current_item ties a clip's video_render progress events to this batch.
+            "gpu_wait_reason": metadata.get("gpu_wait_reason"),
+            "current_item": current_item,
             "failure": failure,
         },
     )

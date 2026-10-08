@@ -8,6 +8,14 @@ DEFAULT_START_BUDGET_HOURS = 6.0
 autoresearch_bp = Blueprint("autoresearch", __name__, url_prefix="/api/autoresearch")
 
 
+def _kickoff_status(result: dict) -> int:
+    """202 started; 422 refused on a precondition (the reasons are in the
+    body and the run row); 409 another run is in progress."""
+    if result.get("not_run"):
+        return 422
+    return 409 if "error" in result else 202
+
+
 @autoresearch_bp.route("/status", methods=["GET"])
 def get_status():
     svc = get_autoresearch_service()
@@ -30,8 +38,7 @@ def start_loop():
         budget_hours=hours,
         trigger="manual",
     )
-    status = 409 if "error" in result else 202
-    return jsonify(result), status
+    return jsonify(result), _kickoff_status(result)
 
 
 def _set_kill_flag(value: str) -> None:
@@ -74,8 +81,10 @@ def get_history():
 
 @autoresearch_bp.route("/config", methods=["GET"])
 def get_config():
+    """The experiment config as the next run would load it. Read-only: any
+    pending migration is applied in memory and saved by the next run."""
     svc = get_autoresearch_service()
-    config = svc._load_config()
+    config, _changed = svc._read_config()
     return jsonify(config)
 
 
@@ -166,6 +175,8 @@ def regenerate_eval_pairs():
         pair.is_active = True
         db.session.add(pair)
     db.session.commit()
+    # A baseline scored on the old questions says nothing about the new ones.
+    svc.clear_baseline()
     return jsonify({"status": "regenerated", "count": len(pairs)})
 
 
@@ -232,7 +243,8 @@ def log_experiment():
 
     Arms run as coding agents in worktrees; this is how their results land in
     the same ExperimentRun ledger the RAG-tuning loop uses, so one morning
-    report covers both engines.
+    report covers both engines. The caller supplies its own scores, so every
+    row written here is marked self_reported and never counts as measured.
     """
     body = request.get_json(silent=True) or {}
     if not body.get("parameter") or body.get("status") not in ("keep", "discard", "crash"):
@@ -249,6 +261,7 @@ def log_experiment():
     retr = body.get("retrieval_metrics") if isinstance(body.get("retrieval_metrics"), dict) else {}
     retr = dict(retr)
     retr.setdefault("layer", "code" if source == "code_arm" else source)
+    retr["self_reported"] = True
     pytest_ok = body.get("pytest_passed", True)
     if status == "keep" and source in ("code_arm", "heal"):
         retr_up = (
@@ -290,15 +303,31 @@ def create_run():
         budget_hours=body.get("budget_hours"),
         trigger="manual",
     )
-    status = 409 if "error" in result else 202
-    return jsonify(result), status
+    return jsonify(result), _kickoff_status(result)
 
 
 @autoresearch_bp.route("/runs", methods=["GET"])
 def list_runs():
+    """The newest 30 runs, each with its measured scores from the ledger
+    (latest_score, best_tried_score, health_checks; see summarize_ledger).
+    The stored best_score of older runs is the baseline whenever nothing beat
+    it, so the page reads best_tried_score instead."""
+    from collections import defaultdict
     from backend.models import ResearchRun
+    from backend.services.research_run_service import summarize_ledger
     runs = ResearchRun.query.order_by(ResearchRun.created_at.desc()).limit(30).all()
-    return jsonify({"runs": [r.to_dict() for r in runs]})
+    rows_by_tag = defaultdict(list)
+    tags = [r.run_tag for r in runs]
+    if tags:
+        for row in (ExperimentRun.query.filter(ExperimentRun.run_tag.in_(tags))
+                    .order_by(ExperimentRun.created_at.asc()).all()):
+            rows_by_tag[row.run_tag].append(row.to_dict())
+    out = []
+    for run in runs:
+        d = run.to_dict()
+        d.update(summarize_ledger(rows_by_tag[run.run_tag]))
+        out.append(d)
+    return jsonify({"runs": out})
 
 
 @autoresearch_bp.route("/runs/<run_id>", methods=["GET"])

@@ -51,6 +51,8 @@ import {
 import { useSnackbar } from '../components/common/SnackbarProvider';
 import PageLayout from '../components/layout/PageLayout';
 import { ContextualLoader } from '../components/common/LoadingStates';
+import EntityContextMenu from '../components/common/EntityContextMenu';
+import useContextMenu from '../hooks/useContextMenu';
 import { io } from 'socket.io-client';
 import { SOCKET_URL } from '../api/apiClient';
 import {
@@ -283,6 +285,7 @@ const PluginCard = ({ plugin, onAction, onConfigOpen, showMessage, excludedBy = 
   const [expanded, setExpanded] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const [actionLoading, setActionLoading] = useState(null);
+  const cardMenu = useContextMenu();
 
   // Camera state (vision_pipeline only)
   const [cameraActive, setCameraActive] = useState(false);
@@ -339,9 +342,14 @@ const PluginCard = ({ plugin, onAction, onConfigOpen, showMessage, excludedBy = 
   };
 
   const isLoading = actionLoading !== null;
+  const coolingDown = (plugin.cooldown_remaining || 0) > 0;
+  const toggleDisabled =
+    isLoading || plugin.status === 'starting' || plugin.status === 'stopping' || coolingDown;
+  const cameraAvailable = plugin.id === 'vision_pipeline' && plugin.status === 'running';
 
   return (
     <Card
+      onContextMenu={(e) => cardMenu.open(e)}
       sx={{
         height: '100%',
         display: 'flex',
@@ -441,13 +449,7 @@ const PluginCard = ({ plugin, onAction, onConfigOpen, showMessage, excludedBy = 
                 // snapshot or optimistic update). Runtime 'status' (running/stopped/disabled)
                 // drives the Chip and card opacity instead.
                 onChange={() => handleAction(plugin.enabled ? 'disable' : 'start')}
-                disabled={
-                  !!excludedBy
-                  || isLoading
-                  || plugin.status === 'starting'
-                  || plugin.status === 'stopping'
-                  || (plugin.cooldown_remaining || 0) > 0
-                }
+                disabled={toggleDisabled}
                 size="small"
                 color="success"
               />
@@ -462,7 +464,7 @@ const PluginCard = ({ plugin, onAction, onConfigOpen, showMessage, excludedBy = 
 
         <Box sx={{ display: 'flex', gap: 0.5 }}>
 
-          {plugin.id === 'vision_pipeline' && plugin.status === 'running' && (
+          {cameraAvailable && (
             <Tooltip title={cameraActive ? 'Stop Camera' : 'Start Camera'}>
               <IconButton
                 size="small"
@@ -512,6 +514,26 @@ const PluginCard = ({ plugin, onAction, onConfigOpen, showMessage, excludedBy = 
           </Box>
         </>
       )}
+
+      <EntityContextMenu
+        anchorPosition={cardMenu.anchorPosition}
+        onClose={cardMenu.close}
+        actions={[
+          {
+            label: plugin.enabled ? 'Turn off' : 'Turn on',
+            onClick: () => handleAction(plugin.enabled ? 'disable' : 'start'),
+            disabled: toggleDisabled,
+          },
+          cameraAvailable && {
+            label: cameraActive ? 'Stop camera' : 'Start camera',
+            onClick: handleCameraToggle,
+            disabled: cameraLoading,
+          },
+          { label: logsOpen ? 'Hide logs' : 'Show logs', onClick: () => setLogsOpen(!logsOpen), dividerBefore: true },
+          { label: 'Settings…', onClick: () => onConfigOpen(plugin), disabled: isLoading },
+          { label: expanded ? 'Fewer details' : 'More details', onClick: () => setExpanded(!expanded) },
+        ]}
+      />
     </Card>
   );
 };

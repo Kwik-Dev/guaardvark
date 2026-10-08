@@ -1,6 +1,24 @@
 """Tests for natural-language / bare CLI routing in the REPL."""
 
+import os
+import stat
+
+import pytest
+
+from llx.command_catalog import BARE_ONLY_COMMANDS
 from llx.intent_router import resolve_repl_line
+
+
+@pytest.fixture
+def pytest_only_path(tmp_path, monkeypatch):
+    """PATH holding a single executable named pytest, so PATH lookups are deterministic."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    exe = bin_dir / "pytest"
+    exe.write_text("#!/bin/sh\nexit 0\n")
+    exe.chmod(exe.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    return bin_dir
 
 
 class TestResolveReplLine:
@@ -34,7 +52,7 @@ class TestResolveReplLine:
     def test_slash_passthrough(self):
         assert resolve_repl_line("/agents list") is None
 
-    def test_local_coding_intents(self):
+    def test_local_coding_intents(self, pytest_only_path):
         assert resolve_repl_line("read repl.py") == ("read", ["repl.py"])
         assert resolve_repl_line("grep TODO in cli") == ("grep", ["TODO in cli"])
         assert resolve_repl_line("ls cli/llx") == ("ls", ["cli/llx"])
@@ -76,3 +94,81 @@ class TestResolveReplLine:
         assert resolve_repl_line("gpu status") == ("gpu", ["status"])
         assert resolve_repl_line("what's using the gpu") == ("gpu", ["status"])
         assert resolve_repl_line("start comfyui") == ("plugins", ["start", "comfyui"])
+
+
+class TestCommandWordsInEnglish:
+    """Lines that only start with a command word go to chat; bare commands still run."""
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "new ideas for a birthday party",
+            "exit strategy for my startup",
+            "quit smoking tips",
+            "clear explanation of recursion please",
+            "abort the mission plan, what are my options",
+            "undo the damage of a bad review",
+            "apply for a passport",
+            "stop being so verbose",
+            "start a story about dragons",
+            "export my notes",
+            "export controls on chips explained",
+            "history of rome",
+            "history 3 times over, why does it repeat",
+        ],
+    )
+    def test_session_command_word_with_more_text_is_chat(self, line, tmp_path):
+        assert resolve_repl_line(line, cwd=tmp_path) is None
+
+    @pytest.mark.parametrize("word", sorted(BARE_ONLY_COMMANDS))
+    def test_bare_session_command_still_runs(self, word):
+        assert resolve_repl_line(word) == (word, [])
+        assert resolve_repl_line(word.capitalize()) == (word, [])
+
+    def test_history_runs_bare_or_with_one_number(self):
+        assert resolve_repl_line("history") == ("history", [])
+        assert resolve_repl_line("History") == ("history", [])
+        assert resolve_repl_line("history 3") == ("history", ["3"])
+        assert resolve_repl_line("history three") is None
+        assert resolve_repl_line("history -1") is None
+
+    def test_start_plugin_rule_still_wins(self):
+        assert resolve_repl_line("start comfyui") == ("plugins", ["start", "comfyui"])
+
+    def test_slash_session_commands_untouched(self):
+        assert resolve_repl_line("/new") is None
+        assert resolve_repl_line("/undo src/app.py") is None
+
+    def test_run_needs_a_program_or_script(self, tmp_path, pytest_only_path):
+        assert resolve_repl_line("run through the plan with me", cwd=tmp_path) is None
+        assert resolve_repl_line("execute the plan we discussed", cwd=tmp_path) is None
+        assert resolve_repl_line("run pytest -q", cwd=tmp_path) == ("run", ["pytest -q"])
+        assert resolve_repl_line("sh pytest -q", cwd=tmp_path) == ("run", ["pytest -q"])
+
+    def test_run_accepts_existing_script_in_repl_folder(self, tmp_path, pytest_only_path):
+        script = tmp_path / "build.sh"
+        script.write_text("#!/bin/sh\n")
+        assert resolve_repl_line("run ./build.sh --fast", cwd=tmp_path) == (
+            "run",
+            ["./build.sh --fast"],
+        )
+        assert resolve_repl_line("run build.sh", cwd=tmp_path) == ("run", ["build.sh"])
+        assert resolve_repl_line("run ./missing.sh", cwd=tmp_path) is None
+
+    def test_test_needs_no_tail_or_an_existing_path(self, tmp_path):
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_x.py").write_text("")
+        assert resolve_repl_line("check the weather in Boston", cwd=tmp_path) is None
+        assert resolve_repl_line("test my knowledge of French", cwd=tmp_path) is None
+        assert resolve_repl_line("checkout the main branch", cwd=tmp_path) is None
+        assert resolve_repl_line("check", cwd=tmp_path) == ("test", [])
+        assert resolve_repl_line("test", cwd=tmp_path) == ("test", [])
+        assert resolve_repl_line("pytest tests", cwd=tmp_path) == ("test", ["tests"])
+        assert resolve_repl_line("test tests/test_x.py::test_one -q", cwd=tmp_path) == (
+            "test",
+            ["tests/test_x.py::test_one -q"],
+        )
+
+    def test_other_command_tree_lines_unchanged(self):
+        assert resolve_repl_line("files list") == ("files", ["list"])
+        assert resolve_repl_line("memory clear") == ("memory", ["clear"])

@@ -27,6 +27,15 @@ from backend.utils.clock import utcnow
 logger = logging.getLogger(__name__)
 
 CONFIG_FILENAME = "rag_experiment_config.json"
+# ExperimentRun.proposal_source of the research run's pytest snapshot rows.
+HEALTH_CHECK_SOURCE = "heal"
+
+
+def _not_health_check(model):
+    """SQL filter for ledger rows that are not health checks (a NULL source
+    is an old experiment row, not a health check)."""
+    from sqlalchemy import or_
+    return or_(model.proposal_source.is_(None), model.proposal_source != HEALTH_CHECK_SOURCE)
 
 
 class RAGAutoresearchService:
@@ -73,22 +82,127 @@ class RAGAutoresearchService:
         root = os.environ.get("GUAARDVARK_ROOT", "")
         return os.path.join(root, "data", CONFIG_FILENAME)
 
-    def _load_config(self) -> dict:
-        """Load current experiment config from disk."""
+    def _baseline_params(self) -> dict:
+        """The params retrieval uses when nothing is promoted, including the
+        dedup threshold measured for the active embedding model."""
+        params = dict(AUTORESEARCH_DEFAULT_PARAMS)
+        try:
+            from backend.config import get_active_embedding_model, get_dedup_threshold
+            params["dedup_threshold"] = get_dedup_threshold(get_active_embedding_model())
+        except Exception as e:
+            # Left out, experiments do not override it and retrieval keeps
+            # resolving its own per-model value.
+            logger.debug(f"Baseline dedup threshold not resolved: {e}")
+        return params
+
+    def _full_params(self, overrides: dict) -> dict:
+        """Baseline params with `overrides` applied: a promoted row, spelled out
+        in full so an eval of it does not inherit whatever else is active."""
+        params = self._baseline_params()
+        params.update(overrides or {})
+        return params
+
+    def _infer_tuned(self, params: dict) -> list:
+        """Tuned param names for a config file without a "tuned" record: the
+        ones whose value differs from the declared default. dedup_threshold
+        has no declared default, so it counts only when the ledger's latest
+        kept dedup_threshold experiment set the stored value."""
+        tuned = {
+            k for k, v in params.items()
+            if k in AUTORESEARCH_DEFAULT_PARAMS and v != AUTORESEARCH_DEFAULT_PARAMS[k]
+        }
+        if "dedup_threshold" in params and self._kept_value_matches(
+                "dedup_threshold", params["dedup_threshold"]):
+            tuned.add("dedup_threshold")
+        return sorted(tuned)
+
+    def _kept_value_matches(self, parameter: str, value) -> bool:
+        """Whether the latest kept experiment on `parameter` set `value`."""
+        try:
+            from backend.models import ExperimentRun
+            row = (
+                ExperimentRun.query
+                .filter_by(parameter_changed=parameter, status="keep")
+                .order_by(ExperimentRun.created_at.desc())
+                .first()
+            )
+            return row is not None and float(row.new_value) == float(value)
+        except Exception as e:
+            logger.debug(f"Ledger check for {parameter} skipped: {e}")
+            return False
+
+    def _rebase_params(self, config: dict) -> bool:
+        """Take every untuned param from the current baseline, so experiments
+        start from what production does now (the dedup threshold follows the
+        active embedding model). A baseline score measured on other values is
+        dropped; the next research run measures it again. Returns whether the
+        config changed."""
+        stored = config.get("params")
+        if not isinstance(stored, dict):
+            stored = {}
+        params = self._baseline_params()
+        params.update({k: stored[k] for k in config.get("tuned") or [] if k in stored})
+        if params == stored:
+            return False
+        if any(params.get(k) != v for k, v in stored.items()):
+            config["baseline_score"] = 0.0
+        config["params"] = params
+        return True
+
+    def _default_config(self) -> dict:
+        return {
+            "version": 1,
+            "baseline_score": 0.0,
+            "params": self._baseline_params(),
+            "tuned": [],
+            "phase": 1,
+            "phase_plateau_count": 0,
+        }
+
+    def _read_config(self) -> tuple:
+        """The experiment config as a run would see it, without touching disk.
+
+        Returns (config, changed): `changed` is True when the file is missing,
+        unreadable, or needs the migrations _load_config would save. Status
+        and other GET paths use this so reading never rewrites the file.
+
+        "tuned" lists the params a kept experiment changed; only those are
+        promoted (see _promote_config), and every other param is re-resolved
+        from the baseline.
+        """
         path = self._config_path()
         try:
             with open(path, "r") as f:
-                return json.load(f)
+                config = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
-            config = {
-                "version": 1,
-                "baseline_score": 0.0,
-                "params": dict(AUTORESEARCH_DEFAULT_PARAMS),
-                "phase": 1,
-                "phase_plateau_count": 0,
-            }
+            return self._default_config(), True
+        changed = False
+        if not isinstance(config.get("tuned"), list):
+            config["tuned"] = self._infer_tuned(config.get("params") or {})
+            changed = True
+        if self._rebase_params(config):
+            changed = True
+        return config, changed
+
+    def _load_config(self) -> dict:
+        """Load the experiment config for a run, saving any migration
+        _read_config applied. Only run, reset and eval-regenerate paths call
+        this; everything that just reports state calls _read_config."""
+        config, changed = self._read_config()
+        if changed:
             self._save_config(config)
-            return config
+        return config
+
+    def clear_baseline(self) -> dict:
+        """Forget the measured baseline and the plateau count, e.g. after the
+        eval set is replaced; the next run measures both again."""
+        config = self._load_config()
+        config["baseline_score"] = 0.0
+        config["phase_plateau_count"] = 0
+        for key in ("baseline_measured_at", "baseline_eval_generation", "baseline_pairs"):
+            config.pop(key, None)
+        self._save_config(config)
+        return config
 
     def _save_config(self, config: dict):
         """Atomically save config to disk."""
@@ -137,13 +251,16 @@ class RAGAutoresearchService:
                 logger.debug(f"timing persist skipped: {e}")
 
     def run_single_experiment(self, run_tag: str = None,
-                              promote_mode: str = "active") -> dict:
+                              promote_mode: str = "active",
+                              on_proposal=None) -> dict:
         """Execute one experiment cycle. Returns result dict.
 
         run_tag stamps the ledger row with the owning ResearchRun (nightly
         runs). promote_mode: "active" promotes winners live immediately
         (legacy /start behavior); "candidate" stores winners inactive for the
-        run-end A/B confirmation to activate.
+        run-end A/B confirmation to activate. on_proposal(proposal) is called
+        once the change to try is chosen, before it is measured; the research
+        run uses it to show the parameter under test from another process.
         """
         config = self._load_config()
         from backend.services.rag_experiment_agent import MAX_PHASE
@@ -157,7 +274,7 @@ class RAGAutoresearchService:
             config["phase_plateau_count"] = 0
             self._save_config(config)
         baseline = config.get("baseline_score", 0.0)
-        params = config.get("params", dict(AUTORESEARCH_DEFAULT_PARAMS))
+        params = config.get("params") or self._baseline_params()
 
         # 1. Get experiment history
         history = self._get_recent_history(limit=20)
@@ -178,17 +295,23 @@ class RAGAutoresearchService:
         experiment_id = str(uuid.uuid4())
         self._current_experiment_id = experiment_id
         self._current_parameter = proposal.get("parameter")
+        if on_proposal is not None:
+            try:
+                on_proposal(proposal)
+            except Exception as e:
+                logger.debug(f"on_proposal callback failed: {e}")
 
         param_name = proposal["parameter"]
         old_value = params.get(param_name)
         new_value = proposal["new_value"]
         hypothesis = proposal.get("hypothesis", "")
         # Provenance for the ledger: was this a real LLM proposal or the random
-        # fallback, and which models proposed/judged.
+        # fallback, and which models proposed/judged. The judge is resolved
+        # during the eval, so it is read after it (see _record_judge).
         provenance = {
             "proposal_source": proposal.get("source", "llm"),
             "proposer_model": getattr(self.agent, "proposer_model_name", None),
-            "judge_model": getattr(self.eval_harness, "judge_model_name", None),
+            "judge_model": None,
             "run_tag": run_tag,
         }
 
@@ -229,6 +352,7 @@ class RAGAutoresearchService:
                 eval_result = {
                     "composite_score": baseline,
                     "num_pairs": test_retr.get("num_pairs") or 1,
+                    "judged_pairs": 0,
                     "details": [],
                     "retrieval": test_retr,
                     "parse_fail_ratio": 0.0,
@@ -271,6 +395,7 @@ class RAGAutoresearchService:
         except Exception as e:
             logger.error(f"Experiment crashed: {e}")
             self._persist_timings(config)
+            self._record_judge(provenance)
             result = {
                 "experiment_id": experiment_id,
                 "parameter": param_name,
@@ -284,6 +409,7 @@ class RAGAutoresearchService:
                 "duration": time.time() - t0,
                 "phase": phase,
                 "fidelity": fidelity,
+                "retrieval_metrics": self._ledger_metrics({}, fidelity, 0),
                 **provenance,
             }
             self._log_experiment(result)
@@ -296,6 +422,7 @@ class RAGAutoresearchService:
         # 2026-08 runaway kept spinning for 3.4 days. No eval pairs means no
         # experiment actually happened; report it as a crash so run_loop's
         # consecutive-crash guard halts the loop instead of iterating forever.
+        self._record_judge(provenance)
         if eval_result.get("num_pairs", 0) == 0:
             logger.error(
                 "Eval set is empty — nothing was measured. Generate eval pairs "
@@ -314,6 +441,7 @@ class RAGAutoresearchService:
                 "duration": duration,
                 "phase": phase,
                 "fidelity": fidelity,
+                "retrieval_metrics": self._ledger_metrics({}, fidelity, 0),
                 **provenance,
             }
             self._log_experiment(result)
@@ -333,7 +461,10 @@ class RAGAutoresearchService:
         promoted_id = None
         if status == "keep":
             config["params"][param_name] = new_value
+            config["tuned"] = sorted(set(config.get("tuned") or []) | {param_name})
             config["baseline_score"] = new_score
+            config["baseline_measured_at"] = utcnow().isoformat()
+            config["baseline_pairs"] = eval_result.get("num_pairs")
             config["phase_plateau_count"] = 0
             self._save_config(config)
             promoted_id = self._promote_config(
@@ -365,7 +496,10 @@ class RAGAutoresearchService:
             "duration": duration,
             "phase": phase,
             "eval_details": eval_result.get("details", []),
-            "retrieval_metrics": retr if retr else eval_result.get("retrieval"),
+            "retrieval_metrics": self._ledger_metrics(
+                retr or eval_result.get("retrieval"), fidelity,
+                eval_result.get("judged_pairs"),
+            ),
             "fidelity": fidelity,
             "config_id": promoted_id,
             **provenance,
@@ -380,6 +514,24 @@ class RAGAutoresearchService:
         self._current_experiment_id = None
         self._current_parameter = None
         return result
+
+    def _record_judge(self, provenance: dict) -> None:
+        provenance["judge_model"] = getattr(self.eval_harness, "judge_model_name", None)
+
+    def _ledger_metrics(self, retrieval, fidelity: int, judged_pairs) -> dict:
+        """The ledger row's retrieval_metrics: the retrieval scores plus what
+        the experiment measured with. judged_pairs is 0 when no judge scored
+        anything (an F0 screen or a crash); answer_model lets the report tell
+        whether the judge graded its own model's answers."""
+        out = dict(retrieval or {})
+        out["fidelity"] = fidelity
+        out["judged_pairs"] = judged_pairs
+        try:
+            out["active_pairs"] = len(self.eval_harness._get_active_eval_pairs())
+        except Exception:
+            out["active_pairs"] = None
+        out["answer_model"] = getattr(self.eval_harness, "answer_model_name", None)
+        return out
 
     def _decide_keep(
         self, new_score, baseline, new_retr, base_retr, f0_lose=False,
@@ -565,6 +717,10 @@ class RAGAutoresearchService:
                         activate: bool = True):
         """Save a winning config to the ResearchConfig table.
 
+        Stores only the tuned params that differ from the baseline; every key
+        in the row overrides live retrieval (get_active_rag_params), so a
+        default copied in with them would go live too.
+
         activate=True: goes live immediately (deactivates predecessors).
         activate=False: stored as a CANDIDATE — nightly-run winners stay
         inactive until the run-end A/B confirmation activates the best one.
@@ -572,11 +728,15 @@ class RAGAutoresearchService:
         """
         try:
             from backend.models import ResearchConfig, db
+            from backend.utils.experiment_context import changed_params
+            params = config.get("params") or {}
+            tuned = {k: params[k] for k in (config.get("tuned") or []) if k in params}
+            promoted = changed_params(tuned, self._baseline_params())
             if activate:
                 ResearchConfig.query.filter_by(is_active=True).update({"is_active": False})
             new_config = ResearchConfig(
                 id=str(uuid.uuid4()),
-                params=config["params"],
+                params=promoted,
                 composite_score=score,
                 is_active=activate,
                 promoted_at=utcnow() if activate else None,
@@ -596,11 +756,14 @@ class RAGAutoresearchService:
             return None
 
     def _get_recent_history(self, limit: int = 20) -> list:
-        """Get recent experiment results from DB."""
+        """Recent parameter experiments, oldest first. Health-check rows are
+        left out: they change no parameter and would read as keeps or
+        discards to the proposer and the plateau check."""
         try:
             from backend.models import ExperimentRun
             runs = (
                 ExperimentRun.query
+                .filter(_not_health_check(ExperimentRun))
                 .order_by(ExperimentRun.created_at.desc())
                 .limit(limit)
                 .all()
@@ -669,9 +832,10 @@ class RAGAutoresearchService:
 
         `running` is true if THIS process's loop is active OR a ResearchRun
         row is pending/running — the overnight engine no longer sets
-        `_running` on this singleton.
+        `_running` on this singleton. Never writes the config file;
+        `config_migration_pending` says the next run will rewrite it.
         """
-        config = self._load_config()
+        config, migration_pending = self._read_config()
         active_run = None
         eval_pair_count = 0
         try:
@@ -711,32 +875,103 @@ class RAGAutoresearchService:
         except Exception:
             pass
         running = bool(self._running or active_run)
+        current_parameter = self._current_parameter
+        if current_parameter is None and active_run:
+            # A research run executes in the Celery worker, so this process
+            # only sees its current experiment through the run's metadata.
+            meta = active_run.get("promotions")
+            current = meta.get("current") if isinstance(meta, dict) else None
+            if isinstance(current, dict):
+                current_parameter = current.get("parameter")
+        eval_pairs = None
+        try:
+            sources = self.eval_harness.eval_source_status()
+            eval_pairs = {k: sources[k] for k in ("active", "not_indexed", "by_status")}
+            eval_pair_count = sources["active"]
+        except Exception:
+            pass
+        judge = None
+        try:
+            js = self.eval_harness.judge_status()
+            judge = {k: js[k] for k in ("configured", "answer_model", "independent", "problem")}
+        except Exception:
+            pass
         return {
             "running": running,
             "paused": self._paused,
+            "auto_enabled": self._auto_enabled(),
             "current_experiment_id": self._current_experiment_id,
-            "current_parameter": self._current_parameter,
+            "current_parameter": current_parameter,
             "phase": config.get("phase", 1),
             "baseline_score": config.get("baseline_score", 0.0),
+            "baseline_measured_at": config.get("baseline_measured_at"),
+            "baseline_eval_generation": config.get("baseline_eval_generation"),
+            "baseline_pairs": config.get("baseline_pairs"),
             "params": config.get("params", {}),
             "total_experiments": self._count_experiments(),
+            "total_health_checks": self._count_health_checks(),
             "total_improvements": self._count_improvements(),
             "active_run": active_run,
+            "last_run": self._last_run(),
             "code_keeps": code_keeps,
             "eval_pair_count": eval_pair_count,
+            "eval_pairs": eval_pairs,
+            "judge": judge,
+            "config_migration_pending": migration_pending,
         }
 
+    def _auto_enabled(self) -> bool:
+        try:
+            from backend.models import Setting
+            s = Setting.query.filter_by(key="rag_autoresearch_auto_enabled").first()
+            return bool(s and str(s.value).strip().lower() == "true")
+        except Exception:
+            return False
+
+    def _last_run(self):
+        """The newest ResearchRun of any status (a refused one included),
+        with its measured scores from the ledger."""
+        try:
+            from backend.models import ExperimentRun, ResearchRun
+            from backend.services.research_run_service import summarize_ledger
+            run = ResearchRun.query.order_by(ResearchRun.created_at.desc()).first()
+            if run is None:
+                return None
+            rows = (
+                ExperimentRun.query.filter_by(run_tag=run.run_tag)
+                .order_by(ExperimentRun.created_at.asc())
+                .all()
+            )
+            out = run.to_dict()
+            out.update(summarize_ledger([r.to_dict() for r in rows]))
+            return out
+        except Exception:
+            return None
+
     def _count_experiments(self) -> int:
+        """Ledger rows that tried a change; health checks are counted apart."""
         try:
             from backend.models import ExperimentRun
-            return ExperimentRun.query.count()
+            return ExperimentRun.query.filter(_not_health_check(ExperimentRun)).count()
+        except Exception:
+            return 0
+
+    def _count_health_checks(self) -> int:
+        try:
+            from backend.models import ExperimentRun
+            return ExperimentRun.query.filter_by(proposal_source=HEALTH_CHECK_SOURCE).count()
         except Exception:
             return 0
 
     def _count_improvements(self) -> int:
+        """Configs this install's autoresearch put live. A kept experiment is
+        only a candidate until the run-end confirmation promotes it."""
         try:
-            from backend.models import ExperimentRun
-            return ExperimentRun.query.filter_by(status="keep").count()
+            from backend.models import ResearchConfig
+            return ResearchConfig.query.filter(
+                ResearchConfig.promoted_at.isnot(None),
+                ResearchConfig.source == "local",
+            ).count()
         except Exception:
             return 0
 

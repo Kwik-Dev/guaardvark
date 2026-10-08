@@ -29,7 +29,7 @@
 
 ## Install (Linux)
 
-**One-liner:**
+**One-liner** (a fresh Ubuntu desktop has no `curl` or `git`: `sudo apt install -y curl git` first):
 
 ```bash
 curl -fsSL https://guaardvark.com/install.sh | bash
@@ -128,9 +128,35 @@ If you want to evaluate the UI/API without a native Python install:
 
 Docker runs the **core stack** (API, UI, PostgreSQL, Redis, Ollama). It does not include plugins, ComfyUI, or the virtual agent display. For the full experience, use `./start.sh`.
 
+**Before the first start (Ubuntu).** A fresh Ubuntu has no Docker, and Ubuntu's `docker.io` does not bring Compose or buildx with it:
+
+```bash
+sudo apt install docker.io docker-compose-v2 docker-buildx
+sudo usermod -aG docker $USER    # then log out and back in (newgrp is not installed on 26.04)
+```
+
+**GPU (`--gpu`).** Containers reach an NVIDIA GPU through NVIDIA Container Toolkit, which is not in Ubuntu's archive. From [NVIDIA's install guide](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html):
+
+```bash
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+  | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+  | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+sudo apt update && sudo apt install -y nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker
+```
+
+`./start-docker.sh` checks each of these before it builds anything and says which one is missing. With `--gpu` it also builds PyTorch for your card: `cu118` for GTX 10/16 and RTX 20 cards, `cu124` for RTX 30/40, `cu128` for newer ones. Set `GUAARDVARK_TORCH_CHANNEL` to pick one yourself.
+
+**Restarts.** The containers start again on their own after a reboot or a crash. `docker compose down` stops them until the next `./start-docker.sh`.
+
+**Build stops at "network is unreachable" with an IPv6 address.** Seen on networks without IPv6 routing, where the image build tried Docker Hub's IPv6 address. Running `./start-docker.sh` again got through.
+
 **API key.** Under Docker the UI reaches the backend through the frontend container, so every browser, this host's included, counts as another device, and protected actions (running tools, automation, backups, file edits) need this install's API key. The first `./start-docker.sh` creates one, saves it as `GUAARDVARK_API_KEY` in `.env` next to `docker-compose.yml`, and prints it. Open the Web UI, go to **Settings → API key**, paste it and press Save. That signs the browser in once (it keeps a sign-in cookie, not the key); do the same once in each browser you use. Later starts leave the key alone; `grep GUAARDVARK_API_KEY .env` shows it again. To change it, edit that line (or delete it and let the next start make a new one) and run `./start-docker.sh` again; every browser then signs in again with the new key. Running `docker compose up` yourself skips this step, and protected actions stay refused until `GUAARDVARK_API_KEY` is set in `.env`.
 
-**Ports.** The Web UI (5173) and the API (5000) are published on every interface, so other devices can use them with the API key. PostgreSQL (5432), Redis (6379) and Ollama (11434) are published on `127.0.0.1` only: the backend reaches them inside Docker's network, and the host ports are there for `psql`, `redis-cli` or `ollama` on this machine. None of the three has a real login here (the database password is the stock `guaardvark`, Redis and Ollama have none), so publishing one to the network gives everyone on it your data, your task queue or your models. To do that anyway for a setup that needs it, set `GUAARDVARK_POSTGRES_PUBLISH_HOST=0.0.0.0`, `GUAARDVARK_REDIS_PUBLISH_HOST=0.0.0.0` or `GUAARDVARK_OLLAMA_PUBLISH_HOST=0.0.0.0` (or one address of this machine) in the `.env` next to `docker-compose.yml` and run `./start-docker.sh` again. For PostgreSQL, change the password first: `ALTER USER guaardvark PASSWORD '…'` in `psql` (the image reads `POSTGRES_PASSWORD` only when it creates the database), then the password in the backend's `DATABASE_URL` and in `POSTGRES_PASSWORD` in `docker-compose.yml`.
+**Ports.** The Web UI (5173) and the API (5000) are published on every interface, so other devices can use them with the API key. PostgreSQL (5432), Redis (6379) and Ollama (11434) are published on `127.0.0.1` only: the backend reaches them inside Docker's network, and the host ports are there for `psql`, `redis-cli` or `ollama` on this machine. Ollama has no login, so publishing it to the network gives everyone on it your models; PostgreSQL and Redis are behind the passwords below. To publish one anyway for a setup that needs it, set `GUAARDVARK_POSTGRES_PUBLISH_HOST=0.0.0.0`, `GUAARDVARK_REDIS_PUBLISH_HOST=0.0.0.0` or `GUAARDVARK_OLLAMA_PUBLISH_HOST=0.0.0.0` (or one address of this machine) in the `.env` next to `docker-compose.yml` and run `./start-docker.sh` again.
+
+**Passwords.** The first `./start-docker.sh` also writes random `GUAARDVARK_POSTGRES_PASSWORD` and `GUAARDVARK_REDIS_PASSWORD` into that `.env`; the backend reads them from there, and you need them only for `psql` or `redis-cli` on this machine. Running `docker compose up` yourself without them falls back to the stock password `guaardvark` for both. PostgreSQL reads its password only when it creates the database, so an install whose database volume is older than this keeps the stock one, and the start script says so. To change it: run `ALTER USER guaardvark PASSWORD '…';` in `psql` (use letters and digits so it fits in a URL), put the same value in `.env` as `GUAARDVARK_POSTGRES_PASSWORD=…`, and run `./start-docker.sh` again. Redis keeps nothing on disk, so editing `GUAARDVARK_REDIS_PASSWORD` and starting again is enough.
 
 Stop: `docker compose down`
 
@@ -197,6 +223,16 @@ The optional web terminal (`scripts/terminal_server.sh start`, ttyd on port 7682
   `--reserve-vram` it needs (H3 5.0, Wan 2.2 14B 1.0) and Guaardvark relaunches ComfyUI when the
   running value differs. Remove `GUAARDVARK_COMFYUI_RESERVE_VRAM` from `.env` if it is set: an
   explicit value overrides every model's own, and H3 runs out of memory at 1.0.
+- **A video model renders cleanly on one machine and garbled on another**: the Interconnector
+  syncs Guaardvark's code, but not ComfyUI and its custom nodes, the model files, `.env`, the
+  PyTorch build or the Studio's own settings (Low VRAM, quality tier). On each machine run
+  `backend/venv/bin/python scripts/video_box_fingerprint.py --out fingerprint-<machine>.json`
+  (`--no-hash` skips hashing the multi-gigabyte model files), copy one file across and run
+  `backend/venv/bin/python scripts/video_box_fingerprint.py --diff fingerprint-a.json fingerprint-b.json`.
+  To see how one clip was rendered, run it with `--only graph,mp4 --mp4 path/to/clip.mp4`: a clip
+  saved by ComfyUI's video node carries the graph that made it, and the `checks` list names any
+  setting that differs from the graph the checkout builds today. `scripts/video_smoke.py --models wan22-5b --mode t2v
+  --width 1280 --height 704 --frames 121` renders the same clip on both machines.
 
 ## Data
 

@@ -262,6 +262,16 @@ def _offline_family_values(field: str) -> dict:
             if _image_limits_for(fam).get("engine") == "offline"}
 
 
+def _has_word(text: str, terms) -> bool:
+    """True when any term appears in ``text`` as a whole word or phrase.
+
+    Prompt keyword checks use this instead of substring tests, which matched
+    "man" in manga/manager/germany, "face" in surface and "painter" in painterly.
+    Plural forms are not implied: list each one a check should accept.
+    """
+    return any(re.search(r"\b" + re.escape(t) + r"\b", text) for t in terms)
+
+
 class OfflineImageGenerator:
 
     def __init__(self):
@@ -417,6 +427,10 @@ class OfflineImageGenerator:
         self._gpu_fault: Optional[Dict[str, Any]] = None
         # Offload mode of the resident pipeline: None | "sequential" | "model" | "full"
         self._pipeline_offload_mode = None
+        # When set, the pipeline is idle and kept loaded after a batch until this
+        # time (Settings → Generation → Between batches); see keep_pipeline_for().
+        self._kept_until: Optional[float] = None
+        self._kept_lock = threading.Lock()
         # One-shot force sequential reload after a mid-inference OOM.
         self._force_sequential_offload = False
         # Active character LoRA adapter names loaded on the current pipeline.
@@ -1543,6 +1557,8 @@ class OfflineImageGenerator:
             )
             return False
 
+        # Whatever happens next, the pipeline is no longer waiting idle.
+        self._clear_kept()
         try:
             want_sequential = bool(force_sequential or self._force_sequential_offload)
             if (
@@ -1813,26 +1829,21 @@ class OfflineImageGenerator:
         # plural "men" inside "element"/"embellishment", flagging single-person
         # costume prompts as multi-person scenes — which then steered enhancement
         # toward group phrasing and produced multi-character images.
-        def _has_word(terms: List[str]) -> bool:
-            return any(
-                re.search(r"\b" + re.escape(t) + r"\b", prompt_lower) for t in terms
-            )
-
         single_indicators = ['a', 'an', 'one', 'single', 'solo', 'alone', 'lone']
         multiple_indicators = ['two', 'three', 'four', 'multiple', 'several', 'many',
                                'group of', 'couple', 'pair of', 'crowd', 'trio', 'duo']
 
-        has_single = _has_word(single_indicators)
-        has_multiple = _has_word(multiple_indicators)
+        has_single = _has_word(prompt_lower, single_indicators)
+        has_multiple = _has_word(prompt_lower, multiple_indicators)
 
         person_plurals = ['men', 'women', 'people', 'workers', 'builders', 'chefs', 'doctors',
                          'teachers', 'children', 'boys', 'girls', 'employees', 'professionals']
-        has_plural_subject = _has_word(person_plurals)
+        has_plural_subject = _has_word(prompt_lower, person_plurals)
 
         person_singulars = ['man', 'woman', 'person', 'child', 'boy', 'girl']
         has_and_conjunction = False
         if ' and ' in prompt_lower:
-            distinct_singulars = [s for s in person_singulars if _has_word([s])]
+            distinct_singulars = [s for s in person_singulars if _has_word(prompt_lower, [s])]
             if len(distinct_singulars) > 1:
                 has_and_conjunction = True
 
@@ -1867,44 +1878,61 @@ class OfflineImageGenerator:
 
         detection["subject_count_info"] = self._detect_subject_count(prompt)
 
-        person_words = ['man', 'woman', 'person', 'people', 'worker', 'builder', 'chef', 'doctor',
-                       'teacher', 'child', 'boy', 'girl', 'human', 'employee', 'staff', 'professional',
-                       'craftsman', 'mechanic', 'plumber', 'electrician', 'carpenter', 'painter']
-        if any(word in prompt_lower for word in person_words):
+        # Whole words only (see _has_word); every accepted plural is listed.
+        person_words = ['man', 'men', 'woman', 'women', 'person', 'persons', 'people',
+                        'worker', 'workers', 'builder', 'builders', 'chef', 'chefs',
+                        'doctor', 'doctors', 'teacher', 'teachers', 'child', 'children',
+                        'boy', 'boys', 'girl', 'girls', 'human', 'humans',
+                        'employee', 'employees', 'staff', 'professional', 'professionals',
+                        'craftsman', 'craftsmen', 'mechanic', 'mechanics', 'plumber', 'plumbers',
+                        'electrician', 'electricians', 'carpenter', 'carpenters',
+                        'painter', 'painters',
+                        # Compounds the old substring test caught through "man"/"woman".
+                        'businessman', 'businessmen', 'businesswoman', 'businesswomen',
+                        'fireman', 'firemen', 'policeman', 'policemen',
+                        'policewoman', 'policewomen', 'fisherman', 'fishermen',
+                        'gentleman', 'gentlemen', 'salesman', 'salesmen',
+                        'workman', 'workmen', 'handyman', 'handymen',
+                        'repairman', 'repairmen', 'sportsman', 'sportsmen']
+        if _has_word(prompt_lower, person_words):
             detection["has_person"] = True
 
-        face_words = ['portrait', 'face', 'headshot', 'selfie', 'close-up', 'closeup', 'head shot']
-        if any(word in prompt_lower for word in face_words):
+        face_words = ['portrait', 'portraits', 'face', 'faces', 'headshot', 'headshots',
+                      'selfie', 'selfies', 'close-up', 'close-ups', 'closeup', 'closeups',
+                      'head shot', 'head shots']
+        if _has_word(prompt_lower, face_words):
             detection["has_face"] = True
 
-        hand_words = ['hand', 'holding', 'grabbing', 'gripping', 'carrying', 'lifting', 'pointing',
-                     'touching', 'typing', 'writing', 'drawing', 'using']
-        if any(word in prompt_lower for word in hand_words):
+        hand_words = ['hand', 'hands', 'holding', 'grabbing', 'gripping', 'carrying', 'lifting',
+                      'pointing', 'touching', 'typing', 'writing', 'drawing', 'using']
+        if _has_word(prompt_lower, hand_words):
             detection["has_hands"] = True
 
+        # Whole words only, so 'reading' is not found in 'spreading' nor 'using' in 'focusing'.
         action_map = {
             'building': ['building', 'constructing', 'assembling', 'installing', 'fixing', 'repairing'],
             'working': ['working', 'operating', 'using', 'handling'],
-            'cooking': ['cooking', 'baking', 'preparing food', 'chef', 'kitchen'],
+            'cooking': ['cooking', 'baking', 'preparing food', 'chef', 'chefs', 'kitchen', 'kitchens'],
             'driving': ['driving', 'steering', 'riding', 'in car', 'behind wheel'],
             'typing': ['typing', 'at computer', 'at keyboard', 'coding', 'programming'],
             'reading': ['reading', 'studying', 'with book', 'looking at'],
-            'sports': ['playing', 'running', 'jumping', 'swimming', 'exercising', 'training', 'jogging', 'treadmill', 'workout'],
+            'sports': ['playing', 'running', 'jumping', 'swimming', 'exercising', 'training', 'jogging',
+                       'treadmill', 'treadmills', 'workout', 'workouts'],
             'gardening': ['gardening', 'planting', 'watering', 'pruning', 'mowing']
         }
 
         for action_type, keywords in action_map.items():
-            if any(keyword in prompt_lower for keyword in keywords):
+            if _has_word(prompt_lower, keywords):
                 detection["has_action"] = True
                 detection["detected_actions"].append(action_type)
 
         interaction_words = ['with', 'using', 'holding', 'beside', 'operating', 'gripping', 'manipulating']
-        if detection["has_person"] and any(word in prompt_lower for word in interaction_words):
+        if detection["has_person"] and _has_word(prompt_lower, interaction_words):
             detection["has_interaction"] = True
 
         spatial_words = ['next to', 'behind', 'in front of', 'beside', 'between', 'under', 'over',
                         'sitting on', 'standing by', 'leaning against', 'near']
-        if any(word in prompt_lower for word in spatial_words):
+        if _has_word(prompt_lower, spatial_words):
             detection["has_spatial"] = True
 
         if detection["has_face"] and detection["has_person"]:
@@ -1915,11 +1943,17 @@ class OfflineImageGenerator:
             detection["recommended_preset"] = "person_working"
         elif detection["has_person"]:
             detection["recommended_preset"] = "person_full_body"
-        elif any(word in prompt_lower for word in ['landscape', 'scenery', 'nature', 'mountain', 'beach', 'forest', 'sunset', 'sunrise']):
+        elif _has_word(prompt_lower, ['landscape', 'landscapes', 'scenery', 'nature',
+                                      'mountain', 'mountains', 'beach', 'beaches',
+                                      'forest', 'forests', 'sunset', 'sunsets',
+                                      'sunrise', 'sunrises']):
             detection["recommended_preset"] = "landscape"
-        elif any(word in prompt_lower for word in ['product', 'item', 'object', 'merchandise', 'bottle', 'package']):
+        elif _has_word(prompt_lower, ['product', 'products', 'item', 'items', 'object', 'objects',
+                                      'merchandise', 'bottle', 'bottles', 'package', 'packages']):
             detection["recommended_preset"] = "product_photo"
-        elif any(word in prompt_lower for word in ['infographic', 'diagram', 'chart', 'icon', 'vector', 'flat']):
+        elif _has_word(prompt_lower, ['infographic', 'infographics', 'diagram', 'diagrams',
+                                      'chart', 'charts', 'icon', 'icons', 'vector', 'vectors',
+                                      'flat']):
             detection["recommended_preset"] = "infographic_preset"
 
         if detection["has_person"] and detection["has_hands"] and detection["has_action"]:
@@ -2408,6 +2442,7 @@ Negative Prompt: {negative_prompt}""",
                     vram_estimate_mb=vram_est, ram_estimate_gb=ram_est,
                     require_fit=True, cross_process=True,
                     vram_reserve_mb=compositor_vram_reserve_mb(),
+                    image_model=model_id,
                 ))
 
                 family = self._model_family(model_id)
@@ -3246,8 +3281,85 @@ Negative Prompt: {negative_prompt}""",
         finally:
             self._generation_lock.release()
 
+    def keep_pipeline_for(self, seconds: int) -> bool:
+        """Leave the loaded pipeline in memory, idle, for up to ``seconds``.
+
+        Called at the end of a batch instead of unloading, so the next batch on
+        the same model starts without a reload. The orchestrator unloads it when
+        the time is up or when it needs the room, and any other GPU job unloads
+        it first (gpu_resource_policy.release_kept_image_pipeline). False when
+        nothing is loaded.
+        """
+        seconds = int(seconds or 0)
+        with self._generation_lock:
+            if self._pipeline is None or seconds <= 0:
+                return False
+            model_id = self._current_model
+            until = time.time() + seconds
+            with self._kept_lock:
+                self._kept_until = until
+        try:
+            from backend.services.gpu_memory_orchestrator import get_orchestrator
+            orch = get_orchestrator()
+            orch.set_idle_timeout("sd:pipeline", seconds)
+            orch.release_model("sd:pipeline")
+        except Exception as e:  # noqa: BLE001
+            logger.debug("orchestrator keep for sd:pipeline failed: %s", e)
+        try:
+            import json
+            from backend.services.gpu_resource_policy import kept_image_pipeline_marker
+            marker = kept_image_pipeline_marker()
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            tmp = marker.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"pid": os.getpid(), "model": model_id, "until": until}))
+            tmp.replace(marker)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("could not write the kept-image marker: %s", e)
+        logger.info(
+            "Keeping %s loaded for %ss after the batch (offload=%s)",
+            model_id, seconds, self._pipeline_offload_mode,
+        )
+        return True
+
+    def kept_model(self) -> Optional[str]:
+        """The model held idle after a batch, or None."""
+        with self._kept_lock:
+            kept = self._kept_until is not None
+        return self._current_model if kept and self._pipeline is not None else None
+
+    def release_kept_pipeline(self, keep_model: Optional[str] = None) -> bool:
+        """Unload a pipeline held idle after a batch, unless it holds ``keep_model``.
+
+        True when it was unloaded. Refuses (False) while a generation holds the
+        pipeline, which only happens if it is in use and so no longer idle.
+        """
+        held = self.kept_model()
+        if held is None or (keep_model and keep_model == held):
+            return False
+        logger.info("Unloading %s kept after a batch: another GPU job needs the memory", held)
+        return bool(self._unload_pipeline(wait=False))
+
+    def _clear_kept(self) -> None:
+        with self._kept_lock:
+            if self._kept_until is None:
+                return
+            self._kept_until = None
+        try:
+            from backend.services.gpu_memory_orchestrator import get_orchestrator_if_created
+            orch = get_orchestrator_if_created()
+            if orch is not None:
+                orch.set_idle_timeout("sd:pipeline", None)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from backend.services.gpu_resource_policy import kept_image_pipeline_marker
+            kept_image_pipeline_marker().unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+
     def _unload_pipeline_unlocked(self) -> bool:
         """Teardown body; caller must hold ``_generation_lock``."""
+        self._clear_kept()
         if self._pipeline is None:
             return True
 

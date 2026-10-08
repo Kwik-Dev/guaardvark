@@ -7,6 +7,7 @@ Response streamed via Socket.IO events.
 import logging
 import threading
 import uuid
+from pathlib import Path
 
 from flask import Blueprint, current_app, request, jsonify
 from backend.services.tool_activity import broadcast_tool_activity
@@ -38,6 +39,24 @@ def chat_config():
 # already running get a 409 instead.
 _inflight: dict = {}
 _inflight_lock = threading.Lock()
+
+
+def _project_root_dir(value) -> str | None:
+    """value when it names an existing folder, else None.
+
+    The chat page guesses a root from the first /x/y path in the message, so
+    an API route or a file path can arrive here; only a folder may root
+    GUAARDVARK.md and code search for the turn.
+    """
+    if not value:
+        return None
+    try:
+        if Path(str(value)).expanduser().is_dir():
+            return str(value)
+    except (OSError, ValueError, RuntimeError):
+        pass
+    logger.debug("[UNIFIED_CHAT] project_root %r is not a folder; ignored", value)
+    return None
 
 
 def _merge_session_mode_options(session_id: str, options: dict | None) -> dict:
@@ -110,9 +129,14 @@ def unified_chat():
     project_id = data.get("project_id")
     # Support project_root for loading GUAARDVARK.md and project-specific context.
     # This enables consistent "analyze dragged folder" experience in CLI and GUI.
-    project_root = data.get("project_root") or data.get("projectRoot") or options.get("project_root")
+    options_root = options.pop("project_root", None)
+    options_camel_root = options.pop("projectRoot", None)
+    project_root = _project_root_dir(
+        data.get("project_root") or data.get("projectRoot")
+        or options_root or options_camel_root
+    )
     if project_root:
-        options["project_root"] = str(project_root)
+        options["project_root"] = project_root
     options = _merge_session_mode_options(session_id, options)
     # The same id must reach the brain and the engine, so the ack, the socket
     # events and the saved row all name one turn.
@@ -126,8 +150,10 @@ def unified_chat():
     # the user means "stop what you're doing and listen to this instead."
     # Without this, the old thread keeps running (and its agent_task_execute
     # keeps the agent locked, so the new task gets "Agent already active").
-    from backend.services.unified_chat_engine import set_abort_flag
-    set_abort_flag(session_id)
+    # The new turn's mark is taken now, so a Stop that arrives while it is
+    # still starting up is not lost.
+    from backend.services.unified_chat_engine import begin_new_turn, turn_replaced
+    turn_mark = begin_new_turn(session_id)
 
     logger.info(
         f"[UNIFIED_CHAT] request_id={request_id[:8]} session={session_id} "
@@ -191,6 +217,10 @@ def unified_chat():
 
     def emit_fn(event, data_payload):
         data_payload["session_id"] = session_id
+        if turn_replaced(session_id, turn_mark):
+            # Stopped and replaced by a newer message: the room belongs to that
+            # turn now, and this one's late events would end or garble it.
+            return
         if socketio.server is None:
             logger.warning(f"SocketIO server not initialized, dropping event {event} for session {session_id}")
             return
@@ -242,19 +272,22 @@ def unified_chat():
         except Exception as img_err:
             logger.warning(f"Failed to save chat image: {img_err}")
 
-    # Vision pipeline: attach latest frame if active and no explicit image
+    # Vision pipeline: while a camera streams, its latest frame rides along as
+    # camera context, not as the user's picture (which would skip RAG and make
+    # the frame an edit_image source). Only the server sets it.
+    options.pop("camera_frame", None)
     if not image_data:
         try:
-            from backend.utils.vision_context_utils import get_vision_context, get_latest_frame
-            vision_ctx = get_vision_context()
-            if vision_ctx:
-                latest_frame = get_latest_frame()
-                if latest_frame:
-                    image_data = latest_frame
+            from backend.utils.vision_context_utils import get_active_camera_frame
+            camera_frame = get_active_camera_frame()
+            if camera_frame:
+                options["camera_frame"] = camera_frame
         except Exception:
             pass
 
     def run_engine():
+        from backend.services.unified_chat_engine import begin_turn, end_turn
+        begin_turn(session_id, turn_mark)
         try:
             logger.info(f"[SOCKET-CHAT] BACKEND THREAD START for session={session_id}; first chat:thinking may emit BEFORE client join_room completes (race window open)")
             # Wire the emit_fn into the thread-local so that agent_control tools
@@ -328,6 +361,7 @@ def unified_chat():
             logger.error(f"Chat engine thread error: {e}", exc_info=True)
             emit_fn("chat:error", {"error": str(e)})
         finally:
+            end_turn(session_id)
             # Always clear the thread-local emitter when this chat turn ends
             # (success, error, or abort) so the next turn on this thread gets a fresh one.
             try:
@@ -405,8 +439,9 @@ def direct_tool_sync():
         "slash_args": data.get("slash_args") or "",
     }
     # Forward project_root for GUAARDVARK.md etc. in direct tool calls too
-    if data.get("project_root"):
-        options["project_root"] = str(data.get("project_root"))
+    project_root = _project_root_dir(data.get("project_root"))
+    if project_root:
+        options["project_root"] = project_root
     tool_name, params = resolve_slash_direct_tool(options)
     if not tool_name:
         return jsonify({"success": False, "error": "tool or slash_command required"}), 400
@@ -425,8 +460,8 @@ def direct_tool_sync():
         except Exception:
             pass
 
-    if data.get("project_root"):
-        options["project_root"] = str(data.get("project_root"))
+    if project_root:
+        options["project_root"] = project_root
 
     try:
         from backend.tools.tool_registry_init import initialize_all_tools

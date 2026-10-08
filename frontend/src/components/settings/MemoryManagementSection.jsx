@@ -28,6 +28,9 @@ import MemoryIcon from "@mui/icons-material/Memory";
 import SettingsSection from "./SettingsSection";
 import LessonSummaryModal from "../modals/LessonSummaryModal";
 import { ActionButton, ChoiceChips, ConfirmActionDialog, Hint } from "./ui";
+import EntityContextMenu from "../common/EntityContextMenu";
+import useContextMenu from "../../hooks/useContextMenu";
+import copyText from "../../utils/copyText";
 
 // Compact spreadsheet-style timestamp: "MM/DD HH:MM:SS". Full ISO available
 // on hover via title attribute for forensic detail.
@@ -107,6 +110,7 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
   const [mergeTargetId, setMergeTargetId] = useState("");
   const [mergeConfirmOpen, setMergeConfirmOpen] = useState(false);
   const [merging, setMerging] = useState(false);
+  const rowMenu = useContextMenu();
 
   const openEditForMemory = (memory) => {
     if (memory?.source === "lesson_summary") {
@@ -354,7 +358,7 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
       </Box>
 
       <Box sx={{ display: "flex", gap: 1.5, mb: 2, flexWrap: "wrap" }}>
-        <TextField select size="small" label="Type" value={filterType} onChange={(e) => setFilterType(e.target.value)} SelectProps={{ native: true }} sx={{ minWidth: 130 }}>
+        <TextField select size="small" label="Type" value={filterType} onChange={(e) => setFilterType(e.target.value)} SelectProps={{ native: true }} InputLabelProps={{ shrink: true }} sx={{ minWidth: 130 }}>
           <option value="">All types</option>
           <option value="fact">Fact</option>
           <option value="preference">Preference</option>
@@ -363,7 +367,7 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
           <option value="belief_update">Belief update</option>
           <option value="snippet">Snippet</option>
         </TextField>
-        <TextField select size="small" label="Source" value={filterSource} onChange={(e) => setFilterSource(e.target.value)} SelectProps={{ native: true }} sx={{ minWidth: 150 }}>
+        <TextField select size="small" label="Source" value={filterSource} onChange={(e) => setFilterSource(e.target.value)} SelectProps={{ native: true }} InputLabelProps={{ shrink: true }} sx={{ minWidth: 150 }}>
           <option value="">All sources</option>
           <option value="manual">Manual</option>
           <option value="chat">Chat</option>
@@ -431,6 +435,7 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
                     key={memory.id}
                     hover
                     onClick={() => openEditForMemory(memory)}
+                    onContextMenu={(e) => rowMenu.open(e, memory)}
                     sx={{ cursor: "pointer", "& td": { py: 0.5, fontSize: "0.75rem" } }}
                   >
                     <TableCell sx={{ fontFamily: "monospace", whiteSpace: "nowrap" }}>
@@ -519,6 +524,41 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
           </Table>
         )}
       </TableContainer>
+
+      <EntityContextMenu
+        anchorPosition={rowMenu.anchorPosition}
+        onClose={rowMenu.close}
+        actions={
+          rowMenu.payload
+            ? [
+                { label: "Edit…", onClick: () => openEditForMemory(rowMenu.payload) },
+                { label: "Copy content", onClick: () => copyText(rowMenu.payload.content) },
+                rowMenu.payload.status !== "active" && {
+                  label: "Restore",
+                  onClick: () => handleStatusChange(rowMenu.payload, "active"),
+                  dividerBefore: true,
+                },
+                {
+                  label: "Archive",
+                  onClick: () => handleStatusChange(rowMenu.payload, "archived"),
+                  disabled: rowMenu.payload.status === "archived",
+                  dividerBefore: rowMenu.payload.status === "active",
+                },
+                {
+                  label: "Mark wrong",
+                  onClick: () => handleStatusChange(rowMenu.payload, "wrong"),
+                  disabled: rowMenu.payload.status === "wrong",
+                },
+                {
+                  label: "Delete",
+                  onClick: () => handleDelete(rowMenu.payload.id),
+                  color: "error.main",
+                  dividerBefore: true,
+                },
+              ]
+            : []
+        }
+      />
 
       {memories.length > 0 && (
         <Box sx={{ mt: 2, display: "flex", justifyContent: "flex-end" }}>

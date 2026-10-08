@@ -6,6 +6,8 @@ Endpoints
 GET  /api/social-outreach/status              — enabled/supervised/cadence snapshot
 POST /api/social-outreach/enable              — flip global on
 POST /api/social-outreach/kill                — flip global off (hard stop)
+POST /api/social-outreach/stop-posting        — stop ALL public posting (outreach + Connections), hold what is queued
+POST /api/social-outreach/resume-posting      — lift that stop; held items still need their usual approval
 POST /api/social-outreach/supervised          — body {"on": bool}
 GET  /api/social-outreach/audit?limit=200     — recent log rows
 GET  /api/social-outreach/queue               — drafted-but-not-posted entries (supervised mode)
@@ -32,7 +34,7 @@ from typing import Any, Dict, Optional
 
 from flask import Blueprint, jsonify, request
 
-from backend.services.social_outreach import audit, kill_switch, persona
+from backend.services.social_outreach import audit, external_grader, gates, kill_switch, persona
 from backend.utils.hosts import host_matches
 
 logger = logging.getLogger(__name__)
@@ -56,6 +58,23 @@ def enable():
 @social_outreach_bp.post("/kill")
 def kill():
     return jsonify(kill_switch.apply_kill_switch())
+
+
+@social_outreach_bp.post("/stop-posting")
+def stop_posting():
+    """Stop all public posting: outreach and Connections publishing alike."""
+    result = kill_switch.stop_all_posting()
+    if not result.get("posting_stopped"):
+        return jsonify({**result, "error": "the stop could not be saved; posting is not stopped"}), 500
+    return jsonify(result)
+
+
+@social_outreach_bp.post("/resume-posting")
+def resume_posting():
+    result = kill_switch.resume_posting()
+    if result.get("posting_stopped"):
+        return jsonify({**result, "error": "the stop could not be lifted; posting is still stopped"}), 500
+    return jsonify(result)
 
 
 @social_outreach_bp.post("/supervised")
@@ -238,6 +257,9 @@ def _poster_step(event_id: int, step, verb: str, needs: str):
         status = transitions.current_status(event_id)
         if status is None:
             return jsonify({"error": "not found"}), 404
+        stopped = kill_switch.posting_stop_reason()
+        if stopped:
+            return jsonify({"error": stopped, "status": status}), 409
         return jsonify({
             "error": f"cannot {verb} from status '{status}' (only from {needs})",
             "status": status,
@@ -279,20 +301,30 @@ def draft_comment():
         "thread_context": "OP + top comments concatenated",
         "target_url": "https://...",
         "target_thread_id": "abc123",  # optional, for dedupe
-        "feature_hint": "video_gen",   # optional, override auto-detect
+        "feature_hint": "video_gen",   # optional: a person's pick for the draft to lead with
         "task_id": 42,                 # optional, links audit row to celery task
         "mode": "comment"|"share",     # default "comment"
         "share_target": "r/SideProject",  # required for share mode
         "share_link": "https://guaardvark.com",  # required for share mode
+        "relevance_unchecked": true,   # optional: the thread-fit judge could not run
     }
-    Returns: {draft, grade, reason, audit_id, would_post}
+    Returns: {draft, grade, reason, audit_id, would_post, gates}
+
+    gates.independent_check is passed, failed or unavailable: whether the
+    second-opinion grader ran on this draft and what it concluded. With
+    supervised mode off, only a passed check lets the draft post on its own.
+    A share is never graded (there is no thread for the rubric) and is always
+    held for a person. A comment sent with relevance_unchecked is held the way
+    an unchecked draft is (gates.independent_ok).
     """
     body = request.get_json(silent=True) or {}
     platform = body.get("platform", "unknown")
     mode = body.get("mode", "comment")
+    action = "comment" if mode == "comment" else "share"
     task_id = body.get("task_id")
     target_url = body.get("target_url")
     target_thread_id = body.get("target_thread_id")
+    relevance_unchecked = bool(body.get("relevance_unchecked"))
 
     if mode == "share":
         context = {
@@ -313,7 +345,7 @@ def draft_comment():
         context=context,
         tone=body.get("tone"),
         mode=mode,
-        feature_hint=body.get("feature_hint"),
+        requested_feature=body.get("feature_hint"),
     )
     
     draft_text = result.get("draft", "")
@@ -326,7 +358,24 @@ def draft_comment():
     grade_ok = grade >= 0.7
     has_draft = bool(draft_text.strip())
 
-    would_post = enabled and not supervised and cadence_ok and grade_ok and has_draft
+    # Second opinion from a different model, blind to the self-grade. An empty
+    # draft cannot post, so it is not sent to the grader. The rubric judges a
+    # reply to a thread; a share has none, so it is not graded and gates holds it.
+    if action == "share":
+        ext = {"grade": 0.0, "checked": False, "skipped": True, "model": None, "reason": "share_not_graded"}
+    elif has_draft:
+        ext = external_grader.grade_draft_externally(draft_text, context["thread_context"])
+    else:
+        ext = {"grade": 0.0, "checked": False, "skipped": True, "model": None, "reason": "empty_draft"}
+    independent_pass, independent_reason = gates.independent_ok(
+        ext, supervised=supervised, action=action, relevance_unchecked=relevance_unchecked,
+    )
+    independent_check = gates.independent_check_label(ext)
+    hold_reason = None if independent_pass else independent_reason
+
+    would_post = (
+        enabled and not supervised and cadence_ok and grade_ok and has_draft and independent_pass
+    )
 
     # Unsupervised auto-post goes through process-approved (single posting path).
     # Legacy Reddit/self-share loops are draft-only and never servo-post.
@@ -334,7 +383,7 @@ def draft_comment():
 
     audit_id = audit.log_outreach_event(
         platform=platform,
-        action="comment" if mode == "comment" else "share",
+        action=action,
         target_url=target_url,
         target_thread_id=target_thread_id,
         draft_text=draft_text,
@@ -343,7 +392,17 @@ def draft_comment():
         grade_score=grade,
         abort_reason=None,
         task_id=task_id,
-        extra={"reason": reason, "would_post": would_post, "cadence_block": cadence_reason if not cadence_ok else None},
+        extra={
+            "reason": reason,
+            "would_post": would_post,
+            "cadence_block": cadence_reason if not cadence_ok else None,
+            "independent_check": independent_check,
+            "external_grade": ext.get("grade"),
+            "external_passed": ext.get("passed"),
+            "external_reason": ext.get("reason", ""),
+            "relevance_unchecked": relevance_unchecked,
+            "hold_reason": hold_reason,
+        },
     )
 
     return jsonify({
@@ -359,6 +418,8 @@ def draft_comment():
             "cadence_reason": cadence_reason,
             "grade_ok": grade_ok,
             "has_draft": has_draft,
+            "independent_check": independent_check,
+            "independent_reason": independent_reason,
         },
     })
 

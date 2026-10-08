@@ -28,6 +28,7 @@ const FileManagerCard = React.forwardRef(
         onCardColorChange={onCardColorChange}
         title="File Manager"
         {...props}
+        contextMenuArea="header"
       >
         <FileManager />
       </DashboardCardWrapper>

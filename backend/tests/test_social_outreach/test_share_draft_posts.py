@@ -150,3 +150,84 @@ def test_an_approved_share_draft_is_submitted_to_its_subreddit(draft_post, app, 
     assert submitted == [("SideProject", "Local-first AI studio", "https://guaardvark.com")]
     assert result["processed"] == 1
     assert _rows()[0].status == "posted"
+
+
+# ---------------------------------------------------------------------------
+# After the submit click, the post counts only when the page shows it landed
+# ---------------------------------------------------------------------------
+
+def _submit_with_page(monkeypatch, page, subreddit="x", title="Local-first AI studio"):
+    """Run the real Reddit submit poster with every agent task succeeding and
+    the post-submit page read answering ``page``."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from backend.services.social_outreach import self_share
+
+    class Service:
+        is_active = False
+
+        def execute_task(self, task, screen):
+            return SimpleNamespace(success=True, reason="ok")
+
+    seen = []
+
+    def evaluate(expression):
+        seen.append(expression)
+        return page
+
+    monkeypatch.setattr("backend.services.agent_control_service.get_agent_control_service",
+                        lambda: Service())
+    monkeypatch.setattr("backend.utils.agent_display_utils.start_agent_display_if_needed",
+                        lambda: True)
+    monkeypatch.setattr("backend.services.local_screen_backend.LocalScreenBackend", MagicMock)
+    monkeypatch.setattr("time.sleep", lambda seconds: None)
+    monkeypatch.setattr(self_share, "bidi_evaluate_json", evaluate)
+    result = self_share._submit_post_via_servo(subreddit, title, "https://guaardvark.com")
+    return result, seen
+
+
+def test_share_still_on_the_submit_page_is_unverified(monkeypatch):
+    url = "https://www.reddit.com/r/x/submit"
+    (ok, reason), _ = _submit_with_page(monkeypatch, ({"url": url, "title_on_page": False}, ""))
+    assert ok is False
+    assert reason == f"submit_unverified: {url}"
+
+
+def test_share_on_the_new_post_with_its_title_is_posted(monkeypatch):
+    page = {"url": "https://www.reddit.com/r/x/comments/abc123/", "title_on_page": True}
+    (ok, reason), seen = _submit_with_page(monkeypatch, (page, ""))
+    assert (ok, reason) == (True, "ok")
+    assert '"Local-first AI studio"' in seen[0]
+
+
+def test_share_post_page_without_the_title_is_unverified(monkeypatch):
+    page = {"url": "https://www.reddit.com/r/x/comments/abc123/other_post/", "title_on_page": False}
+    (ok, reason), _ = _submit_with_page(monkeypatch, (page, ""))
+    assert ok is False
+    assert reason.startswith("submit_unverified: https://www.reddit.com/r/x/comments/abc123/")
+
+
+def test_share_post_in_another_subreddit_is_unverified(monkeypatch):
+    page = {"url": "https://www.reddit.com/r/other/comments/abc123/", "title_on_page": True}
+    (ok, reason), _ = _submit_with_page(monkeypatch, (page, ""))
+    assert ok is False
+
+
+def test_share_unreadable_page_is_unverified(monkeypatch):
+    (ok, reason), _ = _submit_with_page(monkeypatch, (None, "connect failed: refused"))
+    assert ok is False
+    assert reason.startswith("submit_unverified") and "connect failed" in reason
+
+
+@pytest.mark.parametrize("url, landed", [
+    ("https://www.reddit.com/r/SideProject/comments/1abc2d/local_first/", True),
+    ("https://old.reddit.com/r/sideproject/comments/1abc2d/", True),
+    ("https://www.reddit.com/r/SideProject/comments/1abc2d", True),
+    ("https://www.reddit.com/r/SideProject/submit", False),
+    ("https://www.reddit.com/r/SideProjects/comments/1abc2d/", False),
+    ("https://reddit.com.example.net/r/SideProject/comments/1abc2d/", False),
+])
+def test_post_url_shape(url, landed):
+    from backend.services.social_outreach.self_share import _is_post_url
+    assert _is_post_url(url, "SideProject") is landed

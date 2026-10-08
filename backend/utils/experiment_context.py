@@ -74,11 +74,38 @@ def invalidate_active_params_cache():
     _active_cache["loaded_at"] = 0.0
 
 
+_TRUE_WORDS = {"true", "1", "yes"}
+_FALSE_WORDS = {"false", "0", "no"}
+
+
+def parse_bool(value) -> Optional[bool]:
+    """True or False for a recognised boolean, else None.
+
+    Accepts bools, the integers 1 and 0, and the words true/false, 1/0 and
+    yes/no in any case. bool() is not used: bool('false') is True.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        word = value.strip().lower()
+        if word in _TRUE_WORDS:
+            return True
+        if word in _FALSE_WORDS:
+            return False
+    return None
+
+
 def _clamp_params(params: dict) -> dict:
     clamped = {}
     for key, value in params.items():
         if key in _BOOL_PARAMS:
-            clamped[key] = bool(value)
+            flag = parse_bool(value)
+            if flag is None:
+                logger.warning("Dropping non-boolean RAG param %s=%r", key, value)
+                continue
+            clamped[key] = flag
             continue
         bounds = _PARAM_CLAMPS.get(key)
         if bounds is None:
@@ -97,6 +124,24 @@ def _clamp_params(params: dict) -> dict:
             v = min(max(v, low), high)
         clamped[key] = v
     return clamped
+
+
+def normalise_param(key: str, value):
+    """`value` as retrieval reads it (cast, clamped, strict booleans), or None
+    when it is not usable for `key`."""
+    return _clamp_params({key: value}).get(key)
+
+
+def changed_params(params: dict, baseline: dict) -> dict:
+    """The entries of `params` whose value differs from `baseline`, both clamped.
+
+    A promoted config must carry only what experiments changed: every key it
+    holds overrides retrieval's own default, including defaults that are
+    resolved per embedding model, so a copied default would go live with it.
+    """
+    mine = _clamp_params(params or {})
+    base = _clamp_params(baseline or {})
+    return {k: v for k, v in mine.items() if k not in base or base[k] != v}
 
 
 def _load_promoted_params() -> Optional[dict]:

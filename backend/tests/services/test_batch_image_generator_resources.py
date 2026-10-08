@@ -31,10 +31,11 @@ def test_batch_resource_estimates_non_resident():
     assert ram_gb == oig.OfflineImageGenerator._FAMILY_RAM_GB["zimage"]
 
 def test_batch_resource_estimates_resident():
-    # Setup mock OfflineImageGenerator with resident model
+    # Setup mock OfflineImageGenerator with a model resident wholly on the card
     gen = OfflineImageGenerator()
     gen._pipeline = object() # mock loaded pipeline
     gen._current_model = "Tongyi-MAI/Z-Image-Turbo"
+    gen._pipeline_offload_mode = "full"
 
     batch_gen = BatchImageGenerator()
     batch_gen.image_generator = gen
@@ -92,6 +93,7 @@ def test_batch_resource_estimates_resident_still_prices_2048_surcharge():
     gen = OfflineImageGenerator()
     gen._pipeline = object()
     gen._current_model = "Tongyi-MAI/Z-Image-Turbo"
+    gen._pipeline_offload_mode = "full"
 
     batch_gen = BatchImageGenerator()
     batch_gen.image_generator = gen
@@ -112,3 +114,52 @@ def test_batch_resource_estimates_resident_still_prices_2048_surcharge():
     vram_mb, ram_gb = batch_gen._batch_resource_estimates(request)
     assert vram_mb == max(4000, 1024 + 3 * 500)
     assert ram_gb == max(6.0, 2.0 + 3 * 1.0)
+
+
+def _zimage_request(batch_id):
+    return BatchImageRequest(
+        batch_id=batch_id,
+        prompts=[BatchPrompt(id="p1", prompt="A beautiful cat", model="zimage-turbo")],
+        output_dir="/tmp/test_batch",
+    )
+
+
+def test_batch_resource_estimates_resident_offloaded_needs_full_vram():
+    # An offloaded pipeline (sequential/model CPU offload, Z-Image on 16GB cards)
+    # keeps its weights in RAM: RAM is discounted, but the card must hold the
+    # full working peak again, so another resident (an Ollama model) is evicted.
+    gen = OfflineImageGenerator()
+    gen._pipeline = object()
+    gen._current_model = "Tongyi-MAI/Z-Image-Turbo"
+    gen._pipeline_offload_mode = "sequential"
+
+    batch_gen = BatchImageGenerator()
+    batch_gen.image_generator = gen
+
+    vram_mb, ram_gb = batch_gen._batch_resource_estimates(_zimage_request("batch_offloaded"))
+    assert vram_mb == 11000
+    assert ram_gb == 6.0
+
+
+def test_batch_resource_estimates_kept_model_not_reused_gets_no_discount():
+    # A model kept after the last batch that this batch will not render with is
+    # unloaded before admission, so the batch is priced as a fresh load.
+    gen = OfflineImageGenerator()
+    gen._pipeline = object()
+    gen._current_model = "Tongyi-MAI/Z-Image-Turbo"
+    gen._pipeline_offload_mode = "full"
+    gen._kept_until = 4102444800.0  # kept (year 2100)
+
+    batch_gen = BatchImageGenerator()
+    batch_gen.image_generator = gen
+
+    request = _zimage_request("batch_kept_released")
+    vram_mb, ram_gb = batch_gen._batch_resource_estimates(request, reuse_model=None)
+    assert vram_mb == 11000
+    assert ram_gb == oig.OfflineImageGenerator._FAMILY_RAM_GB["zimage"]
+
+    # The same batch reusing it keeps the discount.
+    assert batch_gen._kept_model_for_batch(request) == "Tongyi-MAI/Z-Image-Turbo"
+    vram_mb, ram_gb = batch_gen._batch_resource_estimates(request, reuse_model="Tongyi-MAI/Z-Image-Turbo")
+    assert vram_mb == 4000
+    assert ram_gb == 6.0

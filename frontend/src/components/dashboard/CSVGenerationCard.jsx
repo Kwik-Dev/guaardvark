@@ -94,6 +94,9 @@ const CSVGenerationCard = React.forwardRef(
         onCardColorChange={onCardColorChange}
         title="CSV Generation"
         {...props}
+        contextMenuActions={[
+          { label: "New CSV", onClick: () => navigate("/file-generation") },
+        ]}
       >
         {isLoading && (
           <CircularProgress
@@ -176,7 +179,7 @@ const CSVGenerationCard = React.forwardRef(
                     borderRadius: 1,
                   },
                 }}
-                onClick={() => navigate(`/csv-generation?id=${generation.id}`)}
+                onClick={() => navigate("/file-generation")}
                 className="non-draggable"
               >
                 <ListItemText
@@ -252,7 +255,7 @@ const CSVGenerationCard = React.forwardRef(
           <Box sx={{ textAlign: "center", mt: 1 }}>
             <Button
               component={RouterLink}
-              to="/csv-generation"
+              to="/file-generation"
               variant="text"
               size="small"
               sx={{

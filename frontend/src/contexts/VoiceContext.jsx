@@ -8,6 +8,11 @@ import voiceService, {
 } from "../api/voiceService";
 import { BACKEND_URL } from "../api/apiClient";
 import { useHealth } from "./HealthContext";
+import {
+  VOICE_SETTINGS_EVENT,
+  VOICE_SETTINGS_KEY,
+  readVoiceSettings,
+} from "../config/voiceDefaults";
 
 const VoiceContext = createContext();
 export const useVoice = () => useContext(VoiceContext);
@@ -144,6 +149,8 @@ export const VoiceProvider = ({ children }) => {
 
   const speak = useCallback(async (text, options = {}) => {
     if (!text || !ttsEnabled) return;
+    // A stopPlayback() while the audio is still being made cancels this one too.
+    const epoch = voiceService.playbackEpoch;
     try {
       incrementActiveTTS();
       const cleanedText = cleanTextForSpeech(text);
@@ -151,8 +158,9 @@ export const VoiceProvider = ({ children }) => {
         originalLength: text.length,
         cleanedLength: cleanedText.length,
       });
-      
+
       const result = await textToSpeech(cleanedText, selectedVoice, null, options);
+      if (voiceService.playbackEpoch !== epoch) return;
       if (result.stream && result.response) {
         // First-chunk streaming integration (per voice audit + backend /stream support).
         // Convert incremental response to blob for play (or use reader for true chunked <audio>).
@@ -206,69 +214,30 @@ export const VoiceProvider = ({ children }) => {
     setIsCheckingPermissions(true);
     setMicPermissionError(null);
     
+    // Reads the permission without asking for it: the browser's prompt
+    // belongs to the moment someone clicks a mic button, not to page load.
     try {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        const errorMsg = "Your browser doesn't support microphone access.";
+        const errorMsg = window.isSecureContext === false
+          ? "Mic needs HTTPS or localhost"
+          : "Your browser doesn't support microphone access.";
         setMicPermissionError(errorMsg);
-        setMicPermissionState('denied');
-        setMicEnabled(false);
+        setMicPermissionState('unavailable');
         return;
       }
-      
+
       if (navigator.permissions && navigator.permissions.query) {
         try {
           const permissionStatus = await navigator.permissions.query({ name: 'microphone' });
-          
+
           if (!isMountedRef.current) return;
-          
-          if (permissionStatus.state === 'granted') {
-            setMicPermissionState('granted');
-            setMicEnabled(true);
-            return;
-          } else if (permissionStatus.state === 'denied') {
-            setMicPermissionState('denied');
-            setMicEnabled(false);
-            return;
-          }
+          setMicPermissionState(permissionStatus.state);
+          return;
         } catch (permErr) {
           console.warn("VoiceContext: Permissions API not fully supported:", permErr);
         }
       }
-      
-      try {
-        const testStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        
-        if (!isMountedRef.current) {
-          testStream.getTracks().forEach(track => track.stop());
-          return;
-        }
-        
-        testStream.getTracks().forEach(track => track.stop());
-        
-        setMicPermissionState('granted');
-        setMicEnabled(true);
-        setMicPermissionError(null);
-        
-      } catch (getUserMediaError) {
-        if (!isMountedRef.current) return;
-        
-        let errorMessage = "Microphone access failed. ";
-        
-        if (getUserMediaError.name === 'NotAllowedError') {
-          errorMessage += "Permission denied. Please allow microphone access.";
-          setMicPermissionState('denied');
-        } else if (getUserMediaError.name === 'NotFoundError') {
-          errorMessage += "No microphone found.";
-          setMicPermissionState('denied');
-        } else {
-          errorMessage += "Please try again.";
-          setMicPermissionState('denied');
-        }
-        
-        setMicPermissionError(errorMessage);
-        setMicEnabled(false);
-      }
-      
+      setMicPermissionState('unknown');
     } catch (error) {
       if (!isMountedRef.current) return;
       
@@ -372,24 +341,22 @@ export const VoiceProvider = ({ children }) => {
   }, [isBackendOffline, initializeVoice]);
 
   useEffect(() => {
+    const applySettings = () => {
+      const voiceSettings = readVoiceSettings();
+      setTtsEnabled(voiceSettings.ttsEnabled);
+      setSelectedVoice(voiceSettings.voice);
+    };
     const handleStorageChange = (e) => {
-      if (e.key === 'guaardvark_voiceSettings') {
-        try {
-          const voiceSettings = JSON.parse(e.newValue || '{}');
-          if (voiceSettings.ttsEnabled !== undefined) {
-            setTtsEnabled(voiceSettings.ttsEnabled);
-          }
-          if (voiceSettings.voice !== undefined) {
-            setSelectedVoice(voiceSettings.voice);
-          }
-        } catch (error) {
-          console.warn('VoiceContext: Failed to parse voice settings from storage change:', error);
-        }
-      }
+      if (e.key === VOICE_SETTINGS_KEY) applySettings();
     };
 
+    // 'storage' fires only in other tabs; same-tab writers send VOICE_SETTINGS_EVENT.
     window.addEventListener('storage', handleStorageChange);
-    return () => window.removeEventListener('storage', handleStorageChange);
+    window.addEventListener(VOICE_SETTINGS_EVENT, applySettings);
+    return () => {
+      window.removeEventListener('storage', handleStorageChange);
+      window.removeEventListener(VOICE_SETTINGS_EVENT, applySettings);
+    };
   }, []);
 
   const startRecording = useCallback(async () => {

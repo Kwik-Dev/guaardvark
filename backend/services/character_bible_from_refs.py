@@ -117,20 +117,41 @@ def _parse_consensus_json(raw: str) -> dict[str, str]:
         cls = (data.get("class_token") or data.get("class") or data.get("species") or "").strip()
         if bible:
             return {"bible": bible, "marks": marks, "class_token": cls}
-    # Fallback: treat entire reply as bible prose
-    if len(t) > 40:
-        return {"bible": t, "marks": "", "class_token": ""}
+    # A reply that does not parse is never used as the bible: it may be
+    # truncated JSON, and the bible feeds the class token and every caption.
+    # The caller falls back to the first photo description instead.
     return {}
 
 
-def _default_consensus_llm(*, system: str, user: str, model: str = None) -> str:
+# Preferred consensus model. It is a preference, not a requirement: the tag is
+# resolved against what Ollama has installed (same family first, then the active
+# chat model, the hardware tier, any Gemma, any chat model).
+CONSENSUS_MODEL_PREFERENCE = "gemma4:12b"
+
+NO_CONSENSUS_MODEL = (
+    "no installed chat model for the identity consensus step "
+    "(Ollama lists none, or is unreachable); install a chat model and retry"
+)
+
+
+def resolve_consensus_model(preferred: Optional[str] = None) -> Optional[str]:
+    """Installed chat model for the consensus step, or None when none is installed."""
+    from backend.services.ollama_chat_model import installed_chat_tags, resolve_chat_model
+
+    tags = installed_chat_tags()
+    if not tags:
+        return None
+    return resolve_chat_model(preferred or CONSENSUS_MODEL_PREFERENCE, installed=tags)
+
+
+def _default_consensus_llm(*, system: str, user: str, model: Optional[str] = None) -> str:
     """Consensus LLM for merging per-photo descriptions into a bible.
 
     Text-only (no images). Uses the OpenAI-compatible provider only when the
     operator has consented to cloud (master switch on + OpenAI active); a
     configured ``GUAARDVARK_OPENAI_BASE_URL`` alone is capability, not consent.
     Falls back to a local Ollama call in JSON mode otherwise — the same contract
-    as the cloud branch.
+    as the cloud branch, resolving an installed chat model.
     """
     messages = [
         {"role": "system", "content": system},
@@ -164,11 +185,13 @@ def _default_consensus_llm(*, system: str, user: str, model: str = None) -> str:
         log.warning("bible_from_refs: cloud consensus failed (%s); using local LLM", e)
 
     # Consent off (or the cloud call failed): local Ollama in JSON mode — the same
-    # contract the cloud branch asks for. Mirrors character_generator._default_llm.
+    # contract the cloud branch asks for, with upstream's installed-model resolution
+    # (a preferred tag is a preference, not a requirement).
     import ollama
-    from backend.utils.llm_service import get_saved_active_model_name
     from backend.utils.ollama_resource_manager import think_payload
-    local_model = get_saved_active_model_name() or "gemma4:12b"
+    local_model = model or resolve_consensus_model()
+    if not local_model:
+        raise RuntimeError(NO_CONSENSUS_MODEL)
     local = ollama.chat(
         model=local_model,
         messages=messages,
@@ -183,9 +206,13 @@ def consensus_identity_from_descriptions(
     *,
     name: str = "",
     llm=None,
-    model: str = None,
+    model: Optional[str] = None,
 ) -> dict[str, str]:
-    """Merge open per-photo descriptions into class_token / marks / bible."""
+    """Merge open per-photo descriptions into class_token / marks / bible.
+
+    ``model`` None lets the default LLM resolve an installed chat model; when
+    the consensus call fails, the first description becomes the bible.
+    """
     cleaned = [d.strip() for d in descriptions if (d or "").strip()]
     if not cleaned:
         return {}
@@ -309,9 +336,13 @@ def rebuild_bible_from_refs(
     analyzer=None,
     min_tag_count: int = 1,  # noqa: ARG001 — kept for call-site compat
     llm=None,
-    consensus_model: str = None,
+    consensus_model: Optional[str] = None,
 ) -> dict[str, Any]:
     """Scan refs with open vision + consensus; return grounded bible dict.
+
+    ``consensus_model`` is a preference resolved against installed Ollama chat
+    models; with the default LLM and none installed, returns ok False with that
+    reason instead of building a bible from the fallback.
 
     Returns:
       {ok, bible, trigger_word, tags, marks, class_token, sources_used, …}
@@ -332,6 +363,21 @@ def rebuild_bible_from_refs(
             "sources_used": [],
             "error": "no reference images found on disk",
         }
+
+    if llm is None:
+        consensus_model = resolve_consensus_model(consensus_model)
+        if not consensus_model:
+            return {
+                "ok": False,
+                "bible": "",
+                "trigger_word": trigger,
+                "tags": [],
+                "marks": "",
+                "class_token": "person",
+                "sources_used": sampled,
+                "error": NO_CONSENSUS_MODEL,
+            }
+        log.info("bible_from_refs: consensus model %s", consensus_model)
 
     descriptions: list[str] = []
     errors: list[str] = []
@@ -394,6 +440,7 @@ def rebuild_bible_from_refs(
         "vision_grounded": True,
         "method": "open_consensus",
         "descriptions_used": len(descriptions),
+        "consensus_model": consensus_model,
     }
 
 

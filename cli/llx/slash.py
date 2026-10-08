@@ -18,6 +18,7 @@ from llx.command_catalog import COMMAND_META, COMMAND_TREE, suggest_command
 from llx.lite_mode import lite_mode_block_message
 from llx.theme import make_console, THEMES, set_active_theme, get_active_theme_name, get_theme_names
 from llx.typer_utils import build_typer_kwargs, format_command_usage
+from llx.working import working
 
 logger = logging.getLogger(__name__)
 
@@ -638,13 +639,14 @@ class SlashRouter:
         try:
             from llx.client import get_client, LlxError, LlxConnectionError
             client = get_client(server)
-            data = client.post("/api/chat/unified/direct-tool", json={
-                "slash_command": "imagine",
-                "slash_args": prompt,
-                "params": {"prompt": prompt, "model": "auto"},
-                "message": f"/imagine {prompt}",
-                "session_id": self._state.get("session_id") or "cli_imagine",
-            })
+            with working("Generating image…", console=self._console):
+                data = client.post("/api/chat/unified/direct-tool", json={
+                    "slash_command": "imagine",
+                    "slash_args": prompt,
+                    "params": {"prompt": prompt, "model": "auto"},
+                    "message": f"/imagine {prompt}",
+                    "session_id": self._state.get("session_id") or "cli_imagine",
+                })
             if data.get("success"):
                 self._console.print("[llx.success]Image generated successfully[/llx.success]")
                 response = data.get("response") or ""
@@ -677,9 +679,11 @@ class SlashRouter:
         try:
             from llx.client import get_client, LlxError, LlxConnectionError
             client = get_client(server)
-            data = client.post("/api/batch-video/generate/text", json={
-                "prompts": [prompt],
-            })
+            # Only queues the batch; rendering is tracked with /videos status.
+            with working("Starting video…", console=self._console):
+                data = client.post("/api/batch-video/generate/text", json={
+                    "prompts": [prompt],
+                })
             result = data.get("data", data)
             batch_id = result.get("batch_id", "unknown")
             self._console.print(f"[llx.success]Video generation started[/llx.success]")
@@ -701,9 +705,10 @@ class SlashRouter:
         try:
             from llx.client import get_client, LlxError, LlxConnectionError
             client = get_client(server)
-            data = client.post("/api/voice/text-to-speech", json={
-                "text": text,
-            })
+            with working("Generating speech…", console=self._console):
+                data = client.post("/api/voice/text-to-speech", json={
+                    "text": text,
+                })
             audio_url = data.get("audio_url", "")
             filename = data.get("filename", "output.wav")
             self._console.print(f"[llx.success]Audio generated: {filename}[/llx.success]")
@@ -849,13 +854,14 @@ class SlashRouter:
         try:
             from llx.client import get_client
             client = get_client(server)
-            data = client.post("/api/chat/unified/direct-tool", json={
-                "slash_command": "remember",
-                "slash_args": content,
-                "params": {"content": content},
-                "message": f"/remember {content}",
-                "session_id": session_id or "cli_remember",
-            })
+            with working("Saving to memory…", console=self._console):
+                data = client.post("/api/chat/unified/direct-tool", json={
+                    "slash_command": "remember",
+                    "slash_args": content,
+                    "params": {"content": content},
+                    "message": f"/remember {content}",
+                    "session_id": session_id or "cli_remember",
+                })
             if data.get("success"):
                 self._console.print("[llx.success]Saved to memory[/llx.success]")
                 response = data.get("response") or ""

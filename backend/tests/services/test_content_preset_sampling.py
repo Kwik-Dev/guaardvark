@@ -66,6 +66,51 @@ class TestContentPresetsCarryNoSampling(unittest.TestCase):
         self.assertEqual(detection.get("recommended_preset"), "person_full_body")
 
 
+class TestContentKeywordsMatchWholeWords(unittest.TestCase):
+    """Keywords match as whole words: 'man' is not inside manga, 'painter' is
+    not inside painterly, 'face' is not inside surface."""
+
+    def setUp(self):
+        self.gen = OfflineImageGenerator()
+
+    def test_painterly_landscape_is_a_landscape(self):
+        detection = self.gen.detect_content_type("a painterly mountain landscape")
+        self.assertFalse(detection["has_person"])
+        self.assertEqual(detection["recommended_preset"], "landscape")
+
+    def test_manga_dragon_is_not_a_person(self):
+        detection = self.gen.detect_content_type("manga-style dragon")
+        self.assertFalse(detection["has_person"])
+        self.assertNotIn("person", detection["recommended_preset"])
+
+    def test_a_man_walking_is_a_person(self):
+        detection = self.gen.detect_content_type("a man walking")
+        self.assertTrue(detection["has_person"])
+        self.assertEqual(detection["recommended_preset"], "person_full_body")
+
+    def test_listed_plurals_still_match(self):
+        self.assertTrue(self.gen.detect_content_type("two women talking")["has_person"])
+        self.assertTrue(self.gen.detect_content_type("hands on a keyboard")["has_hands"])
+
+    def test_surface_and_chandelier_are_not_face_or_hands(self):
+        detection = self.gen.detect_content_type("a chandelier above a polished surface")
+        self.assertFalse(detection["has_face"])
+        self.assertFalse(detection["has_hands"])
+
+    def test_action_keywords_do_not_match_inside_words(self):
+        spreading = self.gen.detect_content_type("a knife spreading butter on toast")
+        self.assertNotIn("reading", spreading["detected_actions"])
+        self.assertFalse(spreading["has_action"])
+        focusing = self.gen.detect_content_type("a photographer focusing a lens")
+        self.assertNotIn("working", focusing["detected_actions"])
+        self.assertFalse(focusing["has_action"])
+
+    def test_action_keywords_still_match_as_words(self):
+        self.assertIn("reading", self.gen.detect_content_type("a woman reading a book")["detected_actions"])
+        self.assertIn("working", self.gen.detect_content_type("a man using a drill")["detected_actions"])
+        self.assertIn("cooking", self.gen.detect_content_type("two chefs plating dessert")["detected_actions"])
+
+
 class TestModelOwnsSampling(unittest.TestCase):
     """Per-model recipes are the single source of truth for steps/guidance."""
 

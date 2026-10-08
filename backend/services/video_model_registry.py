@@ -946,6 +946,10 @@ VIDEO_MODEL_REGISTRY = {
         "size_gb": 2.74,
         "vram_mb": 0,
         "type": "lora",
+        # Pairs with an LTX-2.3 dev checkpoint, which is not registered; the distilled
+        # FP8 model does not need it, so no adapter picker offers it.
+        "applies_to": [],
+        "adapter": False,
     },
     # ── LTX-2.5 (Lightricks) — 16GB Ada: distilled Comfy int8 + Gemma 4 int8 ──
     # Official ComfyUI T2V/I2V templates (0.32+). Gated repo: accept the license
@@ -2135,8 +2139,14 @@ def _role_ok(model_id: str, role: str) -> bool:
 
 
 def _fits_card(model_id: str, total_vram_mb) -> bool:
+    """True when the model plus a margin fits a card of ``total_vram_mb``.
+
+    An unread card (0 or None) fits nothing: an automatic pick has to know the
+    card can hold the model, and a guess on an unknown card is how a 24 GB
+    model lands on an 8 GB one.
+    """
     if not total_vram_mb:
-        return True
+        return False
     return vram_mb_for_model(model_id) + _VRAM_FIT_MARGIN_MB <= float(total_vram_mb)
 
 
@@ -2170,7 +2180,14 @@ def _accept_or_refuse(model_id: str, role: str, comfyui_down_ok: bool = False) -
     return model_id, None
 
 
-def _hardware_fallback(role: str, total_vram_mb) -> str | None:
+def _hardware_candidates(role: str, total_vram_mb) -> list:
+    """Installed models that serve ``role`` and fit the card, best first.
+
+    The compile-time default leads when it qualifies; then the largest model
+    the card can hold, so a 16 GB card with two installed families gets the
+    higher-fidelity one rather than whichever the registry happens to list
+    first. Registry order only breaks ties.
+    """
     preferred = DEFAULT_I2V_MODEL if role == "i2v" else DEFAULT_T2V_MODEL
     if role == "scene":
         preferred = None
@@ -2185,15 +2202,40 @@ def _hardware_fallback(role: str, total_vram_mb) -> str | None:
         if not _fits_card(mid, total_vram_mb):
             continue
         candidates.append(mid)
-    if not candidates:
-        return None
-    if preferred in candidates:
-        return preferred
-    # Largest model the card can hold, so a 16 GB card with two installed
-    # families gets the higher-fidelity one rather than whichever the registry
-    # happens to list first. Registry order only breaks ties.
     order = list(VIDEO_MODEL_REGISTRY)
-    return max(candidates, key=lambda m: (vram_mb_for_model(m), -order.index(m)))
+    candidates.sort(key=lambda m: (m != preferred, -vram_mb_for_model(m), order.index(m)))
+    return candidates
+
+
+_ROLE_TEXT = {
+    "t2v": "video from text alone",
+    "i2v": "video from a start image",
+    "scene": "a clip with its own soundtrack",
+}
+
+
+def _same_family_for_role(model_id: str, role: str) -> str | None:
+    """A model of ``model_id``'s family that serves ``role``, or None.
+
+    The model itself when it can; for i2v and scene its first-frame sibling
+    (i2v_model_for); for t2v a text-to-video model of the same type, an
+    installed one first, then the one sharing the most companions.
+    """
+    if _role_ok(model_id, role):
+        return model_id
+    entry = VIDEO_MODEL_REGISTRY.get(model_id or "") or {}
+    if not entry:
+        return None
+    if role in ("i2v", "scene"):
+        sibling = i2v_model_for(model_id, default="")
+        return sibling if sibling and _role_ok(sibling, role) else None
+    shared = set(entry.get("requires", []))
+    siblings = [
+        (bool(is_model_installed(cid)), len(shared & set(e.get("requires", []))), cid)
+        for cid, e in VIDEO_MODEL_REGISTRY.items()
+        if cid != model_id and e.get("type") == entry.get("type") and _role_ok(cid, "t2v")
+    ]
+    return max(siblings)[2] if siblings else None
 
 
 def resolve_active_video_model(
@@ -2206,9 +2248,11 @@ def resolve_active_video_model(
     """Pick the video model for this job.
 
     Priority: explicit request → per-pipeline override → global active
-    setting → first installed model that fits the card. A typed id that
-    cannot run is refused in one sentence; families are never swapped
-    silently. Returns ``(model_id, None)`` or ``(None, message)``.
+    setting, served from its own family → first installed model that fits
+    the card and passes preflight, when the card's memory can be read. A
+    typed id that cannot run is refused in one sentence; families are never
+    swapped: a global setting whose family cannot serve the role is refused,
+    not replaced. Returns ``(model_id, None)`` or ``(None, message)``.
 
     ``comfyui_down_ok`` accepts a model whose only problem is a stopped
     ComfyUI: for callers that run prepare_video_model next, and for
@@ -2231,27 +2275,39 @@ def resolve_active_video_model(
         i2v_override = _video_setting("active_video_model_i2v")
         if i2v_override:
             return _accept_or_refuse(i2v_override, "i2v", comfyui_down_ok)
-        global_id = _video_setting("active_video_model")
-        if global_id:
-            if _role_ok(global_id, "i2v"):
-                return _accept_or_refuse(global_id, "i2v", comfyui_down_ok)
-            sibling = i2v_model_for(global_id, default="")
-            if sibling:
-                return _accept_or_refuse(sibling, "i2v", comfyui_down_ok)
-    else:
-        global_id = _video_setting("active_video_model")
-        if global_id:
-            if _role_ok(global_id, role):
-                return _accept_or_refuse(global_id, role, comfyui_down_ok)
-            if role == "scene":
-                sibling = i2v_model_for(global_id, default="")
-                if sibling and _role_ok(sibling, "scene"):
-                    return _accept_or_refuse(sibling, "scene", comfyui_down_ok)
+    global_id = _video_setting("active_video_model")
+    if global_id:
+        # The person chose a family. Serve the role from it or say why not;
+        # the hardware pick below is for a machine where nobody chose.
+        candidate = _same_family_for_role(global_id, role)
+        if candidate:
+            return _accept_or_refuse(candidate, role, comfyui_down_ok)
+        name = (VIDEO_MODEL_REGISTRY.get(global_id) or {}).get("name") or global_id
+        return None, (
+            f"The active video model, {name}, cannot make {_ROLE_TEXT[role]}, and no model "
+            "of its family that can is in the registry. Pick a model for this job, or "
+            "change the active video model in Settings."
+        )
 
-    fallback = _hardware_fallback(role, _probe_total_vram_mb())
-    if fallback:
-        return fallback, None
-    return None, "No installed video model is ready for this card."
+    total_vram_mb = _probe_total_vram_mb()
+    if not total_vram_mb:
+        return None, (
+            "The GPU's memory could not be read, so no video model was picked "
+            "automatically. Pick a model for this job, or set the active video model "
+            "in Settings."
+        )
+    candidates = _hardware_candidates(role, total_vram_mb)
+    if not candidates:
+        return None, "No installed video model is ready for this card."
+    # The automatic pick passes the same preflight as a typed one; the first
+    # candidate that is ready wins, and when none is, the best one's reason.
+    first_refusal = None
+    for mid in candidates:
+        picked, err = _accept_or_refuse(mid, role, comfyui_down_ok)
+        if picked:
+            return picked, None
+        first_refusal = first_refusal or err
+    return None, first_refusal
 
 
 _FRAME_RULE_RE = re.compile(r"^(\d+)[a-z]\+(\d+)$")
@@ -2703,6 +2759,25 @@ def _verify_capabilities(mid: str, entry: dict) -> list:
     return problems
 
 
+def _verify_lora_scope(mid: str, entry: dict) -> list:
+    """A LoRA names the generation models it applies to, or declares
+    `adapter: False` so no picker offers it. An empty `applies_to` means
+    "applies to nothing", never "applies to everything"."""
+    applies = entry.get("applies_to") or []
+    if entry.get("adapter") is False:
+        return [f"{mid}: adapter False but applies_to lists models"] if applies else []
+    if not applies:
+        return [f"{mid}: LoRA must list the models it applies to, or set adapter False"]
+    problems = []
+    for target in applies:
+        target_entry = VIDEO_MODEL_REGISTRY.get(target)
+        if not target_entry:
+            problems.append(f"{mid}: applies_to names unknown model '{target}'")
+        elif target_entry.get("type") not in GENERATION_TYPES:
+            problems.append(f"{mid}: applies_to names '{target}', which is not a generation model")
+    return problems
+
+
 def verify_registry() -> list:
     """Sanity-check the registry is internally complete. Returns a list of
     human-readable problems (empty = healthy). Never raises."""
@@ -2714,6 +2789,8 @@ def verify_registry() -> list:
             for dep in entry.get("requires", []):
                 if dep not in VIDEO_MODEL_REGISTRY:
                     problems.append(f"{mid}: requires unknown model '{dep}'")
+            if entry.get("type") == "lora":
+                problems.extend(_verify_lora_scope(mid, entry))
             if entry.get("type") == "wan":
                 problems.extend(_verify_capabilities(mid, entry))
                 m = wan_comfyui_map().get(mid, {})

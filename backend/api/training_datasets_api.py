@@ -49,21 +49,48 @@ def list_datasets():
         return jsonify({"error": "Database error fetching datasets."}), 500
 
 
+def _checked_path(path):
+    """(resolved path, None) for a dataset path the trainer can train on, or
+    (None, reason). The reason names files and lines, never their text."""
+    from backend.services.training.scripts import dataset_formats
+
+    if not isinstance(path, str) or not path.strip():
+        return None, "Dataset path is required: a .jsonl or .json file, or a folder of them."
+    report = dataset_formats.inspect(path, samples=0)
+    if not report["trainable"]:
+        return None, f"This dataset cannot be trained on: {report['reason']}"
+    return report["path"], None
+
+
+def _text_field(data, key, *, required=False):
+    """(value, None) for an optional text field, or (None, reason)."""
+    value = data.get(key)
+    if value is None and not required:
+        return None, None
+    if not isinstance(value, str):
+        return None, f"{key} must be text."
+    return value, None
+
+
 @training_bp.route("/", methods=["POST"])
 def create_dataset():
     logger.info("API: POST /api/training_datasets/")
     if not db or not TrainingDataset:
         return jsonify({"error": "Server configuration error."}), 500
-    if not request.is_json:
-        return jsonify({"error": "Request must be JSON"}), 400
-    data = request.get_json()
-    name = (data.get("name") or "").strip()
-    if not name:
-        return jsonify({"error": "Dataset name is required."}), 400
-    description = data.get("description")
-    path = data.get("path")
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Request must be a JSON object"}), 400
+    name, problem = _text_field(data, "name", required=True)
+    if problem or not name.strip():
+        return jsonify({"error": problem or "Dataset name is required."}), 400
+    description, problem = _text_field(data, "description")
+    if problem:
+        return jsonify({"error": problem}), 400
+    path, problem = _checked_path(data.get("path"))
+    if problem:
+        return jsonify({"error": problem}), 400
     try:
-        new_ds = TrainingDataset(name=name, description=description, path=path)
+        new_ds = TrainingDataset(name=name.strip(), description=description, path=path)
         db.session.add(new_ds)
         db.session.commit()
         return jsonify(serialize(new_ds)), 201
@@ -81,23 +108,37 @@ def update_dataset(ds_id):
     logger.info(f"API: PUT /api/training_datasets/{ds_id}")
     if not db or not TrainingDataset:
         return jsonify({"error": "Server configuration error."}), 500
-    if not request.is_json:
-        return jsonify({"error": "Request must be JSON"}), 400
-    data = request.get_json()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Request must be a JSON object"}), 400
     try:
         ds = db.session.get(TrainingDataset, ds_id)
         if not ds:
             return jsonify({"error": "Dataset not found"}), 404
         updated = []
-        if "name" in data and data["name"].strip() and ds.name != data["name"].strip():
-            ds.name = data["name"].strip()
-            updated.append("name")
-        if "description" in data and ds.description != data["description"]:
-            ds.description = data["description"]
-            updated.append("description")
-        if "path" in data and ds.path != data["path"]:
-            ds.path = data["path"]
-            updated.append("path")
+        if "name" in data:
+            name, problem = _text_field(data, "name", required=True)
+            if problem or not name.strip():
+                return jsonify({"error": problem or "Dataset name is required."}), 400
+            if ds.name != name.strip():
+                ds.name = name.strip()
+                updated.append("name")
+        if "description" in data:
+            description, problem = _text_field(data, "description")
+            if problem:
+                return jsonify({"error": problem}), 400
+            if ds.description != description:
+                ds.description = description
+                updated.append("description")
+        # A path saved before these checks existed may be kept as it is while
+        # the dataset is renamed; a changed path must be trainable.
+        if "path" in data and data["path"] != ds.path:
+            path, problem = _checked_path(data["path"])
+            if problem:
+                return jsonify({"error": problem}), 400
+            if ds.path != path:
+                ds.path = path
+                updated.append("path")
         if not updated:
             return jsonify(serialize(ds)), 200
         db.session.commit()

@@ -64,6 +64,92 @@ class TestSteps:
         assert "firefox_running" in _recipe().get("preconditions", [])
 
 
+class TestPageHostCheck:
+    """The comment is public, so the recipe runs only on a youtube.com page."""
+
+    TASK = "post a comment saying Learn more at guaardvark.com"
+
+    def _service(self, page_url, preconditions_pass=True):
+        from unittest.mock import MagicMock
+        from backend.services.agent_control_service import AgentControlService
+
+        svc = AgentControlService.__new__(AgentControlService)
+        svc._load_recipes = lambda: {
+            "youtube_comment": {
+                "description": "Comment on the open YouTube video",
+                "triggers": [r"^post a comment saying (.+)$"],
+                "preconditions": ["firefox_running"],
+                "steps": [{"action": "type", "text": "{1}"}],
+            },
+        }
+        svc._recipe_disabled = lambda name: False
+        svc._preconditions_pass = lambda recipe, screen: preconditions_pass
+        svc._current_page_url = lambda: page_url
+        svc._execute_recipe = MagicMock(return_value="ran")
+        return svc
+
+    def _refused(self, result):
+        from backend.services.agent_control_service import RECIPE_REFUSED
+        return (result is not None and result != "ran" and result.success is False
+                and result.reason.startswith(RECIPE_REFUSED))
+
+    def test_other_site_is_refused_with_the_reason(self):
+        from unittest.mock import MagicMock
+        svc = self._service("https://example.com/some/post")
+        result = svc._try_recipe(self.TASK, MagicMock())
+        assert self._refused(result)
+        assert "youtube.com" in result.reason and "example.com" in result.reason
+        svc._execute_recipe.assert_not_called()
+
+    def test_lookalike_host_is_refused(self):
+        from unittest.mock import MagicMock
+        svc = self._service("https://youtube.com.example.net/watch?v=abc")
+        assert self._refused(svc._try_recipe(self.TASK, MagicMock()))
+        svc._execute_recipe.assert_not_called()
+
+    def test_unreadable_page_is_refused(self):
+        from unittest.mock import MagicMock
+        svc = self._service("")
+        result = svc._try_recipe(self.TASK, MagicMock())
+        assert self._refused(result)
+        assert "could not be read" in result.reason
+        svc._execute_recipe.assert_not_called()
+
+    def test_refused_even_when_other_gates_would_defer_to_the_loop(self):
+        # Deferring hands "post a comment saying ..." to the loop, which would
+        # post it on whatever page is open.
+        from unittest.mock import MagicMock
+        svc = self._service("https://example.com/", preconditions_pass=False)
+        assert self._refused(svc._try_recipe(self.TASK, MagicMock()))
+
+    def test_youtube_watch_page_runs(self):
+        from unittest.mock import MagicMock
+        for url in ("https://www.youtube.com/watch?v=abc", "https://m.youtube.com/watch?v=abc"):
+            svc = self._service(url)
+            assert svc._try_recipe(self.TASK, MagicMock()) == "ran"
+            svc._execute_recipe.assert_called_once()
+
+    def test_recipes_without_a_site_are_not_checked(self):
+        from backend.services.agent_control_service import AgentControlService
+        svc = AgentControlService.__new__(AgentControlService)
+        svc._current_page_url = lambda: ""
+        assert svc._page_host_refusal("open_firefox") == ""
+
+    def test_page_address_comes_from_the_browser_snapshot(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from backend.services.agent_control_service import AgentControlService
+        svc = AgentControlService.__new__(AgentControlService)
+        target = "backend.services.dom_metadata_extractor.DOMMetadataExtractor.get_instance"
+        with patch(target) as gi:
+            gi.return_value.extract.return_value = SimpleNamespace(
+                success=True, url="https://www.youtube.com/watch?v=abc")
+            assert svc._current_page_url() == "https://www.youtube.com/watch?v=abc"
+            gi.return_value.extract.return_value = SimpleNamespace(
+                success=False, url="", error="BiDi connect failed")
+            assert svc._current_page_url() == ""
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-q"]))

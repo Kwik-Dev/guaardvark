@@ -24,13 +24,13 @@ def test_gpu_probe_none_when_no_tools():
 
 
 def test_gpu_probe_nvidia_parses_smi_output():
-    smi_out = "NVIDIA GeForce RTX 4070 Ti SUPER, 16384, 565.57.01, 8.9\n"
+    smi_out = "NVIDIA GeForce RTX 4080 SUPER, 16384, 565.57.01, 8.9\n"
     mock_run = MagicMock(return_value=MagicMock(returncode=0, stdout=smi_out, stderr=""))
     d = HardwareDetector()
     with patch("subprocess.run", mock_run):
         gpu = d._probe_gpu()
     assert gpu["vendor"] == "nvidia"
-    assert gpu["model"] == "NVIDIA GeForce RTX 4070 Ti SUPER"
+    assert gpu["model"] == "NVIDIA GeForce RTX 4080 SUPER"
     assert gpu["vram_mb"] == 16384
     assert gpu["driver"] == "565.57.01"
 
@@ -108,6 +108,33 @@ def test_nvidia_probe_includes_compute_cap(monkeypatch):
     assert gpu["vendor"] == "nvidia"
     assert gpu["vram_mb"] == 16311
     assert gpu["compute_cap"] == "12.0"
+
+
+def test_nvidia_probe_keeps_a_unified_memory_gpu(monkeypatch):
+    # GB10 (DGX Spark) shares RAM with the GPU; nvidia-smi prints [N/A] for
+    # memory.total. The GPU must still be found, with the RAM as its memory.
+    import subprocess
+    from backend.services import hardware_detector as hd
+
+    def fake_run(args, **kwargs):
+        if "--query-gpu=name,memory.total,driver_version,compute_cap" in args:
+            class R:
+                returncode = 0
+                stdout = "NVIDIA GB10, [N/A], 580.95.05, 12.1\n"
+            return R()
+        class Empty:
+            returncode = 1
+            stdout = ""
+        return Empty()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    det = hd.HardwareDetector(node_id_path="/tmp/_gx_nodeid_test")
+    monkeypatch.setattr(det, "_probe_ram", lambda: {"total_gb": 119.7})
+    gpu = det._probe_gpu_nvidia()
+    assert gpu["vendor"] == "nvidia"
+    assert gpu["vram_mb"] is None
+    assert gpu["unified_memory_gb"] == 119.7
+    assert gpu["compute_cap"] == "12.1"
 
 
 def test_network_probe_flags_e1000e_quirk(tmp_path):

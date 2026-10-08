@@ -30,7 +30,7 @@ except ImportError as e:
     offline_gen_available = False
 
 try:
-    from backend.services.media_director import expand_image_plan, direct_prompts as media_direct_enhance
+    from backend.services.media_director import expand_image_plan
     MEDIA_DIRECTOR_AVAILABLE = True
 except Exception as e:  # noqa: BLE001
     logger.warning(f"media_director not available for batch image (will skip): {e}")
@@ -436,6 +436,22 @@ class BatchImageGenerator:
         except Exception:
             pass
 
+    def _keep_or_cleanup_gpu_memory(self, batch_status: BatchGenerationStatus) -> None:
+        """End of a batch: keep the model loaded for the next one when Settings →
+        Generation asks for it and the batch did not fail; otherwise unload."""
+        minutes = 0
+        if batch_status.status in ("completed", "cancelled"):
+            try:
+                from backend.utils.settings_utils import get_image_keep_loaded_minutes
+                minutes = get_image_keep_loaded_minutes()
+            except Exception:  # noqa: BLE001
+                minutes = 0
+        gen = self.image_generator
+        if minutes > 0 and gen is not None and hasattr(gen, "keep_pipeline_for"):
+            if gen.keep_pipeline_for(minutes * 60):
+                return
+        self._cleanup_gpu_memory()
+
     def _batch_running(self, batch_id: Optional[str] = None) -> bool:
         with self.batch_lock:
             if batch_id is not None:
@@ -481,36 +497,79 @@ class BatchImageGenerator:
             return "zimage-turbo"
         return model_key
 
-    def _batch_resource_estimates(self, request: BatchImageRequest) -> Tuple[int, float]:
-        """Worst-case (vram_mb, ram_gb) across offline-generator prompts in this batch."""
+    @staticmethod
+    def _character_model_key(prompt: BatchPrompt) -> str:
+        """Catalog key a cast/LoRA prompt renders with, by the family of its first LoRA."""
+        model_key = "zimage-turbo"
+        try:
+            from backend.services.media_model_registry import resolve_inference_for_loras
+            paths = list(prompt.loras or [])
+            if not paths and getattr(prompt, "subject_ids", None):
+                from backend.models import Subject, db
+                for sid in prompt.subject_ids:
+                    s = db.session.get(Subject, int(sid))
+                    if s and s.lora_path:
+                        paths.append(s.lora_path)
+            if paths:
+                route = resolve_inference_for_loras(paths)
+                if route.get("family") == "zimage":
+                    model_key = "zimage-turbo"
+                elif route.get("family") == "flux":
+                    model_key = "flux-dev"
+                else:
+                    model_key = "sd-xl"
+        except Exception:
+            pass
+        return model_key
+
+    def _prompt_offline_model(self, prompt: BatchPrompt) -> Optional[str]:
+        """Catalog id of the offline pipeline this prompt renders on; None for ComfyUI."""
+        gen = self.image_generator
+        if gen is None:
+            return None
+        if prompt.loras or getattr(prompt, "subject_ids", None):
+            model_key = self._character_model_key(prompt)
+            # Only Z-Image cast renders use the offline pipeline (character_still_pipeline).
+            if model_key != "zimage-turbo" or self._zimage_via_comfyui_enabled():
+                return None
+        elif self._should_use_comfy_stills(prompt):
+            return None
+        elif self._zimage_via_comfyui_enabled() and self._is_zimage_model(prompt.model):
+            return None
+        else:
+            model_key = self._resolve_batch_model_key(prompt.model)
+        if self._is_comfy_flux_model(model_key):
+            return None
+        return gen.available_models.get(model_key, model_key)
+
+    def _kept_model_for_batch(self, request: BatchImageRequest) -> Optional[str]:
+        """The model kept loaded after the last batch, when this batch renders only with it."""
+        gen = self.image_generator
+        kept = gen.kept_model() if gen is not None and hasattr(gen, "kept_model") else None
+        if not kept or not request.prompts:
+            return None
+        if all(self._prompt_offline_model(p) == kept for p in request.prompts):
+            return kept
+        return None
+
+    def _batch_resource_estimates(
+        self, request: BatchImageRequest, reuse_model: Optional[str] = None
+    ) -> Tuple[int, float]:
+        """Worst-case (vram_mb, ram_gb) across offline-generator prompts in this batch.
+
+        ``reuse_model`` is the kept model this batch will render with
+        (_kept_model_for_batch); a kept model it will not use is unloaded before
+        admission, so it earns no discount.
+        """
         if not self.image_generator:
             return 4000, 6.0
         gen = self.image_generator
         vram_mb = 4000
         ram_gb = 6.0
+        kept = gen.kept_model() if hasattr(gen, "kept_model") else None
         for prompt in request.prompts:
             if prompt.loras or getattr(prompt, "subject_ids", None):
-                # Cast LoRAs: estimate by family from first LoRA when possible
-                model_key = "zimage-turbo"
-                try:
-                    from backend.services.media_model_registry import resolve_inference_for_loras
-                    paths = list(prompt.loras or [])
-                    if not paths and getattr(prompt, "subject_ids", None):
-                        from backend.models import Subject, db
-                        for sid in prompt.subject_ids:
-                            s = db.session.get(Subject, int(sid))
-                            if s and s.lora_path:
-                                paths.append(s.lora_path)
-                    if paths:
-                        route = resolve_inference_for_loras(paths)
-                        if route.get("family") == "zimage":
-                            model_key = "zimage-turbo"
-                        elif route.get("family") == "flux":
-                            model_key = "flux-dev"
-                        else:
-                            model_key = "sd-xl"
-                except Exception:
-                    pass
+                model_key = self._character_model_key(prompt)
             else:
                 model_key = self._resolve_batch_model_key(prompt.model)
             if self._is_comfy_flux_model(model_key):
@@ -533,11 +592,21 @@ class BatchImageGenerator:
             except Exception:
                 pw = ph = None
 
-            # If the model is already loaded (resident), its memory footprint is already
-            # reflected in the system's available RAM. Avoid double-gating it — but the
-            # per-generation activation surcharge above 1MP still applies.
-            if getattr(gen, "_pipeline", None) is not None and getattr(gen, "_current_model", None) == catalog_id:
-                model_vram = 1024 + max(0, gen._vram_estimate_mb(catalog_id, pw, ph) - gen._vram_estimate_mb(catalog_id))
+            # If the model is already loaded (resident) and stays for this batch, its
+            # weights are already counted in the system's used RAM, so only the
+            # surcharge above 1MP is new. VRAM is discounted only for a pipeline that
+            # sits wholly on the card: an offloaded one (Z-Image and Krea 2 on 16GB
+            # cards) keeps its weights in RAM and needs its full working peak again.
+            resident = (
+                getattr(gen, "_pipeline", None) is not None
+                and getattr(gen, "_current_model", None) == catalog_id
+                and (kept is None or kept == reuse_model)
+            )
+            if resident:
+                if getattr(gen, "_pipeline_offload_mode", None) == "full":
+                    model_vram = 1024 + max(0, gen._vram_estimate_mb(catalog_id, pw, ph) - gen._vram_estimate_mb(catalog_id))
+                else:
+                    model_vram = gen._vram_estimate_mb(catalog_id, pw, ph)
                 model_ram = 2.0 + max(0.0, gen._ram_estimate_gb(catalog_id, pw, ph) - gen._ram_estimate_gb(catalog_id))
             else:
                 model_vram = gen._vram_estimate_mb(catalog_id, pw, ph)
@@ -1116,9 +1185,10 @@ class BatchImageGenerator:
     def _apply_director(self, request: BatchImageRequest) -> None:
         """If director_mode or storyboard_concept, rewrite prompts via Media Director.
 
-        Mutates in place and disables per-prompt offline auto_enhance (director already
-        produced full visual prompts). Uses stills_policy for the enhance ladder so
-        chat/batch share the same director behavior. Never raises.
+        Mutates in place and disables per-prompt offline auto_enhance on the prompts
+        the director rewrote (those are already full visual prompts). Uses
+        stills_policy for the enhance ladder so chat/batch share the same director
+        behavior. Never raises.
         """
         if not MEDIA_DIRECTOR_AVAILABLE:
             return
@@ -1148,15 +1218,30 @@ class BatchImageGenerator:
                         extra_guidance=getattr(request, "director_guidance", None),
                     )
                     shots = res.get("prompts") or []
+                    # The storyboard's fallback is "the concept, n times": a row
+                    # that gets only the concept, or its own text back, keeps the
+                    # per-prompt enhancer (the batch-video rule).
+                    changed = 0
                     for i, p in enumerate(request.prompts):
-                        if i < len(shots) and shots[i]:
-                            p.prompt = shots[i]
+                        shot = (shots[i] or "").strip() if i < len(shots) else ""
+                        if not shot:
+                            continue
+                        if shot != concept and shot != (p.prompt or "").strip():
                             p.auto_enhance = False
-                    request.auto_enhance = False
-                    logger.info(
-                        "Media Director storyboard expanded %s prompts for batch %s",
-                        len(shots), request.batch_id,
-                    )
+                            changed += 1
+                        p.prompt = shot
+                    if changed:
+                        request.auto_enhance = False
+                        logger.info(
+                            "Media Director storyboard expanded %s/%s prompts for batch %s",
+                            changed, n, request.batch_id,
+                        )
+                    else:
+                        logger.warning(
+                            "Media Director storyboard returned only the concept for batch %s; "
+                            "the per-prompt enhancer stays as it was",
+                            request.batch_id,
+                        )
                     return
 
             # Model is chosen per prompt; the first explicit one stands for the
@@ -1176,37 +1261,40 @@ class BatchImageGenerator:
             raw = [bp.prompt for bp in request.prompts if (bp.prompt or "").strip()]
             if not raw:
                 return
-            # Prefer stills_policy director path (enhance_prompts); fall back to
-            # media_direct_enhance alias if needed.
-            style = batch_style
-            guidance = getattr(request, "director_guidance", None)
+            # One director attempt. enhance_prompts already walks its model ladder
+            # and hands the originals back when none answers, so a second call
+            # would only repeat the same wait.
             directed = apply_enhance_to_prompts(
-                raw, enhance_mode="director", style=style, extra_guidance=guidance,
+                raw, enhance_mode="director", style=batch_style,
+                extra_guidance=getattr(request, "director_guidance", None),
                 model=batch_model,
             )
-            if (not directed or directed == raw) and prompt_style_for_model(batch_model) != "natural":
-                # Fallback to batch's media_direct_enhance if policy path no-op'd.
-                # Natural families never take this rung: its phrase contract is the
-                # CLIP-era one, and an unchanged prompt is the intended fallback.
-                try:
-                    directed = media_direct_enhance(raw, style=style, extra_guidance=guidance)
-                except Exception:
-                    directed = raw
+            # Only a prompt the director actually rewrote turns the per-prompt
+            # enhancer off; an unchanged one keeps it, so a batch whose director
+            # fell back still gets the family's normal enhancement.
             idx = 0
             changed = 0
             for bp in request.prompts:
-                if (bp.prompt or "").strip() and idx < len(directed) and directed[idx]:
-                    newp = directed[idx].strip()
+                if (bp.prompt or "").strip() and idx < len(directed):
+                    newp = (directed[idx] or "").strip()
                     if newp and newp != (bp.prompt or "").strip():
                         bp.prompt = newp
+                        bp.auto_enhance = False
                         changed += 1
-                    bp.auto_enhance = False
                     idx += 1
-            request.auto_enhance = False
-            logger.info(
-                "Media Director enhanced %s prompts for batch %s (director_mode=%s)",
-                changed, request.batch_id, getattr(request, "director_mode", False),
-            )
+            if changed:
+                request.auto_enhance = False
+                logger.info(
+                    "Media Director enhanced %s/%s prompts for batch %s (director_mode=%s, family=%s)",
+                    changed, len(raw), request.batch_id,
+                    getattr(request, "director_mode", False), prompt_style_for_model(batch_model),
+                )
+            else:
+                logger.warning(
+                    "Media Director returned no rewrites for batch %s; prompts and the "
+                    "per-prompt enhancer stand as they were",
+                    request.batch_id,
+                )
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 "Director pass skipped for batch image %s (non-fatal): %s",
@@ -1567,7 +1655,7 @@ class BatchImageGenerator:
                     with self.batch_lock:
                         if batch_id in self.executors:
                             del self.executors[batch_id]
-                    self._cleanup_gpu_memory()
+                    self._keep_or_cleanup_gpu_memory(batch_status)
                     self._release_batch_booking(batch_id)
 
                 except Exception as e:
@@ -1584,16 +1672,31 @@ class BatchImageGenerator:
                             additional_data={"batch_id": batch_id, "error": str(e)}
                         )
 
+            # A model kept from the last batch that this one will not render with
+            # goes now, whichever engine this batch uses.
+            if self._kept_model_for_batch(request) is None:
+                try:
+                    gen = self.image_generator
+                    if gen is not None and hasattr(gen, "release_kept_pipeline"):
+                        gen.release_kept_pipeline()
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("Could not unload the kept image model: %s", e)
+
             if self._batch_uses_cuda_offline_gen():
                 from backend.services.gpu_resource_policy import (
                     compositor_vram_reserve_mb,
                     gpu_session,
                     vram_probe_snapshot,
                 )
-                from backend.services.job_operation_gate import GpuBusyError, GpuCapacityError
+                from backend.services.job_operation_gate import (
+                    GpuBusyError,
+                    GpuCapacityError,
+                    gpu_wait_message,
+                )
                 from backend.services.job_types import JobKind
 
-                vram_mb, ram_gb = self._batch_resource_estimates(request)
+                reuse_model = self._kept_model_for_batch(request)
+                vram_mb, ram_gb = self._batch_resource_estimates(request, reuse_model)
                 slot_id = f"image_batch:{batch_id}"
                 reserve_mb = compositor_vram_reserve_mb()
                 cancel_event = self.cancel_events.get(batch_id)
@@ -1645,7 +1748,20 @@ class BatchImageGenerator:
                             # compositor's VRAM share (Wayland died when 2048² jobs were
                             # admitted against raw card totals).
                             vram_reserve_mb=reserve_mb,
+                            image_model=reuse_model,
                         ):
+                            if batch_status.gpu_wait_reason and self.progress_system:
+                                # Progress consumers merge additional_data, so the
+                                # wait reason stays until it is cleared explicitly.
+                                try:
+                                    self.progress_system.update_process(
+                                        process_id=batch_id,
+                                        progress=0,
+                                        message="Starting generation",
+                                        additional_data={"batch_id": batch_id, "gpu_wait_reason": None},
+                                    )
+                                except Exception:
+                                    pass
                             batch_status.gpu_wait_reason = None
                             _run_batch_body(session_held=True)
                         return
@@ -1670,11 +1786,7 @@ class BatchImageGenerator:
                             return
 
                         snap = vram_probe_snapshot(reserve_mb=reserve_mb)
-                        wait_msg = (
-                            f"Waiting for VRAM — "
-                            f"{(snap.get('free_mb') or 0) / 1024:.1f}GB free, "
-                            f"need ~{need_mb / 1024:.1f}GB"
-                        )
+                        wait_msg = gpu_wait_message(e, snap.get("free_mb"), need_mb)
                         batch_status.gpu_wait_reason = wait_msg
                         if batch_status.status not in ("running", "queued", "pending"):
                             batch_status.status = "queued"

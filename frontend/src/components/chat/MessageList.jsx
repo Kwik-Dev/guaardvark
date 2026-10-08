@@ -4,7 +4,7 @@ import React, { useRef, useEffect, useImperativeHandle, forwardRef } from "react
 import { Box } from "@mui/material";
 import MessageItem from "./MessageItem";
 
-const MessageList = forwardRef(({ messages, sessionId, onOrchestratorUpdate }, ref) => {
+const MessageList = forwardRef(({ messages, sessionId, onOrchestratorUpdate, onSearchWeb }, ref) => {
   const scrollRef = useRef(null);
   const safeMessages = Array.isArray(messages) ? messages : [];
 
@@ -62,6 +62,7 @@ const MessageList = forwardRef(({ messages, sessionId, onOrchestratorUpdate }, r
           message={msg}
           sessionId={sessionId}
           onOrchestratorUpdate={onOrchestratorUpdate}
+          onSearchWeb={onSearchWeb}
         />
       ))}
     </Box>

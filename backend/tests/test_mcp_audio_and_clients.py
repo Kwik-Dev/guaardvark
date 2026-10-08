@@ -52,6 +52,29 @@ def test_music_instrumental_drops_lyrics_and_checks_length(monkeypatch):
     assert GenerateMusicTool().execute(style="  ").success is False
 
 
+def test_music_without_lyrics_is_sent_as_instrumental(monkeypatch):
+    from backend.tools.audio_tools import GenerateMusicTool
+
+    sent = _fake_backend(monkeypatch, {"/api/audio-foundry/generate/music": {"job_id": "c" * 32}})
+    GenerateMusicTool().execute(style="relaxing music for working")
+    GenerateMusicTool().execute(style="ambient", lyrics="   ")
+    for _, _, payload in sent:
+        assert payload["instrumental_only"] is True and "lyrics" not in payload
+
+
+def test_music_model_15_is_sent_and_the_default_is_left_out(monkeypatch):
+    from backend.tools.audio_tools import GenerateMusicTool
+
+    sent = _fake_backend(monkeypatch, {"/api/audio-foundry/generate/music": {"job_id": "d" * 32}})
+    res = GenerateMusicTool().execute(style="ambient", model="ace-step-1.5")
+    assert res.success and sent[0][2]["model"] == "ace-step-1.5"
+    GenerateMusicTool().execute(style="ambient", model="ace-step")
+    assert "model" not in sent[1][2]
+    bad = GenerateMusicTool().execute(style="ambient", model="suno")
+    assert bad.success is False and "ace-step-1.5" in bad.error
+    assert len(sent) == 2
+
+
 def test_music_says_when_audio_foundry_is_off(monkeypatch):
     from backend.tools.audio_tools import GenerateMusicTool
     from backend.utils import backend_http

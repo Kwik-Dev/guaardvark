@@ -62,6 +62,13 @@ def _render(query: str, results: List[Dict[str, Any]], trace: Dict[str, Any]) ->
     if not results:
         head.append("")
         head.append("No matching content. The index may be empty, or the filters too narrow.")
+        # Names of projects, clients and the like are never indexed text; a
+        # search for one comes back empty here even when the record exists.
+        head.append(
+            f"If \"{query}\" is the name of something in Guaardvark (a project, client, "
+            f"document, video, note, Cast member...), find_records with name=\"{query}\" checks "
+            "those directly; find_files checks file names on disk."
+        )
         return "\n".join(head)
 
     body = []
@@ -98,6 +105,9 @@ class KnowledgeSearchTool(BaseTool):
 
     name = "search_knowledge_base"
     read_only = True
+    # The passages are the answer: at the 500 default the model read the
+    # header and the start of one passage.
+    observation_chars = 4000
     description = (
         "Search the user's indexed documents and code repositories (the local knowledge base) by "
         "meaning and keywords. Returns the top passages (the configured number, 3 on a stock install, "

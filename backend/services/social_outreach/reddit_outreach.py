@@ -28,7 +28,7 @@ from urllib.parse import quote
 
 import requests
 
-from backend.services.social_outreach import audit, kill_switch, persona
+from backend.services.social_outreach import audit, external_grader, kill_switch, persona
 from backend.services.social_outreach.transitions import WITHDRAWN_BEFORE_SUBMIT
 
 logger = logging.getLogger(__name__)
@@ -241,6 +241,64 @@ def _bidi_navigate(url: str, settle_seconds: float = 2.0, nav_timeout: float = 1
             pass
 
 
+def bidi_evaluate_json(expression: str) -> tuple[Optional[dict], str]:
+    """Run ``expression`` in the agent Firefox's first tab and parse the JSON
+    string it returns.
+
+    Returns ``(data, "")``, or ``(None, why)`` when the browser cannot be
+    reached or the script returns nothing usable. The posters use it to read
+    the page after a submit. The session is always ended: Firefox caps active
+    BiDi sessions and refuses new ones once the cap is reached.
+    """
+    import json as _json
+    import websocket as _ws
+
+    try:
+        ws = _ws.create_connection(
+            f"ws://localhost:{BIDI_PORT}/session", timeout=3, suppress_origin=True,
+        )
+    except Exception as e:
+        return None, f"connect failed: {e}"
+
+    try:
+        ws.send(_json.dumps({"id": 1, "method": "session.new", "params": {"capabilities": {}}}))
+        if _json.loads(ws.recv()).get("type") != "success":
+            return None, "session.new failed"
+        ws.send(_json.dumps({"id": 2, "method": "browsingContext.getTree", "params": {}}))
+        contexts = _json.loads(ws.recv()).get("result", {}).get("contexts", [])
+        if not contexts:
+            return None, "no browsing context"
+        ws.send(_json.dumps({
+            "id": 3, "method": "script.evaluate",
+            "params": {
+                "expression": expression,
+                "target": {"context": contexts[0]["context"]},
+                "awaitPromise": False,
+            },
+        }))
+        raw = _json.loads(ws.recv())
+        if raw.get("type") == "error":
+            return None, f"evaluate error: {raw.get('message', '')[:200]}"
+        value = raw.get("result", {}).get("result", {}).get("value", "")
+        if not value:
+            return None, "empty evaluate result"
+        data = _json.loads(value)
+        if not isinstance(data, dict):
+            return None, "evaluate result is not an object"
+        return data, ""
+    except Exception as e:
+        return None, f"exception: {e}"
+    finally:
+        try:
+            ws.send(_json.dumps({"id": 99, "method": "session.end", "params": {}}))
+        except Exception:
+            pass
+        try:
+            ws.close()
+        except Exception:
+            pass
+
+
 def _human_pause(min_s: float = 0.3, max_s: float = 2.0) -> None:
     """Random sleep to avoid deterministic bot timing fingerprints.
     
@@ -378,10 +436,16 @@ def _http_get_json(url: str, retries: int = 1) -> Optional[dict]:
         return None
 
 
-def fetch_subreddit_rules(subreddit: str) -> list[str]:
+def fetch_subreddit_rules(subreddit: str) -> Optional[list[str]]:
+    """The community's rules, one "title: description" line each.
+
+    [] means the community has no rules. None means they could not be read
+    (403, 429, timeout, a reply without a rules list); callers skip the
+    community, because unread rules must not read as "promotion allowed".
+    """
     data = _http_get_json(f"{REDDIT_BASE}/r/{subreddit}/about/rules.json")
-    if not data:
-        return []
+    if not isinstance(data, dict) or not isinstance(data.get("rules"), list):
+        return None
     rules = []
     for r in data.get("rules", []):
         title = (r.get("short_name") or "").strip()
@@ -464,8 +528,21 @@ def backend_url() -> str:
 _backend_url = backend_url
 
 
-def draft_via_backend(thread: RedditThread, comments: list[str], feature_hint: Optional[str], task_id: Optional[int]) -> Optional[dict]:
-    """Calls the social-outreach draft endpoint synchronously."""
+def draft_via_backend(
+    thread: RedditThread,
+    comments: list[str],
+    task_id: Optional[int],
+    *,
+    relevance_unchecked: bool = False,
+) -> Optional[dict]:
+    """Calls the social-outreach draft endpoint synchronously.
+
+    ``relevance_unchecked`` says the thread-fit judge could not run on this
+    thread; the endpoint then holds an unsupervised draft for approval.
+    The thread's keyword label is not sent: a feature_hint on /draft-comment
+    is a person asking the draft to lead with that feature, and this loop
+    leaves the angle to the pitch sheet.
+    """
     thread_context = (
         f"TITLE: {thread.title}\n\n"
         f"OP BODY:\n{thread.selftext or '(link-only post)'}\n\n"
@@ -479,9 +556,9 @@ def draft_via_backend(thread: RedditThread, comments: list[str], feature_hint: O
                 "thread_context": thread_context,
                 "target_url": thread.permalink,
                 "target_thread_id": thread.id,
-                "feature_hint": feature_hint,
                 "task_id": task_id,
                 "mode": "comment",
+                "relevance_unchecked": relevance_unchecked,
             },
             timeout=120,
         )
@@ -636,76 +713,56 @@ def post_comment_via_servo(
     # the first 60 chars of our comment text appearing in a comment-tree
     # element.
     import json as _json
-    import websocket as _ws2
-    posted = False
-    verify_msg = "verify failed"
     needle = comment_text[:60].strip()
-    try:
-        ws = _ws2.create_connection(f"ws://localhost:{BIDI_PORT}/session", timeout=3, suppress_origin=True)
-        ws.send(_json.dumps({"id": 1, "method": "session.new", "params": {"capabilities": {}}}))
-        if _json.loads(ws.recv()).get("type") == "success":
-            ws.send(_json.dumps({"id": 2, "method": "browsingContext.getTree", "params": {}}))
-            ctxs = _json.loads(ws.recv()).get("result", {}).get("contexts", [])
-            if ctxs:
-                ctx_id = ctxs[0]["context"]
-                # Look for needle in any rendered comment OR for the
-                # composer being empty (no error message and no value)
-                # which also implies a successful post.
-                check_js = (
-                    "(() => {"
-                    "  const needle = " + _json.dumps(needle) + ";"
-                    "  const url = location.href;"
-                    "  // 1) Primary: needle appears in any element on the page"
-                    "  //    that smells like a comment body."
-                    "  const sels = ['[data-testid=\"comment\"]', 'shreddit-comment', '[id^=\"comment-tree-content-anchor\"]', 'div[role=\"region\"]'];"
-                    "  let foundInThread = false;"
-                    "  for (const s of sels) {"
-                    "    const els = document.querySelectorAll(s);"
-                    "    for (const el of els) {"
-                    "      if ((el.textContent || '').includes(needle)) { foundInThread = true; break; }"
-                    "    }"
-                    "    if (foundInThread) break;"
-                    "  }"
-                    "  // 2) Secondary: composer is empty AND no error message."
-                    "  let composerEmpty = false;"
-                    "  let errorVisible = false;"
-                    "  const composers = document.querySelectorAll('faceplate-textarea-input, textarea');"
-                    "  for (const c of composers) {"
-                    "    const ph = (c.getAttribute && c.getAttribute('placeholder')) || '';"
-                    "    if (/join the conversation|add a comment/i.test(ph)) {"
-                    "      composerEmpty = !((c.value || c.innerText || '').trim());"
-                    "      break;"
-                    "    }"
-                    "  }"
-                    "  const errEls = document.querySelectorAll('*');"
-                    "  for (const e of errEls) {"
-                    "    const t = (e.textContent || '');"
-                    "    if (/field is required|cannot be empty|something went wrong|too fast/i.test(t)) { errorVisible = true; break; }"
-                    "  }"
-                    "  return JSON.stringify({foundInThread, composerEmpty, errorVisible, url});"
-                    "})()"
-                )
-                ws.send(_json.dumps({
-                    "id": 3, "method": "script.evaluate",
-                    "params": {"expression": check_js, "target": {"context": ctx_id}, "awaitPromise": False},
-                }))
-                v = _json.loads(ws.recv()).get("result", {}).get("result", {}).get("value", "")
-                if v:
-                    d = _json.loads(v)
-                    posted = d.get("foundInThread", False) and not d.get("errorVisible", False)
-                    verify_msg = (
-                        f"foundInThread={d.get('foundInThread')} "
-                        f"composerEmpty={d.get('composerEmpty')} "
-                        f"errorVisible={d.get('errorVisible')} "
-                        f"url={d.get('url')}"
-                    )
-        try:
-            ws.send(_json.dumps({"id": 99, "method": "session.end", "params": {}}))
-        except Exception:
-            pass
-        ws.close()
-    except Exception as e:
-        verify_msg = f"verify exception: {e}"
+    # Look for needle in any rendered comment OR for the
+    # composer being empty (no error message and no value)
+    # which also implies a successful post.
+    # The pieces join into one line, so the script must not contain // comments.
+    check_js = (
+        "(() => {"
+        "  const needle = " + _json.dumps(needle) + ";"
+        "  const url = location.href;"
+        "  /* 1) Primary: needle appears in an element that looks like a comment body. */"
+        "  const sels = ['[data-testid=\"comment\"]', 'shreddit-comment', '[id^=\"comment-tree-content-anchor\"]', 'div[role=\"region\"]'];"
+        "  let foundInThread = false;"
+        "  for (const s of sels) {"
+        "    const els = document.querySelectorAll(s);"
+        "    for (const el of els) {"
+        "      if ((el.textContent || '').includes(needle)) { foundInThread = true; break; }"
+        "    }"
+        "    if (foundInThread) break;"
+        "  }"
+        "  /* 2) Secondary: composer is empty and no error message. */"
+        "  let composerEmpty = false;"
+        "  let errorVisible = false;"
+        "  const composers = document.querySelectorAll('faceplate-textarea-input, textarea');"
+        "  for (const c of composers) {"
+        "    const ph = (c.getAttribute && c.getAttribute('placeholder')) || '';"
+        "    if (/join the conversation|add a comment/i.test(ph)) {"
+        "      composerEmpty = !((c.value || c.innerText || '').trim());"
+        "      break;"
+        "    }"
+        "  }"
+        "  const errEls = document.querySelectorAll('*');"
+        "  for (const e of errEls) {"
+        "    const t = (e.textContent || '');"
+        "    if (/field is required|cannot be empty|something went wrong|too fast/i.test(t)) { errorVisible = true; break; }"
+        "  }"
+        "  return JSON.stringify({foundInThread, composerEmpty, errorVisible, url});"
+        "})()"
+    )
+    d, why = bidi_evaluate_json(check_js)
+    if d is None:
+        posted = False
+        verify_msg = f"verify failed: {why}"
+    else:
+        posted = bool(d.get("foundInThread", False)) and not d.get("errorVisible", False)
+        verify_msg = (
+            f"foundInThread={d.get('foundInThread')} "
+            f"composerEmpty={d.get('composerEmpty')} "
+            f"errorVisible={d.get('errorVisible')} "
+            f"url={d.get('url')}"
+        )
     logger.warning("post-submit verify: posted=%s %s", posted, verify_msg)
 
     if not posted:
@@ -717,12 +774,16 @@ class RedditOutreachLoop:
     """One pass = visit one subreddit, find up to MAX_THREADS_PER_PASS candidates, draft + maybe post."""
 
     def run_one_pass(self, subreddit: str, task_id: Optional[int] = None) -> dict:
+        # recon imports this module, so its judge rule is read here, not at import.
+        from backend.services.social_outreach.recon import judged_unfit
+
         report = {
             "subreddit": subreddit,
             "drafted": 0,
             "posted": 0,
             "aborted": 0,
             "skipped": 0,
+            "skipped_by_llm": 0,
             "reason": None,
         }
 
@@ -737,6 +798,16 @@ class RedditOutreachLoop:
             return report
 
         rules_list = fetch_subreddit_rules(subreddit)
+        if rules_list is None:
+            report["reason"] = "rules_unreadable"
+            audit.log_outreach_event(
+                platform="reddit", action="abort",
+                target_url=f"{REDDIT_BASE}/r/{subreddit}",
+                status="aborted", abort_reason="rules_unreadable",
+                task_id=task_id,
+            )
+            report["aborted"] += 1
+            return report
         rules_text = "\n".join(rules_list)
         ban_match = is_self_promo_banned(rules_text)
         if ban_match:
@@ -759,7 +830,9 @@ class RedditOutreachLoop:
         recent_done = audit.recent_thread_ids("reddit", hours=168)
 
         for thread in threads:
-            if report["posted"] + report["aborted"] >= MAX_THREADS_PER_PASS:
+            # This loop only drafts (the approved-drafts tick posts), so the
+            # cap counts drafts.
+            if report["drafted"] + report["aborted"] >= MAX_THREADS_PER_PASS:
                 break
             if thread.id in recent_done:
                 report["skipped"] += 1
@@ -771,7 +844,32 @@ class RedditOutreachLoop:
                 report["skipped"] += 1
                 continue
 
-            draft_result = draft_via_backend(thread, comments, feature_hint, task_id)
+            # Thread-fit judge, asked the same way recon asks it: a keyword
+            # match cannot tell a setup question from a rant against local AI.
+            # A thread it grades below the bar, or says "skip" to, gets no
+            # draft. When the judge cannot run, the thread is drafted marked
+            # relevance unchecked, and an unsupervised draft is then held.
+            relevance = external_grader.score_thread_relevance(
+                title=thread.title,
+                selftext=thread.selftext,
+                top_comments=comments,
+                feature_hint=feature_hint,
+                subreddit=subreddit,
+            )
+            relevance_unchecked = bool(relevance.get("skipped"))
+            logger.info(
+                "reddit loop: r/%s thread=%s relevance grade=%.2f verdict=%s unchecked=%s reason=%s",
+                subreddit, thread.id, relevance.get("grade", 0.0), relevance.get("verdict") or "-",
+                relevance_unchecked, (relevance.get("reason") or "")[:80],
+            )
+            if judged_unfit(relevance):
+                report["skipped_by_llm"] += 1
+                continue
+
+            draft_result = draft_via_backend(
+                thread, comments, task_id,
+                relevance_unchecked=relevance_unchecked,
+            )
             if not draft_result:
                 report["skipped"] += 1
                 continue

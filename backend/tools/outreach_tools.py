@@ -165,7 +165,8 @@ class OutreachListQueueTool(BaseTool):
             description=(
                 "candidate (found, not drafted yet), drafted (waiting for review), approved "
                 "(queued to post), processing (a poster has picked it up), submitting (being "
-                "published now), posted, rejected, aborted (posting failed)"
+                "published now), posted, rejected, aborted (posting failed), unsupported "
+                "(nothing here posts that action on that platform)"
             ),
             default="drafted", enum=list(transitions.KNOWN_STATUSES),
         ),
@@ -289,7 +290,13 @@ class OutreachDraftPostTool(BaseTool):
         ),
         "feature_hint": ToolParameter(
             name="feature_hint", type="string", required=False,
-            description="Override auto-detected feature angle (e.g. 'video_gen', 'rag')",
+            description=(
+                "A feature for the draft to lead with, e.g. 'rag' or 'video_gen' "
+                "(or plain words). The persona leads with it when it fits the thread "
+                "(the community, in share mode) and grades below 0.3, saying why, "
+                "when it does not. Leave it out to let the persona pick the angle "
+                "from the pitch sheet."
+            ),
         ),
         "include_link": ToolParameter(
             name="include_link", type="bool", required=False,
@@ -413,7 +420,7 @@ class OutreachDraftPostTool(BaseTool):
                 context=context,
                 tone=kwargs.get("tone"),
                 mode=mode,
-                feature_hint=kwargs.get("feature_hint"),
+                requested_feature=kwargs.get("feature_hint"),
                 include_link=bool(kwargs.get("include_link", False)),
             )
         except Exception as e:

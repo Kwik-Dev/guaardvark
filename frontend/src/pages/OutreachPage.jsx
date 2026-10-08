@@ -36,6 +36,7 @@ import ErrorOutlineIcon from "@mui/icons-material/ErrorOutline";
 import RadioButtonUncheckedIcon from "@mui/icons-material/RadioButtonUnchecked";
 import OpenInNewIcon from "@mui/icons-material/OpenInNew";
 import PowerSettingsNewIcon from "@mui/icons-material/PowerSettingsNew";
+import StopCircleIcon from "@mui/icons-material/StopCircle";
 import VisibilityIcon from "@mui/icons-material/Visibility";
 import AddCommentIcon from "@mui/icons-material/AddComment";
 import AddIcon from "@mui/icons-material/Add";
@@ -80,6 +81,9 @@ const PLATFORM_OPTIONS = [
   { value: "internal", label: "Internal note", auto: false },
 ];
 
+// Terminal statuses the History panel lists ("all" shows these together).
+const HISTORY_STATUSES = ["posted", "aborted", "rejected", "unsupported"];
+
 const CHAT_EXAMPLES = [
   "comment on youtube videos about Ollama",
   "market Guaardvark on reddit about ComfyUI",
@@ -123,6 +127,7 @@ const OutreachPage = () => {
   const [passTopics, setPassTopics] = useState("");
   const [lastTaskId, setLastTaskId] = useState(null);
   const [killConfirmOpen, setKillConfirmOpen] = useState(false);
+  const [postingStopConfirmOpen, setPostingStopConfirmOpen] = useState(false);
 
   // Citation tool
   const [citationUrl, setCitationUrl] = useState("");
@@ -181,12 +186,12 @@ const OutreachPage = () => {
     }
   }, []);
 
-  // History: terminal-state audit rows (posted/aborted/rejected). Read-only —
+  // History: terminal-state audit rows (HISTORY_STATUSES). Read-only —
   // gives the user a click-through receipt for every comment that actually
   // landed (or didn't) so they can verify or audit afterward. The queue panel
   // above only shows status='drafted'; this fills the gap on the other end.
   const [history, setHistory] = useState([]);
-  const [historyFilter, setHistoryFilter] = useState("posted");  // 'posted' | 'aborted' | 'rejected' | 'all'
+  const [historyFilter, setHistoryFilter] = useState("posted");  // one of HISTORY_STATUSES, or 'all'
   const [loadingHistory, setLoadingHistory] = useState(false);
 
   const fetchHistory = useCallback(async () => {
@@ -496,6 +501,32 @@ const OutreachPage = () => {
     }
   };
 
+  const confirmPostingStopToggle = async () => {
+    if (!status) return;
+    const stopping = !status.posting_stopped;
+    setPostingStopConfirmOpen(false);
+    setBusy(true);
+    try {
+      if (stopping) {
+        const result = await outreachApi.stopAllPosting();
+        const held = result.held_publishes || 0;
+        const inFlight = result.in_flight_publishes || 0;
+        setInfo(
+          `All public posting stopped. ${held} queued Connections publish(es) held on the Approvals page.` +
+            (inFlight ? ` ${inFlight} already being sent could not be recalled.` : ""),
+        );
+      } else {
+        await outreachApi.resumePosting();
+        setInfo("Public posting resumed. Held Connections publishes still wait on the Approvals page.");
+      }
+      await fetchStatus();
+    } catch (e) {
+      setError(`${stopping ? "stop" : "resume"} failed: ${e.message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleSupervisedToggle = async () => {
     if (!status) return;
     setBusy(true);
@@ -602,6 +633,18 @@ const OutreachPage = () => {
             <CircularProgress size={16} />
           )}
           <Box sx={{ flex: 1 }} />
+          {status && (
+            <Button
+              size="small"
+              color={status.posting_stopped ? "success" : "error"}
+              variant="outlined"
+              startIcon={status.posting_stopped ? <PlayArrowIcon /> : <StopCircleIcon />}
+              onClick={() => setPostingStopConfirmOpen(true)}
+              disabled={busy}
+            >
+              {status.posting_stopped ? "Resume public posting" : "Stop all public posting"}
+            </Button>
+          )}
           {lastTaskId != null && (
             <Typography variant="caption" color="text.secondary">
               Last pass:{" "}
@@ -619,6 +662,12 @@ const OutreachPage = () => {
             </IconButton>
           </Tooltip>
         </Box>
+        {status?.posting_stopped && (
+          <CollapsibleAlert severity="error" icon={<StopCircleIcon />} sx={{ mt: 1 }}>
+            All public posting is stopped: outreach and Connections publish nothing until you resume.
+            Approved outreach drafts stay approved; queued Connections publishes wait on the Approvals page.
+          </CollapsibleAlert>
+        )}
         {status && (
           <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1, fontSize: "0.7rem" }}>
             {status.supervised
@@ -670,7 +719,7 @@ const OutreachPage = () => {
                     size="small"
                     variant="text"
                     startIcon={<PlayArrowIcon />}
-                    disabled={busy || !status?.enabled}
+                    disabled={busy || !status?.enabled || status?.posting_stopped}
                     onClick={() => handleRunPass("reddit")}
                     sx={{ textTransform: "none", justifyContent: "flex-start", fontSize: "0.75rem" }}
                   >
@@ -685,7 +734,7 @@ const OutreachPage = () => {
                     size="small"
                     variant="text"
                     startIcon={<PlayArrowIcon />}
-                    disabled={busy || !status?.enabled}
+                    disabled={busy || !status?.enabled || status?.posting_stopped}
                     onClick={() => handleRunPass("youtube")}
                     sx={{ textTransform: "none", justifyContent: "flex-start", fontSize: "0.75rem" }}
                   >
@@ -700,7 +749,7 @@ const OutreachPage = () => {
                     size="small"
                     variant="text"
                     startIcon={<PlayArrowIcon />}
-                    disabled={busy || !status?.enabled}
+                    disabled={busy || !status?.enabled || status?.posting_stopped}
                     onClick={() => handleRunPass("self_share")}
                     sx={{ textTransform: "none", justifyContent: "flex-start", fontSize: "0.75rem" }}
                   >
@@ -1047,7 +1096,7 @@ const OutreachPage = () => {
           <Typography variant="subtitle2" sx={{ flex: 1 }}>
             History
           </Typography>
-          {["posted", "aborted", "rejected", "all"].map((f) => (
+          {[...HISTORY_STATUSES, "all"].map((f) => (
             <Chip
               key={f}
               size="small"
@@ -1068,12 +1117,12 @@ const OutreachPage = () => {
           <CircularProgress size={20} />
         ) : (() => {
           const filtered = historyFilter === "all"
-            ? history.filter((r) => ["posted", "aborted", "rejected"].includes(r.status))
+            ? history.filter((r) => HISTORY_STATUSES.includes(r.status))
             : history.filter((r) => r.status === historyFilter);
           if (filtered.length === 0) {
             return (
               <Typography variant="body2" color="text.secondary">
-                Nothing in this view yet. Drafts that get approved and successfully post will appear under 'posted'; servo failures land under 'aborted'; ones you reject in the queue land under 'rejected'.
+                Nothing in this view yet. Drafts that get approved and successfully post will appear under 'posted'; servo failures land under 'aborted'; ones you reject in the queue land under 'rejected'; approved drafts that nothing here can post on their platform (a reply outside YouTube, for one) land under 'unsupported'.
               </Typography>
             );
           }
@@ -1085,6 +1134,7 @@ const OutreachPage = () => {
                   const text = (row.posted_text || row.draft_text || "").trim();
                   const statusColor = row.status === "posted" ? "success"
                                     : row.status === "aborted" ? "error"
+                                    : row.status === "unsupported" ? "warning"
                                     : "default";
                   return (
                     <Box
@@ -1096,6 +1146,7 @@ const OutreachPage = () => {
                         borderLeft: 3,
                         borderColor: row.status === "posted" ? "success.main"
                                    : row.status === "aborted" ? "error.main"
+                                   : row.status === "unsupported" ? "warning.main"
                                    : "divider",
                       }}
                     >
@@ -1319,6 +1370,30 @@ const OutreachPage = () => {
             disabled={ndBusy || !ndBody.trim()}
           >
             {ndSeededId ? "Save (update seeded row)" : "Save draft"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={postingStopConfirmOpen} onClose={() => setPostingStopConfirmOpen(false)}>
+        <DialogTitle>
+          {status?.posting_stopped ? "Resume public posting?" : "Stop all public posting?"}
+        </DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            {status?.posting_stopped
+              ? "Posts can go out again. Held Connections publishes stay on the Approvals page until someone approves them; approved outreach drafts post on the usual schedule while outreach is enabled."
+              : "Nothing is posted publicly from this install until you resume: no outreach replies or shares, and no Connections publishes, including scheduled, chat and MCP requests. Queued Connections publishes are held on the Approvals page and need approving again; approved outreach drafts stay approved. A post already being sent may still go out. This is separate from the outreach Enabled switch."}
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPostingStopConfirmOpen(false)}>Cancel</Button>
+          <Button
+            variant="contained"
+            color={status?.posting_stopped ? "success" : "error"}
+            onClick={confirmPostingStopToggle}
+            autoFocus
+          >
+            {status?.posting_stopped ? "Resume posting" : "Stop posting"}
           </Button>
         </DialogActions>
       </Dialog>

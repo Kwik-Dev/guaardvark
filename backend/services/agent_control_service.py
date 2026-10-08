@@ -204,6 +204,11 @@ class ActionStep:
     timestamp: float = field(default_factory=time.time)
 
 
+# Reason prefix of an AgentResult from a recipe that refused to run. The task
+# ends there instead of falling back to the see-think-act loop.
+RECIPE_REFUSED = "recipe_refused"
+
+
 @dataclass
 class AgentResult:
     """Final result of a task execution."""
@@ -430,6 +435,8 @@ class AgentControlService:
         # clicking until the screen next changes (key -> name as written).
         self._not_found_counts: Dict[str, int] = {}
         self._banned_targets: Dict[str, str] = {}
+        # Per task: obstacles of each type handled or escalated by ASSESS.
+        self._obstacle_counts: Dict[str, int] = {}
         # Where the field being typed into was clicked; the typed text has to
         # show up near it.
         self._field_point: Optional[Tuple[int, int]] = None
@@ -964,6 +971,7 @@ class AgentControlService:
             self._same_strategy_failures = 0
             self._not_found_counts = {}
             self._banned_targets = {}
+            self._obstacle_counts = {}
             self._field_point = None
 
         # Attempts per click target this task: the second try at the same
@@ -1029,6 +1037,15 @@ class AgentControlService:
 
         # Check for recipe match — skip see-think-act loop for known patterns
         recipe_result = self._try_recipe(task, screen)
+        if recipe_result is not None and (recipe_result.reason or "").startswith(RECIPE_REFUSED):
+            # A recipe that publishes matched on a page it is not for. The
+            # see-think-act loop would post the text on that page instead, so
+            # the task ends with the refusal.
+            with self._lock:
+                if self._active_task_id == task_id:
+                    self._active = False
+            recipe_result.total_time_seconds = time.time() - start_time
+            return finish(recipe_result)
         if recipe_result is not None:
             _rname = (recipe_result.reason or "").replace("recipe:", "", 1).strip() or None
             if _rname:
@@ -1187,8 +1204,8 @@ class AgentControlService:
                     # Persistent cross-session knowledge rides the system slot,
                     # not the user prompt — keeps the per-step prompt small
                     # enough to hold the model in instructed mode while still
-                    # carrying URL routes, Firefox button location, recipe
-                    # index, etc. into every decision.
+                    # carrying the compact knowledge (URL routes, browser
+                    # tactics) and distilled lessons into every decision.
                     persistent_system = self._build_persistent_knowledge_system()
                     if persistent_system:
                         logger.debug(
@@ -1329,6 +1346,9 @@ class AgentControlService:
                     # advisory path) a concrete, history-backed string instead of forcing the
                     # model to perfectly re-phrase the visible state. Mirrors how expected_effect
                     # is pulled from action (1067) and recipe success_proof is top-level declared.
+                    # A grounded proof is ours, not the model's: it must be seen on
+                    # screen, and never takes the advisory branch below.
+                    proof_grounded = False
                     if enforce_proof and (not proof or proof_lc in trivial_proofs) and has_recent_verified:
                         for st in reversed(self._action_history):
                             if getattr(getattr(st, "action", None), "action_type", "") == "done":
@@ -1337,6 +1357,7 @@ class AgentControlService:
                             if tgt:
                                 proof = f"{tgt} now visible/achieved (per prior verified servo change)"
                                 proof_lc = proof.lower()
+                                proof_grounded = True
                                 # attach back so emit/history and finish() see the grounded value
                                 decision.action.success_proof = proof
                                 logger.debug(f"[AGENT][DONE] Grounded success_proof from prior verified step: {proof!r}")
@@ -1378,11 +1399,12 @@ class AgentControlService:
                     # intent as reality.
                     #
                     # ADVISORY EXCEPTION (verified fix for servo-success + user-visible
-                    # goal not leading to termination): if a prior non-done step had
-                    # servo DPC (or equivalent) `verified` or post_action_effect indicating
-                    # real visible change (e.g. the exact GOTHAM RISING thumbnail click
-                    # that achieved the goal per user + step-1 [OK]), then the semantic
-                    # verify on the *model's* proof is treated as advisory only.
+                    # goal not leading to termination): if the latest click (see
+                    # _task_has_verified_click) had servo DPC (or equivalent) `verified`
+                    # or post_action_effect indicating real visible change (e.g. the exact
+                    # GOTHAM RISING thumbnail click that achieved the goal per user +
+                    # step-1 [OK]), then the semantic verify on the *model's* proof is
+                    # treated as advisory only. A proof grounded from history never is.
                     # This re-uses the documented contract for slow expected_effect
                     # verifies (1085: "keeping click as OK; next SEE will observe actual
                     # state") and recipe final proof (2846-2853: "DO NOT flip the whole
@@ -1403,7 +1425,7 @@ class AgentControlService:
                             proof, screen, timeout_s=10.0, allow_dom_fastpath=False,
                         )
                         if not bool(done_verify.get("success", False)):
-                            if has_recent_verified:
+                            if has_recent_verified and not proof_grounded:
                                 # Advisory path: prior servo evidence (DPC change) + user-visible
                                 # goal already confirm the achievement. Log + emit advisory note
                                 # (visible in AgentThinkingTrail), append non-failed advisory step
@@ -1665,11 +1687,14 @@ class AgentControlService:
                                 failed = not launch_verify.get("success", False)
                             # Lean on memory/lessons for recovery (per approved plan + STA awareness): query prior similar fails/lessons.
                             try:
-                                from backend.api.memory_api import get_memories_for_context
-                                from backend.services.memory_contract import memory_match_score
-                                prior = get_memories_for_context(limit=3, query=f"launcher icon click failed for {target}", min_importance=0.3) or []
+                                from backend.api.memory_api import search_memories
+                                prior = search_memories(
+                                    query=f"launcher icon click failed for {target}",
+                                    limit=3, min_importance=0.3,
+                                    match_text=target, min_match=0.2,
+                                )
                                 if prior:
-                                    lesson_hints = [m.get('content','')[:120] for m in prior if memory_match_score(target, m.get('content','')) > 0.2]
+                                    lesson_hints = [(m.get('content') or '')[:120] for m in prior]
                                     if lesson_hints:
                                         result["memory_lesson_hints"] = lesson_hints
                                         logger.debug(f"[AGENT][STA] launcher memory hints for {target}: {lesson_hints}")
@@ -2133,33 +2158,21 @@ class AgentControlService:
 
                     if semantic_loop or spatial_loop:
                         loop_type = "Spatial" if spatial_loop else "Semantic"
-                        # Distinguish "stuck repeating a FAILED action" (genuine
-                        # loop — abort as failure) from "repeated a SUCCESSFUL
-                        # action 3x" (model fixation, but the work happened —
-                        # don't lie and call it a failure).
-                        last3_failed = [h.failed for h in self._action_history[-3:]]
-                        all_steps_ok = not any(last3_failed)
+                        repeat_ok, repeat_reason = self._repetition_verdict(self._action_history[-3:])
                         logger.warning(
                             f"[AGENT][LOOP] {loop_type} action repeated 3x: "
                             f"{last3[0][0]} \"{last3[0][1] or last3[0][2]}\" "
                             f"at {self._click_history[-1] if self._click_history else 'n/a'}. "
-                            f"Aborting (steps_ok={all_steps_ok})."
+                            f"Aborting ({repeat_reason})."
                         )
                         # Capture fresh screenshot for prompt/history context
                         try:
                             fail_shot, _ = self._capture_with_retry(screen)
                         except Exception:
                             pass
-                        if all_steps_ok:
-                            return finish(AgentResult(
-                                success=True,
-                                reason="completed_with_repetition",
-                                steps=self._action_history,
-                                total_time_seconds=time.time() - start_time
-                            ))
                         return finish(AgentResult(
-                            success=False,
-                            reason="loop_detected_no_progress",
+                            success=repeat_ok,
+                            reason=repeat_reason,
                             steps=self._action_history,
                             total_time_seconds=time.time() - start_time
                         ))
@@ -2459,6 +2472,16 @@ class AgentControlService:
         try:
             import re as _re
 
+            # A display that cannot be opened makes every search below come back
+            # empty, which would read as "no windows open".
+            probe = subprocess.run(
+                ["xdotool", "getdisplaygeometry"],
+                capture_output=True, text=True, timeout=2, env=env,
+            )
+            if probe.returncode != 0:
+                logger.debug(f"Desktop state: display {display} not reachable: {probe.stderr.strip()[:120]}")
+                return "Desktop state: unknown (display not reachable)"
+
             # Search for known application windows by name
             app_searches = ["Firefox", "Chromium", "Chrome", "Terminal",
                             "Files", "Text Editor", "LibreOffice"]
@@ -2527,31 +2550,60 @@ class AgentControlService:
             logger.debug(f"Desktop state query failed: {e}")
             return "Desktop state: unknown (query failed)"
 
+    # A task that is nothing but opening or closing one app, anchored like the
+    # recipe triggers. Anything after the app ("open firefox and go to
+    # reddit.com", "open the settings in firefox") is not met by a window
+    # appearing or going away.
+    _BARE_OPEN_TASK_RE = re.compile(
+        r"^\s*(?:please\s+)?(?:open|start|launch)\s+(?:the\s+)?"
+        r"(?:firefox|chrome|chromium|browser|terminal)\s*[.!]?\s*$")
+    _BARE_CLOSE_TASK_RE = re.compile(
+        r"^\s*(?:please\s+)?(?:(?:close|quit|exit)\s+(?:the\s+)?"
+        r"(?:firefox|chrome|chromium|browser|terminal)|close\s+all\s+(?:the\s+)?windows)"
+        r"\s*[.!]?\s*$")
+
     @staticmethod
     def _check_early_done(task: str, display: Optional[str] = None) -> str:
         """Check if the task goal is obviously met based on desktop state.
 
-        Returns a reason string if done, empty string if not.
+        Only a bare "open <app>" or "close <app>" task (or "close all
+        windows") is checked; any other task returns "" without a query.
+        Returns a reason string if done, empty string if not or if the
+        desktop state could not be read.
         Fast check (<20ms) — no vision model, just xdotool queries.
         """
-        import re as _re
         task_lower = task.lower()
+        is_close = bool(AgentControlService._BARE_CLOSE_TASK_RE.match(task_lower))
+        is_open = bool(AgentControlService._BARE_OPEN_TASK_RE.match(task_lower))
+        if not (is_close or is_open):
+            return ""
         desktop = AgentControlService._get_desktop_state(display=display)
+        # An unread desktop lists no windows, which would look like every app had closed.
+        if desktop.startswith("Desktop state: unknown"):
+            return ""
+        titles = "\n".join(
+            line for line in desktop.splitlines() if line.lstrip().startswith("- ")
+        ).lower()
 
         # "Close X" tasks: if no windows are open, we're done
-        if _re.search(r'\b(?:close|quit|exit|kill|shut\s*down|stop)\b', task_lower):
+        if is_close:
             if "No application windows open" in desktop:
                 return "no windows open — target closed"
 
-            # If closing a specific app, check if that app is gone
-            for app in ("firefox", "chrome", "chromium", "browser", "terminal"):
-                if app in task_lower and app.capitalize() not in desktop.lower():
+            # Terminal titles read "user@host: ~", so a terminal can't be told apart by title.
+            for app, window_names in (
+                ("firefox", ("firefox",)),
+                ("chromium", ("chromium", "chrome")),
+                ("chrome", ("chrome", "chromium")),
+                ("browser", ("firefox", "chromium", "chrome")),
+            ):
+                if app in task_lower and not any(name in titles for name in window_names):
                     return f"{app} no longer visible"
 
         # "Open X" tasks: if the target app is now visible
-        if _re.search(r'\b(?:open|start|launch)\b', task_lower):
+        if is_open:
             for app in ("firefox", "chrome", "chromium", "terminal"):
-                if app in task_lower and app.lower() in desktop.lower():
+                if app in task_lower and app in titles:
                     return f"{app} is now open"
 
         return ""
@@ -3138,6 +3190,10 @@ class AgentControlService:
             logger.error(f"Action execution error: {e}", exc_info=True)
             return {"success": False, "error": str(e)}
 
+    # Obstacles of one type ASSESS handles per task before leaving the screen
+    # to THINK: a banner Escape did not close the first two times stays open.
+    _OBSTACLE_TRIES_PER_TYPE = 2
+
     def _assess_obstacles(self, scene_description: str, analyzer, screen, iteration: int) -> str:
         """
         ASSESS phase: detect and handle obstacles before the main THINK step.
@@ -3159,7 +3215,7 @@ class AgentControlService:
                       "dialog is blocking", "dialog is covering", "modal is open",
                       "are you sure you want to"],
             "restore": ["restore session", "restore previous", "open previous tabs", "previous session"],
-            "cookie": ["cookie", "accept cookies", "cookie consent", "gdpr"],
+            "cookie": ["accept cookies", "cookie consent", "gdpr"],
             "error": ["page not found", "404", "server error", "500", "connection refused"],
         }
 
@@ -3172,6 +3228,18 @@ class AgentControlService:
         if not detected_type:
             return "clear"
 
+        tries = self._obstacle_counts.get(detected_type, 0)
+        if tries >= self._OBSTACLE_TRIES_PER_TYPE:
+            logger.info(
+                f"[AGENT][STEP {iteration+1}][ASSESS] {detected_type} obstacle already handled "
+                f"{tries}x this task; leaving it to THINK"
+            )
+            return "clear"
+
+        def _counted(outcome: str) -> str:
+            self._obstacle_counts[detected_type] = tries + 1
+            return outcome
+
         logger.info(f"[AGENT][STEP {iteration+1}][ASSESS] Obstacle detected: {detected_type}")
 
         # Stage 1: Fast model handles known obstacles with simple actions
@@ -3180,7 +3248,7 @@ class AgentControlService:
             screen.hotkey("Escape")
             _time.sleep(0.5)
             logger.info(f"[AGENT][STEP {iteration+1}][ASSESS] Tried Escape for permission dialog")
-            return "handled"
+            return _counted("handled")
 
         elif detected_type == "restore":
             # Restore session bars: click the X dismiss button (far right)
@@ -3191,13 +3259,13 @@ class AgentControlService:
             screen.click(1000, 100)
             _time.sleep(0.5)
             logger.info(f"[AGENT][STEP {iteration+1}][ASSESS] Dismissed restore session bar")
-            return "handled"
+            return _counted("handled")
 
         elif detected_type == "cookie":
             screen.hotkey("Escape")
             _time.sleep(0.5)
             logger.info(f"[AGENT][STEP {iteration+1}][ASSESS] Tried Escape for cookie banner")
-            return "handled"
+            return _counted("handled")
 
         elif detected_type == "error":
             # 404 or connection error — this is informational, not blocking
@@ -3224,7 +3292,7 @@ class AgentControlService:
             # No thinking model available, try Escape as fallback
             screen.hotkey("Escape")
             _time.sleep(0.5)
-            return "handled"
+            return _counted("handled")
 
         # Ask the thinking model to reason about the obstacle
         escalation_prompt = (
@@ -3241,6 +3309,17 @@ class AgentControlService:
         if thinking_result.success:
             logger.debug(f"[AGENT][STEP {iteration+1}][ASSESS][THINKING] {thinking_result.description[:200]}")
             decision = self._parse_decision(thinking_result.description)
+            if ((decision.action.action_type == "click" and decision.action.target_description)
+                    or (decision.action.action_type == "hotkey" and decision.action.keys)):
+                # The same checks a THINK step gets: banned targets, cooldowns.
+                refusal = self._refusal_for(
+                    decision.action, training_mode=getattr(self, "_training_mode", False))
+                if refusal:
+                    logger.warning(
+                        f"[AGENT][STEP {iteration+1}][ASSESS] Escalation "
+                        f"{decision.action.action_type} not sent: {refusal}"
+                    )
+                    return "clear"
             if decision.action.action_type == "click" and decision.action.target_description:
                 from backend.services.servo_controller import ServoController
                 from backend.services.training_data_collector import TrainingDataCollector
@@ -3257,12 +3336,12 @@ class AgentControlService:
             else:
                 screen.hotkey("Escape")
             _time.sleep(0.5)
-            return "escalated"
+            return _counted("escalated")
 
         # Thinking model also failed — last resort Escape
         screen.hotkey("Escape")
         _time.sleep(0.5)
-        return "handled"
+        return _counted("handled")
 
     def _refresh_dom_snapshot(self) -> None:
         """Pull a fresh DOM snapshot from Firefox once per iteration.
@@ -3431,8 +3510,26 @@ class AgentControlService:
         return "OK"
 
     @classmethod
+    def _repetition_verdict(cls, repeated) -> Tuple[bool, str]:
+        """(success, reason) for a task whose last three steps were one action.
+
+        Success only when none of them failed and at least one changed the
+        screen (verified, or an effect other than no change): the work
+        happened and the model fixated on it. A click that changed nothing
+        is not a failed step, since [NO CHANGE] is advisory, so it is checked
+        here.
+        """
+        if any(st.failed for st in repeated):
+            return False, "loop_detected_no_progress"
+        for st in repeated:
+            r = st.result or {}
+            if bool(r.get("verified")) or str(r.get("post_action_effect") or "") not in cls._NO_CHANGE_EFFECTS:
+                return True, "completed_with_repetition"
+        return False, "loop_detected_no_progress"
+
+    @classmethod
     def _task_has_verified_click(cls, history) -> bool:
-        """Did a click in this task change the screen where it landed.
+        """Did the latest click in this task change the screen where it landed.
 
         Gates the advisory "done" that overrides a proof the verifier could
         not see. Only clicks count: a hotkey is marked verified whatever the
@@ -3442,14 +3539,20 @@ class AgentControlService:
         to its points changed. A smiley drawn exactly as asked was otherwise
         refused "done" four times, because the eye would not call two dots
         and a line "a complete smiley face" (2026-10-02).
+        Only the most recent click since the last navigate is read, failed or
+        not: a verified click on a composer says nothing about the Post click
+        after it.
         ``history`` is the current task's, reset when each task starts.
         """
-        for st in history:
-            if st.failed or st.action.action_type not in cls._CLICK_FAMILY + ("click_at", "draw"):
+        for st in reversed(history):
+            kind = st.action.action_type
+            if kind == "navigate":
+                return False
+            if kind not in cls._CLICK_FAMILY + ("click_at", "draw"):
                 continue
             r = st.result or {}
-            if bool(r.get("verified")) or str(r.get("post_action_effect") or "") == "verified":
-                return True
+            return not st.failed and (
+                bool(r.get("verified")) or str(r.get("post_action_effect") or "") == "verified")
         return False
 
     _NUMBER_WORDS = {
@@ -3875,27 +3978,39 @@ Reply ONLY with JSON:
         try:
             with open(path, "r") as f:
                 data = json.load(f)
+            # A recipe runs before any model reads the request, so one that fails
+            # validation (including the safety bounds in agent_knowledge_validator)
+            # is never loaded. If the validator cannot run, none are: the agent
+            # still works through its loop.
+            refused = {}
             try:
-                from backend.services.agent_knowledge_validator import validate_recipe_library
-                validation = validate_recipe_library(data)
-                errors = [i for i in validation.issues if i.severity == "error"]
-                if errors:
+                from backend.services.agent_knowledge_validator import validate_recipe
+                warnings = []
+                for name, recipe in data.items():
+                    if name.startswith("_"):
+                        continue
+                    result = validate_recipe(name, recipe)
+                    if not result.ok:
+                        refused[name] = result.error_messages()
+                    warnings.extend(i for i in result.issues if i.severity != "error")
+                if refused:
                     logger.warning(
-                        "[AGENT][RECIPE] validation errors: %s",
-                        "; ".join(f"{i.path}:{i.message}" for i in errors[:8]),
+                        "[AGENT][RECIPE] not loading %d recipe(s) that fail validation: %s",
+                        len(refused),
+                        "; ".join(m for msgs in refused.values() for m in msgs[:2])[:1200],
                     )
-                elif validation.issues:
+                if warnings:
                     # Only debug-level for migration warnings (legacy waits, missing proof on old recipes)
                     logger.debug(
                         "[AGENT][RECIPE] validation warnings: %s",
-                        "; ".join(
-                            f"{i.severity}:{i.path}:{i.message}"
-                            for i in validation.issues[:8]
-                        ),
+                        "; ".join(f"{i.severity}:{i.path}:{i.message}" for i in warnings[:8]),
                     )
             except Exception as ve:
-                logger.debug(f"Recipe validation skipped: {ve}")
-            cls._recipe_cache = {k: v for k, v in data.items() if not k.startswith("_")}
+                logger.warning(f"[AGENT][RECIPE] validator unavailable, loading no recipes: {ve}")
+                refused = {k: [] for k in data if not k.startswith("_")}
+            cls._recipe_cache = {
+                k: v for k, v in data.items() if not k.startswith("_") and k not in refused
+            }
             cls._recipe_mtime = mtime
             logger.info(f"Loaded {len(cls._recipe_cache)} recipes from {path}")
             return cls._recipe_cache
@@ -3952,6 +4067,13 @@ Reply ONLY with JSON:
         "your", "will", "show", "shows", "text", "box", "form", "link", "menu",
         "tab", "panel", "dialog", "modal", "header", "footer", "list", "item",
         "items", "loading", "load", "loaded",
+        # State-change verbs. Without them "Firefox browser window opens and
+        # becomes visible." left "becomes" over, missed the window check and
+        # went to the vision model, which said no for 12s with Firefox up.
+        "become", "becomes", "appeared", "displayed", "shown",
+        # "URL address bar": browser chrome, not page content. With a blank
+        # page loaded the eye said no to it for 15s while Firefox was up.
+        "address",
         # Generic UI ACTION/label words — present on countless pages, so a match on
         # these alone must not confirm that a specific effect actually happened.
         "submit", "comment", "reply", "post", "send", "search", "save", "cancel",
@@ -4255,7 +4377,7 @@ Reply ONLY with JSON:
         # synthetic navigation phrase when "go to <known page>" matches.
         task_effective = task_for_match or task_stripped
 
-        # Also handle "go to X page" → localhost:5175/X
+        # Also handle "go to X page" → this install's web UI at localhost:<VITE_PORT>/X
         page_match = re.search(
             r'(?:go\s+to|open|navigate\s+to)\s+(?:the\s+)?(\w+)\s+page', task_lower
         )
@@ -4269,7 +4391,8 @@ Reply ONLY with JSON:
             }
             page = page_match.group(1)
             if page in page_routes:
-                task_effective = f"navigate to localhost:5175{page_routes[page]}"
+                from backend.utils.cors_policy import vite_port
+                task_effective = f"navigate to localhost:{vite_port()}{page_routes[page]}"
 
         recipes = self._load_recipes()
         for recipe_name, recipe in recipes.items():
@@ -4284,6 +4407,17 @@ Reply ONLY with JSON:
                     if recipe_name in ("open_firefox",) and self._is_firefox_running(screen):
                         logger.info(f"[AGENT][RECIPE] Skipping '{recipe_name}' — Firefox already running, focusing it")
                         return self._focus_firefox(screen)
+                    # A recipe that posts publicly runs only on the site it is
+                    # for. Anywhere else it refuses, before the gates below can
+                    # defer it to the loop, which would post on the open page.
+                    refusal = self._page_host_refusal(recipe_name)
+                    if refusal:
+                        logger.warning(f"[AGENT][RECIPE] Refusing '{recipe_name}' — {refusal}")
+                        return AgentResult(
+                            success=False,
+                            reason=f"{RECIPE_REFUSED}: {recipe_name} {refusal}",
+                            task=task,
+                        )
                     # Recipes can declare preconditions for the UI state they assume.
                     # When the world doesn't match (e.g. Firefox is already up but the
                     # recipe wants to click a desktop launcher), skip — the see-think-act
@@ -4331,6 +4465,39 @@ Reply ONLY with JSON:
                 logger.warning(f"[AGENT][RECIPE] Unknown precondition '{cond}' — ignoring")
         return True
 
+    # Recipes that post under the user's name, and the sites they post to.
+    _RECIPE_PAGE_HOSTS = {"youtube_comment": ("youtube.com",)}
+
+    def _page_host_refusal(self, recipe_name: str) -> str:
+        """Why `recipe_name` may not run on the open page, or "" when it may.
+
+        Only recipes in _RECIPE_PAGE_HOSTS are checked. A page whose address
+        cannot be read is refused too: a public post needs a known target.
+        """
+        hosts = self._RECIPE_PAGE_HOSTS.get(recipe_name)
+        if not hosts:
+            return ""
+        from backend.utils.hosts import host_matches, url_host
+        wanted = " or ".join(hosts)
+        url = self._current_page_url()
+        if not url:
+            return f"posts publicly and needs a {wanted} page open; the current page address could not be read"
+        host = url_host(url)
+        if host_matches(host, *hosts):
+            return ""
+        return f"posts publicly and needs a {wanted} page open; the current page is {host or url[:80]}"
+
+    def _current_page_url(self) -> str:
+        """Address of the page open in the agent Firefox, or "" when it cannot be read."""
+        try:
+            from backend.services.dom_metadata_extractor import DOMMetadataExtractor
+            snap = DOMMetadataExtractor.get_instance().extract()
+        except Exception:
+            return ""
+        if not snap or not getattr(snap, "success", False):
+            return ""
+        return getattr(snap, "url", "") or ""
+
     def _is_firefox_running(self, screen) -> bool:
         """Check if Firefox has a window on the virtual display."""
         import subprocess
@@ -4346,29 +4513,53 @@ Reply ONLY with JSON:
             return False
 
     def _focus_firefox(self, screen) -> 'AgentResult':
-        """Focus the existing Firefox window instead of launching a new one."""
+        """Focus the existing Firefox window instead of launching a new one.
+
+        Succeeds only when a Firefox window was found and windowactivate
+        returned 0. On failure the reason stays "recipe:focus_firefox" (the
+        recipe name is read from it) and the why is on the one failed step.
+        """
         import subprocess, time as _time
         display = getattr(screen, 'display', os.environ.get('DISPLAY', ':99'))
         env = {**os.environ, "DISPLAY": display}
         start = _time.time()
+        why = ""
         try:
             # Get Firefox window ID and activate it
             result = subprocess.run(
                 ["xdotool", "search", "--name", "Mozilla Firefox"],
                 capture_output=True, text=True, timeout=3, env=env,
             )
-            wids = result.stdout.strip().split()
-            if wids:
-                subprocess.run(
+            wids = (result.stdout or "").strip().split()
+            if not wids:
+                why = "no Firefox window"
+            else:
+                activated = subprocess.run(
                     ["xdotool", "windowactivate", "--sync", wids[0]],
-                    capture_output=True, timeout=3, env=env,
+                    capture_output=True, text=True, timeout=3, env=env,
                 )
-                _time.sleep(0.5)
-                logger.info("[AGENT][RECIPE] Focused existing Firefox window")
+                if activated.returncode != 0:
+                    why = ((activated.stderr or "").strip()
+                           or f"windowactivate exited {activated.returncode}")
+                else:
+                    _time.sleep(0.5)
+                    logger.info("[AGENT][RECIPE] Focused existing Firefox window")
         except Exception as e:
-            logger.warning(f"[AGENT][RECIPE] Firefox focus failed: {e}")
+            why = str(e) or type(e).__name__
 
         elapsed = _time.time() - start
+        if why:
+            logger.warning(f"[AGENT][RECIPE] Firefox focus failed: {why}")
+            return AgentResult(
+                success=False, reason="recipe:focus_firefox",
+                steps=[ActionStep(
+                    scene_description="recipe:focus_firefox",
+                    action=AgentAction(action_type="focus_window", target_description="Firefox"),
+                    result={"success": False, "reason": why},
+                    failed=True,
+                )],
+                total_time_seconds=elapsed,
+            )
         return AgentResult(
             success=True, reason="recipe:focus_firefox",
             steps=[], total_time_seconds=elapsed,
@@ -4394,16 +4585,18 @@ Reply ONLY with JSON:
 
         def get_servo():
             if servo_box["servo"] is None:
-                from backend.services.servo_controller import ServoController
                 from backend.services.training_data_collector import TrainingDataCollector
-                from backend.services.servo_knowledge_store import get_vision_config
-                from backend.utils.vision_analyzer import VisionAnalyzer
-                analyzer = VisionAnalyzer()
-                servo_box["servo"] = ServoController(
-                    screen, analyzer,
-                    collector=TrainingDataCollector(),
-                    vision_config=get_vision_config(analyzer.default_model),
-                )
+                # Point with the task's eye, as the loop does. The analyzer's
+                # default is whichever sighted model is resident, which can be a
+                # different model with its own calibration: gemma4:e4b's fit
+                # sent a correct top-of-screen answer for "Firefox icon",
+                # (299, 61), to (288, 0) while the task's eye was gemma4:12b.
+                be = getattr(self, "_brain_eye", None)
+                eye = be.eye if be is not None and be.eye else ""
+                if not eye:
+                    from backend.utils.vision_analyzer import VisionAnalyzer
+                    eye = VisionAnalyzer().default_model
+                _, servo_box["servo"] = build_servo(screen, eye, collector=TrainingDataCollector())
             return servo_box["servo"]
 
         for step in recipe.get("steps", []):
@@ -4637,6 +4830,17 @@ Reply ONLY with JSON:
         )
 
     @staticmethod
+    def _fill_knowledge_placeholders(text: str) -> str:
+        """Put this install's values into a knowledge file's {VITE_PORT} placeholders.
+
+        A plain replace: the files also hold literal braces (JSON examples).
+        """
+        if "{VITE_PORT}" not in text:
+            return text
+        from backend.utils.cors_policy import vite_port
+        return text.replace("{VITE_PORT}", vite_port())
+
+    @staticmethod
     def _load_self_knowledge() -> str:
         """Load the Guaardvark self-knowledge map for agent context."""
         import os
@@ -4645,7 +4849,8 @@ Reply ONLY with JSON:
         try:
             if os.path.exists(path):
                 with open(path, "r") as f:
-                    return f.read().strip() + "\n\n"
+                    text = f.read().strip()
+                return AgentControlService._fill_knowledge_placeholders(text) + "\n\n"
         except Exception as e:
             logger.warning(f"Failed to load self-knowledge: {e}")
         return ""
@@ -4663,7 +4868,7 @@ Reply ONLY with JSON:
         try:
             if os.path.exists(path):
                 with open(path, "r") as f:
-                    return f.read().strip()
+                    return AgentControlService._fill_knowledge_placeholders(f.read().strip())
         except Exception as e:
             logger.warning(f"Failed to load compact self-knowledge: {e}")
         return ""

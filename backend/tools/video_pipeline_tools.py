@@ -21,11 +21,21 @@ _MUSIC_VIDEO_RE = re.compile(
     r"\b(generate|create|make|produce)\b.{0,40}\bmusic[\s-]?video\b",
     re.IGNORECASE,
 )
+# A Film Crew request opens the message, as in cli/llx/intent_router.py: "run the
+# film crew on this: ...", "produce this script: INT. ...". The same words later in a
+# sentence ("can you produce a python script that ...", "I want to film a script
+# reading") are not a request.
 _FILM_CREW_RE = re.compile(
-    r"\b(start|run|create|make)\b.{0,40}\bfilm[\s-]?crew\b"
-    r"|\b(film|produce)\b.{0,20}\bscript\b",
+    r"^\s*(?:please\s+)?"
+    r"(?:(?P<crew>(?:start|run|create|make)\s+(?:the\s+|a\s+)?film[\s-]?crew)"
+    r"|(?:film|produce)\s+(?:this\s+)?script)\b",
     re.IGNORECASE,
 )
+# What may sit between the command and the script: "on this:", "with", ":".
+_FILM_CREW_LEAD_RE = re.compile(
+    r"^\s*(?:(?:on|for|with)(?:\s+(?:this|it|the\s+following))?\b)?\s*:?\s*", re.IGNORECASE,
+)
+_SCRIPT_LEAD_RE = re.compile(r"^\s*(?:with\b)?\s*:?\s*")
 
 
 def wants_music_video(message: str) -> bool:
@@ -79,8 +89,12 @@ def parse_film_crew_nl(message: str) -> dict:
     """Pull a script body (or path) out of a chat line. Pure."""
     text = (message or "").strip()
     text = re.sub(r"^\s*/film-crew\b[:\s]*", "", text, flags=re.I)
-    text = _FILM_CREW_RE.sub("", text)
-    text = re.sub(r"^\s*(with|:)\s*", "", text)
+    command = _FILM_CREW_RE.match(text)
+    if command:
+        lead = _FILM_CREW_LEAD_RE if command.group("crew") else _SCRIPT_LEAD_RE
+        text = lead.sub("", text[command.end():], count=1)
+    else:
+        text = _SCRIPT_LEAD_RE.sub("", text, count=1)
     script = " ".join(text.split()).strip()
     return {"script_text": script or None}
 

@@ -14,20 +14,43 @@ Thanks for your interest in contributing to Guaardvark! Whether it's a bug repor
 
 1. **Join Discord** (community + live Guaardvark bot: chat, `/imagine`, status) — invite link in the README when the server bot is live.
 2. **Run the project:** `git clone … && ./start.sh` (see Development Setup below).
-3. **Pick a** [`good first issue`](https://github.com/guaardvark/guaardvark/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) — especially recipes, docs, CLI, hardware tiers (#46–#49).
+3. **Pick a** [`good first issue`](https://github.com/guaardvark/guaardvark/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) — especially docs, CLI, hardware tiers (#46–#49).
 4. **Open a focused PR** and expect feedback within 24–48 hours when possible.
 
 ### Safe vs high-risk areas
 
 | Prefer for first PRs | High risk — open an issue before large changes |
 |----------------------|--------------------------------------------------|
-| `data/agent/recipes.json` and recipe docs | Agent control loop, servo, vision targeting |
+| Bug reports with steps and logs | Agent control loop, servo, vision targeting |
 | `docs/`, README, INSTALL, CAPABILITIES accuracy | Self-improvement apply / codebase mutation paths |
 | `cli/` offline commands (list/validate/doctor polish) | MCP default-deny policy and tool exposure |
 | Frontend copy, empty states, accessibility | Plugin CUDA/fork runner and GPU orchestrator core |
 | Unit tests for pure helpers | Auth, credentials, Interconnector credential sync |
 
 If your change touches high-risk paths, describe the approach in an issue first. Smaller, reviewable PRs merge faster.
+
+### Agent behaviour is maintainer-written
+
+Some files tell the agents what to do rather than describing code: the recipes and
+knowledge in `data/agent/`, rule and lesson bundles, seed rules, skills, and agent
+instruction files (`AGENTS.md`, `CLAUDE.md`, `.agents/`, `.claude/`). A recipe runs before
+any model reads a request: when a request matches its trigger, its keys and text go
+straight to the agent's browser, which may be signed in to the user's accounts.
+
+Maintainers write these files. A pull request from a fork that changes one fails the
+inbound check and is closed. To get a new behaviour, open an issue with the phrase, what
+should happen, and on which site, and a maintainer will write it.
+
+Every recipe, wherever it comes from (including the ones the agent learns), must also stay
+inside these bounds, or the agent does not load it:
+
+- Its triggers start with `^` and do not claim everyday requests ("hello", "check my email").
+- What it types comes from the request itself, apart from an address on an allowed site.
+- It presses no keys that open a terminal, a run dialog, a console or developer tools, and
+  never the system key.
+- It clicks nothing that spends, deletes or grants (pay, delete, install, allow).
+
+The checks are in `backend/services/agent_knowledge_validator.py`.
 
 ---
 
@@ -263,6 +286,8 @@ worktree is removed.
 Identifiers specific to your own machine belong in the untracked
 `scripts/.portable-local-patterns`, one `pattern<TAB>explanation` per line. The guard
 picks them up automatically, and your machine names stay out of the public script.
+They apply to every file, the allowlisted ones included: a machine name has no
+legitimate place in a test or the README.
 
 Whole files that must never be committed — private notes, local planning documents,
 anything that is yours rather than the project's — go in the untracked
@@ -283,14 +308,15 @@ If a check fires, fix the content — don't widen the allowlist and don't reach 
 The portability guard watches what leaves a clone. `scripts/check_inbound.py` reads what
 arrives: every pull request is checked by the base branch's copy of it, which annotates
 the lines a maintainer should read before merging. It reads only the lines you add, so
-existing code never trips it. The check reports; it does not fail your pull request.
+existing code never trips it. The check reports, and fails a pull request only when the
+policy blocks it (see [Agent behaviour is maintainer-written](#agent-behaviour-is-maintainer-written)).
 
 What it points out, so nothing in a review is a surprise:
 
 - **Guards and policy:** changes to either guard, to CI workflows (triggers, permissions,
   secrets, actions), to auth and MCP policy, and anything that shortens a protected list.
-- **Agent instructions:** `AGENTS.md`, skills, rule and lesson bundles. These steer agents,
-  so they are read as instructions, not prose.
+- **Agent instructions:** `AGENTS.md`, skills, rule and lesson bundles, recipes. These steer
+  agents, so they are read as instructions, not prose. From a fork they are blocked.
 - **Network:** hosted AI or telemetry clients, new outside hosts, turning off TLS checks.
   Guaardvark never contacts an outside host except behind a visible Install.
 - **Running code:** `shell=True`, `eval`/`exec`, unpickling, `torch.load` without

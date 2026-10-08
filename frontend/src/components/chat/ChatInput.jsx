@@ -25,12 +25,10 @@ import React, {
   useState,
 } from "react";
 
-// Voice mode driven by wakeWordEnabled setting
 import * as apiService from "../../api";
-import VoiceChatButton from "../voice/VoiceChatButton";
-import ContinuousVoiceChat from "../voice/ContinuousVoiceChat";
+import GlobalMicButton from "../voice/GlobalMicButton";
 import { useAppStore } from "../../stores/useAppStore";
-import { useVoiceSettings } from "../../hooks/useVoiceSettings";
+import { useVoiceSession, useVoiceSessionState } from "../../contexts/VoiceSessionContext";
 import useSlashCommands from "../../hooks/useSlashCommands";
 import SlashCommandPopup from "./SlashCommandPopup";
 import { debugLog } from "../../utils/debugLog";
@@ -128,9 +126,10 @@ const ChatInput = forwardRef(
       return true;
     }, []);
 
-    const systemName = useAppStore((s) => s.systemName);
-    const voiceSettings = useVoiceSettings();
-    const wakeWordEnabled = voiceSettings.wakeWordEnabled !== false;  // Default ON
+    // The global voice session: the mic here is the same one as in the top bar.
+    const voiceSession = useVoiceSession();
+    const voiceListening = useVoiceSessionState((s) => Boolean(s.session || s.push));
+    const voiceCapturing = useVoiceSessionState((s) => s.phase === "capturing");
 
     // Modal session mode — "chat" | "agent". The session's mode is stored
     // server-side; we cache it in Zustand and hydrate on session change.
@@ -172,16 +171,18 @@ const ChatInput = forwardRef(
         projectId,
         clearMessages: onClearMessages,
         onPlanCreated,
+        voiceContext: { toggleVoice: voiceSession.toggleHandsFree, isVoiceActive: voiceListening },
       },
     });
 
-    // Voice state for parent component
-    const [voiceState, setVoiceState] = useState({
-      isListening: false,
-      isUserSpeaking: false,
-      isAISpeaking: false,
-      audioLevels: [],
-    });
+    // Voice state for the page's background waveform.
+    useEffect(() => {
+      onVoiceStateChange({
+        isListening: voiceListening,
+        isUserSpeaking: voiceCapturing,
+        audioLevels: [],
+      });
+    }, [voiceListening, voiceCapturing, onVoiceStateChange]);
 
     // Show initial mode status on component mount only
     useEffect(() => {
@@ -226,169 +227,11 @@ const ChatInput = forwardRef(
     const _selectedImage = imageState.images.length > 0 ? imageState.images[0].file : null;
     const _imagePreview = imageState.images.length > 0 ? imageState.images[0].preview : null;
 
-    // Voice chat error state
-    const [voiceError, setVoiceError] = useState(null);
-
     useImperativeHandle(ref, () => ({
       focus: () => {
         inputRef.current?.focus();
       },
     }));
-
-    // Auto-send timeout tracking to prevent race conditions
-    const autoSendTimeoutRef = useRef(null);
-    const _lastAutoSendRef = useRef(null);
-
-    // Voice chat button ref for state access
-    const _voiceChatButtonRef = useRef(null);
-
-    // Ref to the passive wake-word listener (mounted only when wakeWordEnabled).
-    // Used to stop its mic stream while push-to-talk is recording so the two
-    // independent MediaRecorders never hold the mic simultaneously.
-    const _continuousVoiceRef = useRef(null);
-
-    // Propagate voice state changes to parent
-    useEffect(() => {
-      onVoiceStateChange(voiceState);
-    }, [voiceState, onVoiceStateChange]);
-
-    // Handle voice state updates from VoiceChatButton
-    const handleVoiceStateUpdate = useCallback((state) => {
-      // Dual-mic guard: when push-to-talk begins recording, stop the passive
-      // wake-word listener (if mounted + active) so we never have two live
-      // mic streams contending. The listener can be restarted by the user.
-      if (state.isRecording && _continuousVoiceRef.current) {
-        try {
-          const cvState = _continuousVoiceRef.current.getState?.();
-          if (cvState?.isListening) {
-            _continuousVoiceRef.current.stopListening?.();
-          }
-        } catch (err) {
-          debugLog("ChatInput: failed to pause wake-word listener for push-to-talk", err);
-        }
-      }
-      setVoiceState(prev => ({
-        ...prev,
-        isListening: state.isRecording || false,
-        isUserSpeaking: state.speechDetected || (state.volume > 0.1) || false,
-        audioLevels: state.audioLevels || [],
-      }));
-    }, []);
-
-    // Handle voice transcription received - wrapped in useCallback for stability
-    const handleTranscriptionReceived = useCallback((transcriptionData) => {
-      debugLog("ChatInput received transcription data", {
-        hasText: !!transcriptionData?.text,
-        hasUserMessage: !!transcriptionData?.userMessage,
-        hasAiResponse: !!transcriptionData?.aiResponse,
-        isVoiceStream: transcriptionData?.isVoiceStream
-      });
-
-      // Clear any pending auto-send to prevent race conditions
-      if (autoSendTimeoutRef.current) {
-        debugLog("ChatInput clearing previous auto-send timeout");
-        clearTimeout(autoSendTimeoutRef.current);
-        autoSendTimeoutRef.current = null;
-      }
-
-      if (transcriptionData && transcriptionData.text) {
-        // Legacy format - just text transcription - send immediately
-        debugLog("ChatInput processing legacy text transcription");
-        setInputText(transcriptionData.text);
-
-        // Send immediately without timeout to prevent duplicates
-        setTimeout(() => {
-          debugLog("ChatInput sending legacy transcription immediately");
-          // Use onSendMessage directly for legacy format
-          onSendMessage(transcriptionData.text, null);
-        }, 100); // Minimal delay to ensure state update
-      } else if (transcriptionData && transcriptionData.userMessage) {
-        // New voice stream format - includes user message and AI response
-        debugLog("ChatInput processing voice stream response", {
-          userMessageLength: transcriptionData.userMessage?.length || 0,
-          hasAiResponse: !!transcriptionData.aiResponse,
-          aiResponseLength: transcriptionData.aiResponse?.length || 0,
-          isVoiceStream: transcriptionData.isVoiceStream,
-        });
-
-        if (transcriptionData.isVoiceStream && transcriptionData.aiResponse) {
-          // Voice stream with pre-generated AI response - send directly to chat
-          debugLog("ChatInput sending voice stream with AI response directly to chat");
-
-          // Send the user message and AI response as a voice stream
-          onSendMessage(
-            transcriptionData.userMessage,
-            null, // no file
-            {
-              isVoiceMessage: true,
-              aiResponse: transcriptionData.aiResponse,
-            }
-          );
-        } else if (transcriptionData.isVoiceStream) {
-          // Voice stream without AI response - send to backend for processing
-          debugLog("ChatInput sending voice stream without AI response to backend");
-
-          // Send the user message to backend for processing (no auto-send timeout)
-          onSendMessage(
-            transcriptionData.userMessage,
-            null, // no file
-            {
-              isVoiceMessage: true,
-              // No aiResponse - backend will generate response
-            }
-          );
-        } else {
-          // Regular transcription - send immediately
-          debugLog("ChatInput processing regular transcription");
-          setInputText(transcriptionData.userMessage);
-
-          // Send immediately without timeout to prevent duplicates
-          setTimeout(() => {
-            debugLog("ChatInput sending regular transcription immediately");
-            onSendMessage(transcriptionData.userMessage, null);
-          }, 100); // Minimal delay to ensure state update
-        }
-      } else {
-        console.warn(
-          "Invalid transcription data format:",
-          {
-            hasText: Boolean(transcriptionData?.text),
-            hasUserMessage: Boolean(transcriptionData?.userMessage),
-            isVoiceStream: Boolean(transcriptionData?.isVoiceStream),
-          }
-        );
-      }
-    }, [onSendMessage, setInputText]);
-
-    // Bridge ContinuousVoiceChat's onMessageReceived to the existing voice pipeline.
-    // When response is null, the message flows through the normal streaming chat path.
-    const handleContinuousVoiceMessage = useCallback(({ transcription, response }) => {
-      if (!transcription || !transcription.trim()) return;
-      if (response) {
-        // Pre-computed response (legacy path)
-        onSendMessage(transcription.trim(), null, {
-          isVoiceMessage: true,
-          aiResponse: response,
-          skipTTS: true,
-        });
-      } else {
-        // Transcription only — send through normal chat pipeline for streaming
-        // Mark as voice message so TTS fires when the response completes
-        onSendMessage(transcription.trim(), null, {
-          isVoiceMessage: true,
-        });
-      }
-    }, [onSendMessage]);
-
-    // Handle continuous voice state for BackgroundWaveform
-    const handleContinuousVoiceStateChange = useCallback((state) => {
-      setVoiceState(prev => ({
-        ...prev,
-        isListening: state.isListening || false,
-        isUserSpeaking: state.speechDetected || false,
-        audioLevels: state.audioLevels || [],
-      }));
-    }, []);
 
     // Enhanced file upload handler using unified API service
     const handleFileUpload = async (file) => {
@@ -715,30 +558,6 @@ Please select a supported file type.`;
       }
     };
 
-    // Handle voice errors
-    const handleVoiceError = (error) => {
-      console.error("ChatInput: Voice error:", error);
-      // Convert Error object to string to avoid React rendering issues
-      const errorMessage =
-        error instanceof Error ? error.message : String(error);
-      setVoiceError(errorMessage);
-
-      // Clear error after 5 seconds
-      setTimeout(() => {
-        setVoiceError(null);
-      }, 5000);
-    };
-
-    // Cleanup timeouts on unmount
-    useEffect(() => {
-      return () => {
-        if (autoSendTimeoutRef.current) {
-          debugLog("ChatInput cleaning up auto-send timeout on unmount");
-          clearTimeout(autoSendTimeoutRef.current);
-        }
-      };
-    }, []);
-
     // Image handling functions — downscale through a canvas before the
     // preview is stored, so chat:send never carries a raw phone photo.
     const handleImageUpload = async (file) => {
@@ -941,6 +760,44 @@ Please try a different image or check if the vision model is properly loaded.`;
     // typed goes to the running task as a note instead of a new message.
     const noteMode = disabled && chimeIn && typeof onChimeIn === "function";
 
+    // Esc presses Stop while a reply is running, but only when Stop could be
+    // clicked. Whether something covers the button is read in the capture
+    // phase, before an image viewer's own Esc handler can close it; the press
+    // is acted on in the bubble phase, after a dialog, the slash popup or the
+    // agent-screen key forwarder has had the chance to take the key.
+    const rootRef = useRef(null);
+    const stopButtonRef = useRef(null);
+    useEffect(() => {
+      if (!disabled || typeof onStop !== "function") return undefined;
+      let stopReachable = false;
+      const stopIsTopmost = () => {
+        const btn = stopButtonRef.current;
+        if (!btn) return false;
+        const r = btn.getBoundingClientRect();
+        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        return !!hit && btn.contains(hit);
+      };
+      const onCapture = (e) => {
+        stopReachable = e.key === "Escape" && stopIsTopmost();
+      };
+      const onBubble = (e) => {
+        if (e.key !== "Escape" || !stopReachable) return;
+        stopReachable = false;
+        if (e.defaultPrevented || e.repeat || e.isComposing) return;
+        const t = e.target;
+        const editable = t && (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName));
+        if (editable && !rootRef.current?.contains(t)) return;
+        e.preventDefault();
+        onStop();
+      };
+      window.addEventListener("keydown", onCapture, true);
+      window.addEventListener("keydown", onBubble);
+      return () => {
+        window.removeEventListener("keydown", onCapture, true);
+        window.removeEventListener("keydown", onBubble);
+      };
+    }, [disabled, onStop]);
+
     const handleSend = async () => {
       // Capture what the user typed for terminal-style history before any
       // branch consumes/clears it.
@@ -1026,6 +883,7 @@ Please try a different image or check if the vision model is properly loaded.`;
 
     return (
       <Box
+        ref={rootRef}
         onDrop={handleImageDrop}
         onDragOver={handleDragOver}
         sx={{
@@ -1037,17 +895,6 @@ Please try a different image or check if the vision model is properly loaded.`;
           gap: 1,
         }}
       >
-        {/* Voice chat error alert */}
-        {voiceError && (
-          <CollapsibleAlert
-            severity="error"
-            sx={{ mb: 1 }}
-            onClose={() => setVoiceError(null)}
-          >
-            {voiceError}
-          </CollapsibleAlert>
-        )}
-
         {/* File upload error */}
         {fileUploadState.error && (
           <CollapsibleAlert
@@ -1201,33 +1048,10 @@ Please try a different image or check if the vision model is properly loaded.`;
             )}
           </Tooltip>
 
-          {/* Voice input: the push-to-talk button is ALWAYS present so the
-              talk affordance never disappears. When wakeWordEnabled is on, the
-              passive "Hey Guaardvark" listener mounts ALONGSIDE it (additive,
-              not a replacement). To avoid two live mic streams fighting, the
-              wake-word listener is stopped while push-to-talk is recording
-              (see handleVoiceStateUpdate). */}
-          {wakeWordEnabled && (
-            <ContinuousVoiceChat
-              ref={_continuousVoiceRef}
-              sessionId={sessionId}
-              onMessageReceived={handleContinuousVoiceMessage}
-              onError={handleVoiceError}
-              onStateChange={handleContinuousVoiceStateChange}
-              compact={true}
-              wakeWordEnabled={true}
-              systemName={systemName || 'Guaardvark'}
-              onWakeWordDetected={() => {}}
-            />
-          )}
-          <VoiceChatButton
-            onTranscriptionReceived={handleTranscriptionReceived}
-            onError={handleVoiceError}
-            onStateChange={handleVoiceStateUpdate}
-            disabled={disabled}
-            sessionId={sessionId}
-            compact
-          />
+          {/* The global mic: hold to talk, click per the activation mode. */}
+          <Box sx={{ display: "flex", alignItems: "center", alignSelf: "center" }}>
+            <GlobalMicButton variant="inline" label="Voice" showMenu={false} />
+          </Box>
 
           {/* Slash command autocomplete popup */}
           <SlashCommandPopup
@@ -1325,7 +1149,7 @@ Please try a different image or check if the vision model is properly loaded.`;
           <Tooltip
             title={
               disabled
-                ? "Stop"
+                ? "Stop (Esc)"
                 : imageState.analyzing
                   ? "Analyzing image..."
                   : imageState.images.length > 0
@@ -1336,6 +1160,7 @@ Please try a different image or check if the vision model is properly loaded.`;
             {imageState.analyzing ? (
               <span>
                 <IconButton
+                  ref={stopButtonRef}
                   color="primary"
                   onClick={disabled ? onStop : handleSend}
                   disabled={imageState.analyzing} // Disable during analysis
@@ -1345,6 +1170,7 @@ Please try a different image or check if the vision model is properly loaded.`;
               </span>
             ) : (
               <IconButton
+                ref={stopButtonRef}
                 color="primary"
                 onClick={disabled ? onStop : handleSend}
                 disabled={imageState.analyzing} // Disable during analysis

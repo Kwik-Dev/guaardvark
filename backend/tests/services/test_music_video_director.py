@@ -180,3 +180,56 @@ def test_director_ladder_never_picks_an_embedding_model(monkeypatch):
     monkeypatch.setattr(ollama, "list", lambda: _tags("nomic-embed-text:latest"))
     monkeypatch.setattr(director, "_saved_active_model", lambda: "nomic-embed-text:latest")
     assert director._director_candidates(director.DIRECTOR_MODEL) == [director.DIRECTOR_MODEL]
+
+
+# --- distinctness guard -------------------------------------------------------
+
+def _guard_plan(n, *, section_label="unlabeled", energy=0.5):
+    return [{"index": i, "start_s": float(i), "end_s": float(i) + 1.0,
+             "energy": energy, "section_label": section_label} for i in range(n)]
+
+
+def test_guard_cues_every_repeat_so_40_cuts_stay_distinct():
+    style = "ink-wash animation, deep blue"
+    prompts = [f"a lone crow on a wire, {style}"] * 20 + [f"scene {i}, {style}" for i in range(20)]
+    plan = [{"index": i, "start_s": float(i), "end_s": float(i) + 1.0,
+             "energy": (0.2, 0.55, 0.9)[i % 3], "section_label": "unlabeled"} for i in range(40)]
+
+    out = director._ensure_distinct_and_energy_aware(prompts, plan, style)
+
+    assert len(out) == 40
+    assert len(set(out)) == 40
+    assert all(p.endswith(style) for p in out)
+    assert out[0] == prompts[0]                  # the first occurrence stays as written
+    assert out[20:] == prompts[20:]               # distinct prompts are untouched
+    assert all(p.startswith("a lone crow on a wire") for p in out[:20])
+
+
+def test_guard_reads_section_label_for_the_cue():
+    style = "STYLE"
+    plan = _guard_plan(2, section_label="chorus", energy=0.5)
+
+    out = director._ensure_distinct_and_energy_aware([f"rain on glass, {style}"] * 2, plan, style)
+
+    assert out[0] == "rain on glass, STYLE"
+    cue = out[1][len("rain on glass, "):-len(", STYLE")]
+    assert cue in director._HIGH_ENERGY_CUES
+
+
+def test_guard_gives_mid_energy_repeats_a_cue():
+    style = "STYLE"
+    plan = _guard_plan(2, section_label="unlabeled", energy=0.55)
+
+    out = director._ensure_distinct_and_energy_aware([style, style], plan, style)
+
+    assert out[0] == "STYLE"
+    assert out[1] != out[0]
+    assert out[1][: -len(", STYLE")] in director._MID_ENERGY_CUES
+
+
+def test_guard_falls_back_to_the_section_key():
+    plan = [{"index": i, "energy": 0.5, "section": "intro"} for i in range(2)]
+
+    out = director._ensure_distinct_and_energy_aware(["fog, S", "fog, S"], plan, "S")
+
+    assert out[1][len("fog, "):-len(", S")] in director._LOW_ENERGY_CUES

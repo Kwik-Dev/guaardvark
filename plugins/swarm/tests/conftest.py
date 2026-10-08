@@ -6,8 +6,13 @@ its helpers import cleanly under pytest, and make the repo root importable so th
 guarded_code_service chokepoint can be reached.
 """
 
+import os
 import sys
 from pathlib import Path
+
+# No test may hold or release a slot on a running backend's GPU orchestrator;
+# tests that exercise the hold give the orchestrator a stand-in client.
+os.environ["SWARM_DISABLE_GPU_HOLD"] = "1"
 
 # plugins/swarm  (so `import service.app` works)
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]

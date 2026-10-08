@@ -217,8 +217,15 @@ class RAGExperimentAgent:
                 hypothesis = parsed.get("hypothesis", "LLM-proposed experiment")
 
                 if param in available and new_value is not None:
-                    # Validate the value is different from current
-                    if str(new_value) != str(current_config.get(param)):
+                    # Compare as retrieval will read both values: the string
+                    # 'false' against False is no change, and an unusable value
+                    # ('maybe') is no proposal.
+                    from backend.utils.experiment_context import normalise_param
+                    new_value = normalise_param(param, new_value)
+                    current = current_config.get(param)
+                    if current is not None:
+                        current = normalise_param(param, current)
+                    if new_value is not None and new_value != current:
                         return {
                             "parameter": param,
                             "new_value": new_value,

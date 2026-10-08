@@ -1,18 +1,51 @@
 """Publish gates, secret isolation and job-registry wiring."""
 
 import importlib
+import sys
+import types
 
 import pytest
 
 from backend.services.connections import gates
+from backend.services.social_outreach import kill_switch as ks
 
 
 @pytest.fixture
 def settings(monkeypatch):
-    """In-memory stand-in for the Setting table."""
+    """In-memory stand-in for the Setting table, for the publish gates and for
+    the posting stop they read through the outreach kill switch."""
     store = {}
     monkeypatch.setattr(gates, "_setting", lambda key, default: store.get(key, default))
+    monkeypatch.setattr(ks, "_lookup_setting", store.get)
     return store
+
+
+@pytest.fixture
+def db_app():
+    """Flask app on an in-memory database, for the paths that read and write rows."""
+    from flask import Flask
+
+    from backend.models import db
+
+    app = Flask(__name__)
+    app.config.update({"TESTING": True, "SQLALCHEMY_DATABASE_URI": "sqlite:///:memory:"})
+    db.init_app(app)
+    with app.app_context():
+        db.create_all()
+        yield app
+        db.session.remove()
+        db.drop_all()
+
+
+@pytest.fixture
+def fake_celery(monkeypatch):
+    """A Celery stand-in that records revokes instead of reaching a broker."""
+    revoked = []
+    control = types.SimpleNamespace(revoke=lambda task_id, **kwargs: revoked.append(task_id))
+    module = types.ModuleType("backend.celery_app")
+    module.celery = types.SimpleNamespace(control=control)
+    monkeypatch.setitem(sys.modules, "backend.celery_app", module)
+    return revoked
 
 
 # --- gates -------------------------------------------------------------------
@@ -98,6 +131,176 @@ def test_cadence_pass_allows_publishing(settings, monkeypatch):
 
     monkeypatch.setattr(ks, "cadence_allows_post", lambda p: (True, None))
     assert gates.check_can_publish("bluesky") == (True, None)
+
+
+# --- the stop on all public posting ---------------------------------------------
+# One stop covers outreach and Connections. It is its own setting: the outreach
+# on/off switch defaults off, and wiring that in would block every publish on a
+# fresh install.
+def test_outreach_being_off_does_not_block_publishing(settings, monkeypatch):
+    monkeypatch.setattr(ks, "cadence_allows_post", lambda p: (True, None))
+    assert ks.is_enabled() is False  # the stock outreach default
+    settings["social_outreach_enabled"] = "false"
+    assert ks.is_enabled() is False
+    assert gates.check_can_publish("bluesky") == (True, None)
+
+
+def test_posting_stop_blocks_the_gate(settings, monkeypatch):
+    monkeypatch.setattr(ks, "cadence_allows_post", lambda p: (True, None))
+    settings[ks.POSTING_STOP_KEY] = "true"
+    assert gates.check_can_publish("bluesky") == (False, ks.POSTING_STOPPED_REASON)
+
+
+def test_posting_stop_outranks_the_publish_switch(settings):
+    settings[ks.POSTING_STOP_KEY] = "true"
+    settings[gates.PUBLISH_ENABLED_KEY] = "false"
+    assert gates.check_can_publish("bluesky") == (False, ks.POSTING_STOPPED_REASON)
+
+
+def test_unreadable_posting_stop_fails_closed(settings, monkeypatch):
+    def unreadable(key):
+        raise RuntimeError("database is down")
+
+    monkeypatch.setattr(ks, "_lookup_setting", unreadable)
+    monkeypatch.setattr(ks, "cadence_allows_post", lambda p: (True, None))
+    allowed, reason = gates.check_can_publish("bluesky")
+    assert allowed is False
+    assert "refusing" in reason.lower()
+
+
+def test_posting_stop_holds_outreach_without_flipping_its_switch(settings, monkeypatch):
+    monkeypatch.setattr(ks, "cadence_status", lambda: {})
+    settings["social_outreach_enabled"] = "true"
+    settings[ks.POSTING_STOP_KEY] = "true"
+    assert ks.is_enabled() is False
+    snapshot = ks.status_snapshot()
+    assert snapshot["enabled"] is True
+    assert snapshot["posting_stopped"] is True
+    assert snapshot["posting_stop_reason"] == ks.POSTING_STOPPED_REASON
+
+
+def test_queueing_is_refused_while_posting_is_stopped(settings):
+    from backend.services.connections import publish_service
+
+    settings[ks.POSTING_STOP_KEY] = "true"
+    with pytest.raises(RuntimeError, match="stopped"):
+        publish_service.queue_publish(connection_ids=[1], body="hello")
+
+
+def test_approval_is_refused_while_posting_is_stopped(settings):
+    from backend.services.connections import publish_service
+
+    settings[ks.POSTING_STOP_KEY] = "true"
+    record = _Record("awaiting_approval")
+    with pytest.raises(RuntimeError, match="stopped"):
+        publish_service.approve(record)
+    assert record.status == "awaiting_approval"
+
+
+def test_preflight_reports_the_stop(settings):
+    from backend.services.connections import publish_service
+
+    settings[ks.POSTING_STOP_KEY] = "true"
+    result = publish_service.preflight([], [], body="hello")
+    assert result["ok"] is False
+    assert result["violations"] == [ks.POSTING_STOPPED_REASON]
+
+
+def test_fresh_database_publishes_with_outreach_off(db_app, monkeypatch):
+    """No settings rows at all: outreach is off, publishing is not stopped."""
+    monkeypatch.setattr(ks, "cadence_allows_post", lambda p: (True, None))
+    assert ks.is_enabled() is False
+    assert ks.posting_stop_reason() is None
+    assert gates.check_can_publish("bluesky") == (True, None)
+
+
+def _publish_row(status, **fields):
+    from backend.models import PublishRecord, db
+
+    row = PublishRecord(platform="bluesky", body="hello", status=status, **fields)
+    db.session.add(row)
+    db.session.commit()
+    return row
+
+
+def _no_provider(monkeypatch):
+    from backend.services.connections import registry
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("a provider was reached")
+
+    monkeypatch.setattr(registry, "get_provider", refuse)
+
+
+def test_runner_holds_a_publish_while_posting_is_stopped(db_app, monkeypatch):
+    from backend.services.connections import publish_runner, publish_service
+
+    _no_provider(monkeypatch)
+    ks._write_setting(ks.POSTING_STOP_KEY, "true")
+    row = _publish_row("queued")
+
+    out = publish_runner.run({"workflow_config": {"publish_record_id": row.id}}, lambda *a: None)
+
+    assert out == {"skipped": True, "held": True, "reason": ks.POSTING_STOPPED_REASON}
+    assert row.status == "awaiting_approval"
+    assert row.error_message == publish_service.HELD_MESSAGE
+
+
+def test_runner_never_sends_a_publish_that_waits_on_a_person(db_app, monkeypatch):
+    """A job queued before a hold must not send the held publish after resume."""
+    from backend.services.connections import publish_runner
+
+    _no_provider(monkeypatch)
+    row = _publish_row("awaiting_approval")
+
+    out = publish_runner.run({"workflow_config": {"publish_record_id": row.id}}, lambda *a: None)
+
+    assert out == {"skipped": True, "status": "awaiting_approval"}
+    assert row.status == "awaiting_approval"
+
+
+def test_stop_all_posting_holds_queued_publishes(db_app, monkeypatch, fake_celery):
+    from backend.models import Task, db
+    from backend.services.connections import publish_service
+
+    monkeypatch.setattr(
+        ks, "drain_pending_outreach_tasks", lambda: {"purged": 0, "revoked": 0, "errors": []}
+    )
+    publish_task = Task(
+        name="Publish to Bluesky", status="queued", task_handler="connections",
+        handler_config={"platform": "bluesky", "celery_task_id": "celery-abc"},
+    )
+    outreach_task = Task(name="Outreach pass", status="queued", task_handler="social_outreach")
+    db.session.add_all([publish_task, outreach_task])
+    db.session.commit()
+    queued = _publish_row("queued", task_id=publish_task.id)
+    sending = _publish_row("processing")
+    posted = _publish_row("posted")
+
+    result = ks.stop_all_posting()
+
+    assert result["posting_stopped"] is True
+    assert result["errors"] == []
+    assert (result["held_publishes"], result["in_flight_publishes"]) == (1, 1)
+    assert (result["cancelled_publish_tasks"], result["revoked_publish_tasks"]) == (1, 1)
+    assert result["cancelled_tasks"] == 1
+    assert fake_celery == ["celery-abc"]
+    assert (publish_task.status, outreach_task.status) == ("cancelled", "cancelled")
+    assert queued.status == "awaiting_approval"
+    assert queued.error_message == publish_service.HELD_MESSAGE
+    assert (sending.status, posted.status) == ("processing", "posted")
+
+
+def test_resume_lifts_the_stop_and_sends_nothing(db_app, monkeypatch):
+    monkeypatch.setattr(
+        ks, "drain_pending_outreach_tasks", lambda: {"purged": 0, "revoked": 0, "errors": []}
+    )
+    held = _publish_row("queued")
+    assert ks.stop_all_posting()["posting_stopped"] is True
+
+    assert ks.resume_posting() == {"posting_stopped": False}
+    assert ks.posting_stop_reason() is None
+    assert held.status == "awaiting_approval"
 
 
 # --- secret isolation --------------------------------------------------------

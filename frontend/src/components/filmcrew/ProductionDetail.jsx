@@ -14,6 +14,7 @@ import StoryboardGrid from './StoryboardGrid';
 import StoryboardProgress from './StoryboardProgress';
 import RenderProgress from './RenderProgress';
 import CollapsibleAlert from "../common/CollapsibleAlert";
+import VoiceFallbackNotice from './VoiceFallbackNotice';
 
 const ProductionDetail = ({
   production,
@@ -123,6 +124,8 @@ const ProductionDetail = ({
           Screenwriting in progress (or stuck). Use Re-dispatch if nothing happens after a few minutes.
         </CollapsibleAlert>
       )}
+
+      <VoiceFallbackNotice shots={production.shots} />
 
       <Paper sx={{ p: 2, mb: 3 }}>
         <Typography variant="h6" gutterBottom>Pipeline Progress</Typography>

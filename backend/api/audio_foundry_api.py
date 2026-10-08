@@ -407,13 +407,25 @@ def generate_voice():
 
 @audio_foundry_bp.route("/generate/music", methods=["POST"])
 def generate_music():
-    """Music generation. ``model`` picks the backend: the sidecar's ACE-Step
-    (default) or MiniMax Music 3 through ComfyUI, which returns a job id to
-    poll at /generate/music/status/<id> like the sidecar's own jobs."""
+    """Music generation. ``model`` picks the backend: the sidecar's ACE-Step v1
+    (default, or "ace-step"), the sidecar's optional ACE-Step 1.5
+    ("ace-step-1.5"), or MiniMax Music 3 through ComfyUI, which returns a job id
+    to poll at /generate/music/status/<id> like the sidecar's own jobs. Any other
+    value is refused rather than answered by a different model."""
     payload = flask_request.get_json(silent=True) or {}
     model = str(payload.get("model") or "").strip()
+    if model and model != "ace-step" and not model.startswith("minimax-music3"):
+        from backend.services.audio_foundry_models import missing_parts
+        if model != "ace-step-1.5":
+            return jsonify({"success": False, "error": (
+                f"Unknown music model {model!r}: use 'ace-step' (default), 'ace-step-1.5' "
+                "or a MiniMax Music 3 id")}), 400
+        missing = missing_parts(model)
+        if missing:
+            return jsonify({"success": False, "needs_install": model, "error": (
+                f"ACE-Step 1.5 is not installed (missing {missing[0]}). Open Audio Studio → "
+                "Manage models and Install it; generation never downloads on its own.")}), 400
     if model.startswith("minimax-music3"):
-        from flask import current_app, jsonify
         from backend.services import comfyui_music_generator as m3
         from backend.services.plugin_bridge import job_service_start_enabled
         from backend.services.video_model_registry import prepare_video_model, preflight_video_model
@@ -460,7 +472,8 @@ def rewrite_music_prompt():
 
     Body: {"text": str, "instrumental": bool}
     Returns:
-        200 {"style_prompt": str, "negative_prompt": str, "tags_used": [str]}
+        200 {"style_prompt": str, "negative_prompt": "", "tags_used": [str]}
+            (negative_prompt stays empty: ACE-Step v1 has no negative conditioning)
         200 {"fallback": true, "reason": str, "style_prompt": text} if rewrite failed
         400 if text is empty
     """

@@ -756,7 +756,25 @@ def _quality_summary(quality) -> Optional[dict]:
     if not isinstance(quality, dict):
         return None
     flags = [f for f in quality.get("flags") or [] if isinstance(f, dict) and f.get("message")]
-    return {"checked": bool((quality.get("frames") or {}).get("readable")) or bool(flags), "flags": flags}
+    summary = {"checked": bool((quality.get("frames") or {}).get("readable")) or bool(flags), "flags": flags}
+    review = quality.get("vlm_review")
+    if isinstance(review, dict) and review.get("status") == "not_reviewed":
+        summary["not_reviewed"] = review.get("message") or review.get("reason") or "no score"
+    return summary
+
+
+def _review_line(review, studio_url: Optional[str]) -> Optional[str]:
+    """Where a held clip stands, for status readers (batch_video_generator review)."""
+    state = (review or {}).get("state") if isinstance(review, dict) else None
+    if state == "needs_review":
+        where = f" in Video Gen ({studio_url})" if studio_url else " in Video Gen"
+        return ("Review: needs review — held until a person approves or re-renders it"
+                f"{where}; nothing downstream uses it before then")
+    if state == "approved":
+        return "Review: approved by a person after a quality flag"
+    if state == "rerendered":
+        return f"Review: re-rendered as {review.get('rerender_batch_id')}"
+    return None
 
 
 # get_generation_status can wait for a job, for clients that cannot pause between
@@ -997,6 +1015,7 @@ class GenerationStatusTool(BaseTool):
                 if r.get("thumbnail_path"):
                     entry["thumbnail_url"] = f"/api/batch-video/video/{batch_id}/{r['thumbnail_path']}"
                 entry["quality"] = _quality_summary((r.get("metadata") or {}).get("quality"))
+                entry["review"] = r.get("review")
                 files.append(entry)
         failed = [r.get("error") for r in (d.get("results") or []) if not r.get("success") and r.get("error")]
         failures = [r.get("failure") or describe_failure(r.get("error_kind"), r.get("error"))
@@ -1024,6 +1043,7 @@ class GenerationStatusTool(BaseTool):
                 if r.thumbnail_path:
                     entry["thumbnail_url"] = f"/api/batch-video/video/{batch_id}/{r.thumbnail_path}"
                 entry["quality"] = _quality_summary((getattr(r, "metadata", None) or {}).get("quality"))
+                entry["review"] = getattr(r, "review", None)
                 files.append(entry)
         failed = [r.error for r in (status.results or []) if not r.success and r.error]
         failures = [describe_failure(getattr(r, "error_kind", None), r.error)
@@ -1342,6 +1362,11 @@ class GenerationStatusTool(BaseTool):
                 lines.append("Quality: flagged — " + "; ".join(q["message"] for q in quality["flags"]))
             elif quality and quality.get("checked"):
                 lines.append("Quality: no problems found in the sampled frames")
+            if quality and quality.get("not_reviewed"):
+                lines.append(f"Vision review: not reviewed — {quality['not_reviewed']}")
+            review_line = _review_line(f.get("review"), info.get("studio_url"))
+            if review_line:
+                lines.append(review_line)
         failures = info.get("failures")
         if failures is not None:
             # Video: every failure with its kind, the batch's own first.

@@ -51,6 +51,92 @@ def test_chat_website_analysis_reads_nothing_with_web_access_off(web_access, mon
 
 
 @pytest.fixture
+def recorded_search(monkeypatch):
+    searched = []
+
+    def search(query, max_results=5):
+        searched.append(query)
+        return {"success": False, "error": "stub", "data": {}}
+
+    monkeypatch.setattr(web_search_api, "enhanced_web_search", search)
+    return searched
+
+
+def test_chat_reads_only_a_link_the_person_typed(web_access, recorded_search):
+    """settings.py is a file name, though .py is a real domain ending; the
+    word "website" is not a link either. Neither is fetched, even with web
+    access on."""
+    from backend.api.enhanced_chat_api import EnhancedChatManager
+
+    web_access["on"] = True
+    manager = EnhancedChatManager.__new__(EnhancedChatManager)
+
+    message = "is my website config in settings.py right?"
+    assert manager._fallback_intent_detection(message) != "website_analysis"
+    result = manager._handle_website_analysis_request("s1", message)
+    assert result["success"] is False and recorded_search == []
+
+    typed = "summarize https://example.com"
+    assert manager._fallback_intent_detection(typed) == "website_analysis"
+    manager._handle_website_analysis_request("s1", typed)
+    assert recorded_search == ["https://example.com"]
+
+
+def test_analyze_with_a_typed_link_reaches_website_analysis(web_access, recorded_search):
+    """"analyze <link>" is the documented example; it used to fall out of the
+    analyze branch with no intent at all. File words inside the link are part
+    of the address, not a file to analyze."""
+    from backend.api.enhanced_chat_api import EnhancedChatManager
+
+    web_access["on"] = True
+    manager = EnhancedChatManager.__new__(EnhancedChatManager)
+
+    for message in ("analyze https://example.com", "review www.example.com/pricing",
+                    "check https://example.com/code/data.json"):
+        assert manager._fallback_intent_detection(message) == "website_analysis", message
+    assert manager._fallback_intent_detection("analyze the code in settings.py") == "file_analysis"
+    assert manager._fallback_intent_detection("analyze my week for me") == "general_chat"
+
+    manager._handle_website_analysis_request("s1", "analyze https://example.com")
+    assert recorded_search == ["https://example.com"]
+
+
+def test_chat_website_analysis_skips_a_long_message(web_access, recorded_search):
+    from backend.api.enhanced_chat_api import EnhancedChatManager
+
+    web_access["on"] = True
+    manager = EnhancedChatManager.__new__(EnhancedChatManager)
+    paste = "Notes from the call, the deck is at https://example.com for review. " * 5
+    assert len(paste) > EnhancedChatManager._WEB_SEARCH_MAX_CHARS
+    assert manager._handle_website_analysis_request("s1", paste) is None
+    assert recorded_search == []
+
+
+def test_chat_hands_website_analysis_the_typed_message_and_falls_back_to_chat():
+    """The intent check reads the message with the time context added; the
+    handler gets the person's own text, and a skipped analysis goes on as
+    ordinary chat."""
+    from unittest.mock import MagicMock
+
+    from backend.api.enhanced_chat_api import EnhancedChatManager
+
+    manager = EnhancedChatManager.__new__(EnhancedChatManager)
+    manager._update_session_activity = MagicMock()
+    manager._cleanup_old_sessions = MagicMock()
+    manager._try_media_command = MagicMock(return_value=None)
+    manager._detect_intent_with_rules = MagicMock(return_value="website_analysis")
+    manager._handle_website_analysis_request = MagicMock(return_value=None)
+    manager._process_regular_chat = MagicMock(return_value={"response": "chat"})
+
+    message = "what time is it on https://example.com"
+    result = manager.process_chat_message("s1", message)
+
+    assert manager._detect_intent_with_rules.call_args.args[0] != message
+    manager._handle_website_analysis_request.assert_called_once_with("s1", message, project_id=None)
+    assert result == {"response": "chat"}
+
+
+@pytest.fixture
 def generator(monkeypatch, tmp_path):
     monkeypatch.setattr(bulk_csv_generator, "get_default_llm", lambda: None)
     fetched = []

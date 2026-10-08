@@ -14,6 +14,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from ..backend_url import backend_api_url
 from ..models import AgentStatus, SwarmTask
 from .base_backend import AgentProcess, BaseBackend
 
@@ -53,6 +54,21 @@ class ClaudeBackend(BaseBackend):
     name = "claude"
     requires_internet = True
 
+    def command_prefix(self, config: dict[str, Any]) -> list[str]:
+        command = config.get("command", "claude")
+        # Claude Code 2.x does not have --output-file. It writes to stdout in
+        # --print mode and the wrapper script captures that into completion.md.
+        # --bare skips hooks, CLAUDE.md auto-discovery, keychain reads, and
+        # auto-memory, which is what we want for a sandboxed worktree agent
+        # that should stand on its own without parent-session pollution.
+        # --dangerously-skip-permissions is required for non-interactive
+        # execution — without it Claude refuses to use Bash/Edit/Write in
+        # "don't ask mode" and the agent returns a text-only refusal instead
+        # of actually creating files. The worktree is the sandbox; that's
+        # exactly the case this flag is designed for.
+        args = config.get("args", ["--print", "--bare", "--dangerously-skip-permissions"])
+        return [command] + list(args)
+
     def spawn(self, worktree_path: str, task: SwarmTask, config: dict[str, Any]) -> AgentProcess:
         wt = Path(worktree_path)
         log_file = wt / LOG_FILE
@@ -68,22 +84,9 @@ class ClaudeBackend(BaseBackend):
             except FileNotFoundError:
                 pass
 
-        command = config.get("command", "claude")
-        # Claude Code 2.x does not have --output-file. It writes to stdout in
-        # --print mode and the wrapper script captures that into completion.md.
-        # --bare skips hooks, CLAUDE.md auto-discovery, keychain reads, and
-        # auto-memory, which is what we want for a sandboxed worktree agent
-        # that should stand on its own without parent-session pollution.
-        # --dangerously-skip-permissions is required for non-interactive
-        # execution — without it Claude refuses to use Bash/Edit/Write in
-        # "don't ask mode" and the agent returns a text-only refusal instead
-        # of actually creating files. The worktree is the sandbox; that's
-        # exactly the case this flag is designed for.
-        args = config.get("args", ["--print", "--bare", "--dangerously-skip-permissions"])
-
         prompt = self._build_prompt(task)
 
-        claude_parts = [command] + args + [prompt]
+        claude_parts = self.command_prefix(config) + [prompt]
         claude_cmd = " ".join(_shell_quote(p) for p in claude_parts)
 
         # write wrapper script
@@ -213,8 +216,7 @@ class ClaudeBackend(BaseBackend):
         return shutil.which("claude") is not None
 
     def _build_prompt(self, task: SwarmTask) -> str:
-        flask_port = os.environ.get("FLASK_PORT", "5002")
-        swarm_api = f"http://localhost:{flask_port}/api/swarm/{task.swarm_id if hasattr(task, 'swarm_id') else 'active'}"
+        swarm_api = f"{backend_api_url()}/swarm/{task.swarm_id if hasattr(task, 'swarm_id') else 'active'}"
         
         parts = [
             f"You are working on task: {task.title}",

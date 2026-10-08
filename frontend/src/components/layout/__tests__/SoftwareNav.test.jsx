@@ -4,6 +4,7 @@ import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { ThemeProvider, createTheme } from "@mui/material/styles";
 import SoftwareNav from "../SoftwareNav";
+import { VoiceSessionProvider } from "../../../contexts/VoiceSessionContext";
 
 // This test describes the core catalog; a distribution's brand.jsx may
 // carry another one, so the brand is pinned to the core lists here.
@@ -36,6 +37,10 @@ vi.mock("../../modals/SystemMetricsModal", () => ({
 
 vi.mock("../../agent/AgentScreenViewer", () => ({
   default: () => null,
+}));
+
+vi.mock("../../../contexts/VoiceContext", () => ({
+  useVoice: () => ({ isPlaying: false, availableVoices: [] }),
 }));
 
 function renderNav(path = "/batch-images") {
@@ -94,8 +99,40 @@ describe("SoftwareNav", () => {
     expect(screen.getByRole("button", { name: "Library" })).toHaveAttribute("aria-current", "page");
   });
 
+  it("lights only the child tab on a nested page", () => {
+    renderNav("/agents/memory");
+    expect(screen.getByRole("tab", { name: /Agent Memory/ })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: /^Agents$/ })).toHaveAttribute("aria-selected", "false");
+  });
+
+  it("lights only Bulk Import on the bulk import page", () => {
+    renderNav("/documents/bulk-import");
+    expect(screen.getByRole("tab", { name: /Bulk Import/ })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: /^Files$/ })).toHaveAttribute("aria-selected", "false");
+  });
+
+  it("keeps the parent tab lit on a sub-route with no tab of its own", () => {
+    renderNav("/agents/mcp");
+    expect(screen.getByRole("tab", { name: /^Agents$/ })).toHaveAttribute("aria-selected", "true");
+  });
+
   it("surfaces pages the sidebar does not list", () => {
     renderNav("/chat");
-    expect(screen.getByRole("tab", { name: /Voice Chat/ })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /^Voice$/ })).toBeInTheDocument();
+  });
+
+  it("puts the global mic immediately left of the floating-chat button", () => {
+    render(
+      <ThemeProvider theme={createTheme()}>
+        <MemoryRouter initialEntries={["/documents"]}>
+          <VoiceSessionProvider>
+            <SoftwareNav />
+          </VoiceSessionProvider>
+        </MemoryRouter>
+      </ThemeProvider>,
+    );
+    const mic = screen.getByRole("button", { name: /^Voice: Mic off/ });
+    const chat = screen.getByRole("button", { name: "Floating chat" });
+    expect(mic.parentElement.nextElementSibling.contains(chat)).toBe(true);
   });
 });

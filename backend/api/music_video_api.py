@@ -12,7 +12,7 @@ from pathlib import Path
 from flask import Blueprint, request, jsonify, send_file
 
 from backend.models import db, MusicVideo, Project, Document
-from backend.services.music_video_service import MusicVideoService
+from backend.services.music_video_service import MusicVideoService, held_cuts
 from backend.services.pipeline_service import dispatch_report
 from backend.services.gpu_resource_policy import gpu_session, free_comfyui_vram
 from backend.services.job_types import JobKind
@@ -76,6 +76,8 @@ def _mv_dict(mv: MusicVideo) -> dict:
         "cut_count": cut_count,
         "clip_count": len(clips),
         "clips_done": clips_done,
+        # Rendered cuts a quality check held; the video waits for a person.
+        "clips_needing_review": len(held_cuts(clips)),
         "output_document_id": mv.output_document_id,
         "error_blob": mv.error_blob,
         "created_at": mv.created_at.isoformat() if mv.created_at else None,
@@ -278,6 +280,69 @@ def approve(mv_id):
         dispatch = dispatch_report(svc.try_dispatch(mv_id, "clip_generator"))
         db.session.refresh(mv)
 
+    return jsonify({**_mv_dict(mv), **dispatch})
+
+
+# --- Cuts a quality check held -----------------------------------------------
+# A flagged cut waits for a person (video_consistency_metrics.QUALITY_FLAG_OUTCOME):
+# keep it, or render it again. Nothing re-renders on its own.
+
+def _held_cut(mv_id: int, idx: int):
+    """(music video, a copy of its clips, the held cut, None), or Nones and an
+    error response when there is no such held cut."""
+    import copy
+    from backend.services.video_consistency_metrics import NEEDS_REVIEW
+    mv = db.session.get(MusicVideo, mv_id)
+    if mv is None:
+        return None, None, None, (jsonify({"error": "not_found"}), 404)
+    clips = copy.deepcopy(mv.clips or [])
+    cut = next((c for c in clips if c.get("index") == idx), None)
+    if cut is None:
+        return None, None, None, (jsonify({"error": f"cut {idx} not found"}), 404)
+    if (cut.get("review") or {}).get("state") != NEEDS_REVIEW:
+        return None, None, None, (jsonify({"error": f"cut {idx} is not held for review"}), 409)
+    return mv, clips, cut, None
+
+
+def _continue_generation(mv: MusicVideo) -> dict:
+    """Let the clip generator pick up again: it renders what is pending and
+    assembles once no cut is pending or held."""
+    if mv.current_stage != "generating":
+        return {}
+    return dispatch_report(MusicVideoService(db.session).try_dispatch(mv.id, "clip_generator"))
+
+
+@bp.post("/<int:mv_id>/cut/<int:idx>/approve")
+def approve_held_cut(mv_id, idx):
+    """Keep a held cut as rendered; the video is assembled once none is held."""
+    from datetime import datetime
+    mv, clips, cut, err = _held_cut(mv_id, idx)
+    if err:
+        return err
+    cut["review"] = {**cut["review"], "state": "approved", "approved_at": datetime.now().isoformat()}
+    mv.clips = clips
+    db.session.commit()
+    dispatch = _continue_generation(mv)
+    db.session.refresh(mv)
+    return jsonify({**_mv_dict(mv), **dispatch})
+
+
+@bp.post("/<int:mv_id>/cut/<int:idx>/rerender")
+def rerender_held_cut(mv_id, idx):
+    """Render a held cut again; the new render is checked like the first."""
+    mv, clips, cut, err = _held_cut(mv_id, idx)
+    if err:
+        return err
+    if mv.current_stage != "generating":
+        return jsonify({"error": f"music_video is at stage '{mv.current_stage}', not generating"}), 409
+    cut.update({
+        "status": "pending", "clip_path": None, "quality": None, "review": None,
+        "rerenders": int(cut.get("rerenders") or 0) + 1,
+    })
+    mv.clips = clips
+    db.session.commit()
+    dispatch = _continue_generation(mv)
+    db.session.refresh(mv)
     return jsonify({**_mv_dict(mv), **dispatch})
 
 

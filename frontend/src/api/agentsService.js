@@ -30,6 +30,19 @@ export const updateAgent = async (agentId, updates) => {
   return handleResponse(response);
 };
 
+/**
+ * Put an agent back to its built-in default. With no fields the server resets
+ * the instructions, iteration limit and model, and keeps the on/off switch.
+ */
+export const resetAgent = async (agentId, fields) => {
+  const response = await fetch(`${BASE_URL}/agents/${agentId}/reset`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(Array.isArray(fields) ? { fields } : {}),
+  });
+  return handleResponse(response);
+};
+
 export const toggleAgent = async (agentId) => {
   const response = await fetch(`${BASE_URL}/agents/${agentId}/toggle`, {
     method: "POST",
@@ -77,6 +90,7 @@ export default {
   getAgents,
   getAgent,
   updateAgent,
+  resetAgent,
   toggleAgent,
   matchAgent,
   executeAgent,

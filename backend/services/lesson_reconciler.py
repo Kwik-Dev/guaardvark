@@ -13,17 +13,21 @@ Workflow:
   2. Group rows by (source_file, source_line, lowercased element name) using
      the structured tag set Phase 4 attaches.
   3. For each group whose count is at or above the reconciliation threshold
-     (default 3) and whose source is a real file (not ``model_belief``),
-     synthesise a one-line unified diff against the source file proposing a
-     hedge-strengthened version of that line — and stage it as a
-     ``PendingFix`` row so the user can approve/reject from the existing
+     (default 3) and whose source is a Markdown knowledge file (not
+     ``model_belief``), synthesise a one-line unified diff against the source
+     file proposing a hedge-strengthened version of that line — and stage it
+     as a ``PendingFix`` row so the user can approve/reject from the existing
      self-improvement UI.
 
-The reconciler is deliberately *not* on the Celery beat schedule. It runs from
-the CLI (``scripts/run_lesson_reconciler.py``) or from a manual API call. Auto-
-firing every minute would generate noise for groups that haven't crossed the
-threshold yet; auto-firing every hour would trigger surprise file edits behind
-the user's back. Opt-in is the right cadence.
+It runs on the Celery beat every six hours (``memory.reconcile_belief_updates``;
+``GUAARDVARK_RECONCILER_BEAT_DISABLED=1`` turns that off), from the CLI
+(``scripts/run_lesson_reconciler.py``) and on demand. A scan only stages
+proposals; a person applies them, so nothing here edits a knowledge file.
+
+A group gets one proposal. A proposal for the same file and element that is
+open, applied or rejected settles it, and a line that already carries a
+belief-update hedge is left alone, so repeated scans never stack hedges or
+re-ask a question a person has answered.
 
 Errors degrade gracefully — a single malformed memory row never blocks
 processing of the others.
@@ -34,6 +38,7 @@ import json
 import logging
 import os
 from collections import defaultdict
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -46,7 +51,17 @@ DEFAULT_THRESHOLD = 3
 # Sources we know how to edit. "model_belief" rows are recorded by Phase 4 to
 # keep the next-session prompt honest, but they don't correspond to any line
 # in a knowledge file — so the reconciler has nothing to propose for them.
-_EDITABLE_SOURCES = {"self_knowledge_compact.md", "self_knowledge.md", "recipes.json"}
+# recipes.json is left out on purpose: JSON has no comment syntax, so the hedge
+# would make the file invalid and the guarded apply would refuse it. Its belief
+# updates still reach the next-session prompt.
+_EDITABLE_SOURCES = {"self_knowledge_compact.md", "self_knowledge.md"}
+
+# Marks a line the reconciler has hedged. A line carrying it gets no second hedge.
+_HEDGE_MARKER = "<!-- belief-update:"
+
+# PendingFix statuses that settle a (file, element) group: still open, applied,
+# or rejected by a person. Only a deleted proposal lets the scan ask again.
+_SETTLED_STATUSES = ("proposed", "triaged", "approved", "applied", "rejected")
 
 
 def _knowledge_root() -> str:
@@ -100,12 +115,15 @@ def _extract_group_key(tags: List[str]) -> Optional[Tuple[str, Optional[int], st
 
 
 def _hedged_line(original: str, sessions_seen: int) -> str:
-    """Soften a bullet/claim line with an evidence-tagged hedge."""
-    if not original.strip():
+    """Soften a bullet/claim line with an evidence-tagged hedge.
+
+    A blank line, or one already hedged, comes back unchanged.
+    """
+    if not original.strip() or _HEDGE_MARKER in original:
         return original
     stripped = original.rstrip("\n")
     note = (
-        f"  <!-- belief-update: {sessions_seen} sessions did not see this; "
+        f"  {_HEDGE_MARKER} {sessions_seen} sessions did not see this; "
         f"verify before assuming -->"
     )
     return f"{stripped}{note}\n"
@@ -150,28 +168,66 @@ def _build_diff(
 
 
 def _existing_proposal(file_path: str, element: str) -> bool:
-    """True if an active PendingFix already proposes a fix for this (file, element)."""
+    """True if a PendingFix for this (file, element) is open, applied or rejected.
+
+    The element is matched as the quoted name its description starts with, so
+    a proposal for "firefox icon" does not settle one for "icon".
+    """
     from backend.models import db, PendingFix
     rows = (
         db.session.query(PendingFix)
         .filter(PendingFix.file_path == file_path)
-        .filter(PendingFix.status.in_(("proposed", "triaged", "approved")))
+        .filter(PendingFix.status.in_(_SETTLED_STATUSES))
         .all()
     )
-    needle = element.lower()
+    prefix = f"{element.lower()!r} "
     for r in rows:
-        if needle in (r.fix_description or "").lower():
+        if (r.fix_description or "").lower().startswith(prefix):
             return True
     return False
 
 
-def scan_belief_updates(threshold: int = DEFAULT_THRESHOLD) -> int:
-    """Scan belief_update memories and stage PendingFix rows where evidence converges.
+@dataclass
+class Candidate:
+    """One (file, line, element) group a scan would stage as a PendingFix."""
 
-    Returns the number of PendingFix rows created on this run. Idempotent —
-    running it twice with the same evidence won't create duplicate proposals.
+    source_file: str
+    source_line: int
+    element: str
+    sessions: int
+    file_path: str
+    original_line: str
+    proposed_line: str
+    diff: str
+
+
+@dataclass
+class Skipped:
+    """A group at the threshold that a scan leaves alone, and why."""
+
+    source_file: str
+    source_line: Optional[int]
+    element: str
+    sessions: int
+    reason: str
+
+
+@dataclass
+class Plan:
+    memories: int = 0
+    groups: int = 0
+    candidates: List[Candidate] = field(default_factory=list)
+    skipped: List[Skipped] = field(default_factory=list)
+
+
+def plan_belief_updates(threshold: int = DEFAULT_THRESHOLD) -> Plan:
+    """Decide what a scan would stage, without writing anything.
+
+    The real scan stages exactly ``candidates``, so ``--dry-run`` and the beat
+    task can never disagree about which proposals a run makes. Groups below
+    the threshold are counted in ``groups`` but not listed.
     """
-    from backend.models import db, AgentMemory, PendingFix
+    from backend.models import db, AgentMemory
 
     memories = (
         db.session.query(AgentMemory)
@@ -192,39 +248,72 @@ def scan_belief_updates(threshold: int = DEFAULT_THRESHOLD) -> int:
             continue
         buckets[key].append(m)
 
-    created = 0
+    plan = Plan(memories=len(memories), groups=len(buckets))
+    # One proposal per (file, element): a second line flagged for the same
+    # element waits until the first proposal is settled or deleted.
+    planned = set()
     for (source_file, source_line, element_lower), rows in buckets.items():
-        if len(rows) < threshold:
+        sessions = len(rows)
+        if sessions < threshold:
             continue
+
+        reason = None
         if source_file not in _EDITABLE_SOURCES:
             # model_belief rows + future-named sources — keep the lesson in the
             # next-session prompt; don't try to edit a file we don't know.
-            continue
-        if source_line is None:
+            reason = "not an editable knowledge file"
+        elif source_line is None:
+            reason = "no line number"
+        else:
+            abs_path = os.path.join(_knowledge_root(), source_file)
+            if (abs_path, element_lower) in planned or _existing_proposal(abs_path, element_lower):
+                reason = "already proposed, applied or rejected"
+            else:
+                original_line, proposed_line, diff = _build_diff(abs_path, source_line, sessions)
+                if not diff:
+                    reason = "line unreadable, blank or already hedged"
+        if reason:
+            plan.skipped.append(Skipped(source_file, source_line, element_lower, sessions, reason))
             continue
 
-        abs_path = os.path.join(_knowledge_root(), source_file)
-        if _existing_proposal(abs_path, element_lower):
-            continue
+        planned.add((abs_path, element_lower))
+        plan.candidates.append(Candidate(
+            source_file=source_file,
+            source_line=source_line,
+            element=element_lower,
+            sessions=sessions,
+            file_path=abs_path,
+            original_line=original_line,
+            proposed_line=proposed_line,
+            diff=diff,
+        ))
+    return plan
 
-        original_line, proposed_line, diff = _build_diff(abs_path, source_line, len(rows))
-        if not diff:
-            continue
 
+def stage_belief_updates(threshold: int = DEFAULT_THRESHOLD) -> List[Candidate]:
+    """Stage a PendingFix for each candidate of ``plan_belief_updates``.
+
+    Returns the candidates actually staged; one that fails to save is logged
+    and left out.
+    """
+    from backend.models import db, PendingFix
+
+    staged = []
+    for c in plan_belief_updates(threshold).candidates:
         try:
             if True:  # ad-hoc
                 import logging
                 logging.getLogger(__name__).info("PendingFix without run_id (ad-hoc lesson; per infra audit intentional)")
 
             fix = PendingFix(
-                file_path=abs_path,
-                original_content=original_line,
-                proposed_new_content=proposed_line,
-                proposed_diff=diff,
+                file_path=c.file_path,
+                original_content=c.original_line,
+                proposed_new_content=c.proposed_line,
+                proposed_diff=c.diff,
                 fix_description=(
-                    f"{element_lower!r} flagged as not-visible across {len(rows)} "
+                    f"{c.element!r} flagged as not-visible across {c.sessions} "
                     f"sessions. Propose hedging the claim on "
-                    f"{source_file}:{source_line}."
+                    f"{c.source_file}:{c.source_line}."
                 ),
                 severity="low",
                 status="proposed",
@@ -232,15 +321,25 @@ def scan_belief_updates(threshold: int = DEFAULT_THRESHOLD) -> int:
             )
             db.session.add(fix)
             db.session.commit()
-            created += 1
+            staged.append(c)
             logger.info(
-                f"[RECONCILER] staged pending_fix #{fix.id} for {element_lower!r} "
-                f"({source_file}:{source_line}, {len(rows)} sessions)"
+                f"[RECONCILER] staged pending_fix #{fix.id} for {c.element!r} "
+                f"({c.source_file}:{c.source_line}, {c.sessions} sessions)"
             )
         except Exception as e:
             db.session.rollback()
             logger.warning(
-                f"[RECONCILER] failed to stage pending_fix for {element_lower!r}: {e}"
+                f"[RECONCILER] failed to stage pending_fix for {c.element!r}: {e}"
             )
 
-    return created
+    return staged
+
+
+def scan_belief_updates(threshold: int = DEFAULT_THRESHOLD) -> int:
+    """Scan belief_update memories and stage PendingFix rows where evidence converges.
+
+    Returns the number of PendingFix rows created on this run. Idempotent —
+    running it twice with the same evidence won't create duplicate proposals,
+    whether the first one is still open, was applied or was rejected.
+    """
+    return len(stage_belief_updates(threshold))

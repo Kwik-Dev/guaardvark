@@ -122,9 +122,262 @@ class TestAgentExecutorLLMInitialization:
         assert "no chat-capable LLM" in result.error
 
 
+def _approval_registry():
+    """A registry that records execute_tool calls instead of running tools."""
+    from backend.services.agent_tools import ToolRegistry, BaseTool, ToolParameter, ToolResult
+
+    class RecordingRegistry(ToolRegistry):
+        def __init__(self):
+            super().__init__()
+            self.executed = []
+
+        def execute_tool(self, tool_name, /, agent_context=None, **kwargs):
+            self.executed.append(tool_name)
+            return ToolResult(success=True, output=f"{tool_name} ran")
+
+    class RunPythonTool(BaseTool):
+        name = "execute_python"
+        description = "Run Python code."
+        requires_approval = True
+        parameters = {"code": ToolParameter(name="code", type="string", description="Code to run")}
+
+    class EditTool(BaseTool):
+        name = "edit_code"
+        description = "Replace exact text in a file."
+        requires_approval = True
+        parameters = {
+            "filepath": ToolParameter(name="filepath", type="string", description="File"),
+            "old_text": ToolParameter(name="old_text", type="string", description="Old text"),
+            "new_text": ToolParameter(name="new_text", type="string", description="New text"),
+        }
+
+    class FindTool(BaseTool):
+        name = "find_files"
+        description = "Find files; asks only outside the project's own folders."
+        requires_approval = True
+        parameters = {"path": ToolParameter(name="path", type="string", description="Folder")}
+
+        def needs_approval(self, params):
+            return params.get("path") != "inside"
+
+    registry = RecordingRegistry()
+    for tool_cls in (RunPythonTool, EditTool, FindTool):
+        registry.register(tool_cls())
+    return registry
+
+
+class _JsonToolCallLLM:
+    """Answers every prompt-path turn with one JSON tool call."""
+    model = ""
+
+    def __init__(self, tool_name, params):
+        self._text = json.dumps({
+            "thoughts": "calling a tool",
+            "tool_calls": [{"tool_name": tool_name, "parameters": params}],
+            "final_answer": None,
+        })
+
+    def chat(self, messages, **kwargs):
+        from types import SimpleNamespace
+        return SimpleNamespace(message=SimpleNamespace(content=self._text))
+
+
+class _NativeToolCallLLM:
+    """Answers every native-tools turn with one function call."""
+    model = ""
+
+    def __init__(self, tool_name, params):
+        self._tool_name = tool_name
+        self._params = params
+
+    def chat(self, messages, **kwargs):
+        raise AssertionError("native path should not use chat()")
+
+    def chat_with_tools(self, tools, **kwargs):
+        from types import SimpleNamespace
+        return SimpleNamespace(message=SimpleNamespace(content=""))
+
+    def get_tool_calls_from_response(self, response, error_on_no_tool_call=False):
+        from types import SimpleNamespace
+        return [SimpleNamespace(tool_name=self._tool_name, tool_kwargs=dict(self._params))]
+
+
+def _ready_executor(registry, llm, **tool_context):
+    from backend.services.agent_executor import AgentExecutor
+    from backend.services.tool_execution_guard import ToolExecutionGuard
+
+    executor = AgentExecutor(registry, llm, max_iterations=1)
+    executor.coordinator = None
+    executor._guard = ToolExecutionGuard(max_failures_per_tool=2, scope="for the rest of this task")
+    executor._tool_history = []
+    executor._li_tools = []
+    executor.original_query = "run it"
+    if tool_context:
+        executor.set_tool_context(**tool_context)
+    return executor
+
+
+def _run_one_iteration(executor, native):
+    fn = executor._execute_iteration_native if native else executor._execute_iteration
+    return fn("run it", "system", 1, None)
+
+
+_EDIT = {"filepath": "a.py", "old_text": "x = 1", "new_text": "x = 2"}
+
+
+class TestApprovalRequiredTools:
+    """The executor has no approval card, so it refuses calls that need one."""
+
+    @pytest.mark.parametrize("native", [False, True])
+    def test_approval_tool_is_refused_not_run(self, native):
+        registry = _approval_registry()
+        llm_cls = _NativeToolCallLLM if native else _JsonToolCallLLM
+        executor = _ready_executor(registry, llm_cls("execute_python", {"code": "print(2+2)"}))
+
+        out = _run_one_iteration(executor, native)
+
+        assert registry.executed == []
+        obs = out["step"].observations
+        assert len(obs) == 1
+        assert obs[0]["result"]["success"] is False
+        assert obs[0]["result"]["error"] == "execute_python needs your approval in chat and was not run"
+        assert "needs your approval in chat" in out["next_prompt"]
+
+    @pytest.mark.parametrize("native", [False, True])
+    def test_edit_code_refused_outside_self_improvement(self, native):
+        registry = _approval_registry()
+        llm_cls = _NativeToolCallLLM if native else _JsonToolCallLLM
+        executor = _ready_executor(registry, llm_cls("edit_code", _EDIT))
+
+        out = _run_one_iteration(executor, native)
+
+        assert registry.executed == []
+        assert "edit_code needs your approval" in out["step"].observations[0]["result"]["error"]
+
+    @pytest.mark.parametrize("native", [False, True])
+    def test_self_improvement_edit_code_still_runs(self, native):
+        registry = _approval_registry()
+        llm_cls = _NativeToolCallLLM if native else _JsonToolCallLLM
+        executor = _ready_executor(registry, llm_cls("edit_code", _EDIT),
+                                   _self_improvement_context=True)
+
+        out = _run_one_iteration(executor, native)
+
+        assert registry.executed == ["edit_code"]
+        assert out["step"].observations[0]["result"]["success"] is True
+
+    def test_self_improvement_does_not_exempt_other_tools(self):
+        registry = _approval_registry()
+        executor = _ready_executor(registry, _JsonToolCallLLM("execute_python", {"code": "1"}),
+                                   _self_improvement_context=True)
+
+        out = _run_one_iteration(executor, native=False)
+
+        assert registry.executed == []
+        assert out["step"].observations[0]["result"]["success"] is False
+
+    def test_per_call_needs_approval_is_honoured(self):
+        registry = _approval_registry()
+        executor = _ready_executor(registry, _JsonToolCallLLM("find_files", {"path": "inside"}))
+
+        _run_one_iteration(executor, native=False)
+
+        assert registry.executed == ["find_files"]
+
+
+class _ScriptedLLM:
+    """Plays back one reply per chat() call and keeps each prompt it was sent."""
+    model = ""
+
+    def __init__(self, *replies):
+        self._replies = list(replies)
+        self.prompts = []
+
+    def chat(self, messages, **kwargs):
+        from types import SimpleNamespace
+        self.prompts.append(messages[-1].content)
+        return SimpleNamespace(message=SimpleNamespace(content=self._replies.pop(0)))
+
+
+def _notes_registry():
+    """One tool whose output is a fact unrelated to the question asked."""
+    from backend.services.agent_tools import ToolRegistry, BaseTool, ToolParameter, ToolResult
+
+    class NotesRegistry(ToolRegistry):
+        def execute_tool(self, tool_name, /, agent_context=None, **kwargs):
+            return ToolResult(
+                success=True,
+                output="The team meeting is on Tuesday at noon in room four.",
+            )
+
+    class ReadNotesTool(BaseTool):
+        name = "read_notes"
+        description = "Read the user's notes."
+        parameters = {"topic": ToolParameter(name="topic", type="string", description="Topic")}
+
+    registry = NotesRegistry()
+    registry.register(ReadNotesTool())
+    return registry
+
+
+def _tool_call_then_answer(answer):
+    return (
+        json.dumps({
+            "thoughts": "check the notes",
+            "tool_calls": [{"tool_name": "read_notes", "parameters": {"topic": "storage"}}],
+            "final_answer": None,
+        }),
+        json.dumps({"thoughts": "done", "tool_calls": [], "final_answer": answer}),
+    )
+
+
+def _run_notes_agent(llm):
+    from backend.services.agent_executor import AgentExecutor
+
+    executor = AgentExecutor(_notes_registry(), llm, max_iterations=3)
+    executor.coordinator = None
+    return executor.execute("where are my notes stored?")
+
+
+class TestFinalAnswerFactsCheck:
+    """The model's final answer is returned as written; the facts check labels it."""
+
+    def test_unrelated_fact_keeps_the_answer_and_marks_it_unverified(self):
+        answer = "Your notes are stored in Dropbox."
+        llm = _ScriptedLLM(
+            *_tool_call_then_answer(answer),
+            "CORRECTED: The facts only mention a team meeting.",
+        )
+
+        result = _run_notes_agent(llm)
+
+        assert result.success is True
+        assert result.final_answer == answer
+        assert result.verified is False
+        assert not any("Based ONLY on these verified facts" in p for p in llm.prompts)
+
+    def test_answer_with_no_unsupported_claim_is_verified(self):
+        answer = "I checked your notes; they do not say where they are kept."
+        llm = _ScriptedLLM(*_tool_call_then_answer(answer))
+
+        result = _run_notes_agent(llm)
+
+        assert result.final_answer == answer
+        assert result.verified is True
+        assert len(llm.prompts) == 2
+
+
 @requires_llm
 class TestAgentExecutor:
     """Tests for AgentExecutor — backend/services/agent_executor.py:262"""
+
+    @pytest.fixture(autouse=True)
+    def _no_saved_memories(self, monkeypatch):
+        # The executor recalls saved memories first. Outside an app context
+        # that imports backend.app, which boots the whole app inside the test
+        # (and against DATABASE_URL, would count recalls in that database).
+        # test_agent_memory_hints.py covers the recall itself.
+        monkeypatch.setattr("backend.api.memory_api.search_memories", lambda *a, **k: [])
 
     @pytest.mark.timeout(120)
     def test_agent_reads_file(self, sandbox_dir):

@@ -83,6 +83,14 @@ class BaseBackend(ABC):
         """
         ...
 
+    def command_prefix(self, config: dict[str, Any]) -> list[str]:
+        """The argv that runs this backend's CLI on one prompt, minus the prompt.
+
+        spawn() appends the task prompt; a follow-up pass on the same backend
+        (the diagnostic agent) appends its own.
+        """
+        raise NotImplementedError(f"{self.name} backend cannot run a one-off prompt")
+
     def estimate_cost(self, process: AgentProcess) -> tuple[int, float]:
         """
         Estimate tokens used and cost in USD.

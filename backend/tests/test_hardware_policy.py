@@ -106,6 +106,27 @@ def test_model_tier_arm_wins_even_with_high_ram():
     assert t["chat"] == "llama3.2:1b"
 
 
+GB10 = {"vendor": "nvidia", "vram_mb": None, "compute_cap": "12.1", "unified_memory_gb": 119.7}
+
+
+def test_model_tier_standard_for_arm_with_nvidia_gpu():
+    # GB10 / DGX Spark: aarch64 with an NVIDIA GPU is not a Raspberry Pi.
+    assert hp.model_tier(ram_gb=119.7, gpu=GB10, arch="aarch64")["chat"] == "gemma4:e2b"
+
+
+def test_model_tier_small_arm_nvidia_board_stays_small():
+    # A Jetson-class board with 8 GB still gets the 1B model, by its memory.
+    jetson = {"vendor": "nvidia", "vram_mb": None, "unified_memory_gb": 7.4}
+    assert hp.model_tier(ram_gb=7.4, gpu=jetson, arch="aarch64")["chat"] == "llama3.2:1b"
+
+
+def test_ollama_tuning_uses_unified_memory_when_vram_unreported():
+    t = hp.ollama_tuning(GB10)
+    assert t["FLASH_ATTENTION"] == 1
+    assert t["NUM_PARALLEL"] == 2 and t["MAX_LOADED_MODELS"] == 2
+    assert hp.gpu_memory_mb(GB10) == int(119.7 * 1024)
+
+
 def test_model_tier_standard_for_normal_box():
     # Pinned to start.sh's actual standard-tier id (vision-capable Gemma4 default).
     t = hp.model_tier(ram_gb=125, gpu={"vendor": "nvidia", "vram_mb": 16311}, arch="x86_64")
@@ -165,3 +186,55 @@ def test_ollama_tuning_12gb_holds_one_model():
     t = hp.ollama_tuning({"vendor": "nvidia", "vram_mb": 12288})
     assert t["NUM_PARALLEL"] == 1
     assert t["MAX_LOADED_MODELS"] == 1
+
+
+# ---- training_fit: Settings > Training libraries ---------------------------------
+
+NVIDIA_16GB = {"vendor": "nvidia", "vram_mb": 16311, "compute_cap": "12.0"}
+
+
+def test_training_is_practical_on_a_16gb_nvidia_card_with_ram():
+    fit = hp.training_fit(64, NVIDIA_16GB, "x86_64")
+    assert fit["practical"] is True
+    assert "16 GB" in fit["reason"]
+
+
+def test_training_is_practical_at_the_8gb_floor():
+    assert hp.training_fit(32, {"vendor": "nvidia", "vram_mb": 7680}, "x86_64")["practical"] is True
+
+
+def test_training_is_not_practical_without_a_gpu():
+    fit = hp.training_fit(64, {"vendor": "none"}, "x86_64")
+    assert fit["practical"] is False
+    assert "No GPU" in fit["reason"]
+
+
+def test_training_is_not_practical_on_a_raspberry_pi():
+    assert hp.training_fit(8, {"vendor": "none"}, "aarch64")["practical"] is False
+
+
+def test_training_is_not_practical_on_a_card_under_8gb():
+    fit = hp.training_fit(32, {"vendor": "nvidia", "vram_mb": 6144}, "x86_64")
+    assert fit["practical"] is False
+    assert "6.0 GB" in fit["reason"]
+
+
+def test_training_is_not_practical_when_the_gpu_memory_is_unknown():
+    assert hp.training_fit(32, {"vendor": "nvidia", "vram_mb": None}, "x86_64")["practical"] is False
+
+
+def test_training_is_not_practical_with_8gb_of_ram_even_on_a_big_card():
+    fit = hp.training_fit(8, NVIDIA_16GB, "x86_64")
+    assert fit["practical"] is False
+    assert "8 GB of memory" in fit["reason"]
+
+
+def test_training_names_the_gpu_vendor_it_is_not_set_up_for():
+    for vendor, word in (("amd", "AMD"), ("apple", "Apple"), ("intel", "Intel")):
+        fit = hp.training_fit(64, {"vendor": vendor, "vram_mb": 24576}, "x86_64")
+        assert fit["practical"] is False
+        assert word in fit["reason"]
+
+
+def test_training_fit_tolerates_a_missing_gpu_dict():
+    assert hp.training_fit(0, None, "")["practical"] is False

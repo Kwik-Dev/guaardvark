@@ -104,22 +104,90 @@ class TestClaudeAdvisorService:
         assert result["approved"] is False
         assert result["directive"] == "halt_self_improvement"
 
+    @staticmethod
+    def _reviewable_service(total_tokens=0, monthly_budget=1000000):
+        from backend.services.claude_advisor_service import ClaudeAdvisorService
+        from datetime import datetime
+        import threading
+        service = ClaudeAdvisorService.__new__(ClaudeAdvisorService)
+        service._api_key = "test-key"
+        service._client = MagicMock()
+        service._model = "claude-sonnet-4-20250514"
+        service._usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": total_tokens}
+        service._usage_reset_date = datetime.now().replace(day=1)
+        service._monthly_budget = monthly_budget
+        service._usage_lock = threading.Lock()
+        return service
+
+    @staticmethod
+    def _review(service):
+        with patch("backend.services.claude_advisor_service.save_setting"):
+            return service.review_change(
+                file_path="backend/services/indexing_service.py",
+                current_content="x = 1",
+                proposed_diff="- x = 1\n+ x = 2",
+                reasoning="test"
+            )
+
+    @staticmethod
+    def _assert_not_reviewed(result, reason_part):
+        assert result["approved"] is None
+        assert result["reviewed"] is False
+        assert result["directive"] == "not_reviewed"
+        assert result["offline_fallback"] is True
+        assert reason_part in result["reason"]
+
     def test_review_change_offline_fallback(self):
-        """Guardian should return fallback when Claude is unavailable."""
+        """An unavailable guardian reports that no review happened."""
         from backend.services.claude_advisor_service import ClaudeAdvisorService
         service = ClaudeAdvisorService.__new__(ClaudeAdvisorService)
         service._api_key = None
         service._client = None
 
-        result = service.review_change(
-            file_path="backend/services/indexing_service.py",
-            current_content="x = 1",
-            proposed_diff="- x = 1\n+ x = 2",
-            reasoning="test"
-        )
+        result = self._review(service)
+        self._assert_not_reviewed(result, "unavailable")
+
+    def test_review_change_over_budget_is_not_reviewed(self):
+        service = self._reviewable_service(total_tokens=1001, monthly_budget=1000)
+
+        result = self._review(service)
+
+        self._assert_not_reviewed(result, "budget")
+        service._client.messages.create.assert_not_called()
+
+    def test_review_change_unparseable_is_not_reviewed(self):
+        service = self._reviewable_service()
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text="looks fine to me")]
+        mock_response.usage = MagicMock(input_tokens=10, output_tokens=5)
+        service._client.messages.create.return_value = mock_response
+
+        result = self._review(service)
+
+        self._assert_not_reviewed(result, "Could not parse")
+
+    def test_review_change_error_is_not_reviewed(self):
+        service = self._reviewable_service()
+        service._client.messages.create.side_effect = RuntimeError("connection reset")
+
+        result = self._review(service)
+
+        self._assert_not_reviewed(result, "connection reset")
+
+    def test_review_change_that_happened_says_so(self):
+        service = self._reviewable_service()
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text=json.dumps({
+            "approved": True, "suggestions": [], "risk_level": "low",
+            "directive": "proceed", "reason": "fine",
+        }))]
+        mock_response.usage = MagicMock(input_tokens=10, output_tokens=5)
+        service._client.messages.create.return_value = mock_response
+
+        result = self._review(service)
+
         assert result["approved"] is True
-        assert result["directive"] == "proceed_with_caution"
-        assert result["offline_fallback"] is True
+        assert result["reviewed"] is True
 
     def test_token_usage_tracking(self):
         """Service should track token usage."""

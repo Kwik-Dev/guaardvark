@@ -1,0 +1,40 @@
+{
+  "hf_repo": "ACE-Step/Ace-Step1.5",
+  "hf_revision": "19671f406d603126926c1b7e2adc169acbcade22",
+  "local_dir": "data/models/ace-step-1.5",
+  "dit": "acestep-v15-turbo",
+  "planner": "acestep-5Hz-lm-1.7B",
+  "source": {
+    "repo": "https://github.com/ace-step/ACE-Step-1.5.git",
+    "tag": "v0.1.8",
+    "commit": "dce621408bee8c31b4fcf4811682eb9359e1bc94",
+    "python": "3.12",
+    "uv": "0.12.23"
+  },
+  "environment": "venv-music15",
+  "files": [
+    "Qwen3-Embedding-0.6B/added_tokens.json",
+    "Qwen3-Embedding-0.6B/chat_template.jinja",
+    "Qwen3-Embedding-0.6B/config.json",
+    "Qwen3-Embedding-0.6B/merges.txt",
+    "Qwen3-Embedding-0.6B/model.safetensors",
+    "Qwen3-Embedding-0.6B/special_tokens_map.json",
+    "Qwen3-Embedding-0.6B/tokenizer.json",
+    "Qwen3-Embedding-0.6B/tokenizer_config.json",
+    "Qwen3-Embedding-0.6B/vocab.json",
+    "acestep-5Hz-lm-1.7B/added_tokens.json",
+    "acestep-5Hz-lm-1.7B/chat_template.jinja",
+    "acestep-5Hz-lm-1.7B/config.json",
+    "acestep-5Hz-lm-1.7B/merges.txt",
+    "acestep-5Hz-lm-1.7B/model.safetensors",
+    "acestep-5Hz-lm-1.7B/special_tokens_map.json",
+    "acestep-5Hz-lm-1.7B/tokenizer.json",
+    "acestep-5Hz-lm-1.7B/tokenizer_config.json",
+    "acestep-5Hz-lm-1.7B/vocab.json",
+    "acestep-v15-turbo/config.json",
+    "acestep-v15-turbo/model.safetensors",
+    "acestep-v15-turbo/silence_latent.pt",
+    "vae/config.json",
+    "vae/diffusion_pytorch_model.safetensors"
+  ]
+}

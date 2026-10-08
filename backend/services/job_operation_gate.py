@@ -24,6 +24,7 @@ same point it requests VRAM.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from contextlib import contextmanager
@@ -60,6 +61,63 @@ class GpuBusyError(Exception):
 
 class GpuCapacityError(GpuBusyError):
     """The estimate can never fit this card; retrying will not help."""
+
+
+class SystemLoadBusyError(GpuBusyError):
+    """The GPU could take the job but the machine cannot yet: system RAM, swap or
+    CPU is short (GlobalLoadGate). ``detail`` says which, in plain words."""
+
+    def __init__(self, detail: str):
+        super().__init__(f"System under heavy load — {detail}")
+        self.detail = detail
+
+
+# How a queue panel names the job holding the GPU. Batch ids carry their kind as a
+# prefix (output_registration.BATES_PREFIXES, the blueprint/upload image batches);
+# any other holder is named by the JobKind the gate recorded.
+_HOLDER_ID_LABELS = (
+    ("VideoBatch", "Video Gen"),
+    ("ImageBatch", "Image Gen"),
+    ("blueprint_", "Image Gen"),
+    ("upload_", "Image Gen"),
+)
+_HOLDER_KIND_LABELS = {
+    "video_render": "a video render",
+    "training": "model training",
+    "lora_train": "LoRA training",
+}
+# The gate's refusal: "GPU is held by <kind>:<native_id> — wait for completion".
+_GATE_HOLDER_RE = re.compile(r"held by (?P<kind>[a-z_]+):(?P<id>\S+)")
+
+
+def gpu_holder_label(exc: Optional[BaseException]) -> Optional[str]:
+    """Plain name of the job a GPU refusal says holds the card, or None."""
+    text = str(exc or "")
+    if "held by another process" in text:
+        return "another process"
+    m = _GATE_HOLDER_RE.search(text)
+    if not m:
+        return None
+    for prefix, label in _HOLDER_ID_LABELS:
+        if m.group("id").startswith(prefix):
+            return label
+    kind = m.group("kind")
+    return _HOLDER_KIND_LABELS.get(kind, kind.replace("_", " "))
+
+
+def gpu_wait_message(exc: Optional[BaseException], free_mb, need_mb) -> str:
+    """What a queued job is waiting for, for the queue panel and progress footer.
+
+    Names the job holding the GPU when the refusal says who it is."""
+    if isinstance(exc, SystemLoadBusyError):
+        return f"Waiting for the system: {exc.detail}"
+    holder = gpu_holder_label(exc)
+    if holder:
+        return (
+            f"Queued behind {holder} — needs ~{need_mb / 1024:.1f} GB, "
+            f"{(free_mb or 0) / 1024:.1f} GB free"
+        )
+    return f"Waiting for VRAM — {(free_mb or 0) / 1024:.1f}GB free, need ~{need_mb / 1024:.1f}GB"
 
 
 class GpuOOMError(RuntimeError):

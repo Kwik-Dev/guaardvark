@@ -27,16 +27,15 @@ user_pref("browser.theme.toolbar-theme", 1);
 user_pref("ui.systemUsesDarkTheme", 0);
 user_pref("layout.css.prefers-color-scheme.content-override", 1);
 
-// === HOMEPAGE: Google ===
+// === HOMEPAGE: blank ===
 // startup.page: 0 = blank, 1 = homepage, 3 = previous session.
-// startup.homepage MUST include the protocol — bare "google.com" gets
-// interpreted by Firefox as a keyword search against the default search
-// engine, which is why the previous setting landed on a "Google cache
-// troubleshooting" SERP article instead of google.com itself.
+// A blank home page means starting the agent's browser contacts no site;
+// the agent navigates where a task needs it. A non-blank homepage MUST
+// include the protocol — bare "google.com" is read as a keyword search.
 user_pref("browser.startup.page", 1);
-user_pref("browser.startup.homepage", "https://www.google.com/");
+user_pref("browser.startup.homepage", "about:blank");
 user_pref("browser.newtabpage.enabled", true);
-user_pref("browser.newtab.url", "https://www.google.com/");
+user_pref("browser.newtab.url", "about:blank");
 
 // === DISABLE ALL TELEMETRY ===
 user_pref("toolkit.telemetry.enabled", false);

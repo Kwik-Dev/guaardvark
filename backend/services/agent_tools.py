@@ -95,6 +95,11 @@ class BaseTool:
     # next turn. 500 keeps a chatty tool from crowding the context; a search
     # tool whose whole point is the text it returns declares more.
     observation_chars: int = 500
+    # The line the chat model reads in its tool list. Chat shows only the first
+    # 80 characters of `description`, which cut the rules off tools whose use
+    # depends on them; a tool that needs more sets this (keep it under ~250).
+    # MCP clients always get the full description.
+    chat_summary: str = ""
     requires_confirmation: bool = False
     required_context: List[str] = []  # e.g., ['project_id', 'user_id'] (read-only; never mutate)
     
@@ -209,7 +214,26 @@ class ToolRegistry:
     def list_tools(self) -> List[str]:
         """Get list of all registered tool names"""
         return list(self.tools.keys())
-    
+
+    def subset(self, names: List[str]) -> "tuple[ToolRegistry, List[str]]":
+        """A new registry holding only the named tools, in the order given.
+
+        Returns (registry, missing): ``missing`` lists the names this registry
+        does not have, so a caller can say which tools an agent lacks.
+        """
+        tools = self.tools
+        picked: Dict[str, BaseTool] = {}
+        missing: List[str] = []
+        for name in names:
+            tool = tools.get(name)
+            if tool is None:
+                missing.append(name)
+            else:
+                picked[name] = tool
+        registry = ToolRegistry()
+        registry.tools = picked
+        return registry, missing
+
     def get_tool_schemas(self, format: str = 'xml', tool_filter: str = None) -> str:
         """
         Generate tool schemas for LLM prompt
@@ -750,6 +774,41 @@ def coerce_params_to_schema(params: Dict[str, Any], tool: Optional[BaseTool]) ->
         else:
             out[key] = _heuristic_coerce(value)
     return out
+
+
+def consent_reference(tool, params: Dict[str, Any]) -> Optional[str]:
+    """The reference image a consent-gated tool would use, or None."""
+    if not getattr(tool, "consent_gate", False):
+        return None
+    ref = (params or {}).get("image") or ""
+    return ref or None
+
+
+def tool_needs_approval_card(tool, tool_name: str, params: Dict[str, Any], preapproved: set) -> bool:
+    """Whether this call must pause for a person's approval card.
+
+    Chat shows the card; a caller with no card to show refuses the call.
+    A consent-gated tool whose reference image already has a consent record
+    does not ask again: the record is the durable answer.
+    """
+    if not tool or not getattr(tool, "requires_approval", False) or tool_name in preapproved:
+        return False
+    # A tool can narrow its own approval to the calls that need it, e.g.
+    # find_files inside Guaardvark's folders. Unsure means ask.
+    per_call = getattr(tool, "needs_approval", None)
+    if callable(per_call):
+        try:
+            if not per_call(params or {}):
+                return False
+        except Exception:
+            logger.debug("needs_approval check failed for %s; asking", tool_name, exc_info=True)
+    if getattr(tool, "consent_gate", False):
+        ref = consent_reference(tool, params)
+        if ref:
+            from backend.services.consent_records import has_consent
+            if has_consent(ref):
+                return False
+    return True
 
 
 # Global registry instance (like PYDANTIC_MODELS pattern)

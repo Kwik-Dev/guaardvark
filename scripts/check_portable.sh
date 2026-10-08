@@ -60,9 +60,10 @@ if [ "$MODE" = "--file" ] && [ ! -f "$TARGET" ]; then
     exit 2
 fi
 
-# Paths allowed to contain these patterns, as extended regex matched against
-# the repo-relative path. Tests need fake home directories; the architecture
-# doc, funding links and brand config legitimately name the project's owner.
+# Paths allowed to contain the generic patterns below, as extended regex matched
+# against the repo-relative path. Tests need fake home directories; the
+# architecture doc, funding links and brand config legitimately name the
+# project's owner. The local patterns are not exempt anywhere (see run_rules).
 ALLOW='^(backend/tests/|cli/tests/|frontend/src/.*\.test\.(js|jsx)$|docs/ARCHITECTURE\.md$|\.github/FUNDING\.yml$|README\.md$|LICENSE$|frontend/src/config/brand\.jsx$|scripts/check_portable\.sh$)'
 
 # pattern<TAB>human explanation
@@ -94,8 +95,9 @@ PATTERNS
 # tree, whose git directory every worktree shares.
 COMMON_ROOT="$(cd "$(git rev-parse --git-common-dir)/.." && pwd)"
 LOCAL_PATTERNS="${PORTABLE_LOCAL_PATTERNS:-$COMMON_ROOT/scripts/.portable-local-patterns}"
+LOCAL_RULES=""
 if [ -f "$LOCAL_PATTERNS" ]; then
-    RULES="$RULES"$'\n'"$(grep -vE '^\s*(#|$)' "$LOCAL_PATTERNS")"
+    LOCAL_RULES="$(grep -vE '^\s*(#|$)' "$LOCAL_PATTERNS")"
 fi
 
 # Some files must never be committed at all: private working documents, local
@@ -113,7 +115,7 @@ status=0
 scan_tracked() {
     local pattern="$1" explanation="$2" file hits hit
     while IFS= read -r -d '' file; do
-        [[ "$file" =~ $ALLOW ]] && continue
+        [ "$USE_ALLOW" = 1 ] && [[ "$file" =~ $ALLOW ]] && continue
         if hits=$(grep -nE -- "$pattern" "$file" 2>/dev/null); then
             while IFS= read -r hit; do
                 echo "✗ ${file}:${hit%%:*} — ${explanation}"
@@ -133,7 +135,7 @@ scan_staged() {
             '+++ b/'*)       file="${line#+++ b/}" ;;
             '+'*)
                 [ -z "$file" ] && continue
-                [[ "$file" =~ $ALLOW ]] && continue
+                [ "$USE_ALLOW" = 1 ] && [[ "$file" =~ $ALLOW ]] && continue
                 content="${line#+}"
                 if printf '%s' "$content" | grep -qE -- "$pattern"; then
                     echo "✗ ${file} — ${explanation}"
@@ -216,7 +218,7 @@ scan_range() {
                 '+++ b/'*)       file="${line#+++ b/}" ;;
                 '+'*)
                     [ -z "$file" ] && continue
-                    [[ "$file" =~ $ALLOW ]] && continue
+                    [ "$USE_ALLOW" = 1 ] && [[ "$file" =~ $ALLOW ]] && continue
                     content="${line#+}"
                     if printf '%s' "$content" | grep -qE -- "$pattern"; then
                         echo "✗ ${commit:0:7} ${file} — ${explanation}  (${subject:0:50})"
@@ -231,22 +233,29 @@ scan_range() {
 
 [ "$MODE" = "--file" ] || scan_paths
 
-while IFS=$'\t' read -r pattern explanation scope; do
-    [ -z "$pattern" ] && continue
-    # A pattern scoped to a recipient guards their name against the public repo,
-    # not against themselves: a report written for them may say who they are.
-    # Every other pattern still applies — our machines and identity are not theirs.
-    if [ "$MODE" = "--file" ] && [ -n "$scope" ] && [ "$scope" = "$RECIPIENT" ]; then
-        continue
-    fi
-    case "$MODE" in
-        --staged)  scan_staged "$pattern" "$explanation" ;;
-        --message) scan_message "$pattern" "$explanation" ;;
-        --range)   scan_range "$pattern" "$explanation" ;;
-        --file)    scan_file "$pattern" "$explanation" ;;
-        *)         scan_tracked "$pattern" "$explanation" ;;
-    esac
-done <<< "$RULES"
+# The generic rules honour ALLOW; the local ones apply to every file, because a
+# box nickname or a client's name has no legitimate place in a test or README.
+run_rules() {
+    USE_ALLOW="$1"
+    while IFS=$'\t' read -r pattern explanation scope; do
+        [ -z "$pattern" ] && continue
+        # A pattern scoped to a recipient guards their name against the public repo,
+        # not against themselves: a report written for them may say who they are.
+        # Every other pattern still applies — our machines and identity are not theirs.
+        if [ "$MODE" = "--file" ] && [ -n "$scope" ] && [ "$scope" = "$RECIPIENT" ]; then
+            continue
+        fi
+        case "$MODE" in
+            --staged)  scan_staged "$pattern" "$explanation" ;;
+            --message) scan_message "$pattern" "$explanation" ;;
+            --range)   scan_range "$pattern" "$explanation" ;;
+            --file)    scan_file "$pattern" "$explanation" ;;
+            *)         scan_tracked "$pattern" "$explanation" ;;
+        esac
+    done <<< "$2"
+}
+run_rules 1 "$RULES"
+run_rules 0 "$LOCAL_RULES"
 
 if [ "$status" -ne 0 ]; then
     echo

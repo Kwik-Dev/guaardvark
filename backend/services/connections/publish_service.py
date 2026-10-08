@@ -20,6 +20,10 @@ TASK_TYPE = "connection_publish"
 PUBLISH_SOFT_TIME_LIMIT = 7200
 PUBLISH_TIME_LIMIT = 7500
 
+HELD_MESSAGE = (
+    "Held when public posting was stopped. Approve it to send it once posting resumes."
+)
+
 
 def preflight(
     connection_ids: List[int],
@@ -32,10 +36,11 @@ def preflight(
     """Validate without queueing, for live feedback in the compose modal."""
     from backend.models import Connection
 
+    stopped = gates.posting_stop_reason()
     try:
         items = media_util.resolve_media(document_ids)
     except media_util.MediaResolveError as e:
-        return {"ok": False, "per_connection": {}, "violations": [str(e)]}
+        return {"ok": False, "per_connection": {}, "violations": [v for v in (stopped, str(e)) if v]}
 
     per_connection: Dict[str, Any] = {}
     for cid in connection_ids or []:
@@ -58,9 +63,13 @@ def preflight(
         }
 
     return {
-        "ok": all(not v["violations"] for v in per_connection.values()) and bool(per_connection),
+        "ok": (
+            not stopped
+            and all(not v["violations"] for v in per_connection.values())
+            and bool(per_connection)
+        ),
         "per_connection": per_connection,
-        "violations": [],
+        "violations": [stopped] if stopped else [],
     }
 
 
@@ -111,12 +120,16 @@ def queue_publish(
 
     Raises:
         ValueError: nothing selected, or the post violates a target's limits.
-        RuntimeError: publishing is gated off.
+        RuntimeError: publishing is gated off, or public posting is stopped.
     """
     from backend.models import Connection, PublishRecord, db
 
     if not connection_ids:
         raise ValueError("Select at least one connection to publish to.")
+
+    stopped = gates.posting_stop_reason()
+    if stopped:
+        raise RuntimeError(stopped)
 
     if not gates.publish_enabled():
         raise RuntimeError("Publishing is disabled.")
@@ -212,6 +225,11 @@ def _dispatch(record, connection, spec) -> Dict[str, Any]:
         logger.exception("Failed to enqueue publish task for record %s", record.id)
         raise RuntimeError(str(exc)) from exc
 
+    # Kept so the stop on public posting can revoke the job by id
+    # (kill_switch.hold_connection_publishes).
+    task.handler_config = {**(task.handler_config or {}), "celery_task_id": celery_result.id}
+    db.session.commit()
+
     return {
         "publish_record_id": record.id,
         "task_id": task.id,
@@ -223,18 +241,55 @@ def _dispatch(record, connection, spec) -> Dict[str, Any]:
 
 
 def approve(record) -> Dict[str, Any]:
-    """Release a supervised publish to the queue."""
+    """Release a supervised or held publish to the queue.
+
+    Raises RuntimeError while public posting is stopped; the record stays put.
+    """
     from backend.models import Connection, db
 
     if record.status != "awaiting_approval":
         raise ValueError(f"Cannot approve a record that is '{record.status}'.")
+    stopped = gates.posting_stop_reason()
+    if stopped:
+        raise RuntimeError(stopped)
     connection = Connection.query.get(record.connection_id)
     if connection is None:
         raise ValueError("The target connection no longer exists.")
 
     record.status = "queued"
+    record.error_message = None
     db.session.commit()
     return _dispatch(record, connection, registry.spec_for(connection.provider))
+
+
+def hold(record) -> None:
+    """Send a publish back to awaiting_approval because public posting stopped.
+
+    A held publish needs a person's click to go out, so lifting the stop never
+    sends a backlog by itself.
+    """
+    from backend.models import db
+
+    record.status = "awaiting_approval"
+    record.error_message = HELD_MESSAGE
+    db.session.commit()
+
+
+def hold_queued() -> tuple[int, int]:
+    """Hold every publish that is queued and not yet being sent.
+
+    Returns (held, in_flight): in_flight counts publishes already being sent,
+    which a hold cannot recall.
+    """
+    from backend.models import PublishRecord, db
+
+    rows = PublishRecord.query.filter(PublishRecord.status == "queued").all()
+    for row in rows:
+        row.status = "awaiting_approval"
+        row.error_message = HELD_MESSAGE
+    db.session.commit()
+    in_flight = PublishRecord.query.filter(PublishRecord.status == "processing").count()
+    return len(rows), in_flight
 
 
 def reject(record, reason: str = "") -> None:

@@ -13,6 +13,8 @@ import time
 import requests
 from typing import Dict, Any
 
+from .backend_url import backend_api_url
+
 logger = logging.getLogger("swarm.resource_monitor")
 
 class ResourceMonitor:
@@ -28,9 +30,7 @@ class ResourceMonitor:
         self.max_cpu_percent = max_cpu_percent
         self.max_ram_percent = max_ram_percent
         self.min_vram_mb = min_vram_mb
-        # resolve main backend URL
-        flask_port = os.environ.get("FLASK_PORT", "5002")
-        self.backend_url = f"http://localhost:{flask_port}/api"
+        self.backend_url = backend_api_url()
         
     def get_system_stats(self) -> Dict[str, Any]:
         """Get current system resource utilization."""
@@ -73,13 +73,19 @@ class ResourceMonitor:
         return True
 
     def _get_vram_from_backend(self) -> float | None:
-        """Query main Guaardvark backend for unified VRAM status."""
+        """Free VRAM in MB from the backend's GPU orchestrator, or None.
+
+        /api/gpu/memory/status reports it as vram.free_mb. A snapshot with no
+        vram.total_mb (no GPU, or the backend's probe failed) also says free_mb
+        0, which means unknown rather than full, so that is None too and the
+        caller falls back to nvidia-smi.
+        """
         try:
             resp = requests.get(f"{self.backend_url}/gpu/memory/status", timeout=1)
             if resp.status_code == 200:
-                data = resp.json()
-                # orchestrator reports 'vram_free_mb' in its snapshot
-                return data.get("vram_free_mb")
+                vram = (resp.json() or {}).get("vram") or {}
+                if vram.get("total_mb") and vram.get("free_mb") is not None:
+                    return float(vram["free_mb"])
         except Exception:
             pass
         return None

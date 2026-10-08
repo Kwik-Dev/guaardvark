@@ -25,7 +25,7 @@ import { spacing } from "../../theme/tokens";
 import { BrandLogo } from "../branding";
 import brand from "../../config/brand";
 import { filterNavGroups, landingRouteFor } from "../../config/profile";
-import { pathIsActive } from "../../config/navCatalog";
+import { longestActivePath } from "../../config/navCatalog";
 import { extensionNavGroups } from "../../extensions";
 import { usePendingApprovals } from "../../hooks/usePendingApprovals";
 import BarChartIcon from "@mui/icons-material/BarChart";
@@ -35,6 +35,7 @@ import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 
 import SystemMetricsModal from "../modals/SystemMetricsModal";
 import AgentScreenViewer from "../agent/AgentScreenViewer";
+import GlobalMicButton from "../voice/GlobalMicButton";
 
 const COLLAPSED_WIDTH = spacing.sidebarCollapsed;
 const EXPANDED_WIDTH = spacing.sidebarExpanded;
@@ -48,6 +49,10 @@ const Sidebar = () => {
   const navGroups = useMemo(
     () => filterNavGroups([...extensionNavGroups(), ...brand.navGroups], profile?.hidden_routes),
     [profile],
+  );
+  const activePath = longestActivePath(
+    navGroups.flatMap((group) => group.items.map((item) => item.path)),
+    location.pathname,
   );
   const homeRoute = landingRouteFor(profile) || "/dashboard";
   const systemName = useAppStore((state) => state.systemName);
@@ -223,7 +228,7 @@ const Sidebar = () => {
                 )}
                 <List disablePadding>
                   {group.items.map((item) => {
-                    const isActive = pathIsActive(item.path, location.pathname);
+                    const isActive = item.path === activePath;
 
                     // A nav item may carry a live count. Collapsed, the badge is
                     // the only signal there is, so it rides the icon in both
@@ -336,6 +341,8 @@ const Sidebar = () => {
                 )}
               </IconButton>
             </Tooltip>
+
+            <GlobalMicButton variant="rail" expanded={isExpanded} label="Voice" primary />
 
             {}
             <IconButton

@@ -244,6 +244,48 @@ export function useBatchVideo({ setError, setSuccess, computedParams } = {}) {
     }
   }, [fetchBatches, fetchQueue, setError, setSuccess, startPollingStatus]);
 
+  // A clip a quality check held: keep it as rendered (it is then added to Files).
+  const handleApproveClip = useCallback(async (batchId, itemId) => {
+    try {
+      setError?.("");
+      const res = await fetch(`${API_BASE}/batch-video/review/${batchId}/${itemId}/approve`, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        setError?.(data.error || `Approve failed: HTTP ${res.status}`);
+        return;
+      }
+      setBatchStatus((prev) => (prev && prev.batch_id === batchId
+        ? { ...prev, results: (prev.results || []).map((r) => (
+          r.item_id === itemId ? { ...r, review: data.data?.review } : r)) }
+        : prev));
+      setSuccess?.("Clip approved and added to Files.");
+    } catch (e) {
+      setError?.(`Approve failed: ${e.message}`);
+    }
+  }, [setError, setSuccess]);
+
+  // ...or render it again as a new one-clip batch (same settings, new seed).
+  const handleRerenderClip = useCallback(async (batchId, itemId) => {
+    try {
+      setError?.("");
+      const res = await fetch(`${API_BASE}/batch-video/review/${batchId}/${itemId}/rerender`, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success || !data.data?.batch_id) {
+        setError?.(data.error || `Re-render failed: HTTP ${res.status}`);
+        return;
+      }
+      const newBatchId = data.data.batch_id;
+      setActiveBatchId(newBatchId);
+      setBatchStatus(null);
+      startPollingStatus(newBatchId);
+      await fetchBatches();
+      await fetchQueue();
+      setSuccess?.(`Re-rendering as ${newBatchId}. The held clip stays in ${batchId}.`);
+    } catch (e) {
+      setError?.(`Re-render failed: ${e.message}`);
+    }
+  }, [fetchBatches, fetchQueue, setError, setSuccess, startPollingStatus]);
+
   return {
     activeBatchId,
     setActiveBatchId,
@@ -260,6 +302,8 @@ export function useBatchVideo({ setError, setSuccess, computedParams } = {}) {
     handleDeleteBatch,
     handleCancelBatch,
     handleRetryBatch,
+    handleApproveClip,
+    handleRerenderClip,
     handleClearCompletedQueue,
   };
 }

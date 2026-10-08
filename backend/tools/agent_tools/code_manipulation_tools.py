@@ -503,62 +503,95 @@ class EditCodeTool(BaseTool):
 
         # Extract agent context (set by AgentExecutor.set_tool_context)
         ctx = kwargs.pop("_agent_context", {})
+        self_improvement = bool(ctx.get("_self_improvement_context"))
 
         # Guardian review (Uncle Claude) — only during self-improvement (skip if dry_run)
-        if ctx.get("_self_improvement_context") and not dry_run:
+        if self_improvement and not dry_run:
+            # Only approved=True counts as a review that passed. Anything else
+            # (unavailable, over budget, unparseable, error) is recorded as
+            # "not reviewed" on the staged fix; a person applies it either way.
+            reviewed_by = None
+            review_notes = None
             try:
-                from backend.services.claude_advisor_service import get_claude_advisor
-                advisor = get_claude_advisor()
-                if advisor.is_available():
+                from backend.services.claude_advisor_service import (
+                    get_claude_advisor, scheduled_sends_allowed,
+                )
+                if ctx.get("_trigger") in ("scheduled", "reactive") and not scheduled_sends_allowed():
+                    # No person started a scheduled or reactive (heal) run, and the
+                    # review sends this file to Anthropic: it waits for Uncle
+                    # Claude's Scheduled sends.
+                    review = {"approved": None,
+                              "reason": "not sent: scheduled sends to Uncle Claude are off"}
+                else:
+                    advisor = get_claude_advisor()
                     review = advisor.review_change(
                         file_path=filepath,
                         current_content=open(filepath).read()[:3000] if os.path.exists(filepath) else "",
                         proposed_diff=f"- {old_text[:500]}\n+ {new_text[:500]}",
                         reasoning=ctx.get("_reasoning", "Autonomous code change"),
                     )
-                    if not review.get("approved", True):
-                        directive = review.get("directive", "reject")
-                        if directive in ("halt_self_improvement", "lock_codebase", "halt_family"):
+                approved = review.get("approved")
+                if approved is False:
+                    directive = review.get("directive", "reject")
+                    if directive in ("halt_self_improvement", "lock_codebase", "halt_family"):
+                        # A failure here must not turn the rejection into a staged fix.
+                        try:
                             _handle_uncle_directive(directive, review.get("reason", ""))
-                        return ToolResult(
-                            success=False,
-                            error=f"Uncle Claude rejected this change: {review.get('reason', 'No reason given')}. "
-                                  f"Suggestions: {', '.join(review.get('suggestions', []))}",
-                            metadata={"guardian_review": review}
-                        )
+                        except Exception as directive_error:
+                            logger.error(f"Uncle Claude directive {directive} was not applied: "
+                                         f"{directive_error}", exc_info=True)
+                    return ToolResult(
+                        success=False,
+                        error=f"Uncle Claude rejected this change: {review.get('reason', 'No reason given')}. "
+                              f"Suggestions: {', '.join(review.get('suggestions', []))}",
+                        metadata={"guardian_review": review}
+                    )
+                if approved is True:
+                    reviewed_by = "uncle_claude"
+                    review_notes = review.get("reason") or None
+                else:
+                    review_notes = f"not reviewed: {review.get('reason') or 'no verdict returned'}"
             except Exception as e:
-                logger.warning(f"Guardian review failed, proceeding with caution: {e}")
+                logger.warning(f"Guardian review failed; staging as not reviewed: {e}")
+                review_notes = f"not reviewed: {e}"
 
-            # Stage diff to pending_fixes instead of applying directly.
-            try:
-                pending_id = stage_pending_fix(
-                    filepath,
-                    old_text,
-                    new_text,
-                    ctx.get("_reasoning", "Autonomous fix"),
-                    run_id=ctx.get("_run_id"),
-                )
-                return ToolResult(
-                    success=True,
-                    output=f"Fix staged for review (pending_fix #{pending_id}). "
-                           f"File: {filepath}. "
-                           f"The change will be applied after approval.",
-                    metadata={"staged": True, "pending_fix_id": pending_id, "filepath": filepath}
-                )
-            except GuardedCodeError as e:
-                return ToolResult(
-                    success=False,
-                    error=f"Failed to stage fix for review: {e}",
-                    metadata={"staging_failed": True, "blocked_by": e.code}
-                )
-            except Exception as e:
-                logger.error(f"Failed to stage fix: {e}", exc_info=True)
-                # FAIL HARD — never silently switch from reviewed to unreviewed
-                return ToolResult(
-                    success=False,
-                    error=f"Failed to stage fix for review: {e}. Fix NOT applied.",
-                    metadata={"staging_failed": True}
-                )
+            # Self-improvement writes a file only once a person has set
+            # self_improvement_apply_enabled=true. Until then, and whenever that
+            # setting cannot be read, the change is staged for review instead.
+            # A scheduled run always stages: nobody asked for it, so a person
+            # reviews what it found.
+            if _self_improvement_apply_blocked() or ctx.get("_trigger") == "scheduled":
+                try:
+                    pending_id = stage_pending_fix(
+                        filepath,
+                        old_text,
+                        new_text,
+                        ctx.get("_reasoning", "Autonomous fix"),
+                        run_id=ctx.get("_run_id"),
+                        reviewed_by=reviewed_by,
+                        review_notes=review_notes,
+                    )
+                    return ToolResult(
+                        success=True,
+                        output=f"Fix staged for review (pending_fix #{pending_id}). "
+                               f"File: {filepath}. "
+                               f"The change will be applied after approval.",
+                        metadata={"staged": True, "pending_fix_id": pending_id, "filepath": filepath}
+                    )
+                except GuardedCodeError as e:
+                    return ToolResult(
+                        success=False,
+                        error=f"Failed to stage fix for review: {e}",
+                        metadata={"staging_failed": True, "blocked_by": e.code}
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to stage fix: {e}", exc_info=True)
+                    # FAIL HARD — never silently switch from reviewed to unreviewed
+                    return ToolResult(
+                        success=False,
+                        error=f"Failed to stage fix for review: {e}. Fix NOT applied.",
+                        metadata={"staging_failed": True}
+                    )
 
         try:
             edit_result = apply_exact_replacement(
@@ -566,7 +599,8 @@ class EditCodeTool(BaseTool):
                 old_text,
                 new_text,
                 dry_run=dry_run,
-                allow_external=True,
+                # Self-improvement stays inside the checkout, as staging does.
+                allow_external=not self_improvement,
                 expected_hash=expected_hash,
                 expected_mtime=expected_mtime,
             )
@@ -1091,6 +1125,9 @@ class ListCodeRepositoriesTool(BaseTool):
 
     name = "list_code_repositories"
     read_only = True
+    # The built-in 'live' entry alone is about 450 characters, and the count
+    # comes after the list: at the 500 default neither reached the model.
+    observation_chars = 4000
     description = (
         "List the folders marked as Code Repositories in Guaardvark, as a JSON array of {id, name, path, "
         "has_metadata, description}. Call it first to get the integer folder_id that get_repository_map, "

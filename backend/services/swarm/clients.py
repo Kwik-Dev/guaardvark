@@ -62,6 +62,44 @@ def _builtin_voice(voice: str | None) -> str | None:
     return None
 
 
+def build_voice_record(requested: str | None, sent: str | None, meta: dict) -> dict:
+    """What a Film Crew line was spoken in, from the request and Audio Foundry's meta.
+
+    ``fallbacks`` lists every way the line ended up in a voice other than the
+    one asked for, in plain words, so the production view can show it: a Cast
+    voice id that is not a built-in voice (the default voice spoke instead),
+    and Chatterbox failing so Kokoro spoke the line (meta["fallback"]).
+    """
+    requested = (requested or "").strip() or None
+    if requested == "default":
+        requested = None
+    backend = meta.get("backend")
+    spoken = meta.get("voice") or ("stock voice" if backend == "chatterbox" else None)
+    fallbacks = []
+    if requested and not sent:
+        fallbacks.append({
+            "kind": "voice_not_built_in",
+            "message": f"Voice '{requested}' is not one of Audio Foundry's built-in voices; "
+                       "the default voice spoke this line.",
+        })
+    fb = meta.get("fallback")
+    if isinstance(fb, dict):
+        fallbacks.append({
+            "kind": "engine_fallback",
+            "message": f"{str(fb.get('from') or 'Chatterbox').capitalize()} failed "
+                       f"({fb.get('reason') or 'no reason given'}); "
+                       f"{str(fb.get('to') or 'Kokoro').capitalize()}"
+                       f"{f' ({spoken})' if spoken else ''} spoke this line.",
+        })
+    return {
+        "requested_voice": requested,
+        "voice_id_sent": sent,
+        "backend": backend,
+        "voice": spoken,
+        "fallbacks": fallbacks,
+    }
+
+
 class AudioFoundryClient:
     """Implements the Editor's AudioFoundry protocol against the :8206 plugin.
 
@@ -74,6 +112,11 @@ class AudioFoundryClient:
 
     def __init__(self, base_url: str | None = None):
         self.base_url = (base_url or _AUDIO_FOUNDRY_URL).rstrip("/")
+        # Per output file: the plugin's response meta, and the voice record
+        # tts builds from it (voice_record). Keyed by path, so parallel shot
+        # renders do not share a slot.
+        self._responses: dict[str, dict] = {}
+        self._voice_records: dict[str, dict] = {}
 
     def available(self) -> bool:
         return _service_up(self.base_url)
@@ -91,6 +134,7 @@ class AudioFoundryClient:
         dl.raise_for_status()
         with open(output_path, "wb") as f:
             f.write(dl.content)
+        self._responses[output_path] = data
         return output_path
 
     def tts(self, *, text: str, voice: str, output_path: str) -> str:
@@ -101,7 +145,14 @@ class AudioFoundryClient:
         voice_id = _builtin_voice(voice)
         if voice_id:
             payload["voice_id"] = voice_id
-        return self._generate("/generate/voice", payload, output_path)
+        written = self._generate("/generate/voice", payload, output_path)
+        meta = (self._responses.pop(output_path, None) or {}).get("meta") or {}
+        self._voice_records[written] = build_voice_record(voice, voice_id, meta)
+        return written
+
+    def voice_record(self, output_path: str) -> dict | None:
+        """Which voice spoke the line written to ``output_path``, and any fallback."""
+        return self._voice_records.get(output_path)
 
     def generate_music(self, *, mood: str, duration_seconds: float, output_path: str) -> str:
         payload = {

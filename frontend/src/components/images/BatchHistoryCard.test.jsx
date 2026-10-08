@@ -140,6 +140,29 @@ describe('BatchHistoryCard', () => {
     expect(screen.queryByText('Download')).toBeNull();
   });
 
+  it('right-click offers the card actions without also opening the batch', () => {
+    const onOpen = vi.fn();
+    const onDownload = vi.fn();
+    const onHide = vi.fn();
+    render(
+      <BatchHistoryCard batch={batch} dateStr="" {...handlers} onOpen={onOpen} onDownload={onDownload} onHide={onHide} />
+    );
+    fireEvent.contextMenu(screen.getByText('Test batch'), { clientX: 10, clientY: 10 });
+    expect(screen.getAllByRole('menuitem').map((el) => el.textContent)).toEqual([
+      'Browse',
+      'Download',
+      'Adjust & Retry',
+      'Clear from list',
+    ]);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Download' }));
+    expect(onDownload).toHaveBeenCalledWith(batch.batch_id);
+    expect(onOpen).not.toHaveBeenCalled();
+
+    fireEvent.contextMenu(screen.getByText('Test batch'), { clientX: 10, clientY: 10 });
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Clear from list' }));
+    expect(onHide).toHaveBeenCalledWith(batch.batch_id);
+  });
+
   it('renders a placeholder instead of an <img> when the batch has no images', () => {
     render(
       <BatchHistoryCard

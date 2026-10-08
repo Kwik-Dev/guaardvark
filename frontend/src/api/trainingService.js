@@ -78,6 +78,26 @@ export const deleteTrainingDataset = async (id) => {
   }
 };
 
+/**
+ * What a dataset path holds, read the way the trainer reads it: files, rows,
+ * usable rows, formats, a few clipped samples, the first problems and
+ * whether it can be trained on.
+ */
+export const inspectTrainingDataset = async (path) => {
+  const response = await fetch(
+    `${BASE_URL}/training/datasets/inspect?path=${encodeURIComponent(path)}`,
+  );
+  const data = await handleResponse(response, { quiet: true });
+  return data.data || data;
+};
+
+/** Where the dataset picker opens: { locations: [...], default: path }. */
+export const getTrainingDatasetLocations = async () => {
+  const response = await fetch(`${BASE_URL}/training/datasets/locations`);
+  const data = await handleResponse(response, { quiet: true });
+  return data.data || data;
+};
+
 // Training Jobs API
 export const getTrainingJobs = async (filters = {}) => {
   try {
@@ -136,6 +156,13 @@ export const cancelTrainingJob = async (id) => {
     console.error(`trainingService: Error cancelling training job ${id}:`, err.message);
     throw err;
   }
+};
+
+/** Start a job that was created without starting; the backend checks it as it did at creation. */
+export const startTrainingJob = async (id) => {
+  const response = await fetch(`${BASE_URL}/training/jobs/${id}/start`, { method: "POST" });
+  const data = await handleResponse(response);
+  return data.data || data;
 };
 
 export const resumeTrainingJob = async (id) => {
@@ -226,16 +253,36 @@ export const deleteDeviceProfile = async (id) => {
 };
 
 // Base Models API
-export const getBaseModels = async () => {
-  try {
-    const response = await fetch(`${BASE_URL}/training/base-models`);
-    const data = await handleResponse(response);
-    if (data.error) throw new Error(data.error);
-    return data.data || data;
-  } catch (err) {
-    console.error("trainingService: Error getting base models:", err.message);
-    throw err;
-  }
+/**
+ * The declared base models: { models: [{ id, name, installed, fits,
+ * fit_reason, size_gb, license, max_batch_size, max_seq_length, vision, ... }],
+ * hardware, download }. plan: also ask for the one-use token Download and
+ * Remove send back.
+ */
+export const getBaseModels = async ({ plan = false } = {}) => {
+  const response = await fetch(`${BASE_URL}/training/base-models${plan ? "?plan=1" : ""}`);
+  const data = await handleResponse(response);
+  return data.data || data;
+};
+
+export const installTrainingBaseModel = async (planToken, modelId) => {
+  const response = await fetch(`${BASE_URL}/training/base-models/install`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm: "download", model: modelId, plan_token: planToken }),
+  });
+  const data = await handleResponse(response);
+  return data.data || data;
+};
+
+export const removeTrainingBaseModel = async (planToken, modelId) => {
+  const response = await fetch(`${BASE_URL}/training/base-models/remove`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm: "remove", model: modelId, plan_token: planToken }),
+  });
+  const data = await handleResponse(response);
+  return data.data || data;
 };
 
 // Whether a base model is already on this machine (a miss means the job
@@ -246,6 +293,35 @@ export const getBaseModelStatus = async (name) => {
   );
   const data = await handleResponse(response);
   if (data.error) throw new Error(data.error);
+  return data.data || data;
+};
+
+// Settings > Training libraries (Unsloth, TRL, Datasets). plan: also ask for
+// the one-use token that the Install and Remove buttons send back; the backend
+// refuses an install or remove without it.
+export const getTrainingLibraries = async ({ plan = false } = {}) => {
+  const response = await fetch(`${BASE_URL}/training/libraries${plan ? "?plan=1" : ""}`);
+  const data = await handleResponse(response);
+  return data.data || data;
+};
+
+export const installTrainingLibraries = async (planToken, { anyway = false } = {}) => {
+  const response = await fetch(`${BASE_URL}/training/libraries/install`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm: "install", plan_token: planToken, anyway }),
+  });
+  const data = await handleResponse(response);
+  return data.data || data;
+};
+
+export const removeTrainingLibraries = async (planToken) => {
+  const response = await fetch(`${BASE_URL}/training/libraries/remove`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm: "remove", plan_token: planToken }),
+  });
+  const data = await handleResponse(response);
   return data.data || data;
 };
 
@@ -335,6 +411,27 @@ export const importToOllama = async (jobId, options = {}) => {
     return data.data || data;
   } catch (err) {
     console.error(`trainingService: Error importing job ${jobId} to Ollama:`, err.message);
+    throw err;
+  }
+};
+
+/**
+ * Release a run the export gate held as worse than its base model. The
+ * choice (who, from where, when) is recorded on the job; nothing is exported
+ * until exportToOllama is called.
+ */
+export const exportTrainingJobAnyway = async (jobId, options = {}) => {
+  try {
+    const response = await fetch(`${BASE_URL}/training/jobs/${jobId}/export-anyway`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(options),
+    });
+    const data = await handleResponse(response);
+    if (data.error) throw new Error(data.error);
+    return data.data || data;
+  } catch (err) {
+    console.error(`trainingService: Error overriding the export gate for job ${jobId}:`, err.message);
     throw err;
   }
 };

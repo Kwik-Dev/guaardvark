@@ -45,8 +45,10 @@ import { useAgentRouter } from "../hooks/useAgentRouter";
 import { routeAndExecute } from "../api/toolsService";
 import UnifiedChatService, { steerAgent } from "../api/unifiedChatService";
 import StreamingMessage from "../components/chat/StreamingMessage";
+import { webSearchSend } from "../components/chat/webSearchOffer";
 import { useUnifiedProgress } from "../contexts/UnifiedProgressContext";
 import extractSpeakableText from "../utils/extractSpeakableText";
+import useVoiceSink from "../hooks/useVoiceSink";
 import { chatErrorMessage } from "../utils/chatAttachment";
 
 import { createPlan } from "../api/orchestratorService";
@@ -769,6 +771,7 @@ const ChatPage = () => {
                   generatedImages: msg.generatedImages ?? msg.extra_data?.generatedImages,
                   thinking: msg.thinking ?? msg.extra_data?.thinking,
                   truncated: msg.truncated ?? msg.extra_data?.truncated,
+                  verified: msg.verified ?? msg.extra_data?.verified,
                   isUnifiedChat: msg.isUnifiedChat || Boolean(hydratedSteps && hydratedSteps.length),
                   // extra_data does not currently store a top-level synthesized
                   // flag; the last step in extra_data.steps carries it.
@@ -1293,6 +1296,25 @@ const ChatPage = () => {
     [sessionId, projectId, messageQueueId, isSending]
   );
 
+  // While this page is open, global-mic transcripts come here instead of the
+  // floating chat. A turn spoken while a reply streams waits for it.
+  const sendVoiceTurn = useCallback(
+    (text) => handleSendMessage(text, null, { isVoiceMessage: true }),
+    [handleSendMessage]
+  );
+  useVoiceSink({ id: "chat-page", priority: 10, busy: isSending, send: sendVoiceTurn });
+
+  // A reply's "Search the web for this" offer. Returns false while a turn is
+  // running (handleSendMessage would drop the send), so the offer stays open.
+  const searchWebRef = useRef(null);
+  searchWebRef.current = (query) => {
+    if (isSending) return false;
+    const { text, options } = webSearchSend(query);
+    handleSendMessage(text, null, options);
+    return true;
+  };
+  const handleSearchWeb = useCallback((query) => searchWebRef.current(query), []);
+
   const processMessage = useCallback(
     async (inputText, file, voiceOptions, chatMode, sessionId, projectId) => {
       let userMessageTempId = null;
@@ -1448,11 +1470,7 @@ const ChatPage = () => {
       // If no high-conf agent/file from router, fall through to normal unified chat (which hits AgentBrain).
       // detectFileGeneration now neutral (no regex).
 
-      let shouldContinueWithNormalChat = true;
-
       if (fileDetection?.isAgentLoopRequest) {
-        shouldContinueWithNormalChat = false;
-
         // The optimistic user bubble is already on screen; mark it sent rather
         // than appending a second copy of the same text.
         if (userMessageTempId) {
@@ -1481,49 +1499,57 @@ const ChatPage = () => {
         setMessages((prev) => [...prev, thinkingMessage]);
         setAgentLoopExecuting(true);
 
+        let fallBackToChat = false;
         try {
           const result = await routeAndExecute(inputText, {
             project_id: projectId,
             session_id: sessionId,
           });
 
+          if (result?.fallback_to_chat) {
+            // The server found nothing to run and saved nothing; this turn
+            // goes through the normal unified send below instead.
+            fallBackToChat = true;
+            setMessages((prev) => prev.filter((msg) => msg.id !== agentMsgId));
+          } else {
+            const agentResult = result?.result?.type === "agent_result"
+              ? result.result
+              : result?.result || result;
 
-          const agentResult = result?.result?.type === "agent_result"
-            ? result.result
-            : result?.result || result;
-
-          // display_content is what the server persisted for this turn; a
-          // tool_result or file_generation shape carries no final_answer.
-          let content =
-            result?.display_content ||
-            agentResult?.final_answer ||
-            agentResult?.error ||
-            result?.error;
-          if (!content) {
-            if (agentResult?.success === false) {
-              content = "Agent execution failed (no response from the model).";
-            } else {
-              content = "Agent execution completed with no response.";
-            }
-          }
-          const screenshotUrls = agentResult?.screenshot_urls || [];
-          for (const url of screenshotUrls) {
-            content += `\n\n![Screenshot](${url})`;
-          }
-
-          setMessages((prev) =>
-            prev.map((msg) => {
-              if (msg.id === agentMsgId) {
-                return {
-                  id: agentMsgId,
-                  role: "assistant",
-                  content,
-                  timestamp: new Date().toISOString(),
-                };
+            // display_content is what the server persisted for this turn; a
+            // tool_result or file_generation shape carries no final_answer.
+            let content =
+              result?.display_content ||
+              agentResult?.final_answer ||
+              agentResult?.error ||
+              result?.error;
+            if (!content) {
+              if (agentResult?.success === false) {
+                content = "Agent execution failed (no response from the model).";
+              } else {
+                content = "Agent execution completed with no response.";
               }
-              return msg;
-            })
-          );
+            }
+            const screenshotUrls = agentResult?.screenshot_urls || [];
+            for (const url of screenshotUrls) {
+              content += `\n\n![Screenshot](${url})`;
+            }
+
+            setMessages((prev) =>
+              prev.map((msg) => {
+                if (msg.id === agentMsgId) {
+                  return {
+                    id: agentMsgId,
+                    role: "assistant",
+                    content,
+                    verified: agentResult?.verified ?? null,
+                    timestamp: new Date().toISOString(),
+                  };
+                }
+                return msg;
+              })
+            );
+          }
         } catch (agentError) {
           console.error("AGENT_LOOP: Execution failed:", agentError);
           setMessages((prev) =>
@@ -1544,7 +1570,11 @@ const ChatPage = () => {
           setAgentLoopMessageId(null);
         }
 
-        return; // Don't continue with normal chat for agent loop requests
+        // This return is what keeps an agent-loop turn out of the normal
+        // send; a fallback_to_chat turn continues to it below.
+        if (!fallBackToChat) {
+          return;
+        }
       }
 
       if (fileDetection && (fileDetection.isCSVRequest || fileDetection.isCodeRequest)) {
@@ -1601,13 +1631,8 @@ const ChatPage = () => {
               },
               originalMessage: inputText,
             });
-
-
-            shouldContinueWithNormalChat = true;
-
           } catch (error) {
             console.error("Error opening file generation dialog:", error);
-            shouldContinueWithNormalChat = true;
           }
         } else {
           debugLog("File generation dialog already open, allowing normal chat flow");
@@ -1618,14 +1643,7 @@ const ChatPage = () => {
             content: "File generation is already in progress. I'll continue our conversation while that processes.",
           };
           setMessages((prev) => [...prev, infoMessage]);
-          shouldContinueWithNormalChat = true;
         }
-      } else {
-        shouldContinueWithNormalChat = true;
-      }
-
-      if (!shouldContinueWithNormalChat) {
-        shouldContinueWithNormalChat = true;
       }
 
       setIsSending(true);
@@ -2346,6 +2364,7 @@ const ChatPage = () => {
         messages={messages}
         sessionId={sessionId}
         onOrchestratorUpdate={handleOrchestratorUpdate}
+        onSearchWeb={handleSearchWeb}
       />
 
       {}
@@ -2389,6 +2408,8 @@ const ChatPage = () => {
                   thinking: result.thinking || "",
                   truncated: result.truncated === true,
                   synthesized: result.synthesized === true,
+                  verified: result.verified ?? null,
+                  web_search_offer: result.webSearchOffer || null,
                   iterations: result.iterations || 0,
                   budget: result.budget || budgetTelemetry,  // Phase 2.1 surface budget telemetry
                 };
@@ -2443,6 +2464,7 @@ const ChatPage = () => {
                           toolCalls: data.steps || [],
                           synthesized: data.synthesized === true
                             || (Array.isArray(data.steps) && data.steps.some((s) => s?.synthesized === true)),
+                          web_search_offer: data.web_search_offer || null,
                           timestamp: new Date().toISOString(),
                         },
                       ];

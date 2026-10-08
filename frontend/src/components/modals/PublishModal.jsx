@@ -153,11 +153,14 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
     [preflight],
   );
 
+  // Top-level violations apply to every destination, e.g. public posting stopped.
   const allViolations = useMemo(() => {
-    if (!preflight?.per_connection) return [];
-    return Object.entries(preflight.per_connection).flatMap(([id, entry]) =>
+    if (!preflight) return [];
+    const general = preflight.violations || [];
+    const perConnection = Object.entries(preflight.per_connection || {}).flatMap(([id, entry]) =>
       (entry.violations || []).map((v) => `${entry.label || id}: ${v}`),
     );
+    return [...general, ...perConnection];
   }, [preflight]);
 
   const handlePublish = useCallback(async () => {

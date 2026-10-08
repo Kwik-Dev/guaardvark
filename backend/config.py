@@ -298,12 +298,16 @@ AUTORESEARCH_STALENESS_THRESHOLD = 0.2  # fraction of stale pairs triggering reg
 # Default RAG experiment parameters. These MUST mirror actual production
 # behavior (the values retrieval uses when nothing is promoted), so that an
 # experiment's baseline measures the system users actually experience:
-# rerank defaults ON (GUAARDVARK_RERANK_ENABLED default), alpha matches the
-# GUAARDVARK_HYBRID_SEARCH_ALPHA default, chat returns 3 chunks.
+# reranking defaults ON (the cross-encoder, GUAARDVARK_RERANK_CROSS_ENCODER,
+# else MMR, GUAARDVARK_RERANK_ENABLED; False turns both off in
+# search_with_llamaindex), alpha matches the GUAARDVARK_HYBRID_SEARCH_ALPHA
+# default, chat returns 3 chunks.
+# dedup_threshold is not listed: production resolves it per embedding model
+# (get_dedup_threshold), and rag_autoresearch_service adds that value to the
+# baseline each time it loads the experiment config.
 AUTORESEARCH_DEFAULT_PARAMS = {
     # Phase 1 — query-time
     "top_k": 5,
-    "dedup_threshold": 0.85,
     "context_window_chunks": 3,
     "reranking_enabled": True,
     "query_expansion": False,
@@ -441,8 +445,9 @@ def _hardware_default_llm() -> str:
     """Hardware-aware hard fallback for the default chat model.
 
     Mirrors the get_chat_keep_alive / default_advanced_rag hardware-detection pattern
-    in this file: on a small box (≤8GB RAM) or ARM (aarch64/arm64), a fresh install
-    should default to a 1-3B tag so first-run chat actually loads; otherwise the
+    in this file: on a small box (≤8GB RAM) or an ARM board without an NVIDIA GPU, a
+    fresh install should default to a 1-3B tag so first-run chat actually loads
+    (hardware_policy.model_tier is the source of truth); otherwise the
     standard vision-capable Gemma4 default (gemma4:e2b — the model the agentic
     system is validated against). GUAARDVARK_DEFAULT_LLM always overrides.
     Detection failure stays defensive and never crashes.
@@ -462,7 +467,8 @@ def _hardware_default_llm() -> str:
                         break
         except OSError:
             ram_gb = 0
-        if arch in ("aarch64", "arm64") or (0 < ram_gb <= 8):
+        nvidia = os.path.exists("/proc/driver/nvidia/version")
+        if (arch in ("aarch64", "arm64") and not nvidia) or (0 < ram_gb <= 8):
             return "llama3.2:1b"
     except Exception:
         pass

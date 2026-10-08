@@ -71,6 +71,23 @@ def format_vision_context(ctx: dict) -> str:
     return "\n".join(parts)
 
 
+# Prefixed to a chat turn that carries the live camera frame (options
+# ["camera_frame"]). The frame is context, never the user's attachment: it
+# does not skip RAG and is never an edit source.
+CAMERA_FRAME_NOTE = (
+    "[Live camera: the latest frame from the user's camera is attached as context. "
+    "The user did not send it as a picture; use it only when the message is about "
+    "what the camera shows.]"
+)
+
+
+def get_active_camera_frame() -> str | None:
+    """The latest frame while a camera stream is active, else None."""
+    if not get_vision_context():
+        return None
+    return get_latest_frame()
+
+
 def get_latest_frame() -> str | None:
     """Get the latest raw frame from the vision pipeline.
 

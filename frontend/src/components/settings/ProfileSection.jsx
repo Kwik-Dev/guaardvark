@@ -3,7 +3,7 @@ import { Alert, FormControl, InputLabel, MenuItem, Select } from "@mui/material"
 import { getProfile, setProfile as saveProfile } from "../../api/settingsService";
 import { useAppStore } from "../../stores/useAppStore";
 import { useSnackbar } from "../common/SnackbarProvider";
-import { ActionButton, Cluster, Hint, Line } from "./ui";
+import { ActionButton, Cluster, Line } from "./ui";
 
 /**
  * Product Profile — one switch that sets the product shape.
@@ -64,7 +64,17 @@ const ProfileSection = () => {
   }
 
   return (
-    <Cluster label="Product profile" note={locked ? "set by .env" : "applies after a restart"}>
+    <Cluster
+      label="Product profile"
+      help={
+        <>
+          {chosen?.description ? `${chosen.description} ` : ""}
+          A profile decides what is listed and what is on by default. Nothing is removed: hidden pages still
+          open by their address, and settings in <code>.env</code> always win.
+        </>
+      }
+      note={locked ? "set by .env" : "applies after a restart"}
+    >
       <Line nowrap>
         <FormControl size="small" className="grow" disabled={!info || saving || locked}>
           <InputLabel id="product-profile-label">Profile</InputLabel>
@@ -93,11 +103,6 @@ const ProfileSection = () => {
           Apply
         </ActionButton>
       </Line>
-      <Hint>
-        {chosen?.description ? `${chosen.description} ` : ""}
-        A profile decides what is listed and what is on by default. Nothing is removed: every page
-        stays reachable by its address, and explicit settings in <code>.env</code> always win.
-      </Hint>
       {locked && (
         <Alert severity="info" sx={{ py: 0.25 }}>
           The profile is set by <code>GUAARDVARK_PROFILE</code> in <code>.env</code>, which this server
