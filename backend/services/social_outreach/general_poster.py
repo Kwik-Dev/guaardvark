@@ -172,7 +172,11 @@ def post_via_agent_loop(
     from backend.services.agent_control_service import get_agent_control_service
     from backend.services.local_screen_backend import LocalScreenBackend
     from backend.utils.agent_display_utils import start_agent_display_if_needed
-    from backend.services.social_outreach.reddit_outreach import SERVO_SETTLE_SECONDS
+    from backend.services.social_outreach.reddit_outreach import (
+        SERVO_SETTLE_SECONDS,
+        bidi_reachable,
+        page_check_unavailable_reason,
+    )
 
     if not (text or "").strip():
         return False, "empty_text"
@@ -187,6 +191,9 @@ def post_via_agent_loop(
     except Exception as e:  # noqa: BLE001
         logger.warning("general_poster: display unavailable: %s", e)
         return False, "display_unavailable"
+    readable, why = bidi_reachable()
+    if not readable:
+        return False, page_check_unavailable_reason(why)
 
     # 1) Navigate to the target.
     nav = service.execute_task(f"navigate to {target_url}", screen)

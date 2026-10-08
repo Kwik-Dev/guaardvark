@@ -122,6 +122,8 @@ class TestPostViaAgentLoop:
             patch("backend.services.social_outreach.reddit_outreach.SERVO_SETTLE_SECONDS", 0),
             patch.object(gp, "_preflight_logged_in", return_value=(True, "ok")),
             patch.object(gp, "_human_pause", return_value=None),
+            patch("backend.services.social_outreach.reddit_outreach.bidi_reachable",
+                  return_value=(True, "")),
             patch("backend.services.social_outreach.reddit_outreach.bidi_evaluate_json",
                   return_value=(PAGE_POSTED, "")),
         ]
@@ -244,3 +246,60 @@ class TestPostViaAgentLoop:
         assert ok is True
         assert '"' + "a" * 59 + 'b"' in seen[0]
         assert "a" * 59 + "bc" not in seen[0]
+
+
+class TestPageCheckBeforePosting:
+    """Without the BiDi port a post cannot be confirmed, so none is attempted."""
+
+    def _run(self, reachable):
+        tasks = []
+
+        class Service:
+            is_active = False
+
+            def execute_task(self, task, screen):
+                tasks.append(task)
+                return SimpleNamespace(success=True, reason="ok")
+
+        from backend.services.social_outreach import reddit_outreach
+        with patch("backend.services.agent_control_service.get_agent_control_service",
+                   return_value=Service()), \
+             patch("backend.utils.agent_display_utils.start_agent_display_if_needed",
+                   return_value=True), \
+             patch("backend.services.local_screen_backend.LocalScreenBackend", MagicMock), \
+             patch.object(reddit_outreach, "bidi_reachable", return_value=reachable):
+            result = gp.post_via_agent_loop("facebook", "https://www.facebook.com/p/1", "hello")
+        return result, tasks
+
+    def test_closed_port_refuses_before_navigating(self):
+        (ok, reason), tasks = self._run((False, "connect failed: refused"))
+        assert ok is False
+        assert reason.startswith("page_check_unavailable: nothing was posted")
+        assert tasks == []
+
+    def test_open_port_goes_on_to_navigate(self):
+        with patch.object(gp, "_preflight_logged_in", return_value=(False, "logged_out:facebook")):
+            (ok, reason), tasks = self._run((True, ""))
+        assert (ok, reason) == (False, "logged_out:facebook")
+        assert tasks == ["navigate to https://www.facebook.com/p/1"]
+
+
+class TestBidiReachable:
+    def test_answers_true_when_the_browser_evaluates(self):
+        from backend.services.social_outreach import reddit_outreach
+        with patch.object(reddit_outreach, "bidi_evaluate_json", return_value=({"ok": True}, "")):
+            assert reddit_outreach.bidi_reachable(wait_s=0) == (True, "")
+
+    def test_gives_up_after_the_wait_with_the_reason(self):
+        from backend.services.social_outreach import reddit_outreach
+        calls = []
+
+        def closed(expression):
+            calls.append(expression)
+            return None, "connect failed: refused"
+
+        with patch.object(reddit_outreach, "bidi_evaluate_json", side_effect=closed), \
+             patch.object(reddit_outreach.time, "sleep", lambda s: None):
+            assert reddit_outreach.bidi_reachable(wait_s=0) == (False, "connect failed: refused")
+        assert len(calls) == 1
+

@@ -68,16 +68,16 @@ const TONE_OPTIONS = [
   { value: "humorous", label: "Humorous (dry, used sparingly)" },
 ];
 
-// `auto: true` = the backend has a real posting path for this platform
-// (Reddit/YouTube servo via tick_process_approved_drafts, Discord cog).
-// For the others the queue is the only output today — flagged in the modal
-// so users aren't surprised when an approved Twitter draft never goes anywhere.
+// `auto: true` = an approved draft is posted (tick_process_approved_drafts:
+// Reddit/YouTube BiDi posters, the agent loop for X and Facebook comments,
+// the Discord cog). For the others the queue is the only output, flagged in
+// the modal so an approved draft that never goes anywhere is no surprise.
 const PLATFORM_OPTIONS = [
   { value: "reddit", label: "Reddit comment", auto: true },
   { value: "youtube", label: "YouTube comment", auto: true },
   { value: "discord", label: "Discord message", auto: true },
-  { value: "twitter", label: "Twitter / X", auto: false },
-  { value: "facebook", label: "Facebook", auto: false },
+  { value: "twitter", label: "Twitter / X comment", auto: true },
+  { value: "facebook", label: "Facebook comment", auto: true },
   { value: "internal", label: "Internal note", auto: false },
 ];
 

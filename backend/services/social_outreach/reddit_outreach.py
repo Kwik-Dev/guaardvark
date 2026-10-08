@@ -299,6 +299,36 @@ def bidi_evaluate_json(expression: str) -> tuple[Optional[dict], str]:
             pass
 
 
+
+# Reason a poster gives when it refuses because the page could not be read back.
+PAGE_CHECK_UNAVAILABLE = "page_check_unavailable"
+
+
+def bidi_reachable(wait_s: float = 10.0) -> tuple[bool, str]:
+    """Whether the agent Firefox answers on its BiDi port; ``(ok, why)``.
+
+    Posters that confirm a submit by reading the page check this before they
+    touch anything: without the port a post that did go out is recorded as a
+    failure, and re-approving the draft posts it again. Firefox opens the port
+    only when launched with GUAARDVARK_AGENT_CDP=1 (scripts/agent_firefox_launch.sh).
+    ``wait_s`` covers a Firefox the display start has just launched.
+    """
+    deadline = time.monotonic() + wait_s
+    while True:
+        data, why = bidi_evaluate_json("JSON.stringify({ok: true})")
+        if data is not None:
+            return True, ""
+        if time.monotonic() >= deadline:
+            return False, why
+        time.sleep(1.0)
+
+
+def page_check_unavailable_reason(why: str) -> str:
+    return (
+        f"{PAGE_CHECK_UNAVAILABLE}: nothing was posted; the agent browser's control port "
+        f"is closed, so the post could not be confirmed ({why})"
+    )
+
 def _human_pause(min_s: float = 0.3, max_s: float = 2.0) -> None:
     """Random sleep to avoid deterministic bot timing fingerprints.
     
