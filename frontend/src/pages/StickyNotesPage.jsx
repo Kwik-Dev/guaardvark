@@ -1519,24 +1519,6 @@ const StickyNotesPage = () => {
                 },
               },
             },
-            // Global handles sit above the card. Keep the corner and the top/right
-            // strips off the title bar so Close and the title receive the click.
-            "& .react-resizable-handle-n": {
-              height: 8,
-              top: 0,
-              left: 12,
-              width: "calc(100% - 24px)",
-            },
-            "& .react-resizable-handle-e": {
-              width: 8,
-              top: 44,
-              right: 0,
-              height: "calc(100% - 44px)",
-            },
-            "& .react-resizable-handle-ne, & .react-resizable-handle-nw, & .react-resizable-handle-se, & .react-resizable-handle-sw": {
-              width: 12,
-              height: 12,
-            },
           }}
         >
           {(() => {

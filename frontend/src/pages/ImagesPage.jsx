@@ -1993,38 +1993,6 @@ const ImagesPage = () => {
                 '& .react-grid-item > div': { pointerEvents: 'auto' },
                 '& .react-resizable-handle': { pointerEvents: 'auto', zIndex: 10 },
                 '& .folder-window-drag-handle': { position: 'relative', zIndex: 20 },
-                '& .react-resizable-handle-se': {
-                  width: '20px !important', height: '20px !important',
-                  bottom: '0 !important', right: '0 !important', cursor: 'se-resize',
-                },
-                '& .react-resizable-handle-sw': {
-                  width: '20px !important', height: '20px !important',
-                  bottom: '0 !important', left: '0 !important', cursor: 'sw-resize',
-                },
-                '& .react-resizable-handle-ne': {
-                  width: '20px !important', height: '20px !important',
-                  top: '0 !important', right: '0 !important', cursor: 'ne-resize',
-                },
-                '& .react-resizable-handle-nw': {
-                  width: '20px !important', height: '20px !important',
-                  top: '0 !important', left: '0 !important', cursor: 'nw-resize',
-                },
-                '& .react-resizable-handle-s': {
-                  width: '100% !important', height: '12px !important',
-                  bottom: '0 !important', left: '0 !important', cursor: 's-resize',
-                },
-                '& .react-resizable-handle-n': {
-                  width: '100% !important', height: '6px !important',
-                  top: '0 !important', left: '0 !important', cursor: 'n-resize',
-                },
-                '& .react-resizable-handle-e': {
-                  width: '12px !important', height: '100% !important',
-                  top: '0 !important', right: '0 !important', cursor: 'e-resize',
-                },
-                '& .react-resizable-handle-w': {
-                  width: '12px !important', height: '100% !important',
-                  top: '0 !important', left: '0 !important', cursor: 'w-resize',
-                },
               }}>
                 <WindowsGridLayout
                   layout={windowLayout}
