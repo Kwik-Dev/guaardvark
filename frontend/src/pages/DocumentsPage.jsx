@@ -22,7 +22,13 @@ import ReactGridLayoutLib, { WidthProvider } from 'react-grid-layout/legacy';
 import FolderWindow from "../components/documents/FolderWindow";
 import DocumentsContextMenu from "../components/documents/DocumentsContextMenu";
 import { menuTargetPath, folderLabel } from "../components/documents/menuTarget";
-import { snapshotDrop, collectDroppedFiles, dragCarriesFiles } from "../utils/droppedFiles";
+import {
+  snapshotDrop,
+  collectDroppedFiles,
+  dragCarriesFiles,
+  ensureFolderPath,
+  filesFolderApi,
+} from "../utils/droppedFiles";
 import FilePropertiesModal from "../components/modals/FilePropertiesModal";
 import FolderPropertiesModal from "../components/modals/FolderPropertiesModal";
 import { useLayout } from "../contexts/LayoutContext";
@@ -704,34 +710,6 @@ const DocumentsPage = () => {
     // Drag start is handled by FolderContents, just log for debugging
   }, []);
 
-  // Ensure a nested folder path exists, creating parent folders as needed
-  const ensureFolderPath = useCallback(async (relativePath, baseFolder = '/') => {
-    if (!relativePath || relativePath === '/') return baseFolder;
-
-    const parts = relativePath.split('/').filter(Boolean);
-    let currentFolder = baseFolder;
-
-    for (const part of parts) {
-      const checkResponse = await axios.get(`${API_BASE}/browse`, {
-        params: { path: currentFolder },
-      });
-
-      const existingFolder = checkResponse.data.data.folders?.find(f => f.name === part);
-
-      if (existingFolder) {
-        currentFolder = existingFolder.path;
-      } else {
-        const createResponse = await axios.post(`${API_BASE}/folder`, {
-          name: part,
-          parent_path: currentFolder,
-        });
-        currentFolder = createResponse.data.data.path;
-      }
-    }
-
-    return currentFolder;
-  }, []);
-
   // Handle drop in folder window or on desktop
   const handleDrop = useCallback(async (e, targetFolder = null) => {
     e.preventDefault();
@@ -783,6 +761,8 @@ const DocumentsPage = () => {
         // does not stop the rest; the message reports both counts.
         let uploadedCount = 0;
         const failures = [];
+        const folderApi = filesFolderApi(axios, API_BASE);
+        const folderCache = new Map();
         setUploadProgress({ current: 0, total: filesToUpload.length });
         try {
           for (const { file, relativePath } of filesToUpload) {
@@ -792,7 +772,7 @@ const DocumentsPage = () => {
 
               let targetUploadPath = uploadPath;
               if (folderPath) {
-                targetUploadPath = await ensureFolderPath(folderPath, uploadPath);
+                targetUploadPath = await ensureFolderPath(folderPath, uploadPath, folderApi, folderCache);
               }
 
               const formData = new FormData();
@@ -995,7 +975,7 @@ const DocumentsPage = () => {
         dragDropHandledRef.current = false;
       }, 100);
     }
-  }, [windows, showMessage, refreshData, refreshOpenWindows, ensureFolderPath]);
+  }, [windows, showMessage, refreshData, refreshOpenWindows]);
 
   // Separate windows by state (needed by arrange callbacks and render)
   const foldedWindows = windows.filter(w => w.state === 'folded');

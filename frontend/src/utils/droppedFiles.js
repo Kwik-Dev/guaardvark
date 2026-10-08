@@ -90,3 +90,89 @@ export async function collectDroppedFiles(snapshot) {
 export function dragCarriesFiles(event) {
   return Array.from(event?.dataTransfer?.types || []).includes('Files');
 }
+
+/**
+ * The name the server stores a new folder under.
+ *
+ * Mirrors werkzeug's `secure_filename`, which the folder route applies: accents
+ * folded to ASCII, runs of whitespace joined with `_`, anything outside
+ * `A-Za-z0-9_.-` dropped, and leading or trailing `.`/`_` trimmed. "Weekend in
+ * Lisbon" is stored as "Weekend_in_Lisbon".
+ *
+ * @param {string} name
+ * @returns {string}
+ */
+export function storedFolderName(name) {
+  return String(name ?? '')
+    .normalize('NFKD')
+    .replace(/[^ -~\t\n\r\v\f]/g, '')
+    .replace(/\//g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .join('_')
+    .replace(/[^A-Za-z0-9_.-]/g, '')
+    .replace(/^[._]+|[._]+$/g, '');
+}
+
+/**
+ * Folder calls on the Files API, in the shape {@link ensureFolderPath} takes.
+ *
+ * @param {{get: Function, post: Function}} http  axios or a compatible client
+ * @param {string} filesApiBase  e.g. "/api/files"
+ */
+export function filesFolderApi(http, filesApiBase) {
+  return {
+    listFolders: async (path) => {
+      const res = await http.get(`${filesApiBase}/browse`, { params: { path, fields: 'light' } });
+      return res.data?.data?.folders || [];
+    },
+    createFolder: async (name, parentPath) => {
+      const res = await http.post(`${filesApiBase}/folder`, { name, parent_path: parentPath });
+      return res.data?.data;
+    },
+  };
+}
+
+const isConflict = (err) => err?.response?.status === 409;
+
+/**
+ * Make sure a nested folder path exists under `baseFolder`, creating what is
+ * missing, and return the stored path of the deepest folder.
+ *
+ * Existing folders are matched by their dropped name or by the name the server
+ * stores it under, so every file of a dropped "Weekend in Lisbon" lands in the
+ * same "Weekend_in_Lisbon" folder. Pass one `cache` Map for a whole drop so each
+ * folder is looked up once.
+ *
+ * @param {string} relativePath  folder path relative to `baseFolder`, `/`-separated
+ * @param {string} baseFolder    stored path to start from ("/" for the root)
+ * @param {{listFolders: Function, createFolder: Function}} api  see {@link filesFolderApi}
+ * @param {Map<string, string>} [cache]
+ * @returns {Promise<string>}
+ */
+export async function ensureFolderPath(relativePath, baseFolder, api, cache = new Map()) {
+  if (!relativePath || relativePath === '/') return baseFolder;
+  let current = baseFolder;
+  for (const part of relativePath.split('/').filter(Boolean)) {
+    const key = `${current}\n${part}`;
+    if (cache.has(key)) {
+      current = cache.get(key);
+      continue;
+    }
+    const stored = storedFolderName(part);
+    const find = (folders) => folders.find((f) => f.name === part || (stored && f.name === stored));
+    let folder = find(await api.listFolders(current));
+    if (!folder) {
+      try {
+        folder = await api.createFolder(part, current);
+      } catch (err) {
+        if (!isConflict(err)) throw err;
+        folder = find(await api.listFolders(current));
+        if (!folder) throw err;
+      }
+    }
+    cache.set(key, folder.path);
+    current = folder.path;
+  }
+  return current;
+}
