@@ -214,6 +214,18 @@ export const purgeIndex = async (options = {}) => {
   }
 };
 
+/** The search reranker: enabled, installed, size, and any install in progress. */
+export const getRerankerStatus = async () => {
+  const response = await fetch(`${BASE_URL}/meta/reranker`);
+  return await handleResponse(response, { quiet: true });
+};
+
+/** Start downloading the reranker's weights (the only path that fetches them). */
+export const installReranker = async () => {
+  const response = await fetch(`${BASE_URL}/meta/reranker/install`, { method: "POST" });
+  return await handleResponse(response);
+};
+
 export const optimizeIndex = async () => {
   const endpoint = `${BASE_URL}/meta/optimize-index`;
   try {
