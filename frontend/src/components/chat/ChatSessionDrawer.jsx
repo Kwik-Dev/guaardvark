@@ -23,6 +23,7 @@ import SmartToyIcon from "@mui/icons-material/SmartToy";
 import AccessTimeIcon from "@mui/icons-material/AccessTime";
 import { listChatSessions, deleteChatSession } from "../../api/chatService";
 import EntityContextMenu from "../common/EntityContextMenu";
+import ConfirmActionDialog from "../settings/ui/ConfirmActionDialog";
 import useContextMenu from "../../hooks/useContextMenu";
 
 const DRAWER_WIDTH = 340;
@@ -58,16 +59,30 @@ const ChatSessionDrawer = ({
     }
   }, [open, loadSessions]);
 
-  const handleDelete = async (sessionId, e) => {
+  // The chat waiting for the person to confirm its deletion.
+  const [pendingDelete, setPendingDelete] = useState(null);
+  const [deleting, setDeleting] = useState(false);
+
+  const askDelete = (session, e) => {
     e?.stopPropagation();
+    setPendingDelete(session);
+  };
+
+  const confirmDelete = async () => {
+    const sessionId = pendingDelete?.session_id;
+    if (!sessionId) return;
+    setDeleting(true);
     try {
       await deleteChatSession(sessionId);
       setSessions((prev) => prev.filter((s) => s.session_id !== sessionId));
       if (sessionId === currentSessionId) {
         onSelectSession(null);
       }
+      setPendingDelete(null);
     } catch (err) {
       console.error("Failed to delete session:", err);
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -201,7 +216,7 @@ const ChatSessionDrawer = ({
               <Tooltip title="Delete">
                 <IconButton
                   size="small"
-                  onClick={(e) => handleDelete(session.session_id, e)}
+                  onClick={(e) => askDelete(session, e)}
                   sx={{
                     opacity: 0,
                     transition: "opacity 0.15s",
@@ -425,7 +440,7 @@ const ChatSessionDrawer = ({
                   },
                   {
                     label: "Delete",
-                    onClick: () => handleDelete(rowMenu.payload.session_id),
+                    onClick: () => askDelete(rowMenu.payload),
                     color: "error.main",
                     dividerBefore: true,
                   },
@@ -434,6 +449,24 @@ const ChatSessionDrawer = ({
           }
         />
       </Box>
+
+      <ConfirmActionDialog
+        open={Boolean(pendingDelete)}
+        title="Delete this chat"
+        description={pendingDelete ? `"${pendingDelete.preview || "New chat"}" and all of its messages are deleted.` : null}
+        facts={
+          pendingDelete
+            ? [
+                { label: "Messages", value: pendingDelete.message_count ?? 0 },
+                { label: "Last active", value: formatDateTime(pendingDelete.last_activity || pendingDelete.created_at) },
+              ]
+            : []
+        }
+        confirmLabel="Delete chat"
+        busy={deleting}
+        onConfirm={confirmDelete}
+        onClose={() => setPendingDelete(null)}
+      />
 
       {/* Footer stats */}
       <Divider />

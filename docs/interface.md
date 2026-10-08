@@ -78,7 +78,7 @@ Right-click an **empty part of the dashboard** for:
 | Notes | the background | New Note, Cycle Layout, Go to Dashboard |
 | Notes | a note | a colour, Duplicate, Rename, Pin to Top, Delete (and Copy, Select all, Paste inside the text) |
 | Chat | a message | Copy; on the assistant's replies also Good response and Bad response |
-| Chat | a past chat in the Chats list | Open, Delete (deletes at once, without asking) |
+| Chat | a past chat in the Chats list | Open, Delete (asks first) |
 | Code Editor | a file in the Files card | New File, New Folder, Rename, Delete |
 | Code Editor | selected code in the editor | Ask Chat, Fix This, Explain, Add to Chat, which send the code to the editor's chat card |
 | Image Gen | a batch in the history | Browse, Download, Load batch, Adjust & Retry, Clear from list (as fits the batch) |
