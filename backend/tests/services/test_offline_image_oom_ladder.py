@@ -121,7 +121,7 @@ def harness(gen, monkeypatch):
     gen._device = "cuda"
     gen._pipeline_offload_mode = "model"
 
-    def _fake_load(model_id, *, force_sequential=False):
+    def _fake_load(model_id, *, force_sequential=False, allow_download=False):
         state["loads"].append(force_sequential)
         if len(state["loads"]) > 1:
             return False  # ladder retries stop here — we only assert they ran
@@ -130,6 +130,9 @@ def harness(gen, monkeypatch):
         return True
 
     monkeypatch.setattr(gen, "_load_pipeline", _fake_load)
+    # The model counts as installed: these tests drive the render, not the
+    # refusal a missing model gets before any GPU work.
+    monkeypatch.setattr(gen, "_is_model_downloaded", lambda model_id: True)
     return state
 
 
