@@ -18,7 +18,6 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
-import socket
 import subprocess
 import time
 from typing import Iterator, Optional
@@ -65,12 +64,8 @@ def _control_port() -> int:
 
 
 def _port_open() -> bool:
-    """Something listens on the control port: a Firefox someone started with it."""
-    try:
-        with socket.create_connection(("localhost", _control_port()), timeout=0.5):
-            return True
-    except OSError:
-        return False
+    """The control port already answers: a Firefox someone started with it."""
+    return _bidi_answers(0)[0]
 
 
 def _bidi_answers(wait_s: float) -> tuple[bool, str]:
