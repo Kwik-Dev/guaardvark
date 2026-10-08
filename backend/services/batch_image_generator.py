@@ -702,6 +702,51 @@ class BatchImageGenerator:
             except Exception:
                 pass
 
+    def _finish_refused_before_start(
+        self,
+        batch_id: str,
+        batch_status: BatchGenerationStatus,
+        output_dir: Path,
+        request: BatchImageRequest,
+        reason: str,
+    ) -> None:
+        """Terminal bookkeeping for a batch none of whose images can run, decided
+        before the GPU session so nothing was evicted for it."""
+        batch_status.status = "error"
+        batch_status.error = reason
+        batch_status.failed_images = batch_status.total_images
+        batch_status.end_time = datetime.now()
+        batch_status.gpu_wait_reason = None
+        if request.save_metadata:
+            try:
+                self._save_batch_metadata(batch_status, output_dir)
+            except Exception:
+                pass
+        if self.progress_system:
+            try:
+                self.progress_system.error_process(
+                    process_id=batch_id,
+                    message=f"Batch generation error: {reason}",
+                    additional_data={"batch_id": batch_id, "error": reason},
+                )
+            except Exception:
+                pass
+
+    def _missing_offline_model(self, prompt: BatchPrompt) -> Optional[str]:
+        """The install hint when this prompt would render offline with a model that
+        is not installed, else None. Cast characters and ComfyUI routes have their
+        own weights and are never refused here."""
+        if getattr(prompt, "subject_ids", None) or getattr(prompt, "loras", None):
+            return None
+        if self._should_use_comfy_stills(prompt):
+            return None
+        if self._zimage_via_comfyui_enabled() and self._is_zimage_model(prompt.model):
+            return None
+        gen = self.image_generator
+        if gen is None or not hasattr(gen, "missing_model_message"):
+            return None
+        return gen.missing_model_message(prompt.model or "auto")
+
     @staticmethod
     def _is_comfy_flux_model(model_key: str | None) -> bool:
         k = (model_key or "").strip().lower()
@@ -1686,6 +1731,17 @@ class BatchImageGenerator:
                         gen.release_kept_pipeline()
                 except Exception as e:  # noqa: BLE001
                     logger.warning("Could not unload the kept image model: %s", e)
+
+            # Every image would need a model that is not installed: end here,
+            # before the GPU session evicts the chat model to make room for it.
+            if not request.allow_model_download and request.prompts:
+                refusals = [self._missing_offline_model(p) for p in request.prompts]
+                if all(refusals):
+                    logger.warning(f"Batch {batch_id} refused: {refusals[0]}")
+                    self._finish_refused_before_start(
+                        batch_id, batch_status, output_dir, request, refusals[0],
+                    )
+                    return
 
             if self._batch_uses_cuda_offline_gen():
                 from backend.services.gpu_resource_policy import (
