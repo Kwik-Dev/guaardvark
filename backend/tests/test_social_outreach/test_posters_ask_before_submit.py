@@ -88,6 +88,7 @@ def events(monkeypatch):
     monkeypatch.setattr(youtube_outreach, "_verify_youtube_text_in_dom", lambda text: (True, "ok"))
     monkeypatch.setattr(youtube_outreach, "_run_recipe_step", recipe_step)
     monkeypatch.setattr(general_poster, "_preflight_logged_in", lambda platform: (True, "ok"))
+    monkeypatch.setattr(general_poster, "_still_on_target", lambda url: (True, url))
     monkeypatch.setattr(reddit_outreach, "bidi_reachable", lambda *a, **k: (True, ""))
     monkeypatch.setattr(self_share, "bidi_reachable", lambda *a, **k: (True, ""))
     return log
