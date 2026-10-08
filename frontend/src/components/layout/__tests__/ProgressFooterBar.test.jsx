@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ThemeProvider, createTheme } from "@mui/material/styles";
 
 const progress = { activeProcesses: new Map(), unifiedJobs: new Map(), connectionState: "connected" };
@@ -88,6 +88,41 @@ describe("ProgressFooterBar", () => {
     fireEvent.mouseEnter(screen.getByTestId("footer-jobs"));
     expect(await screen.findByText("Image Gen: Queued behind Video Gen — needs ~11.7 GB, 2.6 GB free")).toBeInTheDocument();
     expect(screen.getByText("Image Gen — waiting")).toBeInTheDocument();
+  });
+
+  it("a pinned list closes with its jobs and stays shut when the next job starts", async () => {
+    const bar = () => (
+      <ThemeProvider theme={createTheme()}>
+        <ProgressFooterBar />
+      </ThemeProvider>
+    );
+    progress.activeProcesses = new Map([[waitingImage.job_id, waitingImage]]);
+    const view = render(bar());
+    await act(async () => {});
+    fireEvent.click(screen.getByTestId("footer-jobs"));
+    expect(screen.getByText("Image Gen — waiting")).toBeInTheDocument();
+
+    // The job ends; after the grace period the footer is gone.
+    vi.useFakeTimers();
+    try {
+      progress.activeProcesses = new Map();
+      view.rerender(bar());
+      await act(async () => {
+        vi.advanceTimersByTime(3100);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(screen.queryByTestId("footer-jobs")).not.toBeInTheDocument();
+
+    progress.activeProcesses = new Map([[denoising.job_id, { ...denoising, additional_data: {} }]]);
+    view.rerender(bar());
+    await act(async () => {});
+    expect(screen.getByTestId("footer-jobs")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText(/denoising 12\/30 \(40%\)/)).not.toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId("footer-jobs"));
+    expect(await screen.findByText(/denoising 12\/30 \(40%\)/)).toBeInTheDocument();
   });
 
   it("shows a queued video batch's wait when it is the only job", async () => {

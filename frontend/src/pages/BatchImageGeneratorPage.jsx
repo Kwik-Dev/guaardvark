@@ -114,6 +114,7 @@ const mapBatchResultsToImages = (batchStatus) => {
     }));
 };
 
+const INPUT_MODES = ['single', 'bulk', 'csv', 'blueprint'];
 const POLLABLE_STATUSES = new Set(['queued', 'pending', 'running']);
 const TERMINAL_BATCH_STATUSES = new Set(['completed', 'error', 'cancelled']);
 // Recent Batches reloads at most this often while a batch is landing images.
@@ -186,6 +187,12 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     const cid = searchParams.get('character');
     if (cid) setCastSubjectIds([parseInt(cid, 10)]);
   }, [searchParams]);
+
+  // ?mode=bulk (or single, csv, blueprint) opens that input mode.
+  const modeParam = searchParams.get('mode');
+  useEffect(() => {
+    if (INPUT_MODES.includes(modeParam)) setInputMode(modeParam);
+  }, [modeParam]);
 
   // Generation parameters
   const [params, setParams] = useState({

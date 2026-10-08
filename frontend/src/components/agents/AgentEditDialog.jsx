@@ -61,7 +61,7 @@ const formFrom = (agent) => ({
 /**
  * @param {object|null} agent     the list entry being edited; null closes the dialog
  * @param {function}    onClose
- * @param {function}    onSaved   called with the server's agent after Save or Reset
+ * @param {function}    onSaved   called with the server's agent and { reset } after Save or Reset
  * @param {function}    onToggle  called with the agent when the Enabled chip is clicked
  * @param {function}    onTest    called with the agent to open the Test dialog
  * @param {function}    onError   called with a message when a request fails
@@ -134,7 +134,7 @@ const AgentEditDialog = ({ agent, onClose, onSaved, onToggle, onTest, onError })
     try {
       const res = await updateAgent(agentId, changes);
       if (res?.success) {
-        onSaved?.(res.agent);
+        onSaved?.(res.agent, { reset: false });
         onClose();
       } else {
         onError?.(res?.error || "Save failed");
@@ -153,7 +153,7 @@ const AgentEditDialog = ({ agent, onClose, onSaved, onToggle, onTest, onError })
       if (res?.success) {
         setDetail(res.agent);
         setForm(formFrom(res.agent));
-        onSaved?.(res.agent);
+        onSaved?.(res.agent, { reset: true });
         setConfirmReset(false);
       } else {
         onError?.(res?.error || "Reset failed");

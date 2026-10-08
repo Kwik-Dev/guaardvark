@@ -30,7 +30,7 @@ const CARD_ROUTES = {
   clients: "/clients",
   csvgen: "/file-generation",
   codegen: "/code-editor",
-  imggen: "/images",
+  imggen: "/batch-images",
   files: "/documents",
   family: "/settings",
   autoresearch: "/autoresearch",

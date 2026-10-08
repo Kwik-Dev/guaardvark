@@ -831,7 +831,12 @@ const DashboardPage = () => {
       actions={
         <>
           <Tooltip title="Dashboard Cards">
-            <IconButton size="small" sx={{ color: "primary.main" }}>
+            <IconButton
+              size="small"
+              sx={{ color: "primary.main" }}
+              aria-haspopup="menu"
+              onClick={(e) => backgroundMenu.open(e)}
+            >
               <DashboardIcon fontSize="small" />
             </IconButton>
           </Tooltip>

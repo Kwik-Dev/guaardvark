@@ -140,4 +140,19 @@ describe("DashboardPage right-click", () => {
     await screen.findByText("Tasks body");
     expect(posts.at(-1)).toMatchObject({ cardColors: {}, hiddenCards: {}, layoutMode: "normal" });
   });
+
+  it("the Dashboard Cards button opens the same menu as the empty grid", async () => {
+    saved = { layout: [], cardColors: {}, layoutMode: "normal", hiddenCards: { gpu: true } };
+    renderPage();
+    await screen.findByText("Chat body");
+    fireEvent.click(screen.getByRole("button", { name: "Dashboard Cards" }));
+    expect(screen.getAllByRole("menuitem").map((el) => el.textContent)).toEqual([
+      "Cycle layout (next: Compact)",
+      "Reset layout…",
+      "Show GPU Memory",
+      "Sticky Notes",
+    ]);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Show GPU Memory" }));
+    await screen.findByText("GPU Memory body");
+  });
 });
