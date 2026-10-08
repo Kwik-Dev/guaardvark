@@ -232,6 +232,9 @@ Press **?** anywhere outside a text box to see the main shortcuts in the app.
 | Image viewer | E / Esc | Edit the image / close |
 | Notes | Ctrl+Z | Undo the last change to the notes: colour, text, title, delete, close (up to 30 steps) |
 | Code Editor | Ctrl+S | Save the file |
+| Code Editor | Ctrl+Shift+S | Save the session now: open tabs and the editor chat |
+| Code Editor | Ctrl+Shift+O | Find a function or class by name; pick one to open its file at that line |
+| Code Editor | Ctrl+1 … Ctrl+5 | Jump to the Files, Editor, Chat, Search or Output card |
 | Code Editor | Ctrl+Shift+E | Explain the selected code in the editor's chat |
 | System Map | / or Ctrl+K | Search |
 | System Map | R / Esc | Reset the view / clear the search and selection |

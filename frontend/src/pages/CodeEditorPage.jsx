@@ -59,6 +59,13 @@ import ChatAssistantCard from "../components/codeeditor/ChatAssistantCard";
 import SearchCard from "../components/codeeditor/SearchCard";
 import OutputCard from "../components/codeeditor/OutputCard";
 import WordPressPagesCard from "../components/codeeditor/WordPressPagesCard";
+import {
+  cardForShortcut,
+  findCardElement,
+  findDocumentTab,
+  isFindSymbolShortcut,
+  isSaveSessionShortcut,
+} from "../components/codeeditor/codeEditorNav";
 import { ContextualLoader } from "../components/common/LoadingStates";
 
 const FixedGridLayout = WidthProvider(ReactGridLayout);
@@ -105,9 +112,56 @@ const CodeEditorPage = () => {
   const [symbolResults, setSymbolResults] = useState([]);
   const [symbolLoading, setSymbolLoading] = useState(false);
   const [relatedFiles, setRelatedFiles] = useState([]);
+  // {tabId, line}: the editor card moves to that line once the tab is showing.
+  const [revealRequest, setRevealRequest] = useState(null);
+  const openTabsRef = useRef(openTabs);
+  openTabsRef.current = openTabs;
 
   const { startProcess, completeProcess, errorProcess } = useUnifiedProgress();
   const gridContainerRef = useRef(null);
+
+  /**
+   * Open a document in a tab, or switch to the tab already showing it, and
+   * optionally move the cursor to a 1-based line.
+   */
+  const openDocumentTab = useCallback(async (doc, { line } = {}) => {
+    const existing = findDocumentTab(openTabsRef.current, doc);
+    if (existing !== -1) {
+      setActiveTabIndex(existing);
+      if (line) setRevealRequest({ tabId: openTabsRef.current[existing].id, line });
+      return;
+    }
+    let content = doc.content;
+    // Fetch content if not provided
+    if (content === null || content === undefined) {
+      try {
+        const { getDocumentContent, getRepoFileContent } = await import("../api/documentService");
+        const result = doc.source === 'live_repo'
+          ? await getRepoFileContent(doc.relativePath || doc.filePath || "")
+          : await getDocumentContent(doc.id);
+        content = typeof result === "string" ? result : result.content || result.data || "";
+      } catch {
+        content = "";
+      }
+    }
+    const { getLanguageFromFilename } = await import("../utils/languageDetector");
+    const newTab = {
+      id: `doc-${doc.id}-${Date.now()}`,
+      filePath: doc.filePath || doc.filename,
+      content: content,
+      language: getLanguageFromFilename(doc.filename),
+      isModified: false,
+      source: doc.source || 'document',
+      documentId: doc.source === 'live_repo' ? null : doc.id,
+      readOnly: doc.source === 'live_repo',
+    };
+    setOpenTabs(prev => {
+      const updated = [...prev, newTab];
+      setActiveTabIndex(updated.length - 1);
+      return updated;
+    });
+    if (line) setRevealRequest({ tabId: newTab.id, line });
+  }, []);
 
   // Handle file opened from Documents page via router state
   useEffect(() => {
@@ -115,41 +169,9 @@ const CodeEditorPage = () => {
     if (!incoming) return;
     // Clear the state so refreshing doesn't re-open
     window.history.replaceState({}, document.title);
-
-    const openIncoming = async () => {
-      let content = incoming.content;
-      // Fetch content if not provided
-      if (content === null || content === undefined) {
-        try {
-          const { getDocumentContent, getRepoFileContent } = await import("../api/documentService");
-          const result = incoming.source === 'live_repo'
-            ? await getRepoFileContent(incoming.relativePath || incoming.filePath || "")
-            : await getDocumentContent(incoming.id);
-          content = typeof result === "string" ? result : result.content || result.data || "";
-        } catch {
-          content = "";
-        }
-      }
-      const { getLanguageFromFilename } = await import("../utils/languageDetector");
-      const newTab = {
-        id: `doc-${incoming.id}-${Date.now()}`,
-        filePath: incoming.filePath || incoming.filename,
-        content: content,
-        language: getLanguageFromFilename(incoming.filename),
-        isModified: false,
-        source: incoming.source || 'document',
-        documentId: incoming.source === 'live_repo' ? null : incoming.id,
-        readOnly: incoming.source === 'live_repo',
-      };
-      setOpenTabs(prev => {
-        const updated = [...prev, newTab];
-        setActiveTabIndex(updated.length - 1);
-        return updated;
-      });
-    };
     // Delay slightly to let state restoration finish
-    setTimeout(openIncoming, 500);
-  }, [location.state]);
+    setTimeout(() => openDocumentTab(incoming), 500);
+  }, [location.state, openDocumentTab]);
 
   useEffect(() => {
     const loadModels = async () => {
@@ -177,7 +199,7 @@ const CodeEditorPage = () => {
 
   useEffect(() => {
     const handleSymbolShortcut = (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'o' || e.key === 'O')) {
+      if (isFindSymbolShortcut(e)) {
         e.preventDefault();
         setSymbolSearchOpen(true);
       }
@@ -1070,33 +1092,23 @@ const CodeEditorPage = () => {
 
   useEffect(() => {
     const handleKeyDown = (event) => {
-      if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey) {
-        const cardMap = {
-          '1': 'filetree',
-          '2': 'editor',
-          '3': 'chat',
-          '4': 'search',
-          '5': 'output'
-        };
+      const cardId = cardForShortcut(event);
+      if (cardId) {
+        event.preventDefault();
 
-        const cardId = cardMap[event.key];
-        if (cardId) {
-          event.preventDefault();
+        const cardElement = findCardElement(gridContainerRef.current || document, cardId);
+        if (cardElement) {
+          cardElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
-          const cardElement = document.querySelector(`[data-grid*='"i":"${cardId}"']`);
-          if (cardElement) {
-            cardElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
-
-            cardElement.style.transition = 'box-shadow 0.3s';
-            cardElement.style.boxShadow = '0 0 20px rgba(25, 118, 210, 0.6)';
-            setTimeout(() => {
-              cardElement.style.boxShadow = '';
-            }, 1000);
-          }
+          cardElement.style.transition = 'box-shadow 0.3s';
+          cardElement.style.boxShadow = '0 0 20px rgba(25, 118, 210, 0.6)';
+          setTimeout(() => {
+            cardElement.style.boxShadow = '';
+          }, 1000);
         }
       }
 
-      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key === 's') {
+      if (isSaveSessionShortcut(event)) {
         event.preventDefault();
         saveCodeEditorSession();
       }
@@ -1458,7 +1470,7 @@ const CodeEditorPage = () => {
               };
 
               return (
-                <div key={cardId} data-grid={adjustedLayoutItem}>
+                <div key={cardId} data-grid={adjustedLayoutItem} data-card-id={cardId}>
                   {CardComponent ? (
                     <CardComponent
                       id={cardId}
@@ -1489,6 +1501,8 @@ const CodeEditorPage = () => {
                       {...(cardId === 'editor' && {
                         onEditorContextChange: handleEditorContextChange,
                         onChatAction: handleEditorChatAction,
+                        revealRequest,
+                        onRevealDone: () => setRevealRequest(null),
                       })}
                       {...(cardId === 'output' && {
                         currentTab: currentTab
@@ -1571,6 +1585,15 @@ const CodeEditorPage = () => {
                   setSymbolSearchOpen(false);
                   setSymbolQuery('');
                   setSymbolResults([]);
+                  openDocumentTab(
+                    {
+                      id: sym.document_id,
+                      filename: sym.filename,
+                      filePath: sym.file_path || sym.filename,
+                      source: 'document',
+                    },
+                    { line: sym.line },
+                  );
                 }}
               >
                 <ListItemText

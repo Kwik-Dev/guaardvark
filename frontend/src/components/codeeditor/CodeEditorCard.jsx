@@ -40,6 +40,7 @@ import { useUnifiedProgress } from "../../contexts/UnifiedProgressContext";
 import * as codeIntelligenceService from "../../api/codeIntelligenceService";
 import * as fileOperationsService from "../../api/fileOperationsService";
 import { getLanguageFromFilename } from "../../utils/languageDetector";
+import { revealEditorLine } from "./codeEditorNav";
 
 const CodeEditorCard = React.forwardRef(
   (
@@ -55,11 +56,14 @@ const CodeEditorCard = React.forwardRef(
       setActiveTabIndex,
       onEditorContextChange,
       onChatAction,
+      revealRequest,
+      onRevealDone,
       ...props
     },
     ref
   ) => {
     const editorRef = useRef(null);
+    const [editorMounts, setEditorMounts] = useState(0);
     const contextUpdateTimeoutRef = useRef(null);
     const [editorError, setEditorError] = useState(null);
     const [contextMenu, setContextMenu] = useState(null);
@@ -168,6 +172,7 @@ ${currentTab.content}
 
     const handleEditorDidMount = useCallback((editor, monaco) => {
       editorRef.current = editor;
+      setEditorMounts((n) => n + 1);
 
       // Configure editor with AI enhancements
       editor.updateOptions({
@@ -218,11 +223,6 @@ ${currentTab.content}
       // Add keyboard shortcuts
       editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
         handleSave();
-      });
-
-      // Add AI assistance shortcut
-      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Space, () => {
-        handleAIAssist();
       });
 
       // Add hover provider for AI explanations
@@ -382,8 +382,9 @@ ${currentTab.content}
       };
     }, [currentTab, updateEditorContext, onEditorContextChange]);
 
-    // AI assistance handler
-    const handleAIAssist = useCallback(async () => {
+    // Not bound to a key: the completion it fetches is never shown, so Ctrl+Space
+    // stays Monaco's own suggestion list.
+    const _handleAIAssist = useCallback(async () => {
       if (!editorRef.current || !currentTab) return;
 
       const position = editorRef.current.getPosition();
@@ -507,6 +508,13 @@ ${currentTab.content}
       getSelection: () => editorRef.current?.getSelection(),
       getPosition: () => editorRef.current?.getPosition()
     }), []);
+
+    // A jump asked for by the page (Find Symbol) runs once its tab is showing
+    // and Monaco has mounted; the Editor child updates its model before this runs.
+    useEffect(() => {
+      if (!revealRequest || !currentTab || currentTab.id !== revealRequest.tabId) return;
+      if (revealEditorLine(editorRef.current, revealRequest.line)) onRevealDone?.();
+    }, [revealRequest, currentTab, editorMounts, onRevealDone]);
 
     const handleContentChange = useCallback((value) => {
       if (!currentTab || activeTabIndex < 0 || activeTabIndex >= openTabs.length) return;
