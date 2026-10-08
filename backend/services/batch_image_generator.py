@@ -408,12 +408,7 @@ class BatchImageGenerator:
 
         try:
             if self.image_generator and hasattr(self.image_generator, "_unload_pipeline"):
-                self.image_generator._unload_pipeline()
-            try:
-                from backend.services.gpu_memory_orchestrator import get_orchestrator
-                get_orchestrator().release_model("sd:pipeline")
-            except Exception:
-                pass
+                self.image_generator._unload_pipeline(forget_slot=True)
             import gc
             import torch
             gc.collect()
