@@ -118,6 +118,31 @@ _PAGE_CHECK_JS = r"""(() => {
 })()"""
 
 
+def _same_page(url: str, target_url: str) -> bool:
+    """Same host and path, ignoring scheme, query, fragment and a trailing slash."""
+    from urllib.parse import urlparse
+
+    a, b = urlparse(url or ""), urlparse(target_url or "")
+    host = lambda u: (u.hostname or "").lower().removeprefix("www.").removeprefix("m.")
+    return host(a) == host(b) and a.path.rstrip("/") == b.path.rstrip("/")
+
+
+def _still_on_target(target_url: str) -> tuple[bool, str]:
+    """Whether the browser is still on the approved page.
+
+    The loop clicks and scrolls by sight; on a reel viewer one scroll moves
+    to someone else's video, and text typed or submitted there would land
+    on the wrong post.
+    """
+    from backend.services.social_outreach.reddit_outreach import bidi_evaluate_json
+
+    data, why = bidi_evaluate_json("JSON.stringify({url: location.href})")
+    if data is None:
+        return False, f"page not readable ({why})"
+    url = str(data.get("url") or "")
+    return _same_page(url, target_url), url[:200]
+
+
 def _text_published(text: str) -> tuple[bool, str]:
     """Read the page and decide whether ``text`` was published.
 
@@ -229,10 +254,16 @@ def post_via_agent_loop(
         return False, f"focus_composer_failed: {focus.reason}"
 
     # 4) Type the user text directly — never through the LLM prompt.
+    on_target, where = _still_on_target(target_url)
+    if not on_target:
+        return False, f"wrong_page: nothing was posted; the browser left the target before typing ({where})"
     screen.type_text(text)
     _human_pause()
 
     # 5) Submit.
+    on_target, where = _still_on_target(target_url)
+    if not on_target:
+        return False, f"wrong_page: nothing was posted; the browser left the target before submitting ({where})"
     if before_submit is not None and not before_submit():
         return False, WITHDRAWN_BEFORE_SUBMIT
     submit_task = (

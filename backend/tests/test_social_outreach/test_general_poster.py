@@ -122,6 +122,7 @@ class TestPostViaAgentLoop:
             patch("backend.services.social_outreach.reddit_outreach.SERVO_SETTLE_SECONDS", 0),
             patch.object(gp, "_preflight_logged_in", return_value=(True, "ok")),
             patch.object(gp, "_human_pause", return_value=None),
+            patch.object(gp, "_still_on_target", return_value=(True, "")),
             patch("backend.services.social_outreach.reddit_outreach.bidi_reachable",
                   return_value=(True, "")),
             patch("backend.services.social_outreach.reddit_outreach.bidi_evaluate_json",
@@ -308,4 +309,44 @@ class TestBidiReachable:
         refused = (None, 'evaluate error: System access is required. Start Firefox with "-remote-allow-system-access" to enable it.')
         with patch.object(reddit_outreach, "bidi_evaluate_json", return_value=refused):
             assert reddit_outreach.bidi_reachable(wait_s=0) == (True, "")
+
+
+class TestStaysOnTarget:
+    """Nothing is typed or submitted once the browser has left the approved page."""
+
+    def _run(self, places):
+        service = MagicMock()
+        service.is_active = False
+        service.execute_task.return_value = SimpleNamespace(success=True, reason="ok")
+        screen = MagicMock()
+        answers = iter(places)
+        with patch("backend.services.agent_control_service.get_agent_control_service", return_value=service), \
+             patch("backend.utils.agent_display_utils.start_agent_display_if_needed", return_value=True), \
+             patch("backend.services.local_screen_backend.LocalScreenBackend", return_value=screen), \
+             patch("backend.services.social_outreach.reddit_outreach.SERVO_SETTLE_SECONDS", 0), \
+             patch("backend.services.social_outreach.reddit_outreach.bidi_reachable", return_value=(True, "")), \
+             patch.object(gp, "_preflight_logged_in", return_value=(True, "ok")), \
+             patch.object(gp, "_human_pause", return_value=None), \
+             patch.object(gp, "_still_on_target", side_effect=lambda url: next(answers)):
+            result = gp.post_via_agent_loop("facebook", "https://www.facebook.com/reel/1", "hello")
+        tasks = [c.args[0] for c in service.execute_task.call_args_list]
+        return result, screen, tasks
+
+    def test_leaving_before_typing_types_nothing(self):
+        (ok, reason), screen, _ = self._run([(False, "https://www.facebook.com/reel/2")])
+        assert ok is False
+        assert reason.startswith("wrong_page: nothing was posted")
+        screen.type_text.assert_not_called()
+
+    def test_leaving_before_submitting_submits_nothing(self):
+        (ok, reason), screen, tasks = self._run([(True, ""), (False, "https://www.facebook.com/reel/2")])
+        assert ok is False
+        assert reason.startswith("wrong_page: nothing was posted")
+        screen.type_text.assert_called_once()
+        assert not [t for t in tasks if "publishes/submits" in t]
+
+    def test_same_page_ignores_scheme_www_query_and_slash(self):
+        assert gp._same_page("https://www.facebook.com/reel/1/?s=x", "http://facebook.com/reel/1")
+        assert not gp._same_page("https://www.facebook.com/reel/2", "https://www.facebook.com/reel/1")
+        assert not gp._same_page("https://evil.example/reel/1", "https://www.facebook.com/reel/1")
 
