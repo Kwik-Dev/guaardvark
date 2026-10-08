@@ -1411,10 +1411,6 @@ const CodeEditorPage = () => {
             overflow: "none",
             "& .react-grid-item": {
               transition: "transform 0.2s ease-out !important",
-              "&.react-grid-placeholder": {
-                transition: "all 0.2s ease-out !important",
-                opacity: 0.3,
-              },
               "&.react-draggable-dragging": {
                 transition: "none !important",
                 zIndex: 1000,

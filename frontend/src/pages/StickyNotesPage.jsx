@@ -1525,13 +1525,6 @@ const StickyNotesPage = () => {
             width: "100%",
             "& .react-grid-item": {
               transition: "transform 0.2s ease-out !important",
-              "&.react-grid-placeholder": {
-                transition: "all 0.2s ease-out !important",
-                opacity: 0.15,
-                background: "transparent",
-                border: `1px dashed ${theme.palette.primary.main}`,
-                borderRadius: "4px",
-              },
               "&.react-draggable-dragging": {
                 transition: "none !important",
                 opacity: 0.9,
