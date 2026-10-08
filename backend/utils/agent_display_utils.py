@@ -90,8 +90,45 @@ def run_display_script(action: str, timeout: int = 60) -> dict:
     }
 
 
+def _display_in_use_marker() -> str:
+    root = GUAARDVARK_ROOT or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(root, "pids", "agent_display_in_use")
+
+
+def mark_display_in_use() -> None:
+    """Tell every process the display is in use (a post in a Celery worker).
+
+    The idle shutdown runs in the backend, which cannot see work in other
+    processes; without this it stopped the display halfway through a post.
+    """
+    path = _display_in_use_marker()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(str(os.getpid()))
+
+
+def clear_display_in_use() -> None:
+    try:
+        os.remove(_display_in_use_marker())
+    except FileNotFoundError:
+        pass
+
+
+def _display_marked_in_use() -> bool:
+    """The marker exists and the process that wrote it is still alive."""
+    try:
+        with open(_display_in_use_marker()) as f:
+            pid = int(f.read().strip() or 0)
+    except (FileNotFoundError, ValueError):
+        return False
+    return pid > 0 and os.path.exists(f"/proc/{pid}")
+
+
 def is_display_idle_blocker_active() -> bool:
-    """True when the display must not be torn down (agent task or training)."""
+    """True when the display must not be torn down (agent task, training, or
+    a post in another process)."""
+    if _display_marked_in_use():
+        return True
     try:
         from backend.services.agent_control_service import get_agent_control_service
         service = get_agent_control_service()
