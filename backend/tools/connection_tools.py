@@ -115,7 +115,9 @@ class RequestPublishTool(BaseTool):
         "connection needs a video and is not offered). This does NOT post: the request waits "
         "on the Approvals page until a person approves, rejects or cancels it, whatever the "
         "publish settings say. Omit connection when only one text connection is set up; "
-        "otherwise pass its id or name. Returns the publish record ids and their status."
+        "otherwise pass its id or name. Returns the publish record ids and their status. "
+        "For a comment drafted for someone else's Reddit or YouTube thread, use "
+        "outreach_draft_post."
     )
     parameters = {
         "body": ToolParameter(

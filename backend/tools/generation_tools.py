@@ -333,7 +333,9 @@ class FileGeneratorTool(BaseTool):
         "It generates from the description ALONE and never reads any existing file. "
         "Do NOT use it to improve, refactor, modify, or produce a new version of an existing or "
         "uploaded file — it cannot see that file and would fabricate. For that, use `codegen` "
-        "with input_file=<path> (grounded copy) or `edit_code` (in-place repo change)."
+        "with input_file=<path> (grounded copy), or `edit_code` in Guaardvark's chat for an "
+        "in-place repo change (not offered over MCP). For a CSV table use generate_csv; for "
+        "a WordPress import file with a page per row, generate_bulk_csv."
     )
 
     # Verbs that signal "change something that already exists" rather than
@@ -541,7 +543,7 @@ class FileGeneratorTool(BaseTool):
                         f"brand-new file from your description and never reads '{referenced}', so "
                         f"any 'improved version' would be fabricated. Use `codegen` with "
                         f"input_file='{referenced}' to generate a grounded modified copy, or "
-                        f"`edit_code` to change the file in place."
+                        f"`edit_code` in Guaardvark's chat to change the file in place."
                     ),
                 )
 
