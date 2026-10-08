@@ -31,13 +31,15 @@ def bootstrap(dispatcher: Dispatcher, config: dict[str, Any]) -> None:
 
     runtime = config.get("runtime", {})
     backends_cfg = runtime.get("backends", {})
-    output_dir = _PROJECT_ROOT / runtime.get("output", {}).get("dir", "data/outputs/audio")
+    output_cfg = runtime.get("output", {})
+    output_dir = _PROJECT_ROOT / output_cfg.get("dir", "data/outputs/audio")
 
     if "fx" not in disabled:
         _try_register_fx(dispatcher, backends_cfg.get("audio_fx", {}), output_dir)
 
     if "voice" not in disabled:
-        _try_register_voice(dispatcher, backends_cfg.get("voice_gen", {}), output_dir)
+        voice_dir = output_dir / output_cfg.get("voice_subdir", "Voice")
+        _try_register_voice(dispatcher, backends_cfg.get("voice_gen", {}), voice_dir)
 
     if "music" not in disabled:
         _try_register_music(dispatcher, backends_cfg.get("music_gen", {}), output_dir)
