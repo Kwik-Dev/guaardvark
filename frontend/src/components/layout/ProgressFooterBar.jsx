@@ -120,12 +120,21 @@ const ProgressFooterBar = () => {
     }, []);
 
     // Hover shows every job in flight; a click keeps the list open until dismissed.
-    const [listAnchor, setListAnchor] = useState(null);
+    // It closes once nothing is in flight, so the next job never reopens it unanchored.
+    const jobsRef = useRef(null);
+    const [listOpen, setListOpen] = useState(false);
     const [listPinned, setListPinned] = useState(false);
     const closeList = () => {
         setListPinned(false);
-        setListAnchor(null);
+        setListOpen(false);
     };
+    const hasView = Boolean(view);
+    useEffect(() => {
+        if (!hasView) {
+            setListPinned(false);
+            setListOpen(false);
+        }
+    }, [hasView]);
 
     const sidebarExpanded = useAppStore((state) => state.sidebarExpanded);
     const navChrome = useAppStore((state) => state.navChrome);
@@ -189,15 +198,16 @@ const ProgressFooterBar = () => {
                         : `${Math.round(progress)}%`}
                 </Typography>
                 <Box
+                    ref={jobsRef}
                     data-testid="footer-jobs"
                     role={view ? 'button' : undefined}
                     tabIndex={view ? 0 : undefined}
                     aria-label={view ? 'Show every job in progress' : undefined}
-                    onMouseEnter={(e) => { if (view) setListAnchor(e.currentTarget); }}
-                    onMouseLeave={() => { if (!listPinned) setListAnchor(null); }}
-                    onClick={(e) => {
+                    onMouseEnter={() => { if (view) setListOpen(true); }}
+                    onMouseLeave={() => { if (!listPinned) setListOpen(false); }}
+                    onClick={() => {
                         if (!view) return;
-                        setListAnchor(e.currentTarget);
+                        setListOpen(true);
                         setListPinned((p) => !p);
                     }}
                     sx={{
@@ -247,8 +257,8 @@ const ProgressFooterBar = () => {
                 <TaskQueueIndicator compact={true} />
 
                 <Popover
-                    open={Boolean(view && listAnchor)}
-                    anchorEl={listAnchor}
+                    open={Boolean(view && listOpen)}
+                    anchorEl={() => jobsRef.current}
                     onClose={closeList}
                     anchorOrigin={{ vertical: 'top', horizontal: 'left' }}
                     transformOrigin={{ vertical: 'bottom', horizontal: 'left' }}
