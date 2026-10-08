@@ -4,6 +4,7 @@ import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from "r
 import useNavigationCancel from "./hooks/useNavigationCancel";
 import useGpuIntent from "./hooks/useGpuIntent";
 import useKeyboardForwarding from "./hooks/useKeyboardForwarding";
+import useFileDropGuard from "./hooks/useFileDropGuard";
 import {
   ThemeProvider as MuiThemeProvider,
   CssBaseline,
@@ -183,6 +184,7 @@ const AppContainer = () => {
   // Route keystrokes to DISPLAY=:99 when the user flips the toggle on either
   // floater. No-op when disabled.
   useKeyboardForwarding();
+  useFileDropGuard();
 
   React.useEffect(() => {
     fetchSystemInfo();

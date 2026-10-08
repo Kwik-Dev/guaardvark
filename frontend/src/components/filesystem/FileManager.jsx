@@ -69,6 +69,7 @@ import {
 } from '@mui/icons-material';
 import ReactGridLayoutLib, { WidthProvider } from 'react-grid-layout/legacy';
 import axios from 'axios';
+import { snapshotDrop, collectDroppedFiles } from '../../utils/droppedFiles';
 import FilePropertiesModal from '../modals/FilePropertiesModal';
 import FolderPropertiesModal from '../modals/FolderPropertiesModal';
 import CSVSpreadsheetViewer from './CSVSpreadsheetViewer';
@@ -1180,52 +1181,6 @@ const FileManager = () => {
     await fetchContents();
   };
 
-  // Helper function to recursively traverse folders and collect files with paths
-  const traverseFolderEntry = useCallback(async (entry, basePath = '') => {
-    const files = [];
-
-    if (entry.isFile) {
-      // Get the file object
-      const file = await new Promise((resolve, reject) => {
-        entry.file(resolve, reject);
-      });
-      // Store file with its relative path
-      files.push({
-        file,
-        relativePath: basePath ? `${basePath}/${file.name}` : file.name
-      });
-    } else if (entry.isDirectory) {
-      const dirReader = entry.createReader();
-
-      // Read all entries in this directory (may require multiple calls)
-      const readEntries = async () => {
-        const entries = await new Promise((resolve, reject) => {
-          dirReader.readEntries(resolve, reject);
-        });
-
-        if (entries.length > 0) {
-          // Process each entry recursively
-          for (const childEntry of entries) {
-            const childPath = basePath ? `${basePath}/${entry.name}` : entry.name;
-            const childFiles = await traverseFolderEntry(childEntry, childPath);
-            files.push(...childFiles);
-          }
-
-          // Continue reading (directories may have more entries)
-          const moreFiles = await readEntries();
-          files.push(...moreFiles);
-        }
-
-        return files;
-      };
-
-      const dirFiles = await readEntries();
-      files.push(...dirFiles);
-    }
-
-    return files;
-  }, []);
-
   // Drag and drop for file upload (from outside browser)
   const handleFileDrag = useCallback((e) => {
     e.preventDefault();
@@ -1253,41 +1208,13 @@ const FileManager = () => {
     const hasInternalDrag = draggedItem || draggedItems.length > 0;
     if (hasInternalDrag) return;
 
-    const items = e.dataTransfer.items;
-    const filesToUpload = [];
-
-    if (items) {
-      // Use DataTransferItem API to handle folders
-      for (let i = 0; i < items.length; i++) {
-        const item = items[i];
-
-        if (item.kind === 'file') {
-          const entry = item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
-
-          if (entry) {
-            // Traverse the entry (could be file or folder)
-            const filesWithPaths = await traverseFolderEntry(entry);
-            filesToUpload.push(...filesWithPaths);
-          } else {
-            // Fallback: treat as regular file
-            const file = item.getAsFile();
-            if (file) {
-              filesToUpload.push({ file, relativePath: file.name });
-            }
-          }
-        }
-      }
-    } else if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      // Fallback for browsers that don't support DataTransferItem
-      for (const file of e.dataTransfer.files) {
-        filesToUpload.push({ file, relativePath: file.name });
-      }
-    }
+    // Before any await: the browser empties the item list once this handler yields.
+    const filesToUpload = await collectDroppedFiles(snapshotDrop(e.dataTransfer));
 
     if (filesToUpload.length > 0) {
       handleFileSelectWithPaths(filesToUpload);
     }
-  }, [draggedItem, draggedItems, traverseFolderEntry]);
+  }, [draggedItem, draggedItems]);
 
   // Drag and drop for moving items
   const handleItemDragStart = (e, item, type) => {
