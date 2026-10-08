@@ -58,6 +58,7 @@ import {
 import { useNavigate } from "react-router-dom";
 import PageLayout from "../components/layout/PageLayout";
 import ClosedNotesDrawer from "../components/notes/ClosedNotesDrawer";
+import { pinnedToTop, pinnedFirst, isEditableTarget } from "../components/notes/notesBoard";
 import { useLayout, useDashboardWidth } from "../contexts/LayoutContext";
 import { ContextualLoader } from "../components/common/LoadingStates";
 
@@ -643,10 +644,17 @@ const StickyNotesPage = () => {
   // packed layouts below are not rebuilt — rebuilding them pulls dragged
   // notes back to the left edge on Enter.
   const noteIdsKey = Object.keys(notes).join("\0");
+  // Pinned ids in a stable string, so the packed layouts rebuild only on a pin change.
+  const pinnedKey = Object.keys(pinnedNotes).filter((id) => pinnedNotes[id]).sort().join("\0");
+  const orderedNoteIds = useMemo(() => {
+    const ids = noteIdsKey ? noteIdsKey.split("\0") : [];
+    const pinned = Object.fromEntries((pinnedKey ? pinnedKey.split("\0") : []).map((id) => [id, true]));
+    return pinnedFirst(ids, pinned);
+  }, [noteIdsKey, pinnedKey]);
 
   // Compact layout (derived)
   const compactLayout = useMemo(() => {
-    const noteIds = noteIdsKey ? noteIdsKey.split("\0") : [];
+    const noteIds = orderedNoteIds;
     const compactW = Math.round(cardGridW * 0.71);
     const compactH = Math.round(cardGridH * 0.71);
     const colWidthPx = gridWidth / COLS_COUNT;
@@ -663,11 +671,11 @@ const StickyNotesPage = () => {
       isDraggable: true,
       isResizable: false,
     }));
-  }, [noteIdsKey, cardGridW, cardGridH, gridWidth, COLS_COUNT, cardMinGridW]);
+  }, [orderedNoteIds, cardGridW, cardGridH, gridWidth, COLS_COUNT, cardMinGridW]);
 
   // Collapsed layout (derived)
   const collapsedLayout = useMemo(() => {
-    const noteIds = noteIdsKey ? noteIdsKey.split("\0") : [];
+    const noteIds = orderedNoteIds;
     const colWidthPx = gridWidth / COLS_COUNT;
     const barW = Math.round(300 / colWidthPx);
     const barH = Math.round(50 / ROW_HEIGHT_PX);
@@ -683,7 +691,7 @@ const StickyNotesPage = () => {
       isDraggable: true,
       isResizable: false,
     }));
-  }, [noteIdsKey, gridWidth, COLS_COUNT, ROW_HEIGHT_PX, cardMinGridW]);
+  }, [orderedNoteIds, gridWidth, COLS_COUNT, ROW_HEIGHT_PX, cardMinGridW]);
 
   // ── Load saved state ─────────────────────────────────────────────────────
 
@@ -912,8 +920,9 @@ const StickyNotesPage = () => {
   // Global keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e) => {
-      // CTRL+Z — Undo
+      // CTRL+Z — board undo. A note body, title or other text field keeps its own.
       if ((e.ctrlKey || e.metaKey) && e.key === "z" && !e.shiftKey) {
+        if (isEditableTarget(e.target)) return;
         e.preventDefault();
         handleUndo();
       }
@@ -1233,19 +1242,33 @@ const StickyNotesPage = () => {
     [notes, noteColors, layout, minimizedCards, makeLayoutItem, saveState],
   );
 
-  // Toggle pin
+  // Pinning moves the note into the band of pinned notes at the top of the
+  // board and moves the rest below it. Unpinning leaves every note where it is.
   const handleTogglePin = useCallback(
     (noteId) => {
-      const newPinned = { ...pinnedNotes };
-      if (newPinned[noteId]) {
-        delete newPinned[noteId];
-      } else {
+      pushUndo();
+      const newPinned = { ...pinnedNotesRef.current };
+      const pinning = !newPinned[noteId];
+      if (pinning) {
         newPinned[noteId] = true;
+      } else {
+        delete newPinned[noteId];
       }
+      pinnedNotesRef.current = newPinned;
       setPinnedNotes(newPinned);
-      saveState(null, null, null, undefined, undefined, newPinned);
+
+      let newLayout = normalLayoutRef.current || layoutRef.current || [];
+      if (pinning) {
+        const barRows = minimizedBarRows(ROW_HEIGHT_PX, CARD_MARGIN_PX);
+        newLayout = pinnedToTop(newLayout, newPinned, COLS_COUNT, (item) =>
+          minimizedCardsRef.current[item.i] ? barRows : item.h,
+        );
+        normalLayoutRef.current = newLayout;
+        if (layoutModeRef.current === "normal") setLayout(newLayout);
+      }
+      saveState(newLayout, null, null, undefined, undefined, newPinned);
     },
-    [pinnedNotes, saveState],
+    [saveState, pushUndo, ROW_HEIGHT_PX, CARD_MARGIN_PX, COLS_COUNT],
   );
 
   // Format commands via execCommand
