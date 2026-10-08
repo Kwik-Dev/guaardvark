@@ -10,7 +10,7 @@ import React, { useState, useCallback, useEffect, useRef, useMemo } from "react"
 import { Box, Typography, Card, CardActionArea, CardContent, IconButton, Tooltip, Dialog, DialogTitle, DialogContent, DialogActions, Button, TextField, useTheme, CircularProgress } from "@mui/material";
 import { BrandLogo } from "../components/branding";
 import { Apps as AppsIcon, GridView as GridViewIcon, FolderOutlined, Code, UploadFile as UploadFileIcon } from "@mui/icons-material";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { getFileIcon, getItemKey, FolderIndexIndicator, isImageFile, isVideoFile, isCodeFile, isPdfFile, isDocxFile, isAudioFile } from "../components/documents/fileUtils.jsx";
 import ImageLightbox from "../components/images/ImageLightbox";
 import CodeViewerModal from "../components/documents/CodeViewerModal";
@@ -31,6 +31,8 @@ import {
 } from "../utils/droppedFiles";
 import FilePropertiesModal from "../components/modals/FilePropertiesModal";
 import FolderPropertiesModal from "../components/modals/FolderPropertiesModal";
+import EntityFilesPanel from "../components/documents/EntityFilesPanel";
+import { entityFilesFilter } from "../utils/entityLinks";
 import { useLayout } from "../contexts/LayoutContext";
 import { useSnackbar } from "../components/common/SnackbarProvider";
 import { useStatus } from "../contexts/StatusContext";
@@ -182,6 +184,8 @@ const DocumentsPage = () => {
   const [audioPlayer, setAudioPlayer] = useState(null); // { file } for AudioPlayerModal
   const [docxViewer, setDocxViewer] = useState(null); // { file } for DocxViewerModal
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const entityFilter = entityFilesFilter(searchParams);
   const [dragOverFolderId, setDragOverFolderId] = useState(null); // Folder ID being dragged over
   const [desktopFileDragOver, setDesktopFileDragOver] = useState(false);
   const fileInputRef = useRef(null);
@@ -2041,6 +2045,14 @@ const DocumentsPage = () => {
       activeModel={isLoadingModel ? "Loading..." : modelError ? "Error" : activeModel}
     >
       <Box ref={windowContainerRef} sx={{ flex: 1, minHeight: 0, position: "relative", overflow: "hidden" }}>
+        {entityFilter && (
+          <EntityFilesPanel
+            kind={entityFilter.kind}
+            id={entityFilter.id}
+            onOpenFile={(doc) => openFile(doc)}
+            onClose={() => setSearchParams({})}
+          />
+        )}
         {/* Desktop area with folded folder icons */}
         <Box
           data-desktop-container

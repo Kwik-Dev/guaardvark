@@ -88,7 +88,7 @@ Right-click an **empty part of the dashboard** for:
 | Jobs | a job | Start, Cancel, Edit, Duplicate, Delete |
 | Jobs | the background | New Code Generation, New CSV / Bulk Content, New Content Generation, New Data Analysis, New Custom Job |
 | Activity | a job | Details, Copy ID, Resume / Re-index, Cancel job |
-| Clients, Projects, Websites | an entry | Edit, Delete, Files, Schedule Task (Websites adds Crawl) |
+| Clients, Projects, Websites | an entry | Edit, Delete, Files, Schedule Task (Websites adds Crawl). Files opens a project's Documents tab, or the Files page with a list of the files linked to that client or website (link them in File or Folder Properties) |
 | Clients, Projects, Websites | the background | New Client, New Project or New Website |
 | Rules & Prompts | a rule | Edit…, Activate or Deactivate, Duplicate, Link to projects…, Copy ID, Delete |
 | Agents | an agent | Edit, Test, Enable or Disable, Copy id, Reset to default |

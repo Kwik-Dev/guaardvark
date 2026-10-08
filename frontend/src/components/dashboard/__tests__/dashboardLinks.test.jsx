@@ -20,7 +20,13 @@ import ClientsDashboardCard from "../ClientsDashboardCard";
 import WebsiteDataCard from "../WebsiteDataCard";
 import TaskManagerCard from "../TaskManagerCard";
 import ImageGenerationCard from "../ImageGenerationCard";
-import { entityFilesPath, entityLinkActions, scheduleTaskPath, taskPath } from "../../../utils/entityLinks";
+import {
+  entityFilesFilter,
+  entityFilesPath,
+  entityLinkActions,
+  scheduleTaskPath,
+  taskPath,
+} from "../../../utils/entityLinks";
 
 const Where = () => {
   const loc = useLocation();
@@ -42,11 +48,19 @@ const menuLabels = () => screen.getAllByRole("menuitem").map((el) => el.textCont
 const pick = (label) => fireEvent.click(screen.getByRole("menuitem", { name: label }));
 
 describe("entity links", () => {
-  it("send Files only where a page lists that entity's documents", () => {
+  it("send Files to the page that lists that entity's documents", () => {
     expect(entityFilesPath("project", 7)).toBe("/projects/7?tab=documents");
-    expect(entityFilesPath("client", 3)).toBeNull();
-    expect(entityFilesPath("website", 5)).toBeNull();
-    expect(entityLinkActions("client", 3, () => {}).map((a) => a.label)).toEqual(["Schedule Task"]);
+    expect(entityFilesPath("client", 3)).toBe("/documents?client_id=3");
+    expect(entityFilesPath("website", 5)).toBe("/documents?website_id=5");
+    expect(entityFilesPath("task", 5)).toBeNull();
+    expect(entityLinkActions("client", 3, () => {}).map((a) => a.label)).toEqual(["Files", "Schedule Task"]);
+  });
+
+  it("let the Files page read back which client or website it was asked for", () => {
+    expect(entityFilesFilter(new URLSearchParams("client_id=3"))).toEqual({ kind: "client", id: 3 });
+    expect(entityFilesFilter(new URLSearchParams("website_id=5"))).toEqual({ kind: "website", id: 5 });
+    expect(entityFilesFilter(new URLSearchParams(""))).toBeNull();
+    expect(entityFilesFilter(new URLSearchParams("client_id=abc"))).toBeNull();
   });
 
   it("send Schedule Task and Open to parameters the Tasks page reads", () => {
@@ -73,18 +87,29 @@ describe("dashboard card links", () => {
     expect(screen.getByTestId("where")).toHaveTextContent("/tasks?project_id=7&new=1");
   });
 
-  it("Client row: no Files item; Schedule Task carries the client", async () => {
+  it("Client row: Files lists the client's documents; Schedule Task carries the client", async () => {
+    const first = renderCard(<ClientsDashboardCard id="clients" />);
+    rightClick(await screen.findByText("Acme"));
+    expect(menuLabels()).toEqual(["Open", "Files", "Schedule Task"]);
+    pick("Files");
+    expect(screen.getByTestId("where")).toHaveTextContent("/documents?client_id=3");
+    first.unmount();
+
     renderCard(<ClientsDashboardCard id="clients" />);
     rightClick(await screen.findByText("Acme"));
-    expect(menuLabels()).toEqual(["Open", "Schedule Task"]);
     pick("Schedule Task");
     expect(screen.getByTestId("where")).toHaveTextContent("/tasks?client_id=3&new=1");
   });
 
-  it("Website row: no Files item; Schedule Task carries the website", async () => {
+  it("Website row: Files lists the website's documents; Schedule Task carries the website", async () => {
+    const first = renderCard(<WebsiteDataCard id="website" />);
+    rightClick(await screen.findByText(/Docs: 2/));
+    pick("Files");
+    expect(screen.getByTestId("where")).toHaveTextContent("/documents?website_id=5");
+    first.unmount();
+
     renderCard(<WebsiteDataCard id="website" />);
     rightClick(await screen.findByText(/Docs: 2/));
-    expect(menuLabels()).not.toContain("Files");
     pick("Schedule Task");
     expect(screen.getByTestId("where")).toHaveTextContent("/tasks?website_id=5&new=1");
   });
