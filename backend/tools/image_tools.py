@@ -1523,7 +1523,7 @@ class VideoGeneratorTool(BaseTool):
         "model": ToolParameter(
             name="model",
             type="string",
-            description="Video model id from the registry (e.g. wan22-5b, minimax-h3-int8). Default: the installed default.",
+            description="Video model id from the registry (e.g. wan22-5b, minimax-h3-int8). Omitted: the active video model in Settings, or on a machine where none is set the best installed one for the GPU; when that model cannot make this clip the call is refused with the reason, never rendered on another model. The result names the model used.",
             required=False,
         ),
         "aspect_ratio": ToolParameter(
@@ -1634,14 +1634,21 @@ class VideoGeneratorTool(BaseTool):
         model's capability record. Returns (params, None) or (None, message).
         Pure: no service is touched, so the rules are testable."""
         from backend.services.video_model_registry import (
-            DEFAULT_T2V_MODEL, GENERATION_TYPES, VIDEO_MODEL_REGISTRY, model_capabilities, i2v_model_for,
+            GENERATION_TYPES, VIDEO_MODEL_REGISTRY, model_capabilities, i2v_model_for,
             resolve_active_video_model,
         )
         model_id = (model or "").strip()
         if not model_id:
+            # The resolver never swaps families; its refusal is the answer,
+            # not a cue to render on some other model.
             role = "i2v" if first_image else "t2v"
-            picked, _resolve_err = resolve_active_video_model(role, comfyui_down_ok=True)
-            model_id = picked or DEFAULT_T2V_MODEL
+            picked, resolve_err = resolve_active_video_model(role, comfyui_down_ok=True)
+            if not picked:
+                return None, resolve_err or (
+                    "No video model is chosen or installed. Pass model, or set the active "
+                    "video model in Settings."
+                )
+            model_id = picked
         entry = VIDEO_MODEL_REGISTRY.get(model_id)
         if not entry:
             known = ", ".join(k for k, e in VIDEO_MODEL_REGISTRY.items() if e.get("type") in GENERATION_TYPES)
@@ -1838,6 +1845,7 @@ class VideoGeneratorTool(BaseTool):
                     success=True,
                     output="\n".join([
                         f"Video generation queued as batch {batch_id} (stage: {stage}).",
+                        f"Model: {model_id}",
                         f"Prompt: {prompt}",
                         f"Frames: {duration_frames} | Steps: {num_inference_steps}",
                         f"Open Video Gen: {studio_url}",
@@ -1846,6 +1854,7 @@ class VideoGeneratorTool(BaseTool):
                     ]),
                     metadata={
                         "prompt": prompt,
+                        "model": model_id,
                         "batch_id": batch_id,
                         "queued": True,
                         "stage": stage,
@@ -1874,7 +1883,7 @@ class VideoGeneratorTool(BaseTool):
                     success=True,
                     output="\n".join([
                         f"Video generation still running after {self.MAX_WAIT_S // 60} minutes "
-                        f"(batch {batch_id}).",
+                        f"(batch {batch_id}, model {model_id}).",
                         f"Open Video Gen: {studio_url}",
                         "It will finish in the background — this is not a failure.",
                     ]),
@@ -1901,6 +1910,7 @@ class VideoGeneratorTool(BaseTool):
                 gen_seconds = (status.end_time - status.start_time).total_seconds()
             output_lines = [
                 f"Video generated successfully" + (f" in {gen_seconds:.0f}s." if gen_seconds else "."),
+                f"Model: {model_id}",
                 f"Prompt: {prompt}",
                 f"Frames: {duration_frames} | Steps: {num_inference_steps} | Batch: {batch_id}",
                 f"Video: {video_url}",
@@ -1908,6 +1918,7 @@ class VideoGeneratorTool(BaseTool):
             ]
             metadata = {
                 "prompt": prompt,
+                "model": model_id,
                 "batch_id": batch_id,
                 "video_url": video_url,
                 "generation_time": gen_seconds,
