@@ -378,3 +378,31 @@ def test_comfyui_dir_without_scratch_folders_is_a_no_op(app, tmp_path, no_genera
     result = svc.delete_generation_history(upload_dir=tmp_path, comfyui_dir=tmp_path / "nowhere")
     assert result["success"] and result["bytes_freed"] == 0
     assert result["deleted"]["comfyui"] == {"output": {"files": 0, "bytes": 0}, "input": {"files": 0, "bytes": 0}}
+
+
+def test_spoken_clips_in_the_voice_subfolder_are_history(seeded, no_generators, sidecar_down):
+    voice_dir = seeded / "Audio" / "Voice"
+    voice_dir.mkdir()
+    (voice_dir / f"{HEX_B}.wav").write_bytes(b"v" * 30)
+    (voice_dir / "my intro.wav").write_bytes(b"keep")
+    audio_root = Folder.query.filter_by(path="Audio").one()
+    voice = Folder(name="Voice", path="Audio/Voice", parent_id=audio_root.id)
+    db.session.add(voice)
+    db.session.flush()
+    db.session.add_all([
+        Document(filename="Good morning.wav", path=f"Audio/Voice/{HEX_B}.wav", folder_id=voice.id),
+        Document(filename="my intro.wav", path="Audio/Voice/my intro.wav", folder_id=voice.id),
+    ])
+    db.session.commit()
+
+    counts = svc.count_generation_history(upload_dir=seeded)
+    assert counts["audio"]["files"] == 3 and counts["audio"]["bytes"] == 82
+
+    result = svc.delete_generation_history(upload_dir=seeded, triggered_by="test")
+    assert result["success"], result["errors"]
+    assert not (voice_dir / f"{HEX_B}.wav").exists()
+    assert (voice_dir / "my intro.wav").exists()
+    remaining_docs = {d.path for d in Document.query.all()}
+    assert f"Audio/Voice/{HEX_B}.wav" not in remaining_docs
+    assert "Audio/Voice/my intro.wav" in remaining_docs
+    assert Folder.query.filter_by(path="Audio/Voice").count() == 1

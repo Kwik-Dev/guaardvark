@@ -6,6 +6,7 @@ output:
   dir: data/uploads/Audio            # project-root-relative; under UPLOAD_DIR so DocumentsPage can serve it
   default_format: wav                # wav | mp3
   subdirs_by_date: false             # flat filenames (uuid only) — date folders clutter the UI tree at low volume
+  voice_subdir: Voice                # spoken outputs (chat replies, narration) go to Audio/Voice; "" keeps them in dir
 
 registration:
   # Each generated file is POSTed to the main Guaardvark backend so it lands

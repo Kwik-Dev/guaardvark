@@ -163,3 +163,34 @@ def test_generate_fx_returns_503_when_backend_unavailable():
         r = client.post("/generate/fx", json={"prompt": "rain", "duration_s": 5, "async": True})
     assert r.status_code == 503
     assert "NVIDIA GPU" in r.json()["detail"]
+
+
+def test_spoken_output_is_filed_under_voice_with_its_words(tmp_path, monkeypatch):
+    import service.app as app_module
+    from backends.base import GenerationResult
+    from service.dispatcher import Intent
+
+    calls = []
+    monkeypatch.setattr(app_module, "register_output", lambda result, **kw: calls.append(kw) or {"id": 9})
+    clip = tmp_path / "0123abcd.wav"
+    clip.write_bytes(b"RIFFmock")
+    result = GenerationResult(path=clip, duration_s=1.0, sample_rate=24000, meta={})
+
+    body = app_module._finalize(result, Intent.VOICE, {"text": "Good morning, here is the news."})
+    assert body["document_id"] == 9
+    assert calls[-1]["folder"] == "Audio"
+    assert calls[-1]["subfolder"] == "Voice"
+    assert calls[-1]["filename"] == "Good morning, here is the news.wav"
+
+    app_module._finalize(result, Intent.FX, {"prompt": "rain"})
+    assert calls[-1]["subfolder"] is None and calls[-1]["filename"] is None
+
+
+def test_voice_backend_writes_into_the_voice_subfolder(monkeypatch):
+    from service import bootstrap as boot
+
+    seen = {}
+    monkeypatch.setenv("AUDIO_FOUNDRY_DISABLE_BACKENDS", "fx,music")
+    monkeypatch.setattr(boot, "_try_register_voice", lambda d, cfg, out: seen.setdefault("dir", out))
+    boot.bootstrap(None, {"runtime": {"output": {"dir": "data/uploads/Audio", "voice_subdir": "Voice"}}})
+    assert seen["dir"].parts[-3:] == ("uploads", "Audio", "Voice")

@@ -98,3 +98,45 @@ def test_register_output_sends_absolute_path(tmp_path):
 
     sent_path = mock_post.call_args.kwargs["json"]["physical_path"]
     assert Path(sent_path).is_absolute()
+
+
+def test_spoken_display_name_uses_the_first_words():
+    from service.registration import spoken_display_name
+
+    assert spoken_display_name("Hello and welcome to the show.", ".wav") == "Hello and welcome to the show.wav"
+    long = "one two three four five six seven eight nine ten"
+    assert spoken_display_name(long, ".wav") == "one two three four five six seven eight.wav"
+
+
+def test_spoken_display_name_drops_characters_files_refuses():
+    from service.registration import spoken_display_name
+
+    assert spoken_display_name('Is it "a/b"?\n<yes>', ".mp3") == "Is it a b yes.mp3"
+    assert spoken_display_name("", ".wav") == "Voice.wav"
+    assert spoken_display_name(None, ".wav") == "Voice.wav"
+    assert spoken_display_name("?!...", ".wav") == "Voice.wav"
+
+
+def test_spoken_display_name_caps_length_at_a_word():
+    from service.registration import spoken_display_name
+
+    name = spoken_display_name("Supercalifragilistic " * 8, ".wav")
+    assert len(name) <= 60 + len(".wav")
+    assert not name.startswith(" ") and "  " not in name
+
+
+def test_register_output_sends_subfolder_and_display_name(tmp_path):
+    result = _make_result(tmp_path)
+    fake_response = MagicMock()
+    fake_response.raise_for_status = MagicMock()
+    fake_response.json.return_value = {"data": {"id": 3}}
+
+    with patch("service.registration.httpx.post", return_value=fake_response) as mock_post:
+        register_output(result, subfolder="Voice", filename="Hello there.wav")
+        sent = mock_post.call_args.kwargs["json"]
+        assert sent["subfolder_name"] == "Voice"
+        assert sent["filename"] == "Hello there.wav"
+
+        register_output(result)
+        sent = mock_post.call_args.kwargs["json"]
+        assert "subfolder_name" not in sent and "filename" not in sent

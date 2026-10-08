@@ -11,10 +11,11 @@ Scope is deliberately narrow and structural, not by folder prefix:
   ``UPLOAD_DIR/Videos`` that contain ``batch_metadata.json``. The same
   folders also hold ``Editor Renders``, ``Text Overlay`` and standalone
   ComfyUI output, none of which is batch history;
-- audio history = files in ``UPLOAD_DIR/Audio`` named ``<uuid4 hex>.wav``,
-  ``.mp3`` or ``_input_params.json`` (the audio_foundry backends name every
-  generation ``uuid.uuid4().hex``) plus the sidecar's ``.jobs/*.json``
-  records. Hand-named files in the same folder are user assets and stay;
+- audio history = files in ``UPLOAD_DIR/Audio`` and its ``Voice`` subfolder
+  named ``<uuid4 hex>.wav``, ``.mp3`` or ``_input_params.json`` (the
+  audio_foundry backends name every generation ``uuid.uuid4().hex``) plus the
+  sidecar's ``.jobs/*.json`` records. Hand-named files in the same folders are
+  user assets and stay;
 - ComfyUI scratch = everything in ``COMFYUI_DIR/output`` and
   ``COMFYUI_DIR/input``. Every render is fetched over ``/view`` into a batch
   directory and every reference frame is pushed over ``/upload/image``, so
@@ -42,6 +43,8 @@ logger = logging.getLogger(__name__)
 
 BATCH_METADATA = "batch_metadata.json"
 AUDIO_GENERATED_RE = re.compile(r"^[0-9a-f]{32}(\.wav|\.mp3|_input_params\.json)$")
+# Where audio_foundry files spoken clips (its config.yaml output.voice_subdir).
+AUDIO_VOICE_SUBDIR = "Voice"
 # A batch in one of these states is still owned by a generator and is skipped.
 ACTIVE_STATUSES = frozenset({"queued", "pending", "running", "processing"})
 SIDECAR_TIMEOUT_S = 10
@@ -104,9 +107,11 @@ def _audio_root(upload: Path) -> Path:
 
 
 def _audio_generated_files(audio_root: Path) -> list[Path]:
-    if not audio_root.is_dir():
-        return []
-    return sorted(p for p in audio_root.iterdir() if p.is_file() and AUDIO_GENERATED_RE.match(p.name))
+    found = []
+    for folder in (audio_root, audio_root / AUDIO_VOICE_SUBDIR):
+        if folder.is_dir():
+            found.extend(p for p in folder.iterdir() if p.is_file() and AUDIO_GENERATED_RE.match(p.name))
+    return sorted(found)
 
 
 def _audio_job_files(audio_root: Path) -> list[Path]:
@@ -297,9 +302,15 @@ def _db_targets(image_ids: Iterable[str], video_ids: Iterable[str]) -> tuple[lis
     from backend.models import db, Document, Folder
 
     folder_ids, doc_ids = _batch_targets(image_ids, video_ids)
-    audio_folder_id = db.session.query(Folder.id).filter(Folder.path == "Audio").scalar()
-    if audio_folder_id is not None:
-        for did, path in db.session.query(Document.id, Document.path).filter(Document.folder_id == audio_folder_id):
+    audio_folder_ids = [
+        fid for (fid,) in db.session.query(Folder.id).filter(
+            Folder.path.in_(["Audio", f"Audio/{AUDIO_VOICE_SUBDIR}"])
+        )
+    ]
+    if audio_folder_ids:
+        for did, path in db.session.query(Document.id, Document.path).filter(
+            Document.folder_id.in_(audio_folder_ids)
+        ):
             if AUDIO_GENERATED_RE.match(Path(path or "").name):
                 doc_ids.add(did)
     return folder_ids, sorted(doc_ids)
