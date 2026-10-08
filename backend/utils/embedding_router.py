@@ -187,11 +187,17 @@ class EmbeddingRouter:
             return HardwareProfile.LOW_RESOURCE
 
     def _configure_for_profile(self) -> Dict[str, Any]:
+        # No GPU+CPU split on a GPU box (parallel_threshold 0). Ollama keeps one
+        # copy of a model: a num_gpu=0 call reloads it onto the CPU and every
+        # call after it, GPU path included, runs on that CPU copy until it
+        # unloads. Measured on qwen3-embedding:4b-q4_K_M, 12 texts (RTX 4070 Ti
+        # SUPER, Ollama 0.40): 0.13 s on the GPU; the first num_gpu=0 call 7.98 s
+        # (6.78 s reload); each later call 1.20 s, still on the CPU.
         configs = {
             HardwareProfile.HIGH_END_GPU: {
                 "gpu_enabled": True,
                 "batch_size": 64,
-                "parallel_threshold": 20,  # Split batches >= 20 across GPU+CPU
+                "parallel_threshold": 0,
                 "gpu_ratio": 0.8,
                 "max_workers": 4,
                 "latency_window": 100,
@@ -199,7 +205,7 @@ class EmbeddingRouter:
             HardwareProfile.MID_RANGE_GPU: {
                 "gpu_enabled": True,
                 "batch_size": 32,
-                "parallel_threshold": 10,
+                "parallel_threshold": 0,
                 "gpu_ratio": 0.7,
                 "max_workers": 3,
                 "latency_window": 100,
@@ -386,6 +392,13 @@ class EmbeddingRouter:
     def _route_to_gpu(self, texts: List[str]) -> List[List[float]]:
         """Embed via GPU path (default Ollama)."""
         model = self._get_gpu_embedding()
+        # A CPU fallback after a GPU error leaves the model on the CPU for
+        # every later call; move it back once the GPU has room.
+        try:
+            from backend.utils.ollama_resource_manager import reload_onto_gpu_if_room
+            reload_onto_gpu_if_room(self._model_name())
+        except Exception:
+            pass
         start = time.time()
         try:
             if len(texts) == 1:
