@@ -208,12 +208,13 @@ class ImageGeneratorTool(BaseTool):
     read_only = False
     destructive = False
     description = (
-        "Generate an image from a text prompt. Returns the URL of the generated image. "
-        "Use when the user asks to create, generate, draw, or visualize an image. "
-        "For a trained Cast character, ALWAYS pass subject_ids as a separate array of "
-        "numeric Cast Library IDs (e.g. subject_ids=[26] for Batman 2). Do NOT bury "
-        "subject_ids inside the prompt string. Putting [batman_2] only in the prompt "
-        "without subject_ids will NOT load the LoRA."
+        "Generate a new image from a text prompt on this machine's GPU. Returns the image's "
+        "URL, or with wait_for_result=false a batch id to poll with get_generation_status. "
+        "Use when the user asks to create, generate, draw or visualize an image. For a "
+        "character from the Cast Library pass its numeric id in subject_ids (e.g. "
+        "subject_ids=[3]); naming the character only in the prompt does not load its LoRA. "
+        "To change an existing picture use edit_image; to cut out its subject, "
+        "remove_background; for a video, generate_video."
     )
     parameters = {
         "prompt": ToolParameter(
@@ -223,7 +224,7 @@ class ImageGeneratorTool(BaseTool):
                 "Scene/action description only (pose, lighting, setting). "
                 "Do not embed JSON here. For cast characters put identity in subject_ids, "
                 "not as the whole prompt body. If quoting on-image text, put EXACT words "
-                'in double quotes — e.g. title "BATMAN".'
+                'in double quotes — e.g. a sign reading "OPEN".'
             ),
             required=True,
         ),
@@ -233,7 +234,7 @@ class ImageGeneratorTool(BaseTool):
             items="int",
             description=(
                 "Optional. Numeric Cast Library subject IDs with trained LoRAs to lock "
-                "identity (e.g. [26]). Separate parameter — never nest this inside prompt. "
+                "identity (e.g. [3]). Separate parameter — never nest this inside prompt. "
                 "Loads LoRA + trigger + vision bible. Required for consistent characters."
             ),
             required=False,
@@ -249,14 +250,14 @@ class ImageGeneratorTool(BaseTool):
         "width": ToolParameter(
             name="width",
             type="int",
-            description="Image width in pixels. Default: 1024. Options: 512, 768, 1024.",
+            description="Image width in pixels, default 1024: one of 256, 384, 512, 640, 768, 896, 1024, 1280 or 1536. Another value resets both sides to 1024 unless the prompt states that size (e.g. '1280x768'). The model's own limits may clamp the final size; the result reports it.",
             required=False,
             default=1024,
         ),
         "height": ToolParameter(
             name="height",
             type="int",
-            description="Image height in pixels. Default: 1024. Options: 512, 768, 1024.",
+            description="Image height in pixels, default 1024: one of 256, 384, 512, 640, 768, 896, 1024, 1280 or 1536 (see width).",
             required=False,
             default=1024,
         ),
@@ -277,7 +278,8 @@ class ImageGeneratorTool(BaseTool):
                 "own LoRA. A named model must be one every character has a LoRA for, or the "
                 "render is refused. "
                 "Only override when the user names a specific model: 'krea2-turbo', 'zimage-turbo', "
-                "'sd-xl', 'sdxl-turbo', 'realistic-vision', 'epic-realism'."
+                "'sd-xl', 'sdxl-turbo', 'realistic-vision', 'epic-realism'. A model that is not "
+                "installed is refused with where to install it; nothing is downloaded."
             ),
             required=False,
             default="auto",
@@ -286,10 +288,9 @@ class ImageGeneratorTool(BaseTool):
             name="wait_for_result",
             type="bool",
             description=(
-                "True (the default in chat): render now and return the image inline. "
-                "False: queue the render as an image batch and return its batch id at once; "
-                "poll get_generation_status for the file. Use False from a remote agent or "
-                "when the GPU may be busy."
+                "true: render now and return the image (the default in Guaardvark's chat). "
+                "false: queue the render as an image batch and return its batch id at once; "
+                "poll get_generation_status for the file (the default over MCP)."
             ),
             required=False,
             default=True,
@@ -1523,7 +1524,7 @@ class VideoGeneratorTool(BaseTool):
         "model": ToolParameter(
             name="model",
             type="string",
-            description="Video model id from the registry (e.g. wan22-5b, minimax-h3-int8). Default: the installed default.",
+            description="Video model id from the registry (e.g. wan22-5b, minimax-h3-int8). Omitted: the active video model in Settings, or on a machine where none is set the best installed one for the GPU; when that model cannot make this clip the call is refused with the reason, never rendered on another model. The result names the model used.",
             required=False,
         ),
         "aspect_ratio": ToolParameter(
@@ -1634,14 +1635,21 @@ class VideoGeneratorTool(BaseTool):
         model's capability record. Returns (params, None) or (None, message).
         Pure: no service is touched, so the rules are testable."""
         from backend.services.video_model_registry import (
-            DEFAULT_T2V_MODEL, GENERATION_TYPES, VIDEO_MODEL_REGISTRY, model_capabilities, i2v_model_for,
+            GENERATION_TYPES, VIDEO_MODEL_REGISTRY, model_capabilities, i2v_model_for,
             resolve_active_video_model,
         )
         model_id = (model or "").strip()
         if not model_id:
+            # The resolver never swaps families; its refusal is the answer,
+            # not a cue to render on some other model.
             role = "i2v" if first_image else "t2v"
-            picked, _resolve_err = resolve_active_video_model(role, comfyui_down_ok=True)
-            model_id = picked or DEFAULT_T2V_MODEL
+            picked, resolve_err = resolve_active_video_model(role, comfyui_down_ok=True)
+            if not picked:
+                return None, resolve_err or (
+                    "No video model is chosen or installed. Pass model, or set the active "
+                    "video model in Settings."
+                )
+            model_id = picked
         entry = VIDEO_MODEL_REGISTRY.get(model_id)
         if not entry:
             known = ", ".join(k for k, e in VIDEO_MODEL_REGISTRY.items() if e.get("type") in GENERATION_TYPES)
@@ -1838,6 +1846,7 @@ class VideoGeneratorTool(BaseTool):
                     success=True,
                     output="\n".join([
                         f"Video generation queued as batch {batch_id} (stage: {stage}).",
+                        f"Model: {model_id}",
                         f"Prompt: {prompt}",
                         f"Frames: {duration_frames} | Steps: {num_inference_steps}",
                         f"Open Video Gen: {studio_url}",
@@ -1846,6 +1855,7 @@ class VideoGeneratorTool(BaseTool):
                     ]),
                     metadata={
                         "prompt": prompt,
+                        "model": model_id,
                         "batch_id": batch_id,
                         "queued": True,
                         "stage": stage,
@@ -1874,7 +1884,7 @@ class VideoGeneratorTool(BaseTool):
                     success=True,
                     output="\n".join([
                         f"Video generation still running after {self.MAX_WAIT_S // 60} minutes "
-                        f"(batch {batch_id}).",
+                        f"(batch {batch_id}, model {model_id}).",
                         f"Open Video Gen: {studio_url}",
                         "It will finish in the background — this is not a failure.",
                     ]),
@@ -1901,6 +1911,7 @@ class VideoGeneratorTool(BaseTool):
                 gen_seconds = (status.end_time - status.start_time).total_seconds()
             output_lines = [
                 f"Video generated successfully" + (f" in {gen_seconds:.0f}s." if gen_seconds else "."),
+                f"Model: {model_id}",
                 f"Prompt: {prompt}",
                 f"Frames: {duration_frames} | Steps: {num_inference_steps} | Batch: {batch_id}",
                 f"Video: {video_url}",
@@ -1908,6 +1919,7 @@ class VideoGeneratorTool(BaseTool):
             ]
             metadata = {
                 "prompt": prompt,
+                "model": model_id,
                 "batch_id": batch_id,
                 "video_url": video_url,
                 "generation_time": gen_seconds,
@@ -1945,7 +1957,9 @@ class EditImageTool(BaseTool):
         "Preserves the original subject and only applies the requested edit. If the "
         "user did not attach an image, ask them to attach one (an MCP client passes image). Do NOT use this to make "
         "a brand-new image from scratch — use generate_image. For a new scene that "
-        "keeps a face from an attached photo, use generate_identity." + _TOOL_JOB_NOTE
+        "keeps a face from an attached photo, use generate_identity in Guaardvark's chat "
+        "(it asks for likeness consent; not offered over MCP). To extend the canvas use "
+        "outpaint_image; to cut the subject out, remove_background." + _TOOL_JOB_NOTE
     )
     parameters = {
         "instruction": ToolParameter(
@@ -2388,8 +2402,9 @@ class RemoveBackgroundTool(BaseTool):
     destructive = False
     description = (
         "Remove the background from an attached photo and return a transparent PNG. "
-        "Use for product shots, stickers, and cut-outs. Does not invent a new scene — "
-        "use generate_identity or edit_image for that. In chat the attached image is used "
+        "Use for product shots, stickers, and cut-outs. Does not invent a new scene: "
+        "edit_image changes the picture, and generate_identity in Guaardvark's chat (not "
+        "offered over MCP) makes a new scene with the same face. In chat the attached image is used "
         "when `image` is omitted; an MCP client passes `image`." + _TOOL_JOB_NOTE
     )
     parameters = {
@@ -2449,9 +2464,10 @@ class InpaintImageTool(BaseTool):
         "Change or remove something in an attached photo from a natural-language "
         "instruction ('remove the coffee cup', 'replace the sky with sunset'). "
         "Uses Qwen-Image-Edit when installed, else FLUX Kontext; with neither installed it "
-        "refuses and names the pack to install. For extending the "
-        "canvas use outpaint_image. For a brand-new scene of a person's face use "
-        "generate_identity." + _TOOL_JOB_NOTE
+        "refuses and names the pack to install. It runs the same edit as edit_image; "
+        "either name works. For extending the canvas use outpaint_image. For a brand-new "
+        "scene of a person's face use generate_identity in Guaardvark's chat (not offered "
+        "over MCP)." + _TOOL_JOB_NOTE
     )
     parameters = {
         "instruction": ToolParameter(
@@ -2501,7 +2517,10 @@ class OutpaintImageTool(BaseTool):
     description = (
         "Expand an attached photo in one or more directions and fill the new area "
         "so it matches the scene. Use when the user says extend, expand the canvas, "
-        "or outpaint. Prefer Qwen-Image-Edit when installed." + _TOOL_JOB_NOTE
+        "or outpaint. Needs Qwen-Image-Edit to add canvas: with only FLUX Kontext "
+        "installed the picture keeps its size and Kontext is asked to widen the view "
+        "inside it. To change something in the picture use edit_image; to cut the subject "
+        "out, remove_background." + _TOOL_JOB_NOTE
     )
     parameters = {
         "image": ToolParameter(
@@ -2585,11 +2604,14 @@ class OutpaintImageTool(BaseTool):
                 from backend.services.image_editing_packs import missing_message
                 return ToolResult(success=False, error=missing_message("outpaint_image"))
             image_url = f"/api/outputs/generated_images/{filename}"
+            done = ("Canvas extended (qwen)." if backend == "qwen" else
+                    "Kontext widened the view inside the original frame; the canvas size is "
+                    "unchanged. Install Qwen-Image-Edit to add canvas.")
             return ToolResult(
                 success=True,
-                output="\n".join([f"Canvas extended ({backend}).", f"Image URL: {image_url}", *_steps_lines(gen)]),
-                metadata={"image_url": image_url, "filename": filename, "backend": backend, "pad": pad,
-                          **_steps_metadata(gen)},
+                output="\n".join([done, f"Image URL: {image_url}", *_steps_lines(gen)]),
+                metadata={"image_url": image_url, "filename": filename, "backend": backend,
+                          "pad": pad if backend == "qwen" else None, **_steps_metadata(gen)},
             )
         except Exception as e:
             refusal = _gpu_refusal(e, gpu_wait)

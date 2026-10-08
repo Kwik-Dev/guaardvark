@@ -218,7 +218,8 @@ class SearchCodebaseTool(BaseTool):
         "with checkout-relative line numbers and the code itself. With the zvec_grep plugin "
         "connected the search is hybrid (meaning plus keyword); without it, a literal search "
         "for the query and for the code names in it. Use it before saying Guaardvark's code is "
-        "unavailable and before reading whole files."
+        "unavailable and before reading whole files. For an exact name or a regular expression "
+        "use search_code; read_code opens a file it finds."
     )
     category = "code"
     observation_chars = MAX_OUTPUT_CHARS

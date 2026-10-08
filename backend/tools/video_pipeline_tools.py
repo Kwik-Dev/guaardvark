@@ -337,7 +337,7 @@ class MusicVideoTool(BaseTool):
         "attaches the song, writes unique cut prompts, and stops at the approval "
         "gate — it does not spend GPU rendering clips. Use when the user asks to "
         "make a music video. Pass song as a document id (generate_music reports one) "
-        "or the location of an audio file."
+        "or the location of an audio file. For a story from a screenplay, use start_film_crew."
     )
     parameters = {
         "song": ToolParameter(
@@ -467,7 +467,7 @@ class FilmCrewTool(BaseTool):
         "begins at once; casting, storyboards and GPU renders wait for you in Studio. "
         "ComfyUI need not be running: only the clip renders at the end use it, and the "
         "answer says when it is stopped. Use when the user asks to film a script or start "
-        "the film crew."
+        "the film crew. For visuals cut to a song, use generate_music_video."
     )
     parameters = {
         "script_text": ToolParameter(
