@@ -217,6 +217,22 @@ code {
 }
 /* --- End resize handles --- */
 
+/* --- Drop placeholder on react-grid-layout pages ---
+   Where a card or window will land while it is moved or resized: a dashed
+   outline in the theme's primary colour (--primary-main, set by App.jsx) on
+   every grid page, in place of the library's red block. Three classes beat
+   the library's two in any load order; pages do not override it. */
+.react-grid-layout > .react-grid-item.react-grid-placeholder {
+  background: transparent;
+  border-width: 1px;
+  border-style: dashed;
+  border-color: var(--primary-main, currentColor);
+  border-radius: 4px;
+  opacity: 0.15;
+  transition: all 0.2s ease-out !important;
+}
+/* --- End drop placeholder --- */
+
 /* Ensure react-grid-item doesn't clip resize handles */
 .react-grid-item {
   overflow: visible !important;

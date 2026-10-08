@@ -672,6 +672,7 @@ def gpu_session(
     vram_reserve_mb: int = 0,
     cancel_event=None,
     image_model: Optional[str] = None,
+    on_wait=None,
 ) -> Iterator[bool]:
     """Claim the GPU for a unit of work — exclusivity + VRAM reclaim/budget in one place.
 
@@ -686,6 +687,7 @@ def gpu_session(
 
     ``cancel_event`` ends an ``on_busy='wait'`` gate wait with ``GpuBusyError``
     once it is set, so a cancelled job does not hold up the queue behind it.
+    ``on_wait(reason)`` reports that wait as it starts (see ``gpu_exclusive``).
 
     An image pipeline kept loaded after a batch is unloaded first, unless
     ``image_model`` names the model it holds (the job will render with it).
@@ -754,7 +756,8 @@ def gpu_session(
                 lease_held = False
 
     with gate.gpu_exclusive(
-        kind, op_id, on_busy=on_busy, wait_timeout=wait_timeout, cancel_event=cancel_event
+        kind, op_id, on_busy=on_busy, wait_timeout=wait_timeout,
+        cancel_event=cancel_event, on_wait=on_wait,
     ) as acq:
         acquired = acq
         if acquired:

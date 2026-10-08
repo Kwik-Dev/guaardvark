@@ -91,7 +91,7 @@ describe("Chat page drop", () => {
     expect(clipUpload.slice(1, 5)).toEqual(dropUpload.slice(1, 5));
     expect(dropNotice[0]).toContain("**Document Uploaded Successfully**");
     expect(dropNotice[0]).toContain("report.pdf");
-    expect(dropNotice[0]).toContain("Uploaded and indexed successfully");
+    expect(dropNotice[0]).toContain("**Status:** Uploaded and indexed");
     expect(viaClip.mock.calls[0]).toEqual(dropNotice);
   });
 

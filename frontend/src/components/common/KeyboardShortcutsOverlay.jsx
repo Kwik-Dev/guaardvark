@@ -42,6 +42,17 @@ const SHORTCUT_GROUPS = [
     ],
   },
   {
+    // pages/CodeEditorPage.jsx and components/codeeditor/CodeEditorCard.jsx
+    group: "Code Editor",
+    items: [
+      { keys: ["Ctrl", "S"], desc: "Save the file" },
+      { keys: ["Ctrl", "Shift", "S"], desc: "Save the session now: open tabs and chat" },
+      { keys: ["Ctrl", "Shift", "O"], desc: "Find a function or class and jump to it" },
+      { keys: ["Ctrl", "1–5"], desc: "Jump to Files, Editor, Chat, Search, Output" },
+      { keys: ["Ctrl", "Shift", "E"], desc: "Explain the selected code in the chat" },
+    ],
+  },
+  {
     group: "System Map",
     items: [
       { keys: ["/"], desc: "Focus search" },

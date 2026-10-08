@@ -130,13 +130,23 @@ const ImageThumbnailGrid = ({
     onContextMenu?.(e, item, item.itemType === 'folder' ? 'folder' : 'image');
   }, [selectedItems, onSelectionChange, onContextMenu]);
 
+  // Empty space in the window: the menu acts on the folder this window shows.
+  // Sorting and Select All are this window's own, so the menu calls back here.
   const handleBackgroundContextMenu = useCallback((e) => {
     if (e.target === containerRef.current || e.target.dataset?.background) {
       e.preventDefault();
       onSelectionChange?.(new Set());
-      onContextMenu?.(e, null, 'folder-window');
+      onContextMenu?.(e, {
+        path: currentPath,
+        name: (currentPath || '').split('/').filter(Boolean).pop() || currentPath,
+        sortBy: (field) => {
+          setSortBy(field);
+          setSortDir(field === 'name' ? 'asc' : 'desc');
+        },
+        selectAll: () => onSelectionChange?.(new Set(allItems.map(i => i.key))),
+      }, 'folder-background');
     }
-  }, [onContextMenu, onSelectionChange]);
+  }, [onContextMenu, onSelectionChange, currentPath, allItems]);
 
   const handleDragStartItem = useCallback((e, item) => {
     const dragItems = selectedItems.has(item.key)

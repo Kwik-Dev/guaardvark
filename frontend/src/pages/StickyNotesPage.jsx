@@ -61,6 +61,7 @@ import ClosedNotesDrawer from "../components/notes/ClosedNotesDrawer";
 import { pinnedToTop, pinnedFirst, isEditableTarget } from "../components/notes/notesBoard";
 import { useLayout, useDashboardWidth } from "../contexts/LayoutContext";
 import { ContextualLoader } from "../components/common/LoadingStates";
+import { opaqueMenuPaperSx } from "../components/common/opaqueMenuPaper";
 
 const LAYOUT_MODES = ["normal", "compact", "collapsed"];
 const LAYOUT_MODE_LABELS = {
@@ -1524,13 +1525,6 @@ const StickyNotesPage = () => {
             width: "100%",
             "& .react-grid-item": {
               transition: "transform 0.2s ease-out !important",
-              "&.react-grid-placeholder": {
-                transition: "all 0.2s ease-out !important",
-                opacity: 0.15,
-                background: "transparent",
-                border: `1px dashed ${theme.palette.primary.main}`,
-                borderRadius: "4px",
-              },
               "&.react-draggable-dragging": {
                 transition: "none !important",
                 opacity: 0.9,
@@ -1732,7 +1726,7 @@ const StickyNotesPage = () => {
         onClose={() => setContextMenu(null)}
         anchorReference="anchorPosition"
         anchorPosition={contextMenu ? { top: contextMenu.y, left: contextMenu.x } : undefined}
-        slotProps={{ paper: { sx: { minWidth: 180, borderRadius: "6px" } } }}
+        slotProps={{ paper: { sx: (t) => ({ minWidth: 180, borderRadius: "6px", ...opaqueMenuPaperSx(t) }) } }}
       >
         {contextMenu?.inContent && (
           <>
@@ -1846,7 +1840,7 @@ const StickyNotesPage = () => {
         onClose={() => setDesktopMenu(null)}
         anchorReference="anchorPosition"
         anchorPosition={desktopMenu ? { top: desktopMenu.y, left: desktopMenu.x } : undefined}
-        slotProps={{ paper: { sx: { minWidth: 160, borderRadius: "6px" } } }}
+        slotProps={{ paper: { sx: (t) => ({ minWidth: 160, borderRadius: "6px", ...opaqueMenuPaperSx(t) }) } }}
       >
         <MenuItem onClick={() => { handleAddNote(); setDesktopMenu(null); }}>
           <ListItemIcon><Add fontSize="small" /></ListItemIcon>

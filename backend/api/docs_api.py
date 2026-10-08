@@ -159,6 +159,8 @@ def list_documents():
         per_page = request.args.get("per_page", 10, type=int)
         per_page = max(1, min(per_page, 10000))
         project_id_filter = request.args.get("project_id", type=int)
+        client_id_filter = request.args.get("client_id", type=int)
+        website_id_filter = request.args.get("website_id", type=int)
         tag_filter = request.args.get("tag")
         query = db.session.query(DBDocument)
 
@@ -169,6 +171,10 @@ def list_documents():
                 logger.warning(
                     "DBDocument model does not have 'project_id' for filtering."
                 )
+        if client_id_filter is not None:
+            query = query.filter(DBDocument.client_id == client_id_filter)
+        if website_id_filter is not None:
+            query = query.filter(DBDocument.website_id == website_id_filter)
 
         if tag_filter:
             query = query.filter(DBDocument.tags.ilike(f"%{tag_filter}%"))

@@ -69,7 +69,12 @@ import {
 } from '@mui/icons-material';
 import ReactGridLayoutLib, { WidthProvider } from 'react-grid-layout/legacy';
 import axios from 'axios';
-import { snapshotDrop, collectDroppedFiles } from '../../utils/droppedFiles';
+import {
+  snapshotDrop,
+  collectDroppedFiles,
+  ensureFolderPath,
+  filesFolderApi,
+} from '../../utils/droppedFiles';
 import FilePropertiesModal from '../modals/FilePropertiesModal';
 import FolderPropertiesModal from '../modals/FolderPropertiesModal';
 import CSVSpreadsheetViewer from './CSVSpreadsheetViewer';
@@ -922,39 +927,6 @@ const FileManager = () => {
     handleCloseContextMenu();
   };
 
-  // Helper function to ensure folder exists, creating parent folders as needed
-  const ensureFolderPath = async (relativePath, baseFolder = currentPath) => {
-    if (!relativePath || relativePath === '/') return baseFolder;
-
-    const parts = relativePath.split('/').filter(Boolean);
-    let currentFolder = baseFolder;
-
-    for (const part of parts) {
-      // Check if this folder already exists at the current path
-      const checkResponse = await axios.get(`${API_BASE}/browse`, {
-        params: { path: currentFolder },
-      });
-
-      const existingFolder = checkResponse.data.data.folders?.find(f => f.name === part);
-
-      if (existingFolder) {
-        // Folder exists, use its path
-        currentFolder = existingFolder.path;
-      } else {
-        // Create the folder
-        const createResponse = await axios.post(`${API_BASE}/folder`, {
-          name: part,
-          parent_path: currentFolder,
-        });
-
-        // Use the created folder's path
-        currentFolder = createResponse.data.data.path;
-      }
-    }
-
-    return currentFolder;
-  };
-
   // Upload files with folder structure preservation
   const handleFileSelectWithPaths = async (filesWithPaths) => {
     if (!filesWithPaths || filesWithPaths.length === 0) return;
@@ -980,6 +952,8 @@ const FileManager = () => {
       if (validFilesWithPaths.length === 0) return;
     }
 
+    const folderApi = filesFolderApi(axios, API_BASE);
+    const folderCache = new Map();
     setIsOperationInProgress(true);
     setUploadProgress({
       files: validFilesWithPaths.map(({ relativePath }) => ({ name: relativePath, status: 'pending' })),
@@ -1008,7 +982,7 @@ const FileManager = () => {
         // Ensure the folder exists (create if necessary)
         let targetFolder = currentPath;
         if (folderPath) {
-          targetFolder = await ensureFolderPath(folderPath, currentPath);
+          targetFolder = await ensureFolderPath(folderPath, currentPath, folderApi, folderCache);
         }
 
         // Upload the file to the target folder
@@ -1543,11 +1517,6 @@ const FileManager = () => {
           },
           '& .react-grid-item': {
             transition: 'transform 0.2s ease-out !important',
-            '&.react-grid-placeholder': {
-              transition: 'all 0.2s ease-out !important',
-              opacity: 0.3,
-              bgcolor: 'action.hover',
-            },
             '&.react-draggable-dragging': {
               transition: 'none !important',
               zIndex: 1000,

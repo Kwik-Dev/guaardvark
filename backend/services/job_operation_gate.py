@@ -28,7 +28,7 @@ import re
 import threading
 import time
 from contextlib import contextmanager
-from typing import Iterator, Optional
+from typing import Callable, Iterator, Optional
 
 from backend.services.job_types import JobKind
 
@@ -103,6 +103,11 @@ def gpu_holder_label(exc: Optional[BaseException]) -> Optional[str]:
             return label
     kind = m.group("kind")
     return _HOLDER_KIND_LABELS.get(kind, kind.replace("_", " "))
+
+
+def _wait_key(reason: str) -> str:
+    """A refusal reason without its numbers, so a cooldown countdown is one wait."""
+    return re.sub(r"\d+(?:\.\d+)?", "#", reason or "")
 
 
 def gpu_wait_message(exc: Optional[BaseException], free_mb, need_mb) -> str:
@@ -287,6 +292,7 @@ class JobOperationGate:
         on_busy: str = "raise",
         wait_timeout: float = 120.0,
         cancel_event: Optional[threading.Event] = None,
+        on_wait: Optional[Callable[[str], None]] = None,
     ) -> Iterator[bool]:
         """Claim the GPU-exclusive slot for the duration of a ``with`` block.
 
@@ -304,7 +310,9 @@ class JobOperationGate:
             wait out a transient busy / the 8s post-release cooldown instead of
             failing the job. Raises GpuBusyError only if it never frees in time,
             or as soon as ``cancel_event`` is set: a cancelled job must not sit
-            out the rest of the wait in front of the next one.
+            out the rest of the wait in front of the next one. ``on_wait(reason)``
+            is called when the wait starts and whenever the holder changes, so the
+            caller can show what it is queued behind.
 
         Yields True when the exclusive slot was acquired, False in the
         degraded ("register") path. Release is idempotent and always runs in
@@ -317,7 +325,14 @@ class JobOperationGate:
             # cooldown rather than fail. Poll try_claim until it frees or we time out.
             import time as _t
             deadline = _t.monotonic() + max(0.0, wait_timeout)
+            reported = None
             while not acquired and _t.monotonic() < deadline:
+                if on_wait is not None and _wait_key(reason) != reported:
+                    reported = _wait_key(reason)
+                    try:
+                        on_wait(reason)
+                    except Exception:  # noqa: BLE001 — a status line must not end the wait
+                        logger.debug("gpu_exclusive on_wait callback failed", exc_info=True)
                 if cancel_event is not None and cancel_event.is_set():
                     reason = f"cancelled while waiting for the GPU ({reason})"
                     break

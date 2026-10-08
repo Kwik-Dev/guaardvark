@@ -411,12 +411,7 @@ class BatchImageGenerator:
 
         try:
             if self.image_generator and hasattr(self.image_generator, "_unload_pipeline"):
-                self.image_generator._unload_pipeline()
-            try:
-                from backend.services.gpu_memory_orchestrator import get_orchestrator
-                get_orchestrator().release_model("sd:pipeline")
-            except Exception:
-                pass
+                self.image_generator._unload_pipeline(forget_slot=True)
             import gc
             import torch
             gc.collect()
@@ -662,6 +657,48 @@ class BatchImageGenerator:
                 )
             except Exception:
                 pass
+
+    def _report_gpu_wait(
+        self,
+        batch_id: str,
+        batch_status: BatchGenerationStatus,
+        refusal: BaseException,
+        need_mb: int,
+        reserve_mb: int = 0,
+    ) -> str:
+        """Mark the batch as waiting for the GPU and tell the progress feed why.
+
+        The text names the job holding the card when the refusal says who it is,
+        so the footer and queue panel read "Queued behind Video Gen" rather than
+        "Starting". Returns the message.
+        """
+        from backend.services.gpu_resource_policy import vram_probe_snapshot
+        from backend.services.job_operation_gate import gpu_wait_message
+
+        try:
+            snap = vram_probe_snapshot(reserve_mb=reserve_mb)
+        except Exception:  # noqa: BLE001 — the wait text is still useful without a probe
+            snap = {}
+        wait_msg = gpu_wait_message(refusal, snap.get("free_mb"), need_mb)
+        batch_status.gpu_wait_reason = wait_msg
+        if batch_status.status not in ("running", "queued", "pending"):
+            batch_status.status = "queued"
+        if self.progress_system:
+            try:
+                self.progress_system.update_process(
+                    process_id=batch_id,
+                    progress=0,
+                    message=wait_msg,
+                    additional_data={
+                        "batch_id": batch_id,
+                        "gpu_wait_reason": wait_msg,
+                        "vram_free_mb": snap.get("free_mb"),
+                        "vram_need_mb": need_mb,
+                    },
+                )
+            except Exception:
+                pass
+        return wait_msg
 
     def _finish_cancelled_before_start(
         self,
@@ -1747,12 +1784,10 @@ class BatchImageGenerator:
                 from backend.services.gpu_resource_policy import (
                     compositor_vram_reserve_mb,
                     gpu_session,
-                    vram_probe_snapshot,
                 )
                 from backend.services.job_operation_gate import (
                     GpuBusyError,
                     GpuCapacityError,
-                    gpu_wait_message,
                 )
                 from backend.services.job_types import JobKind
 
@@ -1783,6 +1818,11 @@ class BatchImageGenerator:
                 backoff_s = 2.0
                 need_mb = int(vram_mb) + 1024
 
+                def _on_gate_wait(reason: str) -> None:
+                    self._report_gpu_wait(
+                        batch_id, batch_status, GpuBusyError(reason), need_mb, reserve_mb
+                    )
+
                 while True:
                     if cancel_event and cancel_event.is_set():
                         self._finish_cancelled_before_start(
@@ -1810,6 +1850,8 @@ class BatchImageGenerator:
                             # admitted against raw card totals).
                             vram_reserve_mb=reserve_mb,
                             image_model=reuse_model,
+                            cancel_event=cancel_event,
+                            on_wait=_on_gate_wait,
                         ):
                             if batch_status.gpu_wait_reason and self.progress_system:
                                 # Progress consumers merge additional_data, so the
@@ -1836,6 +1878,8 @@ class BatchImageGenerator:
                         )
                         return
                     except GpuBusyError as e:
+                        if cancel_event and cancel_event.is_set():
+                            continue
                         remaining = deadline - time.time()
                         if remaining <= 0:
                             batch_status.gpu_wait_reason = None
@@ -1846,26 +1890,7 @@ class BatchImageGenerator:
                             )
                             return
 
-                        snap = vram_probe_snapshot(reserve_mb=reserve_mb)
-                        wait_msg = gpu_wait_message(e, snap.get("free_mb"), need_mb)
-                        batch_status.gpu_wait_reason = wait_msg
-                        if batch_status.status not in ("running", "queued", "pending"):
-                            batch_status.status = "queued"
-                        if self.progress_system:
-                            try:
-                                self.progress_system.update_process(
-                                    process_id=batch_id,
-                                    progress=0,
-                                    message=wait_msg,
-                                    additional_data={
-                                        "batch_id": batch_id,
-                                        "gpu_wait_reason": wait_msg,
-                                        "vram_free_mb": snap.get("free_mb"),
-                                        "vram_need_mb": need_mb,
-                                    },
-                                )
-                            except Exception:
-                                pass
+                        self._report_gpu_wait(batch_id, batch_status, e, need_mb, reserve_mb)
                         logger.warning(
                             "Batch %s VRAM resident/busy (%s) — retrying in %.0fs (%.0fs left)",
                             batch_id, e, min(backoff_s, remaining), remaining,

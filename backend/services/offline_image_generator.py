@@ -84,6 +84,32 @@ _FATAL_CUDA_MARKERS = (
 )
 
 
+def forget_pipeline_slot() -> None:
+    """Drop the orchestrator's ``sd:pipeline`` slot once the pipeline is unloaded.
+
+    ``release_model`` would only restart the slot's idle timer, and the GPU card
+    would keep listing the pipeline as loaded at its booked size until a sync.
+    """
+    try:
+        from backend.services.gpu_memory_orchestrator import get_orchestrator_if_created
+        orch = get_orchestrator_if_created()
+        if orch is not None:
+            orch.drop_booking("sd:pipeline")
+    except Exception:  # noqa: BLE001 — bookkeeping must not fail an unload
+        pass
+
+
+def record_pipeline_vram(peak_mb: int) -> None:
+    """Show the pipeline's measured VRAM on its slot instead of the admission estimate."""
+    try:
+        from backend.services.gpu_memory_orchestrator import get_orchestrator_if_created
+        orch = get_orchestrator_if_created()
+        if orch is not None:
+            orch.set_measured_vram("sd:pipeline", peak_mb)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def is_fatal_cuda_error(exc: BaseException) -> bool:
     """True when ``exc`` is a CUDA error that leaves the process's context dead."""
     msg = (str(exc) or "").lower()
@@ -3107,6 +3133,7 @@ Negative Prompt: {negative_prompt}""",
                             f"{_peak_mb}MB ({request.width}x{request.height}, "
                             f"offload={self._pipeline_offload_mode})"
                         )
+                        record_pipeline_vram(_peak_mb)
                 except Exception:
                     pass
 
@@ -3134,12 +3161,9 @@ Negative Prompt: {negative_prompt}""",
                 if not getattr(request, "keep_pipeline_loaded", False):
                     # Immediately free VRAM — don't wait for the 300s idle timer.
                     # The LLM needs the GPU back for the next chat turn.
-                    self._unload_pipeline()
-                    try:
-                        from backend.services.gpu_memory_orchestrator import get_orchestrator
-                        get_orchestrator().release_model("sd:pipeline")
-                    except Exception:
-                        pass
+                    # Still under _generation_lock, so no new booking can be hit.
+                    if self._unload_pipeline():
+                        forget_pipeline_slot()
                 # Release the gpu_session LAST — after LoRA/pipeline teardown — so
                 # the lease and gate cover the whole unit of work (2026-08-04).
                 # Guarded own try/except: a close failure must not mask the result.
@@ -3291,7 +3315,7 @@ Negative Prompt: {negative_prompt}""",
             type(sched).__name__,
         )
 
-    def _unload_pipeline(self, wait: bool = True) -> bool:
+    def _unload_pipeline(self, wait: bool = True, forget_slot: bool = False) -> bool:
         """Fully unload the pipeline and return RAM/VRAM to the pool.
 
         Aggressive host RAM release for heavy offloaded models (Z-Image etc).
@@ -3303,6 +3327,10 @@ Negative Prompt: {negative_prompt}""",
                 (orchestrator idle eviction), refuse immediately when a
                 generation is in progress so we never null ``scheduler`` under
                 a live ``__call__``.
+            forget_slot: Also drop the orchestrator's ``sd:pipeline`` slot, for
+                callers that are done with the pipeline. Unloads in the middle of
+                a load or an OOM retry leave it, because the slot is that job's
+                booking. Done under the lock so a new job's booking is never hit.
 
         Returns:
             True if unloaded (or already empty), False if refused because busy.
@@ -3315,7 +3343,10 @@ Negative Prompt: {negative_prompt}""",
             )
             return False
         try:
-            return self._unload_pipeline_unlocked()
+            unloaded = self._unload_pipeline_unlocked()
+            if unloaded and forget_slot:
+                forget_pipeline_slot()
+            return unloaded
         finally:
             self._generation_lock.release()
 
@@ -3375,7 +3406,7 @@ Negative Prompt: {negative_prompt}""",
         if held is None or (keep_model and keep_model == held):
             return False
         logger.info("Unloading %s kept after a batch: another GPU job needs the memory", held)
-        return bool(self._unload_pipeline(wait=False))
+        return bool(self._unload_pipeline(wait=False, forget_slot=True))
 
     def _clear_kept(self) -> None:
         with self._kept_lock:
@@ -3686,7 +3717,8 @@ Negative Prompt: {negative_prompt}""",
                     except Exception:
                         pass
                 if not keep_pipeline_loaded:
-                    self._unload_pipeline()
+                    if self._unload_pipeline():
+                        forget_pipeline_slot()
 
         return result
 

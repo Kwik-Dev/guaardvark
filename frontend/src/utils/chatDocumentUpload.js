@@ -99,13 +99,40 @@ Please select a supported file type.`;
   return null;
 }
 
-function uploadNotice({ file, documentId, indexed, codeGenMode }) {
+/** The Status line and what the document is good for now, per indexing outcome. */
+function indexingLines({ outcome, reason }) {
+  switch (outcome) {
+    case "indexed":
+      return { status: "Uploaded and indexed", now: "It is available for search and context retrieval now." };
+    case "stored":
+      return {
+        status: "Uploaded; indexing queued",
+        now: "Its full text is available to this chat now; it becomes searchable once indexing finishes.",
+      };
+    case "deferred":
+      return {
+        status: `Uploaded; indexing queued${reason ? ` (${reason})` : ""}`,
+        now: "It becomes searchable once indexing runs.",
+      };
+    case "failed":
+      return {
+        status: `Uploaded; indexing failed${reason ? ` (${reason})` : ""}`,
+        now: "It is not searchable until it is re-indexed from Files.",
+      };
+    default:
+      return { status: "Uploaded; indexing queued", now: "It becomes searchable once indexing finishes." };
+  }
+}
+
+function uploadNotice({ file, documentId, indexing, codeGenMode }) {
   const fileType = file.name.split(".").pop().toLowerCase();
   const isCodeFile = CODE_EXTENSIONS.has("." + fileType);
   const fileSizeKB = (file.size / 1024).toFixed(1);
-  const indexingStatus = indexed ? "Uploaded and indexed successfully" : "Uploaded (indexing in progress)";
+  // The chat reads a document's stored text, so a stored file is ready to discuss.
+  const readable = indexing.outcome === "indexed" || indexing.outcome === "stored";
+  const lines = indexingLines(indexing);
 
-  if (codeGenMode && isCodeFile && indexed) {
+  if (codeGenMode && isCodeFile && readable) {
     return `/codegen
 
 Please analyze and refactor the uploaded code file: ${file.name}
@@ -118,10 +145,11 @@ Requirements:
 
 Document ID: ${documentId}`;
   }
-  if (codeGenMode && !indexed) {
-    return `**File Upload Complete - Indexing in Progress**
+  if (codeGenMode && !readable) {
+    return `**File Uploaded - Not Ready Yet**
 
-Please wait for indexing to complete before processing. File: ${file.name} (${fileSizeKB} KB)`;
+**Status:** ${lines.status}
+Please wait for indexing to finish before processing. File: ${file.name} (${fileSizeKB} KB)`;
   }
   if (isCodeFile) {
     return `**Code File Uploaded Successfully**
@@ -132,12 +160,12 @@ Please wait for indexing to complete before processing. File: ${file.name} (${fi
 - **Size:** ${fileSizeKB} KB
 - **Document ID:** ${documentId || "N/A"}
 
-**Status:** ${indexingStatus}
-**Enhanced Analysis:** Code content is ${indexed ? "now" : "being"} indexed and ${indexed ? "available" : "will be available"} for search and discussion.
+**Status:** ${lines.status}
+${lines.now}
 
-${indexed
-    ? "You can ask questions about this code file and I'll analyze the complete content!"
-    : "Please wait a moment for indexing to complete, then ask questions about the code."}`;
+${readable
+    ? "You can ask questions about this code file and I'll analyze the complete content."
+    : "Ask about the code once indexing has finished."}`;
   }
   return `**Document Uploaded Successfully**
 
@@ -147,8 +175,32 @@ ${indexed
 - **Size:** ${fileSizeKB} KB
 - **Document ID:** ${documentId || "N/A"}
 
-**Status:** ${indexingStatus}
-**RAG Integration:** The document is ${indexed ? "now" : "being"} indexed and ${indexed ? "available" : "will be available"} for search and context retrieval.`;
+**Status:** ${lines.status}
+${lines.now}`;
+}
+
+// The indexer leaves a document PENDING with this message when the vector store
+// is not in use; the resume task indexes it later (celery_tasks_isolated.py).
+const DEFERRED_PREFIX = "Waiting for the vector store";
+
+/**
+ * Where indexing stands for a document, from its row.
+ *
+ * `stored`: a text or code file whose full text is saved and readable by the chat,
+ * with search indexing still to run. `deferred`: indexing is parked until the
+ * vector store is back. Anything not finished yet is `queued`.
+ *
+ * @param {{index_status?: string, error_message?: string}} doc
+ * @returns {{outcome: "indexed"|"stored"|"deferred"|"failed"|"queued", reason?: string}}
+ */
+export function indexOutcome(doc) {
+  const status = String(doc?.index_status || "").toUpperCase();
+  const reason = doc?.error_message || undefined;
+  if (status === "INDEXED") return { outcome: "indexed" };
+  if (status === "STORED" || status === "STORED_TRUNCATED") return { outcome: "stored" };
+  if (status === "ERROR") return { outcome: "failed", reason };
+  if (status === "PENDING" && reason?.startsWith(DEFERRED_PREFIX)) return { outcome: "deferred", reason };
+  return { outcome: "queued" };
 }
 
 async function waitForIndexing(documentId, onStage) {
@@ -156,12 +208,8 @@ async function waitForIndexing(documentId, onStage) {
     try {
       const response = await fetch(`/api/docs/${documentId}`);
       if (response.ok) {
-        const doc = await response.json();
-        if (doc.index_status === "INDEXED" || doc.index_status === "STORED") return true;
-        if (doc.index_status === "ERROR") {
-          console.warn("Document indexing failed");
-          return false;
-        }
+        const state = indexOutcome(await response.json());
+        if (state.outcome !== "queued") return state;
       }
     } catch (error) {
       console.warn("Error checking indexing status:", error);
@@ -169,7 +217,7 @@ async function waitForIndexing(documentId, onStage) {
     onStage?.({ progress: 75 + (attempt / INDEX_WAIT_ATTEMPTS) * 20, indexing: true });
     await new Promise((resolve) => setTimeout(resolve, INDEX_WAIT_MS));
   }
-  return false;
+  return { outcome: "queued" };
 }
 
 /**
@@ -180,7 +228,8 @@ async function waitForIndexing(documentId, onStage) {
  * @param {string} opts.sessionId      chat session the document is tagged with
  * @param {boolean} [opts.codeGenMode] send a /codegen request for code files
  * @param {function} [opts.onStage]    called with { progress, indexing } as it goes
- * @returns {Promise<{ok: boolean, message: string, error?: string}>} the notice to send
+ * @returns {Promise<{ok: boolean, message: string, indexing?: string, error?: string}>}
+ *   the notice to send, and the indexing outcome it reports (see indexOutcome)
  */
 export async function uploadChatDocument(file, { sessionId, codeGenMode = false, onStage } = {}) {
   try {
@@ -195,12 +244,13 @@ export async function uploadChatDocument(file, { sessionId, codeGenMode = false,
     if (result?.error) throw new Error(result.error);
 
     onStage?.({ progress: 75, indexing: true });
-    const indexed = await waitForIndexing(result.document_id, onStage);
+    const indexing = await waitForIndexing(result.document_id, onStage);
     onStage?.({ progress: 100, indexing: false });
 
     return {
       ok: true,
-      message: uploadNotice({ file, documentId: result.document_id, indexed, codeGenMode }),
+      indexing: indexing.outcome,
+      message: uploadNotice({ file, documentId: result.document_id, indexing, codeGenMode }),
     };
   } catch (error) {
     console.error("File upload failed:", error);

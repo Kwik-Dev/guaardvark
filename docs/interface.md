@@ -74,11 +74,12 @@ Right-click an **empty part of the dashboard** for:
 | Files | a folder | Open in Window, Cut, Copy, Paste, a colour, Rename, Properties, Index Contents, Delete |
 | Files | a file | Cut, Copy, Paste, Download, Rename, Properties, Index, Delete, plus Edit, View or Open in Code Editor for the file types that have them |
 | Media | the background | New Folder, Select All, Sort by Name, Date or Size, Arrange Icons, Arrange Windows |
+| Media | empty space in a folder window | New Folder, Paste into this folder, Select All, Sort by Name, Date or Size, all for the folder the window shows |
 | Media | an image | View Full Size, Edit, Share / Publish…, Cut, Copy, Download, Rename, Delete |
 | Notes | the background | New Note, Cycle Layout, Go to Dashboard |
 | Notes | a note | a colour, Duplicate, Rename, Pin to Top, Delete (and Copy, Select all, Paste inside the text) |
 | Chat | a message | Copy; on the assistant's replies also Good response and Bad response |
-| Chat | a past chat in the Chats list | Open, Delete (deletes at once, without asking) |
+| Chat | a past chat in the Chats list | Open, Delete (asks first) |
 | Code Editor | a file in the Files card | New File, New Folder, Rename, Delete |
 | Code Editor | selected code in the editor | Ask Chat, Fix This, Explain, Add to Chat, which send the code to the editor's chat card |
 | Image Gen | a batch in the history | Browse, Download, Load batch, Adjust & Retry, Clear from list (as fits the batch) |
@@ -87,7 +88,7 @@ Right-click an **empty part of the dashboard** for:
 | Jobs | a job | Start, Cancel, Edit, Duplicate, Delete |
 | Jobs | the background | New Code Generation, New CSV / Bulk Content, New Content Generation, New Data Analysis, New Custom Job |
 | Activity | a job | Details, Copy ID, Resume / Re-index, Cancel job |
-| Clients, Projects, Websites | an entry | Edit, Delete, Files, Schedule Task (Websites adds Crawl) |
+| Clients, Projects, Websites | an entry | Edit, Delete, Files, Schedule Task (Websites adds Crawl). Files opens a project's Documents tab, or the Files page with a list of the files linked to that client or website (link them in File or Folder Properties) |
 | Clients, Projects, Websites | the background | New Client, New Project or New Website |
 | Rules & Prompts | a rule | Edit…, Activate or Deactivate, Duplicate, Link to projects…, Copy ID, Delete |
 | Agents | an agent | Edit, Test, Enable or Disable, Copy id, Reset to default |
@@ -232,6 +233,9 @@ Press **?** anywhere outside a text box to see the main shortcuts in the app.
 | Image viewer | E / Esc | Edit the image / close |
 | Notes | Ctrl+Z | Undo the last change to the notes: colour, text, title, delete, close (up to 30 steps) |
 | Code Editor | Ctrl+S | Save the file |
+| Code Editor | Ctrl+Shift+S | Save the session now: open tabs and the editor chat |
+| Code Editor | Ctrl+Shift+O | Find a function or class by name; pick one to open its file at that line |
+| Code Editor | Ctrl+1 … Ctrl+5 | Jump to the Files, Editor, Chat, Search or Output card |
 | Code Editor | Ctrl+Shift+E | Explain the selected code in the editor's chat |
 | System Map | / or Ctrl+K | Search |
 | System Map | R / Esc | Reset the view / clear the search and selection |
