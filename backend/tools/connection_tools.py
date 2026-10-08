@@ -45,12 +45,29 @@ def _label(connection: Dict[str, Any]) -> str:
     return f"{name} ({connection.get('provider')}, id {connection.get('id')})"
 
 
+def _takes_text_post(connection: Dict[str, Any]) -> bool:
+    """Whether a text-only post can go to this connection (YouTube needs a video)."""
+    try:
+        from backend.services.connections import registry
+        return not registry.spec_for(connection.get("provider")).capabilities.requires_media
+    except Exception:
+        return not (connection.get("capabilities") or {}).get("requires_media")
+
+
 def _pick_connection(
     connections: List[Dict[str, Any]], wanted: Optional[str]
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    usable = [c for c in connections if c.get("enabled")]
-    if not usable:
+    enabled = [c for c in connections if c.get("enabled")]
+    if not enabled:
         return None, "No social connection is set up. Add one on the Connections page first."
+    usable = [c for c in enabled if _takes_text_post(c)]
+    media_only = [c for c in enabled if not _takes_text_post(c)]
+    if not usable:
+        return None, (
+            "No connection here takes a text post: "
+            + "; ".join(_label(c) for c in media_only)
+            + " needs a video. Add Discord, Bluesky, Mastodon or Telegram on the Connections page."
+        )
     choices = "; ".join(_label(c) for c in usable)
     if wanted is None or not str(wanted).strip():
         if len(usable) == 1:
@@ -68,6 +85,16 @@ def _pick_connection(
     if len(matches) == 1:
         return matches[0], None
     if not matches:
+        needs_media = [
+            c for c in media_only
+            if key in (str(c.get("id")), (c.get("display_name") or "").strip().lower(),
+                       (c.get("provider") or "").lower(), (c.get("handle") or "").strip().lower())
+        ]
+        if needs_media:
+            return None, (
+                f"{_label(needs_media[0])} needs a video, which this tool cannot attach; publish "
+                f"it from the Studio. Text posts can go to: {choices}."
+            )
         return None, f"No enabled social connection matches '{wanted}'. Available: {choices}."
     return None, f"'{wanted}' matches more than one connection; pass its id. Available: {choices}."
 
@@ -83,11 +110,12 @@ class RequestPublishTool(BaseTool):
     # approval-required would only hide it from MCP clients and ask twice in chat.
     requires_approval = False
     description = (
-        "Ask to publish a text post to one of the user's social connections "
-        "(Discord webhook, Bluesky, Mastodon, Telegram). This does NOT post: the "
-        "request waits on the Approvals page until a person approves, rejects or "
-        "cancels it, whatever the publish settings say. Omit connection when only "
-        "one is set up; otherwise pass its id or name."
+        "Ask to publish a text post, optionally with a link, to one of the user's social "
+        "connections that takes text (Discord webhook, Bluesky, Mastodon, Telegram; a YouTube "
+        "connection needs a video and is not offered). This does NOT post: the request waits "
+        "on the Approvals page until a person approves, rejects or cancels it, whatever the "
+        "publish settings say. Omit connection when only one text connection is set up; "
+        "otherwise pass its id or name. Returns the publish record ids and their status."
     )
     parameters = {
         "body": ToolParameter(
@@ -97,10 +125,6 @@ class RequestPublishTool(BaseTool):
         "connection": ToolParameter(
             name="connection", type="string", required=False,
             description="Connection id, display name, provider or handle. Optional when only one exists.",
-        ),
-        "title": ToolParameter(
-            name="title", type="string", required=False,
-            description="Title, for platforms that show one.",
         ),
         "link_url": ToolParameter(
             name="link_url", type="string", required=False,
@@ -136,7 +160,6 @@ class RequestPublishTool(BaseTool):
         request = {
             "connection_ids": [connection["id"]],
             "body": body,
-            "title": kwargs.get("title") or None,
             "link_url": kwargs.get("link_url") or None,
             "requested_by": source,
         }
