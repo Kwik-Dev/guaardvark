@@ -54,7 +54,7 @@ export const TIPS = Object.freeze([
   },
   {
     id: "drop-into-chat",
-    text: "Drop an image onto the chat box, or paste one, to ask about it in your next message.",
+    text: "Drop a document or an image into any chat to add it: documents are indexed, an image goes with your next message.",
     route: "/chat",
   },
   {

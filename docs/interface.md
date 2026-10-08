@@ -159,15 +159,15 @@ wider.
 | Files | files or whole folders from your computer, onto the desktop, a folder icon or an open folder window | They are uploaded there (folders keep their structure) and queued for indexing, so chat and search can use them. |
 | Files | icons inside the page | Moves them between folders. |
 | Dashboard, File Manager card | files from your computer | Uploaded into the folder the card shows. |
-| Chat | an image onto the chat box | Attached to your next message so you can ask about it. Pasting an image does the same. Other file types are ignored here; to add a document, use the paperclip (**Attach file or image**), which uploads and indexes it. |
+| Chat and the floating chat | a document or an image anywhere in the chat | A document is uploaded and indexed, the same as the paperclip, and the chat notes it. An image is attached to your next message so you can ask about it; pasting an image does the same. Only the first image of a message is sent to the model. |
 | Media | images inside the page | Moves them between folders. Files from your computer are not taken here; put them in Files. |
 | Video Gen | images, with **Input** set to **Image** | Added as the starting images for image-to-video. |
 | Upscaling | images or videos | Added to the upscaling queue. |
 | Video Editor | clips from the Media Library card onto the Bin, or files from your computer | Added to the project's Bin (files from your computer are uploaded to Files first). |
 | Cast & LoRA | reference images | Added to the subject's reference photos. |
 
-The floating chat has no drop target; paste an image into it, or use **Attach an
-image**.
+Dropping several files at once uploads all of them. A file dropped anywhere else is
+ignored, so a stray drop never replaces the app in your browser tab.
 
 ## The floating chat
 
