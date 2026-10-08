@@ -1,8 +1,9 @@
 # Handoff — reproducible generation CLI (issue #8)
 
-**Status:** implemented, unit/contract-tested, pushed. **E2E against the live backend is NOT done** — that is the next session's job (plan below).
-**Branch:** `cli-reproducible-generation` → pushed to `origin/cli-reproducible-generation` (`9344df11`). No PR.
-**Issue:** Kwik-Dev/guaardvark#8 (and #7 for the `music-video list` output path, which this builds on).
+**Status:** done — implemented, unit/contract/e2e-tested, live-verified, and landed on `origin/cloud-plus` (tip `20ffaa37`). No PR.
+**Branch:** `cli-reproducible-generation` (plus `fix/issue8-followup`) → landed on `origin/cloud-plus`.
+**Issue:** Kwik-Dev/guaardvark#8 (closed), and #7 for the `music-video list` output path.
+**Parked (user):** the live `infographic generate → reproduce` row needs the FLUX weights (~17.85 GB: `flux_unet` 12.7, `t5xxl` 4.9, `clip_l` 0.25). Same class of parked item as `videos model-download` / `images model-download`; the path is covered by `cli/tests/test_reproducibility_e2e.py`, so this is an asset-installation gap, not a code gap.
 
 ## Commits
 
@@ -52,11 +53,11 @@ Fork rule: `cli/` is upstream-owned; changes live in `_fork/` (override pattern,
 
 ## What is tested today (and what is not)
 
-**Passing:** `cd cli && backend/venv/bin/python -m pytest tests -q -m "not e2e"` → **597 passed, 30 deselected**.
+**Passing:** `cd cli && backend/venv/bin/python -m pytest tests -q -m "not e2e"` → **619 passed, 34 deselected**. The e2e tier (`-m e2e`, scratch Postgres via `GUAARDVARK_E2E_DATABASE_URL`) → **32 passed, 2 skipped**, re-runnable.
 
-That tier asserts, per command, `fake_backend.posted_paths() == []` (the negative no-write contract), plus JSON shapes, provenance, the TTY branch for uploads, reproduce round-trip fields, redaction and `NO_RECORD` paths.
+The fast tier asserts, per command, `fake_backend.posted_paths() == []` (the negative no-write contract), plus JSON shapes, provenance, the TTY branch for uploads, reproduce round-trip fields, redaction and `NO_RECORD` paths. The e2e tier drives real requests through the Flask app, including a full `generate → jobs → reproduce` round-trip for audio and infographic.
 
-**NOT tested:** real end-to-end behaviour against a running backend — that the POST the dry run predicted is actually accepted, that a `reproduce --yes` really reproduces, that `_mv_dict` fields appear over HTTP after a restart. The e2e tier (`-m e2e`) needs Postgres via `GUAARDVARK_E2E_DATABASE_URL` and is deselected by default.
+**Live-verified for real** (issue #8 comments): restarted backend, live audio TTS → `audio jobs` → `audio reproduce` → `--yes` audited; live images (`zimage-turbo`) and videos (`wan22-5b`) create→status→reproduce; live film-crew and music-video create with the full flags → status → named reproduce. The infographic live render is parked (FLUX weights not installed); see the header.
 
 ## E2E test plan (next session)
 
@@ -120,13 +121,14 @@ guaardvark film-crew create --script "INT. ROOM - DAY\nProbe." --model wan22-5b 
 ```
 Then `status --json` on each and assert `settings` / `settings_json` carry the values. Delete both. This is the step that was never run live (deliberately, to avoid creating artifacts).
 
-### 6. Audio (known gap — decide before testing)
-`audio music/sfx/tts` have `--dry-run` but **no persisted record**, so there is no `reproduce` and nothing to round-trip. Either accept the gap or make it the next implementation task: a main-DB row (or surfacing the Audio Foundry sidecar `/jobs` history via `audio jobs`) with the inputs, then a `reproduce`. This is the largest remaining item in #8.
+### 6. Audio — DONE (was the known gap)
+`audio music/sfx/tts` are now recorded in the main-DB `AudioGeneration` table; `audio jobs [<id>]` lists them and `audio reproduce <id>` replays the exact request (`--yes` through `_api_guard`, audited; a voice clone still needs its consent record). Live-verified: a TTS produced generation 1, `audio jobs` showed inputs `{"text": ...}`, `reproduce` emitted the identical body, and `--yes` created generation 2 with an approved `ok` audit entry.
 
 ## Known limitations (accepted, documented)
 
-- **Audio** generations are not recorded → `--dry-run` only.
-- **`images`/`videos`** named commands expose a subset of the backend's fields, so their `reproduce` emits the generic `api request` line (lossless) and names the inexpressible fields, rather than a lossy named replay. Adding the missing flags would make them natively reproducible.
+- **Audio** is recorded in the main DB (`AudioGeneration`) — no longer a limitation.
+- **`images`/`videos`** `reproduce` prefers the named command for the recorded scalars; opaque Studio fields (`ui_config`, `content_preset`, `adapters`, `subject_ids`, …) still cannot be expressed by the named command, so it emits the generic `api request` line (lossless) and names them.
+- **Infographic live render — PARKED (user).** The record→reproduce path is covered by `test_reproducibility_e2e.py` on the real Flask app with the ComfyUI generator faked; a *live* render is parked because this box lacks the FLUX weights (~17.85 GB). Same class as the parked `videos model-download` / `images model-download` items.
 - **`captions-burn --dry-run`** shows the caption-import request (the first write) and says the burn body cannot be shown until the backend parses those captions.
 - **Server-resolved model/clamps** are not shown when `--model`/size is omitted; the output says so instead of fabricating a value. The body shown is exactly what the client sends.
 - **Human `list` rows** carry no settings — that lives in `status` by design (adding `retry_data` to every list row is the heaviness #7 removed from `music-video list`).
@@ -142,8 +144,9 @@ Then `status --json` on each and assert `settings` / `settings_json` carry the v
 
 ## Suggested next actions
 
-1. Restart the backend and run §1–§5 above; record results on issue #8.
-2. Convert the most valuable of §2–§5 into an `e2e`-marked test tier (the `inprocess_backend` fixture boots the real Flask app; it needs `GUAARDVARK_E2E_DATABASE_URL`, or `GUAARDVARK_E2E_ALLOW_CONFIGURED_DB=1` locally).
-3. Decide on the audio-persistence gap (issue #8 deferred item) — likely the next goal.
-4. Optional: add the missing flags to `images generate` / `videos generate` so their `reproduce` can use the named command.
-5. Watch `backend/api/music_video_api.py` on the next upstream sync (`sync-upstream` skill).
+1. Done: §1–§5 verified live and recorded on issue #8 (closed).
+2. Done: the record→reproduce round-trip is an `e2e` tier (`test_reproducibility_e2e.py`, idempotent).
+3. Done: audio persistence (`AudioGeneration` + `audio jobs`/`reproduce`).
+4. Done: the recorded scalar flags on `images generate` / `videos generate`.
+5. **PARKED (user):** install the FLUX weights (~17.85 GB) to make the infographic live row pass.
+6. Watch `backend/api/music_video_api.py` and the new `AudioGeneration`/`InfographicGeneration` models on the next upstream sync (`sync-upstream` skill).
