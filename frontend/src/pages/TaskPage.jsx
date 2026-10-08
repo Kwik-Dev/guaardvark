@@ -66,6 +66,7 @@ import TaskCard from "../components/cards/TaskCard";
 import TaskActionModal from "../components/modals/TaskActionModal";
 import PageLayout from "../components/layout/PageLayout";
 import EntityContextMenu from "../components/common/EntityContextMenu";
+import useContextMenu from "../hooks/useContextMenu";
 import EmptyState from "../components/common/EmptyState";
 import { ContextualLoader } from "../components/common/LoadingStates";
 
@@ -132,20 +133,14 @@ const TaskPage = () => {
   const [statusFilter, setStatusFilter] = useState('all');
   const [typeFilter, setTypeFilter] = useState('all');
 
-  // Context menu state
-  const [contextMenu, setContextMenu] = useState(null);
-  const [contextItem, setContextItem] = useState(null);
+  // Right-click menu; fields and dialogs keep the browser's own menu.
+  const pageMenu = useContextMenu();
+  const contextItem = pageMenu.payload;
+  const handleContextMenu = (e, task = null) => pageMenu.open(e, task);
 
   const [videoGenJobs, setVideoGenJobs] = useState([]);
   const [videoGenLoading, setVideoGenLoading] = useState(false);
   const [videoGenError, setVideoGenError] = useState(null);
-
-  const handleContextMenu = (e, task = null) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setContextMenu({ top: e.clientY, left: e.clientX });
-    setContextItem(task);
-  };
 
   // Fetch tasks
   const fetchTasks = useCallback(async () => {
@@ -966,8 +961,8 @@ const TaskPage = () => {
       </Box>
 
         <EntityContextMenu
-          anchorPosition={contextMenu}
-          onClose={() => { setContextMenu(null); setContextItem(null); }}
+          anchorPosition={pageMenu.anchorPosition}
+          onClose={pageMenu.close}
           actions={contextItem ? [
             {
               label: 'Start',

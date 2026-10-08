@@ -57,6 +57,7 @@ import { useStatus } from "../contexts/StatusContext";
 import { getLogoUrl } from "../config/logoConfig";
 import PageLayout from "../components/layout/PageLayout";
 import EntityContextMenu from "../components/common/EntityContextMenu";
+import useContextMenu from "../hooks/useContextMenu";
 import { entityLinkActions } from "../utils/entityLinks";
 import EmptyState from "../components/common/EmptyState";
 import { ContextualLoader } from "../components/common/LoadingStates";
@@ -107,16 +108,10 @@ function ProjectsPage() {
   const [order, setOrder] = useState("asc");
   const [orderBy, setOrderBy] = useState("name");
 
-  // Context menu state
-  const [contextMenu, setContextMenu] = useState(null);
-  const [contextItem, setContextItem] = useState(null);
-
-  const handleContextMenu = (e, project = null) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setContextMenu({ top: e.clientY, left: e.clientX });
-    setContextItem(project);
-  };
+  // Right-click menu; fields and dialogs keep the browser's own menu.
+  const pageMenu = useContextMenu();
+  const contextItem = pageMenu.payload;
+  const handleContextMenu = (e, project = null) => pageMenu.open(e, project);
 
   const fetchProjectsAndClients = useCallback(async () => {
     setIsLoading(true);
@@ -656,8 +651,8 @@ function ProjectsPage() {
       </Box>
 
       <EntityContextMenu
-        anchorPosition={contextMenu}
-        onClose={() => { setContextMenu(null); setContextItem(null); }}
+        anchorPosition={pageMenu.anchorPosition}
+        onClose={pageMenu.close}
         actions={contextItem ? [
           { label: 'Edit', onClick: () => handleOpenEditDialog(contextItem) },
           { label: 'Delete', onClick: () => handleOpenDeleteDialog(contextItem), color: 'error.main' },

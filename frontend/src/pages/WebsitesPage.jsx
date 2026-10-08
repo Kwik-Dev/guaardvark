@@ -39,6 +39,7 @@ import { scrapeWebsite } from "../api/websiteService";
 import WebsiteActionModal from "../components/modals/WebsiteActionModal";
 import PageLayout from "../components/layout/PageLayout";
 import EntityContextMenu from "../components/common/EntityContextMenu";
+import useContextMenu from "../hooks/useContextMenu";
 import { entityLinkActions } from "../utils/entityLinks";
 import { useStatus } from "../contexts/StatusContext"; // For active model display
 import { useAppStore } from "../stores/useAppStore";
@@ -131,16 +132,10 @@ const WebsitesPage = () => {
   const [order, setOrder] = useState("asc");
   const [orderBy, setOrderBy] = useState("url");
 
-  // Context menu state
-  const [contextMenu, setContextMenu] = useState(null);
-  const [contextItem, setContextItem] = useState(null);
-
-  const handleContextMenu = (e, site = null) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setContextMenu({ top: e.clientY, left: e.clientX });
-    setContextItem(site);
-  };
+  // Right-click menu; fields and dialogs keep the browser's own menu.
+  const pageMenu = useContextMenu();
+  const contextItem = pageMenu.payload;
+  const handleContextMenu = (e, site = null) => pageMenu.open(e, site);
 
   const fetchWebsitesAndProjects = useCallback(async () => {
     setIsLoading(true);
@@ -704,8 +699,8 @@ const WebsitesPage = () => {
       </Box>
 
       <EntityContextMenu
-        anchorPosition={contextMenu}
-        onClose={() => { setContextMenu(null); setContextItem(null); }}
+        anchorPosition={pageMenu.anchorPosition}
+        onClose={pageMenu.close}
         actions={contextItem ? [
           { label: 'Edit', onClick: () => handleOpenActionModal(contextItem) },
           { label: 'Crawl', onClick: () => handleCrawlWebsite(contextItem.id) },
