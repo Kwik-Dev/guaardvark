@@ -3835,6 +3835,8 @@ const SettingsPage = () => {
         systemName={persistedSystemName}
         whisperManualInstall={whisperManualInstall}
         onCopyWhisperCommand={copyWhisperCommand}
+        onManageVoiceModels={() => setVoiceModelsModalOpen(true)}
+        showMessage={showMessage}
       />
       <InterconnectorSettingsModal
         open={interconnectorModalOpen}

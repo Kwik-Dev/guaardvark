@@ -12,6 +12,7 @@ import MuiAlert from "@mui/material/Alert";
 import FileDownloadIcon from "@mui/icons-material/FileDownload";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import VoiceListeningSettings from "../voice/VoiceListeningSettings";
+import SpeechModelSelect from "../voice/SpeechModelSelect";
 
 const VoiceSettingsContent = ({
   voiceSettings,
@@ -31,6 +32,8 @@ const VoiceSettingsContent = ({
   systemName,
   whisperManualInstall,
   onCopyWhisperCommand,
+  onManageVoiceModels,
+  showMessage,
 }) => {
   const whisperCliMissing = voiceStatus && voiceStatus.whisper_installed === false;
   const pendingManual = whisperManualInstall
@@ -351,6 +354,15 @@ const VoiceSettingsContent = ({
               </Box>
             </Grid>
           </Grid>
+
+          {/* Speech recognition model (shared with the Voice page); re-read after each status load */}
+          <Box sx={{ mb: 3 }}>
+            <SpeechModelSelect
+              reloadKey={voiceStatus}
+              onManageModels={onManageVoiceModels}
+              showMessage={showMessage}
+            />
+          </Box>
 
           {/* Listening: mic button mode, speech detection, wake phrase (shared with the Voice page) */}
           <VoiceListeningSettings

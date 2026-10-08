@@ -113,7 +113,13 @@ class TestFasterWhisperLoadsLocalOnly(unittest.TestCase):
         hub = MagicMock(return_value="/cache/snapshot")
         with patch.object(fw, "download_model", hub):
             fw.install_model("tiny.en")
-        hub.assert_called_once_with("tiny.en")
+        hub.assert_called_once_with("tiny.en", use_auth_token=False)
+
+    def test_turbo_install_check_stays_offline(self):
+        hub = _OfflineHub(cached_path=None)
+        with patch.object(fw, "download_model", hub):
+            self.assertFalse(fw.is_model_installed("large-v3-turbo"))
+        self.assertEqual(hub.calls, [("large-v3-turbo", {"local_files_only": True})])
 
 
 class TestGgmlCheckOnly(unittest.TestCase):
@@ -177,6 +183,13 @@ class TestStatusOffersTheInstall(unittest.TestCase):
     def test_complete_weights_report_installed(self):
         self.assertIs(self._status([])["speech_model_installed"], True)
 
+    def test_status_names_the_model_chosen_in_settings(self):
+        with patch("backend.utils.settings_utils.get_setting", return_value="small"), \
+             patch.object(fw, "is_model_installed", return_value=True):
+            body = self._status([])
+        self.assertEqual(body["speech_model_id"], "small")
+        self.assertIs(body["speech_model_installed"], True)
+
 
 class TestMissingParts(unittest.TestCase):
 
@@ -229,6 +242,21 @@ class TestInstallDownloads(unittest.TestCase):
         ggml.assert_called_once()
         self.assertEqual(ggml.call_args.args[0], "tiny.en")
         install.assert_called_once_with("tiny.en")
+
+    def test_turbo_installs_under_one_id_for_both_engines(self):
+        # whisper.cpp publishes ggml-large-v3-turbo.bin; faster-whisper maps
+        # "large-v3-turbo" to its CTranslate2 repo.
+        config = voice_api.WHISPER_MODELS["large-v3-turbo"]
+        with patch.object(voice_api, "_whisper_missing_parts",
+                          return_value=["ggml", "faster-whisper"]), \
+             patch.object(voice_api, "_download_ggml_model_direct") as ggml, \
+             patch.object(fw, "install_model") as install, \
+             patch.object(fw, "is_model_installed", return_value=True):
+            voice_api._do_whisper_download("/backend", "large-v3-turbo", config)
+
+        self.assertEqual(ggml.call_args.args[0], "large-v3-turbo")
+        self.assertTrue(ggml.call_args.args[1].endswith("ggml-large-v3-turbo.bin"))
+        install.assert_called_once_with("large-v3-turbo")
 
     def test_incomplete_weights_after_download_fail_the_install(self):
         config = voice_api.WHISPER_MODELS["tiny.en"]

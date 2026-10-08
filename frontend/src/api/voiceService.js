@@ -1256,6 +1256,32 @@ class VoiceService {
     });
     return await handleResponse(response);
   }
+
+  /**
+   * The speech recognition model: the saved choice, the one transcription
+   * uses now, and the installed Whisper models it can be set to.
+   * Resolves to {data: {model, model_name, in_use, default_model, installed}}.
+   */
+  async getSpeechModel() {
+    const response = await fetch(`${BASE_URL}/voice/speech-model`);
+    return await handleResponse(response);
+  }
+
+  /**
+   * Choose the speech recognition model every transcription uses unless a
+   * request names one. Only an installed model is accepted; nothing downloads.
+   * @param {string} modelId - e.g. "tiny.en" or "large-v3-turbo"
+   */
+  async setSpeechModel(modelId) {
+    const response = await fetch(`${BASE_URL}/voice/speech-model`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ model: modelId }),
+    });
+    return await handleResponse(response);
+  }
 }
 
 // Create singleton instance

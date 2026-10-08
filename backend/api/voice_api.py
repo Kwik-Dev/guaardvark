@@ -69,6 +69,7 @@ WHISPER_MODEL_SIZES_MB = {
     "medium": 1500,
     "medium.en": 1500,
     "large": 2900,
+    "large-v3-turbo": 1536,
 }
 
 # Piper TTS model sizes in MB (approximate)
@@ -774,11 +775,66 @@ WHISPER_MODELS = {
         "description": "More accurate, slower processing",
         "max_audio_seconds": 300,
         "avg_processing_ratio": 0.4  # 40% of audio length
-    }
+    },
+    # faster-whisper names it "large-v3-turbo" (mobiuslabsgmbh/faster-whisper-large-v3-turbo)
+    # and whisper.cpp publishes ggml-large-v3-turbo.bin in the same Hugging Face
+    # repo as the others, so one id serves both engines. No avg_processing_ratio:
+    # it has not been measured here.
+    "large-v3-turbo": {
+        "path": "tools/voice/whisper.cpp/models/ggml-large-v3-turbo.bin",
+        "name": "Large v3 Turbo (Most accurate)",
+        "description": "Most accurate, multilingual; the largest download",
+        "max_audio_seconds": 300,
+    },
 }
 
 # DEFAULT MODEL for performance optimization
 DEFAULT_WHISPER_MODEL = "tiny.en"  # Changed from base to tiny.en for performance
+
+# Settings row holding the model chosen in Settings → Voice; transcription uses
+# it whenever a request names no model. Unset means DEFAULT_WHISPER_MODEL.
+SPEECH_MODEL_SETTING = "voice_speech_model"
+
+# Chosen models already logged as falling back, so a deleted model warns once
+# rather than on every utterance. Cleared when a choice is saved.
+_speech_model_fallback_warned: Set[str] = set()
+
+
+def get_speech_model() -> str:
+    """The Whisper model chosen in Settings → Voice, or DEFAULT_WHISPER_MODEL."""
+    from backend.utils.settings_utils import get_setting
+    chosen = (get_setting(SPEECH_MODEL_SETTING, default="") or "").strip()
+    return chosen if chosen in WHISPER_MODELS else DEFAULT_WHISPER_MODEL
+
+
+def _faster_whisper_weights_installed(model_id: str) -> bool:
+    from backend.utils import faster_whisper_utils as fw
+    return fw.is_model_installed(model_id)
+
+
+def resolve_speech_model(is_installed=None) -> str:
+    """The model a transcription uses when its request names none.
+
+    The saved choice; if its weights are gone and DEFAULT_WHISPER_MODEL's are
+    present, the default, with one warning. Otherwise the choice itself, so a
+    missing model is reported by name (SPEECH_MODEL_MISSING). Never downloads.
+
+    `is_installed(model_id)` checks the engine the caller runs; the default is
+    the faster-whisper weights /speech-to-text and the socket stream load.
+    """
+    chosen = get_speech_model()
+    if chosen == DEFAULT_WHISPER_MODEL:
+        return chosen
+    check = is_installed or _faster_whisper_weights_installed
+    if check(chosen) or not check(DEFAULT_WHISPER_MODEL):
+        return chosen
+    if chosen not in _speech_model_fallback_warned:
+        _speech_model_fallback_warned.add(chosen)
+        logger.warning(
+            f"Voice API: speech model '{chosen}' is chosen in Settings but not installed; "
+            f"transcribing with '{DEFAULT_WHISPER_MODEL}' until it is installed again"
+        )
+    return DEFAULT_WHISPER_MODEL
 
 # ENHANCED WHISPER PARAMETERS for better speech detection
 WHISPER_ENHANCED_PARAMS = {
@@ -1186,8 +1242,11 @@ def _speech_to_text_response():
                 logger.error(f"Voice API: whisper-server path failed ({ws_err})")
                 return jsonify({"error": f"Speech recognition failed: {str(ws_err)}"}), 500
         
-        # Get optional model preference from request
-        preferred_model = request.form.get('model', DEFAULT_WHISPER_MODEL)
+        # A model named in the request wins; otherwise the one chosen in
+        # Settings → Voice. Either way select_optimal_whisper_model returns it
+        # as given, so its duration-based pick never replaces a choice.
+        requested_model = (request.form.get('model') or '').strip()
+        preferred_model = requested_model if requested_model in WHISPER_MODELS else resolve_speech_model()
         
         # PERFORMANCE OPTIMIZATION: In-memory audio decoding & STT
         try:
@@ -1841,7 +1900,7 @@ def get_available_models():
                 "available": is_available,
                 "path": model_config["path"],
                 "max_audio_seconds": model_config["max_audio_seconds"],
-                "avg_processing_ratio": model_config["avg_processing_ratio"],
+                "avg_processing_ratio": model_config.get("avg_processing_ratio"),
                 "file_size": os.path.getsize(model_path) if is_available else 0
             }
         
@@ -1879,10 +1938,12 @@ def voice_status():
 
         whisper_available = whisper_cli_available and len(available_models) > 0
 
-        # The model voice transcribes with by default, in every format this
-        # install reads; Settings offers its Install while anything is missing.
+        # The model voice transcribes with (Settings → Voice, else the default),
+        # in every format this install reads; Settings offers its Install while
+        # anything is missing.
+        speech_model_id = resolve_speech_model()
         speech_model_installed = not _whisper_missing_parts(
-            backend_path, DEFAULT_WHISPER_MODEL, WHISPER_MODELS[DEFAULT_WHISPER_MODEL]
+            backend_path, speech_model_id, WHISPER_MODELS[speech_model_id]
         )
 
         # Check FFmpeg availability
@@ -1925,7 +1986,7 @@ def voice_status():
             "whisper_installed": whisper_cli_available,
             "whisper_source_available": whisper_source_available,
             "whisper_models_available": available_models,
-            "speech_model_id": DEFAULT_WHISPER_MODEL,
+            "speech_model_id": speech_model_id,
             "speech_model_installed": speech_model_installed,
             "ffmpeg_available": ffmpeg_available,
             "supported_formats": list(SUPPORTED_AUDIO_FORMATS),
@@ -2070,9 +2131,13 @@ def stream_voice_chat():
             audio_duration = get_audio_duration(wav_temp_path)  # Use converted WAV file
             logger.info(f"VOICE API: Stream audio duration estimated at {audio_duration:.2f} seconds")
             
-            # Use tiny.en model for speed with robust validation
+            # The model chosen in Settings → Voice (tiny.en unless changed),
+            # judged by its ggml file since whisper-cli reads that format.
             logger.info("VOICE API: Selecting Whisper model...")
-            model_config = WHISPER_MODELS["tiny.en"]
+            model_id = resolve_speech_model(
+                lambda m: ensure_whisper_model_downloaded(WHISPER_MODELS[m])[0]
+            )
+            model_config = WHISPER_MODELS[model_id]
             logger.info(f"VOICE API: Attempting to use model: {model_config['name']}")
             
             model_available, model_path, error_msg = ensure_whisper_model_downloaded(model_config)
@@ -2083,7 +2148,7 @@ def stream_voice_chat():
                 model_available, model_path, error_msg = ensure_whisper_model_downloaded(fallback_model)
                 if not model_available:
                     logger.error(f"VOICE API: No Whisper model available: {error_msg}")
-                    return _speech_model_missing_response("tiny.en")
+                    return _speech_model_missing_response(model_id)
                 model_config = fallback_model
                 logger.info(f"VOICE API: Falling back to model '{model_config['name']}'")
             
@@ -2752,6 +2817,72 @@ def list_all_voice_models():
     except Exception as e:
         logger.error(f"Error listing all voice models: {e}", exc_info=True)
         return error_response(str(e), 500)
+
+
+def _installed_whisper_models(backend_path):
+    """Whisper model ids complete for every speech engine on this machine, in
+    WHISPER_MODELS order. Empty when neither engine is present."""
+    from backend.utils import faster_whisper_utils as fw
+    whisper_cli_built = os.path.exists(os.path.join(backend_path, WHISPER_CLI_PATH))
+    if not (fw.FASTER_WHISPER_AVAILABLE or whisper_cli_built):
+        return []
+    return [
+        model_id for model_id, model_config in WHISPER_MODELS.items()
+        if not _whisper_missing_parts(backend_path, model_id, model_config)
+    ]
+
+
+def _speech_model_payload():
+    installed = _installed_whisper_models(get_backend_path())
+    chosen = get_speech_model()
+    return {
+        "model": chosen,
+        "model_name": WHISPER_MODELS[chosen]["name"],
+        "in_use": resolve_speech_model(),
+        "default_model": DEFAULT_WHISPER_MODEL,
+        "installed": [
+            {
+                "id": model_id,
+                "name": WHISPER_MODELS[model_id]["name"],
+                "description": WHISPER_MODELS[model_id]["description"],
+            }
+            for model_id in installed
+        ],
+    }
+
+
+@voice_bp.route("/speech-model", methods=["GET"])
+def get_speech_model_route():
+    """The speech recognition model chosen in Settings → Voice, the one in use,
+    and the installed models it can be set to."""
+    try:
+        return success_response(_speech_model_payload())
+    except Exception as e:
+        logger.error(f"Voice API: could not read the speech model: {e}", exc_info=True)
+        return error_response(str(e), 500)
+
+
+@voice_bp.route("/speech-model", methods=["POST"])
+def set_speech_model_route():
+    """Choose the speech recognition model. Only an installed model is accepted;
+    this never downloads (Install in Voice models does)."""
+    data = request.get_json(silent=True) or {}
+    model_id = str(data.get("model") or "").strip()
+    if model_id not in WHISPER_MODELS:
+        return error_response(f"Unknown speech model '{model_id}'", 400, "UNKNOWN_SPEECH_MODEL")
+    if model_id not in _installed_whisper_models(get_backend_path()):
+        return error_response(
+            f"{WHISPER_MODELS[model_id]['name']} is not installed. Install it in Voice models first.",
+            400,
+            "SPEECH_MODEL_NOT_INSTALLED",
+        )
+    from backend.utils.settings_utils import save_setting
+    save_setting(SPEECH_MODEL_SETTING, model_id)
+    if get_speech_model() != model_id:
+        return error_response("Could not save the speech model", 500)
+    _speech_model_fallback_warned.clear()
+    logger.info(f"Voice API: speech model set to '{model_id}'")
+    return success_response(_speech_model_payload())
 
 
 def _missing_whisper_apt() -> list:
