@@ -624,6 +624,55 @@ def record_post_via_backend(
         logger.warning("record-post call failed: %s", e)
 
 
+# The element holding keyboard focus, followed through shadow roots: what a
+# typed comment actually lands in. Joined into one line, so no // comments.
+_FOCUSED_EDITABLE_JS = (
+    "JSON.stringify((() => {"
+    "  let el = document.activeElement;"
+    "  while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;"
+    "  if (!el) return {editable: false};"
+    "  const tag = el.tagName.toLowerCase();"
+    "  const editable = !!el.isContentEditable || tag === 'textarea';"
+    "  const label = ((el.getAttribute('placeholder') || '') + ' ' + (el.getAttribute('aria-label') || '')).trim();"
+    "  return {editable, tag, label: label.slice(0, 80), text: el.isContentEditable ? (el.innerText || '') : (el.value || '')};"
+    "})())"
+)
+_FOCUS_WAIT_S = 3.0
+
+
+def _focused_editable() -> Optional[dict]:
+    """What has keyboard focus in the agent Firefox, or None when unreadable."""
+    data, _why = bidi_evaluate_json(_FOCUSED_EDITABLE_JS)
+    return data
+
+
+def _same_text(typed: str, intended: str) -> bool:
+    """Whitespace-insensitive equality: the rich editor turns newlines into
+    paragraphs, so only the words and their order are compared."""
+    return " ".join((typed or "").split()) == " ".join((intended or "").split())
+
+
+def _wait_for_composer_focus() -> tuple[bool, str]:
+    """Wait for the clicked composer to take focus before typing.
+
+    Reddit expands the composer into its editor on the click; keystrokes sent
+    before the editor holds focus are lost, which once dropped the opening
+    words of a published comment.
+    """
+    deadline = time.monotonic() + _FOCUS_WAIT_S
+    last = None
+    while True:
+        last = _focused_editable()
+        if last and last.get("editable") and not re.search(r"search", last.get("label") or "", re.I):
+            return True, ""
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.25)
+    if last is None:
+        return False, "composer_not_focused: the page could not be read"
+    return False, f"composer_not_focused: focus is on <{last.get('tag')}> {last.get('label') or ''}".rstrip()
+
+
 def post_comment_via_servo(
     permalink: str,
     comment_text: str,
@@ -718,12 +767,29 @@ def post_comment_via_servo(
     cx, cy = coords
     logger.warning("clicking composer at (%s, %s)", cx, cy)
     screen.click(cx, cy)
+    focused, why = _wait_for_composer_focus()
+    if not focused:
+        return False, why
     _human_pause(0.5, 1.0)
 
     logger.warning("typing comment (%s chars)", len(comment_text))
     screen.type_text(comment_text)
     time.sleep(1.0)
     _human_pause()
+
+    # Only the approved text is ever submitted: read the composer back and,
+    # on any difference, empty it and stop.
+    held = _focused_editable()
+    if held is None or not _same_text(held.get("text", ""), comment_text):
+        screen.hotkey("ctrl", "a")
+        screen.hotkey("BackSpace")
+        shown = " ".join(((held or {}).get("text") or "").split())[:60]
+        return False, (
+            "typed_text_mismatch: nothing was posted; the comment box held "
+            f"{shown!r} instead of the approved text"
+            if held is not None else
+            "typed_text_unreadable: nothing was posted; the comment box could not be read back"
+        )
 
     # Submit via Reddit's standard Ctrl+Enter shortcut. The textarea is
     # already focused from the click and type, so this keystroke routes to
@@ -781,7 +847,13 @@ def post_comment_via_servo(
         "  return JSON.stringify({foundInThread, composerEmpty, errorVisible, url});"
         "})()"
     )
-    d, why = bidi_evaluate_json(check_js)
+    # A new comment can take a moment to render, so the thread is read a few times.
+    for attempt in range(3):
+        d, why = bidi_evaluate_json(check_js)
+        if d is not None and d.get("foundInThread"):
+            break
+        if attempt < 2:
+            time.sleep(2.0)
     if d is None:
         posted = False
         verify_msg = f"verify failed: {why}"
@@ -796,6 +868,10 @@ def post_comment_via_servo(
     logger.warning("post-submit verify: posted=%s %s", posted, verify_msg)
 
     if not posted:
+        if d is not None and d.get("composerEmpty") and not d.get("errorVisible"):
+            # Reddit took the submit but the comment is not on the page yet:
+            # it may well be live, and approving the draft again would post twice.
+            return False, f"submitted_unconfirmed: may be live, check the thread before approving again ({verify_msg})"
         return False, f"submit_failed: {verify_msg}"
     return True, "ok"
 

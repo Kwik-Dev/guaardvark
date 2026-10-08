@@ -76,6 +76,12 @@ def events(monkeypatch):
     monkeypatch.setattr("time.sleep", lambda seconds: None)
     monkeypatch.setattr(reddit_outreach, "_bidi_navigate", lambda *a, **k: True)
     monkeypatch.setattr(reddit_outreach, "_bidi_scroll_to_composer", lambda: (True, "ok", (40, 50)))
+
+    def focused_editable():
+        typed = [e[len("type "):] for e in log if e.startswith("type ")]
+        return {"editable": True, "tag": "div", "label": "", "text": typed[-1] if typed else ""}
+
+    monkeypatch.setattr(reddit_outreach, "_focused_editable", focused_editable)
     monkeypatch.setattr(youtube_outreach, "_bidi_navigate", lambda *a, **k: True)
     monkeypatch.setattr(youtube_outreach, "_bidi_scroll_to_yt_composer", lambda: (True, "ok", (1, 1)))
     monkeypatch.setattr(youtube_outreach, "_bidi_fill_and_submit_comment", fill_and_submit)
