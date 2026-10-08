@@ -302,6 +302,8 @@ def bidi_evaluate_json(expression: str) -> tuple[Optional[dict], str]:
 
 # Reason a poster gives when it refuses because the page could not be read back.
 PAGE_CHECK_UNAVAILABLE = "page_check_unavailable"
+# bidi_evaluate_json reasons given after the browser answered the session.
+_BIDI_ANSWERED = ("evaluate error", "empty evaluate result", "evaluate result is not an object")
 
 
 def bidi_reachable(wait_s: float = 10.0) -> tuple[bool, str]:
@@ -316,7 +318,10 @@ def bidi_reachable(wait_s: float = 10.0) -> tuple[bool, str]:
     deadline = time.monotonic() + wait_s
     while True:
         data, why = bidi_evaluate_json("JSON.stringify({ok: true})")
-        if data is not None:
+        # A fresh Firefox opens on a built-in page that refuses scripts
+        # ("System access is required"); the session still answered, and the
+        # poster navigates away from that page before reading anything.
+        if data is not None or why.startswith(_BIDI_ANSWERED):
             return True, ""
         if time.monotonic() >= deadline:
             return False, why

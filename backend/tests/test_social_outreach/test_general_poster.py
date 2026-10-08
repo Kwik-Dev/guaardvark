@@ -303,3 +303,9 @@ class TestBidiReachable:
             assert reddit_outreach.bidi_reachable(wait_s=0) == (False, "connect failed: refused")
         assert len(calls) == 1
 
+    def test_a_start_page_that_refuses_scripts_still_counts_as_reachable(self):
+        from backend.services.social_outreach import reddit_outreach
+        refused = (None, 'evaluate error: System access is required. Start Firefox with "-remote-allow-system-access" to enable it.')
+        with patch.object(reddit_outreach, "bidi_evaluate_json", return_value=refused):
+            assert reddit_outreach.bidi_reachable(wait_s=0) == (True, "")
+
