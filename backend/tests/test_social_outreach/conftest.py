@@ -1,7 +1,22 @@
 """Test fixtures for social outreach suite."""
+import contextlib
+
 import pytest
 from flask import Flask
 from backend.models import db
+
+
+@pytest.fixture(autouse=True)
+def _agent_browser_left_alone(monkeypatch):
+    """The posting tick restarts the agent Firefox with its control port around
+    its posts (backend/utils/agent_browser_control.py). Here that is a no-op,
+    so no test closes or launches a real browser; test_browser_control.py
+    exercises the real one against stubs."""
+    @contextlib.contextmanager
+    def untouched():
+        yield None
+
+    monkeypatch.setattr("backend.utils.agent_browser_control.agent_browser_control", untouched)
 
 
 @pytest.fixture
