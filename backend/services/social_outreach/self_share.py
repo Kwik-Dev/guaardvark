@@ -24,6 +24,8 @@ from backend.services.social_outreach.reddit_outreach import (
     is_self_promo_banned,
     backend_url,
     bidi_evaluate_json,
+    bidi_reachable,
+    page_check_unavailable_reason,
     SERVO_SETTLE_SECONDS,
 )
 from backend.services.social_outreach.transitions import WITHDRAWN_BEFORE_SUBMIT
@@ -157,6 +159,9 @@ def _submit_post_via_servo(
     except Exception as e:
         logger.warning("display not available for self_share: %s", e)
         return False, "display_unavailable"
+    readable, why = bidi_reachable()
+    if not readable:
+        return False, page_check_unavailable_reason(why)
 
     nav = service.execute_task(
         f"navigate to www.reddit.com/r/{subreddit}/submit",

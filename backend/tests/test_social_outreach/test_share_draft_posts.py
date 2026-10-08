@@ -183,6 +183,7 @@ def _submit_with_page(monkeypatch, page, subreddit="x", title="Local-first AI st
     monkeypatch.setattr("backend.services.local_screen_backend.LocalScreenBackend", MagicMock)
     monkeypatch.setattr("time.sleep", lambda seconds: None)
     monkeypatch.setattr(self_share, "bidi_evaluate_json", evaluate)
+    monkeypatch.setattr(self_share, "bidi_reachable", lambda *a, **k: (True, ""))
     result = self_share._submit_post_via_servo(subreddit, title, "https://guaardvark.com")
     return result, seen
 
@@ -231,3 +232,32 @@ def test_share_unreadable_page_is_unverified(monkeypatch):
 def test_post_url_shape(url, landed):
     from backend.services.social_outreach.self_share import _is_post_url
     assert _is_post_url(url, "SideProject") is landed
+
+
+def test_share_refuses_before_touching_reddit_when_the_page_cannot_be_read(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from backend.services.social_outreach import self_share
+
+    tasks = []
+
+    class Service:
+        is_active = False
+
+        def execute_task(self, task, screen):
+            tasks.append(task)
+            return SimpleNamespace(success=True, reason="ok")
+
+    monkeypatch.setattr("backend.services.agent_control_service.get_agent_control_service",
+                        lambda: Service())
+    monkeypatch.setattr("backend.utils.agent_display_utils.start_agent_display_if_needed",
+                        lambda: True)
+    monkeypatch.setattr("backend.services.local_screen_backend.LocalScreenBackend", MagicMock)
+    monkeypatch.setattr(self_share, "bidi_reachable", lambda *a, **k: (False, "connect failed: refused"))
+    ok, reason = self_share._submit_post_via_servo("test", "a title", "https://guaardvark.com")
+    assert ok is False
+    assert reason.startswith("page_check_unavailable: nothing was posted")
+    assert "connect failed: refused" in reason
+    assert tasks == []
+
