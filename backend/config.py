@@ -608,6 +608,24 @@ def _saved_embedding_model_outside_app() -> str | None:
     return value
 
 
+def get_saved_embedding_model() -> str | None:
+    """The embedding model chosen in Settings, or None when none was saved."""
+    try:
+        from flask import has_app_context
+        in_app = has_app_context()
+    except Exception:
+        in_app = False
+    if not in_app:
+        return _saved_embedding_model_outside_app()
+    try:
+        from backend.models import Setting, db
+        setting = db.session.get(Setting, "active_embedding_model")
+        return (setting.value or None) if setting else None
+    except Exception as e:
+        _config_logger.debug(f"DB not available for embedding model lookup: {e}")
+        return None
+
+
 def get_active_embedding_model() -> str:
     # The model chosen in Settings wins, in every process. Then the env var
     # (first boot, before anything is saved), then auto-selection.
