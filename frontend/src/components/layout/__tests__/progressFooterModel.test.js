@@ -151,6 +151,23 @@ describe("footerView and chips", () => {
     expect(view.chips[0].text).toBe("Video: denoising 12/30 · 40%");
   });
 
+  it("shows an image batch held at the job gate as waiting for the GPU, not starting", () => {
+    const started = {
+      job_id: "ImageBatch_3", processType: "image_generation", status: "start", progress: 0,
+      message: "Starting image_generation... (Batch generation of 4 images)", timestamp: 400,
+      additional_data: { batch_id: "ImageBatch_3", total_images: 4 },
+    };
+    const gateWait = "Queued behind Video Gen — needs ~8.8 GB, 2.0 GB free";
+    const queued = {
+      ...started, status: "processing", message: gateWait,
+      additional_data: { ...started.additional_data, gpu_wait_reason: gateWait },
+    };
+    const view = footerView(buildFooterEntries([queued, denoising()], [videoJob()]));
+    expect(view.chips.map((c) => c.text)).toEqual(["Image: waiting for GPU"]);
+    expect(view.chips[0].waiting).toBe(true);
+    expect(view.entries[1]).toMatchObject({ waitKind: "gpu", text: gateWait });
+  });
+
   it("names a system-load wait and leads with a waiting job when nothing runs", () => {
     const sys = { ...imageWaiting, message: "Waiting for the system: RAM low",
       additional_data: { gpu_wait_reason: "Waiting for the system: RAM low" } };
