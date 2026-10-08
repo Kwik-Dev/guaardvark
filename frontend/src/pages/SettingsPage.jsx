@@ -74,6 +74,7 @@ import {
   DashboardTile,
 } from "../components/settings/ui";
 import IndexProfileChips from "../components/settings/IndexProfileChips";
+import RerankerControl from "../components/settings/RerankerControl";
 import RebuildIndexDialog from "../components/settings/RebuildIndexDialog";
 import IndexProfileEditDialog from "../components/settings/IndexProfileEditDialog";
 import RefreshIcon from "@mui/icons-material/Refresh";
@@ -3231,6 +3232,12 @@ const SettingsPage = () => {
             Index pending
           </ActionButton>
         </Line>
+      </Cluster>
+      <Cluster
+        label="Search reranker"
+        help="A second model that rereads the passages a search found and puts the most relevant first. Searches work without it."
+      >
+        <RerankerControl showMessage={showMessage} />
       </Cluster>
       <Cluster
         label="Autoresearch"

@@ -159,6 +159,10 @@ class ImageGenerationRequest:
     # Character LoRAs (Z-Image / future). Paths to .safetensors + optional strength.
     loras: Optional[List[str]] = None
     lora_scale: float = 1.0
+    # Only the Studio page sets this: its model picker says a model that is not
+    # installed "downloads ~N GB on first use". Chat, agents, MCP and edits never
+    # download; a missing model is refused with where to install it.
+    allow_model_download: bool = False
 
 @dataclass
 class ImageGenerationResult:
@@ -764,6 +768,12 @@ class OfflineImageGenerator:
                 f"'{model_key}' runs through ComfyUI and its weights are not installed. "
                 "Install the FLUX dev unet/clip/vae assets, then retry."
             )
+        if getattr(self, "_install_needed", None) == model_id:
+            return (
+                f"'{model_key}' is not installed ({model_id}). Install it in Settings > Model "
+                "libraries > Image, or pick an installed model. Generating from chat, agents "
+                "or MCP never downloads a model on its own."
+            )
         if not self._is_model_downloaded(model_id):
             access = self._probe_repo_access(model_id)
             if access == "gated":
@@ -796,6 +806,21 @@ class OfflineImageGenerator:
             f"'{model_key}' is downloaded but its pipeline failed to load. See the backend "
             "log for the loader error — usually VRAM pressure or an incomplete download."
         )
+
+    def missing_model_message(self, model_key: str) -> Optional[str]:
+        """The install hint when an offline model's weights are not on this machine, else None.
+
+        For the paths that may not download (everything but the Studio page);
+        checked before any GPU admission, which would evict the chat model for
+        a request about to be refused.
+        """
+        if not model_key or model_key == "auto" or self.is_comfy_only_model(model_key):
+            return None
+        model_id = self.available_models.get(model_key)
+        if not model_id or self._is_model_downloaded(model_id):
+            return None
+        self._install_needed = model_id
+        return self._load_failure_reason(model_key, model_id)
 
     def _resolve_model_ref(self, model_ref: str) -> str:
         """Catalog key (e.g. krea2-turbo) → HF repo id; pass through HF ids and auto."""
@@ -1548,7 +1573,9 @@ class OfflineImageGenerator:
             return False
         return False
 
-    def _load_pipeline(self, model_id: str, *, force_sequential: bool = False) -> bool:
+    def _load_pipeline(self, model_id: str, *, force_sequential: bool = False,
+                       allow_download: bool = False) -> bool:
+        self._install_needed = None
         if not self.service_available:
             return False
         if self._gpu_fault is not None:
@@ -1572,6 +1599,10 @@ class OfflineImageGenerator:
                 self._unload_pipeline()
 
             if not self._is_model_downloaded(model_id):
+                if not allow_download:
+                    self._install_needed = model_id
+                    logger.warning("Model %s is not installed; not downloading it from a generate call", model_id)
+                    return False
                 logger.info(f"Model {model_id} not found locally, downloading...")
                 ok, dl_err = self._download_model(model_id)
                 if not ok:
@@ -2402,6 +2433,12 @@ Negative Prompt: {negative_prompt}""",
                 )
                 return result
             logger.info(f"Using model: {request.model} -> {model_id}")
+            if not request.allow_model_download:
+                missing = self.missing_model_message(request.model)
+                if missing:
+                    result.error = missing
+                    logger.warning(f"Model {request.model} ({model_id}) refused: {missing}")
+                    return result
 
             # Family-aware max side + area clamp BEFORE the estimates (2026-08-04):
             # admission must see the final W×H now that estimates scale with
@@ -2509,7 +2546,7 @@ Negative Prompt: {negative_prompt}""",
                 # estimate matches the model we actually load.
                 self._ensure_vram_for_pipeline(model_id, request.width, request.height)
 
-                if not self._load_pipeline(model_id):
+                if not self._load_pipeline(model_id, allow_download=request.allow_model_download):
                     # No substitution. This used to silently swap in SD 1.5 and carry
                     # on, which returned a plausible-looking image from a completely
                     # different (and much older) model — the user then blamed the model
@@ -2881,7 +2918,8 @@ Negative Prompt: {negative_prompt}""",
                                 raise RuntimeError(
                                     f"GPU busy after OOM — cannot reload: {admit_err}"
                                 ) from infer_err
-                            if self._load_pipeline(model_id, force_sequential=True):
+                            if self._load_pipeline(model_id, force_sequential=True,
+                                                   allow_download=request.allow_model_download):
                                 try:
                                     # Rebuild generator after OOM (device state may be dirty)
                                     if request.seed is not None:
@@ -3517,6 +3555,12 @@ Negative Prompt: {negative_prompt}""",
                 from backend.services.image_resolution_limits import clamp_image_dimensions
                 width, height, _ = clamp_image_dimensions(int(width), int(height), family)
 
+                # Edits never download: a missing model is refused before admission.
+                if not self._is_model_downloaded(model_id):
+                    self._install_needed = model_id
+                    result.error = self._load_failure_reason(model, model_id)
+                    return result
+
                 # Priced admission, as for txt2img: book sd:pipeline against the
                 # real card before loading, so a too-large edit is refused as
                 # busy instead of thrashing CUDA.
@@ -3526,7 +3570,7 @@ Negative Prompt: {negative_prompt}""",
                     result.error = f"GPU busy: {admit_err}"
                     return result
 
-                # Ensure the base txt2img pipeline is loaded (downloads model if needed)
+                # Ensure the base txt2img pipeline is loaded (installed models only)
                 if not self._load_pipeline(model_id):
                     result.error = self._load_failure_reason(model, model_id)
                     return result

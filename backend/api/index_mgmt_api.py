@@ -747,3 +747,17 @@ def optimize_index():
     except Exception as e:
         logger.error(f"Optimize Index: Error during optimization: {e}", exc_info=True)
         return jsonify({"error": f"Optimization failed: {e}"}), 500
+
+
+@index_mgmt_bp.route("/reranker", methods=["GET"])
+def reranker_status():
+    """The search reranker: on or off, installed or not, and any install in progress."""
+    from backend.utils import reranker
+    return jsonify(reranker.install_status()), 200
+
+
+@index_mgmt_bp.route("/reranker/install", methods=["POST"])
+def reranker_install():
+    """Download the reranker's weights (Settings > Knowledge > Install). Searches never do."""
+    from backend.utils import reranker
+    return jsonify(reranker.start_install()), 202

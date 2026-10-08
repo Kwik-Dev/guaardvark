@@ -114,6 +114,7 @@ def run_stills_pipeline(
     extra_guidance: str | None = None,
     hold_gpu: bool = True,
     replace_legacy_sd_markers: bool = True,
+    allow_model_download: bool = False,
 ) -> list[StillResult]:
     """Generate one or more stills with shared policy. Never raises for per-prompt failures."""
     from backend.services.image_prompt_sanitize import sanitize_image_prompt
@@ -241,6 +242,7 @@ def run_stills_pipeline(
                 face_restoration_weight=face_restoration_weight,
                 remove_background=remove_background,
                 hold_gpu=hold_gpu,
+                allow_model_download=allow_model_download,
             )
         )
     for result in results:
@@ -281,6 +283,7 @@ def _generate_one(
     face_restoration_weight: float,
     remove_background: bool,
     hold_gpu: bool,
+    allow_model_download: bool = False,
 ) -> StillResult:
     from backend.services.offline_image_generator import (
         ImageGenerationRequest,
@@ -342,6 +345,14 @@ def _generate_one(
             enhance_mode=enhance_mode,
         )
 
+    # Offline route: a model that is not installed is refused before the GPU
+    # session below, which would otherwise evict the chat model to make room.
+    if not allow_model_download:
+        missing = generator.missing_model_message(model)
+        if missing:
+            return StillResult(success=False, error=missing, prompt_used=prompt,
+                               enhance_mode=enhance_mode)
+
     request = ImageGenerationRequest(
         prompt=prompt,
         negative_prompt=negative,
@@ -364,6 +375,7 @@ def _generate_one(
         keep_pipeline_loaded=keep_pipeline,
         loras=loras,
         lora_scale=lora_scale,
+        allow_model_download=allow_model_download,
     )
 
     try:
