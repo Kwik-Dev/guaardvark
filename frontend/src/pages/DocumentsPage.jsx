@@ -90,10 +90,11 @@ const DocumentsPage = () => {
   const [desktopSelectionBox, setDesktopSelectionBox] = useState(null);
   const [isDesktopSelecting, setIsDesktopSelecting] = useState(false);
 
-  // Keep a ref of windows so event listeners don't need re-registration
-  useEffect(() => {
-    windowsRef.current = windows;
-  }, [windows]);
+  // Keep a ref of windows so event listeners don't need re-registration.
+  // Assigned during render: the grid reports its first layout from its own
+  // effect, which runs before this component's effects, and that report saves
+  // the window list read from here.
+  windowsRef.current = windows;
 
   // Which selection slot "owns" the current keyboard/context-menu actions.
   // Desktop surface → 'desktop'; a focused folder window → that window's id.

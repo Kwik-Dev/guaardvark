@@ -183,8 +183,10 @@ const ImagesPage = () => {
   const isTogglingRef = useRef(false); // Skip onLayoutChange during programmatic minimize/expand
   const windowLayoutRef = useRef(windowLayout);
 
-  // Keep refs in sync
-  useEffect(() => { windowsRef.current = windows; }, [windows]);
+  // Keep refs in sync. windowsRef is assigned during render: the grid reports
+  // its first layout from its own effect, before these run, and that report
+  // saves the window list read from it.
+  windowsRef.current = windows;
   useEffect(() => { iconPositionsRef.current = iconPositions; }, [iconPositions]);
   useEffect(() => { windowLayoutRef.current = windowLayout; }, [windowLayout]);
   useEffect(() => {
