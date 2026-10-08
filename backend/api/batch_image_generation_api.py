@@ -982,7 +982,12 @@ def get_download_status():
                 if not vstatus.get("is_downloading"):
                     _DELEGATED_PACK = None
                 return success_response(vstatus)
-            if str(vstatus.get("current_model") or "").startswith("flux"):
+            # A FLUX run is this modal's only while it is newer than the last
+            # image install; afterwards its error would shadow that install.
+            if (
+                str(vstatus.get("current_model") or "").startswith("flux")
+                and float(vstatus.get("updated_at") or 0) >= float(status.get("updated_at") or 0)
+            ):
                 return success_response(vstatus)
         return success_response(status)
     except Exception as e:
