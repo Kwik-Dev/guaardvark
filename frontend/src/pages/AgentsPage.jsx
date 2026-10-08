@@ -296,9 +296,9 @@ const AgentsPage = () => {
       <AgentEditDialog
         agent={editing}
         onClose={() => setEditingId(null)}
-        onSaved={(updated) => {
+        onSaved={(updated, { reset } = {}) => {
           replaceAgent(updated);
-          notify("Agent updated");
+          notify(reset ? `${updated?.name || "Agent"} reset to default` : "Agent updated");
         }}
         onToggle={handleToggle}
         onTest={openTest}
