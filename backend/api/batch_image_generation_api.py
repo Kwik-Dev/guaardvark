@@ -115,6 +115,21 @@ def _dir_bytes(d: Path) -> int:
     return total
 
 
+def _hf_cache_repo_dir(repo_id: str) -> Optional[Path]:
+    """The Hugging Face hub cache folder for a repo id, or None for non-repo ids.
+
+    SD and SDXL installs go through from_pretrained, which fills this folder and
+    only writes the install folder at the end (save_pretrained).
+    """
+    if not repo_id or "/" not in repo_id or repo_id.startswith("comfy:"):
+        return None
+    try:
+        from huggingface_hub import constants
+        return Path(constants.HF_HUB_CACHE) / ("models--" + repo_id.replace("/", "--"))
+    except Exception:
+        return None
+
+
 def _image_download_dest(img, catalog_key: str, hf_model_id: str) -> Path:
     """Directory whose growth is the download — Comfy unet/loras, or the snapshot path."""
     from backend.services.user_image_models import user_download_dir
@@ -822,7 +837,9 @@ def _start_image_model_download(model_path: str):
             _start_time = time.time()
             total_bytes = int(total_gb * 1024**3) if total_gb else 1
             dest = _image_download_dest(generator.image_generator, catalog_key, hf_model_id)
-            baseline = _dir_bytes(dest)
+            hf_cache = _hf_cache_repo_dir(hf_model_id)
+            watched = [d for d in (dest, hf_cache) if d is not None]
+            baseline = sum(_dir_bytes(d) for d in watched)
             stalled = threading.Event()
 
             try:
@@ -839,7 +856,7 @@ def _start_image_model_download(model_path: str):
                     last_change = time.time()
                     while not stop_monitor.is_set():
                         try:
-                            downloaded = max(0, _dir_bytes(dest) - baseline)
+                            downloaded = max(0, sum(_dir_bytes(d) for d in watched) - baseline)
                             now_m = time.time()
                             if downloaded != last_bytes:
                                 last_bytes = downloaded
