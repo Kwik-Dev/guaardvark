@@ -285,6 +285,22 @@ def test_forged_xff_from_direct_remote_peer_is_ignored(app, monkeypatch):
     assert response.get_json()["error"] == auth_guard.LOCAL_ONLY_MESSAGE
 
 
+def test_forged_xff_through_the_proxy_is_ignored(app, monkeypatch):
+    # A LAN device sends X-Forwarded-For: 127.0.0.1 to the UI port; the proxy
+    # appends the address it really saw, and that last entry is the one trusted.
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+
+    client = app.test_client()
+    response = client.post(
+        "/api/files/write",
+        headers={"X-Forwarded-For": "127.0.0.1, 192.168.1.20"},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["error"] == auth_guard.LOCAL_ONLY_MESSAGE
+
+
 def test_genuine_localhost_via_proxy_is_allowed(app, monkeypatch):
     # Operator on the box: browser → loopback proxy → backend, XFF also loopback.
     monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)

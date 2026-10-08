@@ -276,8 +276,9 @@ def _effective_client_ip():
     if _is_localhost(peer):
         xff = request.headers.get('X-Forwarded-For', '')
         if xff:
-            # Leftmost entry is the original client.
-            return xff.split(',')[0].strip()
+            # Rightmost entry: the proxy appends the address it saw to whatever
+            # the client sent, so earlier entries are the client's own claim.
+            return xff.split(',')[-1].strip()
     return peer
 
 
