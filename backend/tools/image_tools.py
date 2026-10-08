@@ -2596,11 +2596,14 @@ class OutpaintImageTool(BaseTool):
                 from backend.services.image_editing_packs import missing_message
                 return ToolResult(success=False, error=missing_message("outpaint_image"))
             image_url = f"/api/outputs/generated_images/{filename}"
+            done = ("Canvas extended (qwen)." if backend == "qwen" else
+                    "Kontext widened the view inside the original frame; the canvas size is "
+                    "unchanged. Install Qwen-Image-Edit to add canvas.")
             return ToolResult(
                 success=True,
-                output="\n".join([f"Canvas extended ({backend}).", f"Image URL: {image_url}", *_steps_lines(gen)]),
-                metadata={"image_url": image_url, "filename": filename, "backend": backend, "pad": pad,
-                          **_steps_metadata(gen)},
+                output="\n".join([done, f"Image URL: {image_url}", *_steps_lines(gen)]),
+                metadata={"image_url": image_url, "filename": filename, "backend": backend,
+                          "pad": pad if backend == "qwen" else None, **_steps_metadata(gen)},
             )
         except Exception as e:
             refusal = _gpu_refusal(e, gpu_wait)
