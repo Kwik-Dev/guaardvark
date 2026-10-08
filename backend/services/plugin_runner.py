@@ -69,6 +69,20 @@ from typing import List, Optional
 logger = logging.getLogger(__name__)
 
 
+def service_env(base: Optional[dict] = None) -> dict:
+    """The environment a plugin service (Ollama, ComfyUI, Audio Foundry) starts with.
+
+    A Celery worker hides the GPU from itself at import (indexing_service sets
+    CUDA_VISIBLE_DEVICES to ""), and every process it spawns inherits that,
+    this sidecar included. A service a background task starts would then run
+    on the CPU until restarted. A device number someone chose is kept.
+    """
+    env = dict(os.environ if base is None else base)
+    if env.get("CUDA_VISIBLE_DEVICES", None) == "":
+        env.pop("CUDA_VISIBLE_DEVICES")
+    return env
+
+
 # ============================================================================
 # SIDECAR (runs when this file is invoked as `python plugin_runner.py --sidecar`)
 # ============================================================================
@@ -107,6 +121,7 @@ def _sidecar_main() -> None:
                     text=True,
                     timeout=timeout,
                     cwd=cwd,
+                    env=service_env(),
                 )
                 resp = {
                     "id": req_id,
