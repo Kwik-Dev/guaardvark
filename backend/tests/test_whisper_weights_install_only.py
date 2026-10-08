@@ -113,7 +113,7 @@ class TestFasterWhisperLoadsLocalOnly(unittest.TestCase):
         hub = MagicMock(return_value="/cache/snapshot")
         with patch.object(fw, "download_model", hub):
             fw.install_model("tiny.en")
-        hub.assert_called_once_with("tiny.en")
+        hub.assert_called_once_with("tiny.en", use_auth_token=False)
 
     def test_turbo_install_check_stays_offline(self):
         hub = _OfflineHub(cached_path=None)
