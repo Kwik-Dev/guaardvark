@@ -25,7 +25,9 @@ from typing import Iterator, Optional
 
 from backend.utils.agent_display_utils import (
     AGENT_DISPLAY,
+    clear_display_in_use,
     is_display_idle_blocker_active,
+    mark_display_in_use,
     start_agent_display_if_needed,
 )
 from backend.utils.agent_web_gate import agent_firefox_pids, close_agent_firefox
@@ -200,31 +202,36 @@ def agent_browser_control() -> Iterator[Optional[str]]:
         yield busy
         return
 
-    if _port_open():
-        logger.info("agent browser control port already open; the browser is left as it is")
-        yield None
-        return
-
-    if not start_agent_display_if_needed():
-        logger.warning("agent display could not be started; the browser was not opened for the post")
-        yield None
-        return
-
-    was_running = bool(agent_firefox_pids())
-    if was_running and not _close():
-        logger.warning("agent browser did not exit; posting without restarting it")
-        yield None
-        return
-
+    # The backend's idle shutdown must not stop the display under the post.
+    mark_display_in_use()
     try:
-        if _launch(control_port=True):
-            ok, why = _bidi_answers(PORT_WAIT_S)
-            if ok:
-                logger.info("agent browser open with its control port for a post")
-            else:
-                logger.warning("agent browser control port did not answer within %.0fs: %s "
-                               "(agent Firefox running: %s)",
-                               PORT_WAIT_S, why, bool(agent_firefox_pids()))
-        yield None
+        if _port_open():
+            logger.info("agent browser control port already open; the browser is left as it is")
+            yield None
+            return
+
+        if not start_agent_display_if_needed():
+            logger.warning("agent display could not be started; the browser was not opened for the post")
+            yield None
+            return
+
+        was_running = bool(agent_firefox_pids())
+        if was_running and not _close():
+            logger.warning("agent browser did not exit; posting without restarting it")
+            yield None
+            return
+
+        try:
+            if _launch(control_port=True):
+                ok, why = _bidi_answers(PORT_WAIT_S)
+                if ok:
+                    logger.info("agent browser open with its control port for a post")
+                else:
+                    logger.warning("agent browser control port did not answer within %.0fs: %s "
+                                   "(agent Firefox running: %s)",
+                                   PORT_WAIT_S, why, bool(agent_firefox_pids()))
+            yield None
+        finally:
+            _restore(was_running)
     finally:
-        _restore(was_running)
+        clear_display_in_use()

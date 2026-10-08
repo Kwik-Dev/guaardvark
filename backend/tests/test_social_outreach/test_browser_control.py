@@ -68,6 +68,9 @@ def browser(monkeypatch):
     monkeypatch.setattr(control, "_launch", b.launch)
     monkeypatch.setattr(control, "_bidi_answers", b.bidi)
     monkeypatch.setattr(control, "GONE_WAIT_S", 0.0)
+    b.marks = []
+    monkeypatch.setattr(control, "mark_display_in_use", lambda: b.marks.append("mark"))
+    monkeypatch.setattr(control, "clear_display_in_use", lambda: b.marks.append("clear"))
     return b
 
 
@@ -86,6 +89,7 @@ def test_a_running_browser_is_restarted_with_the_port_and_put_back(browser):
     assert browser.events == [
         "close", "launch with port", "wait for port", "post", "close", "launch without port",
     ]
+    assert browser.marks == ["mark", "clear"]
     assert browser.running and not browser.with_port
 
 
@@ -107,6 +111,7 @@ def test_the_browser_is_put_back_when_the_post_raises(browser):
             raise RuntimeError("servo crashed")
 
     assert browser.events[-3:] == ["post", "close", "launch without port"]
+    assert browser.marks == ["mark", "clear"]
     assert browser.running and not browser.with_port
 
 
@@ -143,6 +148,7 @@ def test_a_port_that_never_answers_still_puts_the_browser_back(browser):
     assert browser.events == [
         "close", "launch with port", "wait for port", "post", "close", "launch without port",
     ]
+    assert browser.marks == ["mark", "clear"]
 
 
 def test_a_browser_that_will_not_exit_is_not_launched_over(browser):
@@ -403,3 +409,26 @@ def test_the_port_closes_when_a_poster_raises(app, tick, monkeypatch):
         run()
 
     assert events == ["open", "reddit_comment", "close"]
+
+
+def test_the_display_counts_as_in_use_while_a_post_holds_it(tmp_path, monkeypatch):
+    from backend.utils import agent_display_utils as adu
+
+    monkeypatch.setattr(adu, "_display_in_use_marker", lambda: str(tmp_path / "pids" / "agent_display_in_use"))
+    monkeypatch.setattr(adu, "get_agent_control_service",
+                        lambda: type("S", (), {"is_active": False, "is_learning": False})(), raising=False)
+    assert adu._display_marked_in_use() is False
+    adu.mark_display_in_use()
+    assert adu.is_display_idle_blocker_active() is True
+    adu.clear_display_in_use()
+    assert adu._display_marked_in_use() is False
+
+
+def test_a_marker_left_by_a_dead_process_does_not_block(tmp_path, monkeypatch):
+    from backend.utils import agent_display_utils as adu
+
+    marker = tmp_path / "agent_display_in_use"
+    marker.write_text("999999999")
+    monkeypatch.setattr(adu, "_display_in_use_marker", lambda: str(marker))
+    assert adu._display_marked_in_use() is False
+
