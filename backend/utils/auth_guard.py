@@ -37,6 +37,10 @@ PROTECTED_PREFIXES = (
     # Social outreach has kill switches, draft approval, and fetch-meta — none of
     # which should be reachable from another machine on the LAN without an API key.
     '/api/social-outreach/',
+    # Connections hold publishing accounts, approve or cancel held publishes,
+    # switch approval off and rotate the credential store's key. The bare path
+    # is the list and create route, so there is no trailing slash.
+    '/api/connections',
     # Raw file download for everything under data/outputs, chat exports and
     # screenshots included (backend/routes/download_route.py). Only MCP resource
     # links point here, and those are local; the web UI loads outputs through
@@ -272,8 +276,9 @@ def _effective_client_ip():
     if _is_localhost(peer):
         xff = request.headers.get('X-Forwarded-For', '')
         if xff:
-            # Leftmost entry is the original client.
-            return xff.split(',')[0].strip()
+            # Rightmost entry: the proxy appends the address it saw to whatever
+            # the client sent, so earlier entries are the client's own claim.
+            return xff.split(',')[-1].strip()
     return peer
 
 
@@ -399,6 +404,7 @@ def protected_summary() -> list[str]:
         "Editing files and browsing the server's folders",
         "Reading Guaardvark's own source (self-code)",
         "Social outreach",
+        "Connections and publishing",
         "Changing tasks, jobs, schedules, memory and GPU state",
         "Raw file downloads under /outputs/",
         "Managing this API key",

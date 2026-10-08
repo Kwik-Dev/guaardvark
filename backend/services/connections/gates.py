@@ -1,7 +1,8 @@
 """Safety gates for publishing.
 
 Publishing your own asset is a different act from unsolicited outreach, so it
-gets its own enable switch and defaults to on. The two paths still share one
+gets its own enable switch and defaults to on. Each publish still waits on the
+Approvals page unless a person switches approval off. The two paths share one
 per-platform cadence budget and one stop on all public posting
 (``kill_switch.posting_stop_reason``). That stop is its own setting, not the
 outreach on/off switch: outreach defaults off, and that must not hold back a
@@ -62,7 +63,8 @@ def set_publish_enabled(value: bool) -> None:
 
 
 def publish_supervised() -> bool:
-    return _setting(PUBLISH_SUPERVISED_KEY, "false") in _TRUTHY
+    """True unless a person switched approval off; a saved value wins."""
+    return _setting(PUBLISH_SUPERVISED_KEY, "true") in _TRUTHY
 
 
 def set_publish_supervised(value: bool) -> None:

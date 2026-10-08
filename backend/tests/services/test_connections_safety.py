@@ -58,7 +58,13 @@ def test_publishing_can_be_disabled(settings):
     assert gates.publish_enabled() is False
 
 
-def test_supervision_is_off_by_default_for_the_ui(settings):
+def test_supervision_is_on_by_default_for_the_ui(settings):
+    assert gates.publish_supervised() is True
+    assert gates.requires_approval("ui") is True
+
+
+def test_a_saved_supervision_off_is_honoured(settings):
+    settings[gates.PUBLISH_SUPERVISED_KEY] = "false"
     assert gates.publish_supervised() is False
     assert gates.requires_approval("ui") is False
 
@@ -66,6 +72,7 @@ def test_supervision_is_off_by_default_for_the_ui(settings):
 @pytest.mark.parametrize("source", ["chat", "mcp", "schedule"])
 def test_agent_initiated_publishes_always_require_approval(settings, source):
     """An agent must never publish without a human click."""
+    settings[gates.PUBLISH_SUPERVISED_KEY] = "false"
     assert gates.publish_supervised() is False
     assert gates.requires_approval(source) is True
 
@@ -94,6 +101,7 @@ def test_source_matching_ignores_case_and_padding():
 
 def test_an_unattributed_publish_is_supervised(settings):
     """A caller that omits its source must not land on the unsupervised branch."""
+    settings[gates.PUBLISH_SUPERVISED_KEY] = "false"
     assert gates.publish_supervised() is False
     assert gates.requires_approval(gates.normalize_source(None)) is True
 
@@ -212,6 +220,41 @@ def test_fresh_database_publishes_with_outreach_off(db_app, monkeypatch):
     assert ks.is_enabled() is False
     assert ks.posting_stop_reason() is None
     assert gates.check_can_publish("bluesky") == (True, None)
+
+
+def test_fresh_database_waits_for_approval(db_app):
+    """No settings row: a publish from the UI waits on the Approvals page."""
+    from backend.models import Setting, db
+
+    assert db.session.get(Setting, gates.PUBLISH_SUPERVISED_KEY) is None
+    assert gates.publish_supervised() is True
+    assert gates.requires_approval("ui") is True
+
+
+def test_a_saved_supervision_off_row_is_honoured(db_app):
+    from backend.models import Setting, db
+
+    gates.set_publish_supervised(False)
+
+    assert db.session.get(Setting, gates.PUBLISH_SUPERVISED_KEY).value == "false"
+    assert gates.publish_supervised() is False
+    assert gates.requires_approval("ui") is False
+
+
+def test_settings_route_reports_and_saves_supervision(db_app):
+    """The Connections page reads and writes the switch through this route."""
+    from backend.api.connections_api import connections_bp
+
+    db_app.register_blueprint(connections_bp)
+    client = db_app.test_client()
+
+    assert client.get("/api/connections/settings").get_json()["publish_supervised"] is True
+    saved = client.post("/api/connections/settings", json={"publish_supervised": False})
+    assert saved.get_json()["publish_supervised"] is False
+    assert client.get("/api/connections/settings").get_json()["publish_supervised"] is False
+    # Changing the other switch leaves the saved choice alone.
+    client.post("/api/connections/settings", json={"publish_enabled": True})
+    assert client.get("/api/connections/settings").get_json()["publish_supervised"] is False
 
 
 def _publish_row(status, **fields):
