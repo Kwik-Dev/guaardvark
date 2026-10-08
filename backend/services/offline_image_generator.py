@@ -565,8 +565,9 @@ class OfflineImageGenerator:
             if component.startswith("_") or component in self._WEIGHTLESS_COMPONENTS:
                 continue
             # Component entries look like ["diffusers", "AutoencoderKL"]; anything
-            # else (nulls for optional pieces, scalars) carries no weights to check.
-            if not isinstance(spec, (list, tuple)) or len(spec) != 2:
+            # else carries no weights to check. save_pretrained writes an absent
+            # optional piece (safety_checker, image_encoder) as [null, null].
+            if not isinstance(spec, (list, tuple)) or len(spec) != 2 or None in spec:
                 continue
             comp_dir = model_path / component
             if not comp_dir.is_dir():
@@ -819,6 +820,14 @@ class OfflineImageGenerator:
             return guidance_scale <= 1.0
         return False
 
+    def _limits_row(self, model_id: str) -> dict:
+        """The IMAGE_MODEL_LIMITS row for a catalog key or the HF id it maps to."""
+        from backend.services.media_model_registry import IMAGE_MODEL_LIMITS
+        key = model_id or ""
+        if key not in IMAGE_MODEL_LIMITS:
+            key = next((k for k, v in self.available_models.items() if v == model_id), key)
+        return IMAGE_MODEL_LIMITS.get(key) or {}
+
     def _model_family(self, model_id: str) -> str:
         """Map a catalog key or HF model id to a pipeline family.
 
@@ -988,6 +997,8 @@ class OfflineImageGenerator:
                 base = int(_image_limits_for("flux")["vram_mb"])
             elif family == "krea2" and self._will_use_sequential_for_krea2():
                 base = self._KREA2_SEQUENTIAL_VRAM_MB
+            elif family == "sdxl" and self._sdxl_offloads():
+                base = int(_image_limits_for("sdxl")["vram_mb_offload"])
             else:
                 base = self._FAMILY_VRAM_MB.get(family, 4000)
         extra_mp = self._extra_megapixels(width, height)
@@ -1191,6 +1202,12 @@ class OfflineImageGenerator:
         msg = (str(exc) or "").lower()
         return "out of memory" in msg and ("cuda" in msg or "cublas" in msg or "cudnn" in msg)
 
+    def _sdxl_offloads(self) -> bool:
+        """True when this card is too small to hold SDXL whole (see the sdxl family row)."""
+        below = _image_limits_for("sdxl").get("offload_below_vram_gb")
+        total = self._cuda_total_vram_gb()
+        return bool(below) and 0 < total < float(below)
+
     def _prefer_krea2_for_auto(self) -> bool:
         """Krea2 is aesthetic-first but ~14GB peak; only auto-lead on roomy GPUs."""
         return self._cuda_total_vram_gb() >= 20.0
@@ -1267,6 +1284,8 @@ class OfflineImageGenerator:
             key = "zimage-turbo"
         elif family == "krea2":
             key = "krea2-raw" if self._krea2_variant(request.model or "") == "raw" else "krea2-turbo"
+        elif self._limits_row(request.model).get("distilled"):
+            key = request.model
         else:
             return
         from backend.services.image_render_limits import envelope_cfg, envelope_steps
@@ -1633,9 +1652,18 @@ class OfflineImageGenerator:
                 )
 
             # Flow-matching DiTs ship their own scheduler — don't force DPM (SD/SDXL only).
-            if family not in ('zimage', 'krea2'):
+            # Distilled models (row "distilled") keep theirs too.
+            if family not in ('zimage', 'krea2') and not self._limits_row(model_id).get("distilled"):
+                sched_cfg = self._pipeline.scheduler.config
+                # A DEIS config (Realistic Vision 5.1) carries algorithm_type "deis",
+                # which DPMSolver rejects with its default final_sigmas_type.
+                dpm_kwargs = {}
+                if sched_cfg.get("algorithm_type") not in (
+                    None, "dpmsolver", "dpmsolver++", "sde-dpmsolver", "sde-dpmsolver++"
+                ):
+                    dpm_kwargs = {"algorithm_type": "dpmsolver++", "solver_type": "midpoint"}
                 self._pipeline.scheduler = DPMSolverMultistepScheduler.from_config(
-                    self._pipeline.scheduler.config
+                    sched_cfg, **dpm_kwargs
                 )
 
             # Z-Image / Krea 2 are flow-matching DiTs too large to sit fully resident
@@ -1672,6 +1700,18 @@ class OfflineImageGenerator:
                         logger.warning(f"{family} CPU offload unavailable ({e}); loading fully on GPU")
                         self._pipeline = self._pipeline.to(self._device)
                         offload_mode = "full"
+            elif family == 'sdxl' and self._device == "cuda" and self._sdxl_offloads():
+                try:
+                    self._pipeline.enable_model_cpu_offload()
+                    offload_mode = "model"
+                    logger.info(
+                        f"sdxl: enabled model CPU offload "
+                        f"(VRAM={self._cuda_total_vram_gb():.1f}GB is too small to hold it whole)"
+                    )
+                except Exception as e:
+                    logger.warning(f"sdxl CPU offload unavailable ({e}); loading fully on GPU")
+                    self._pipeline = self._pipeline.to(self._device)
+                    offload_mode = "full"
             else:
                 self._pipeline = self._pipeline.to(self._device)
                 offload_mode = "full"
@@ -2379,6 +2419,7 @@ Negative Prompt: {negative_prompt}""",
             if (
                 self._has_text_intent(request.prompt)
                 and "sd-xl" in self.available_models
+                and self._is_model_downloaded(self.available_models["sd-xl"])
                 and request.model in (None, "", "auto", "sdxl-turbo")
             ):
                 if request.model != "sd-xl":
@@ -2479,7 +2520,7 @@ Negative Prompt: {negative_prompt}""",
                 # those turbo params produce soft/painterly "artwork" instead of photos.
                 # Turbo/DiT: soft-clamp only so quality presets/sliders are not placebo.
                 # SDXL: hard correct (black-image / turbo-leftover hazards).
-                if family in ('krea2', 'zimage'):
+                if family in ('krea2', 'zimage') or self._limits_row(request.model).get("distilled"):
                     self._soft_clamp_family_sampling(request, family)
                 elif family == 'sdxl':
                     if request.guidance_scale > 9.0:

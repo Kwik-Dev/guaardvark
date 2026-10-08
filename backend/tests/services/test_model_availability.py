@@ -321,6 +321,21 @@ class TestAbortedDownloadDetection(unittest.TestCase):
             with patch.object(g, "_get_model_path", return_value=root):
                 self.assertFalse(g._is_model_downloaded("x/y"))
 
+    def test_absent_optional_components_do_not_count_as_missing(self):
+        """save_pretrained writes an absent safety_checker / image_encoder as [null, null]."""
+        import tempfile, json
+        g = _gen()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "m"
+            self._tree(root, shards_present=True)
+            idx = json.loads((root / "model_index.json").read_text())
+            idx["feature_extractor"] = [None, None]
+            idx["image_encoder"] = [None, None]
+            idx["safety_checker"] = [None, None]
+            (root / "model_index.json").write_text(json.dumps(idx))
+            with patch.object(g, "_get_model_path", return_value=root):
+                self.assertTrue(g._is_model_downloaded("x/y"))
+
 
 class TestRepoAccessProbe(unittest.TestCase):
 
