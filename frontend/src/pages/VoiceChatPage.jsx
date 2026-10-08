@@ -19,6 +19,7 @@ import { useShallow } from "zustand/react/shallow";
 import voiceService from "../api/voiceService";
 import GlobalMicButton from "../components/voice/GlobalMicButton";
 import VoiceListeningSettings from "../components/voice/VoiceListeningSettings";
+import SpeechModelSelect from "../components/voice/SpeechModelSelect";
 import { useVoiceSession, useVoiceSessionState } from "../contexts/VoiceSessionContext";
 import { useAppStore } from "../stores/useAppStore";
 import brand from "../config/brand";
@@ -185,6 +186,9 @@ const VoiceChatPage = () => {
               Open voice settings
             </Button>
           )}
+          <Box sx={{ mt: 2 }}>
+            <SpeechModelSelect reloadKey={status} onChange={loadStatus} />
+          </Box>
 
           <Divider sx={{ my: 2 }} />
           <Typography variant="subtitle2" sx={{ mb: 0.5 }}>

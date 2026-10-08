@@ -131,8 +131,11 @@ def handle_voice_stream_end(data):
             audio_io = io.BytesIO(audio_bytes)
             audio_array = decode_audio(audio_io)
 
-            # Use tiny.en for fastest streaming response
-            final_text, processing_time = transcribe_audio_faster(audio_array, model_size="tiny.en")
+            # The model chosen in Settings → Voice (tiny.en unless changed).
+            from backend.api.voice_api import resolve_speech_model
+            final_text, processing_time = transcribe_audio_faster(
+                audio_array, model_size=resolve_speech_model()
+            )
 
             emit("voice:final_transcript", {
                 "text": final_text,
