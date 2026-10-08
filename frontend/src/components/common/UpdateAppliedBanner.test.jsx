@@ -2,6 +2,7 @@ import React from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import UpdateAppliedBanner, { describeUpdate } from "./UpdateAppliedBanner";
+import { useAppStore } from "../../stores/useAppStore";
 
 let mockHealth = null;
 vi.mock("../../contexts/HealthContext", () => ({
@@ -108,5 +109,20 @@ describe("UpdateAppliedBanner", () => {
     mockHealth = health({ restart_required: true, restart_reason: "backend code changed", update: frontendUpdate(500) });
     render(<UpdateAppliedBanner />);
     expect(screen.getByRole("status")).toBeInTheDocument();
+  });
+
+  it("tells the app store while it is up, so a tip card stays out of its way", () => {
+    mockHealth = health({ restart_required: true, restart_reason: "backend code changed" });
+    const { unmount } = render(<UpdateAppliedBanner />);
+    expect(useAppStore.getState().updateNoticeVisible).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(useAppStore.getState().updateNoticeVisible).toBe(false);
+    unmount();
+
+    mockHealth = health({ restart_required: true, restart_reason: "dependencies changed", disk_version: "3.0.2" });
+    const second = render(<UpdateAppliedBanner />);
+    expect(useAppStore.getState().updateNoticeVisible).toBe(true);
+    second.unmount();
+    expect(useAppStore.getState().updateNoticeVisible).toBe(false);
   });
 });

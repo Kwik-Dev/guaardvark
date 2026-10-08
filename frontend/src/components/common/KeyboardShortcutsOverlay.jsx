@@ -16,6 +16,9 @@ import {
 import CloseIcon from "@mui/icons-material/Close";
 import KeyboardIcon from "@mui/icons-material/Keyboard";
 
+/** Dispatch on window to open the shortcuts reference from elsewhere (a tip's "Show me"). */
+export const SHOW_SHORTCUTS_EVENT = "guaardvark:show-shortcuts";
+
 // Real shortcuts wired elsewhere in the app — keep this list in sync with the
 // handlers that own each key (referenced in comments) rather than inventing new
 // ones. `?` itself is owned here.
@@ -111,8 +114,13 @@ const KeyboardShortcutsOverlay = () => {
       e.preventDefault();
       setOpen((prev) => !prev);
     };
+    const onShow = () => setOpen(true);
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    window.addEventListener(SHOW_SHORTCUTS_EVENT, onShow);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener(SHOW_SHORTCUTS_EVENT, onShow);
+    };
   }, []);
 
   return (
