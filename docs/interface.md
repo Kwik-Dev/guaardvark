@@ -74,6 +74,7 @@ Right-click an **empty part of the dashboard** for:
 | Files | a folder | Open in Window, Cut, Copy, Paste, a colour, Rename, Properties, Index Contents, Delete |
 | Files | a file | Cut, Copy, Paste, Download, Rename, Properties, Index, Delete, plus Edit, View or Open in Code Editor for the file types that have them |
 | Media | the background | New Folder, Select All, Sort by Name, Date or Size, Arrange Icons, Arrange Windows |
+| Media | empty space in a folder window | New Folder, Paste into this folder, Select All, Sort by Name, Date or Size, all for the folder the window shows |
 | Media | an image | View Full Size, Edit, Share / Publish…, Cut, Copy, Download, Rename, Delete |
 | Notes | the background | New Note, Cycle Layout, Go to Dashboard |
 | Notes | a note | a colour, Duplicate, Rename, Pin to Top, Delete (and Copy, Select all, Paste inside the text) |
