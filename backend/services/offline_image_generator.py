@@ -1716,22 +1716,21 @@ class OfflineImageGenerator:
             else:
                 gpu_dtype = torch.float32
 
+            load_kwargs = {
+                "torch_dtype": gpu_dtype,
+            }
+
             # Sana on a card without native bf16 (Pascal, Turing): the transformer
             # and VAE run in fp32 and only the Gemma encoder in bf16. In fp16 the
-            # 1.6B transformer renders black frames (GTX 1080, 2026-10-08).
-            sana_encoder_dtype = None
+            # 1.6B transformer renders black frames (GTX 1080, 2026-10-08). The
+            # encoder loads straight to bf16: an fp32 copy first is 10 GB of RAM.
             if (
                 family == 'sana'
                 and self._device == "cuda"
                 and not torch.cuda.is_bf16_supported(including_emulation=False)
             ):
-                gpu_dtype = torch.float32
-                sana_encoder_dtype = torch.bfloat16
+                load_kwargs["torch_dtype"] = {"text_encoder": torch.bfloat16, "default": torch.float32}
                 logger.info("sana: float32 transformer/VAE, bfloat16 text encoder (no native bf16)")
-
-            load_kwargs = {
-                "torch_dtype": gpu_dtype,
-            }
 
             if family == 'sd':
                 load_kwargs["safety_checker"] = None
@@ -1749,8 +1748,6 @@ class OfflineImageGenerator:
                     model_path,
                     **load_kwargs
                 )
-            if sana_encoder_dtype is not None:
-                self._pipeline.text_encoder.to(sana_encoder_dtype)
 
             # Flow-matching DiTs ship their own scheduler — don't force DPM (SD/SDXL only).
             # Distilled models (row "distilled") keep theirs too.
