@@ -1,7 +1,7 @@
 // frontend/src/components/modals/UpscalingModelsModal.jsx
 // Install registered upscaling weights (plugin model registry).
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   Dialog,
   DialogTitle,
@@ -47,11 +47,14 @@ function buildRows(payload) {
   return rows;
 }
 
-const UpscalingModelsModal = ({ open, onClose, showMessage, onInstalled }) => {
+// installModelName: opened from a page's Install button. That row's install
+// starts once the list has loaded, as if the person had clicked Install on it.
+const UpscalingModelsModal = ({ open, onClose, showMessage, onInstalled, installModelName }) => {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [downloadingName, setDownloadingName] = useState(null);
+  const installStartedRef = useRef(false);
 
   const isDownloading = downloadingName != null;
 
@@ -76,6 +79,7 @@ const UpscalingModelsModal = ({ open, onClose, showMessage, onInstalled }) => {
       setRows([]);
       setError(null);
       setDownloadingName(null);
+      installStartedRef.current = false;
     }
   }, [open, fetchModels]);
 
@@ -97,6 +101,14 @@ const UpscalingModelsModal = ({ open, onClose, showMessage, onInstalled }) => {
       setDownloadingName(null);
     }
   };
+
+  useEffect(() => {
+    if (!open || !installModelName || loading || installStartedRef.current) return;
+    const row = rows.find((r) => r.name === installModelName);
+    if (!row) return;
+    installStartedRef.current = true;
+    if (!row.is_downloaded) handleDownload(row.name);
+  }, [open, installModelName, loading, rows]);
 
   return (
     <Dialog open={open} onClose={() => !isDownloading && onClose()} maxWidth="sm" fullWidth>
@@ -140,7 +152,7 @@ const UpscalingModelsModal = ({ open, onClose, showMessage, onInstalled }) => {
                     secondary={
                       model.is_downloaded
                         ? "Ready to use in the upscaler"
-                        : "Not installed — download to enable in the model dropdown"
+                        : "Not installed — Install adds it to the model dropdown"
                     }
                   />
 

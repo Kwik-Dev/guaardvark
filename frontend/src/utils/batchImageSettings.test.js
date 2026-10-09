@@ -3,8 +3,10 @@ import {
   buildFinalPrompts,
   clampQuantity,
   ignoresNegativeAndAnatomy,
+  imageModelOption,
   isZimageModel,
   modelFamily,
+  modelInstallNeed,
   qualityPresetsForModel,
   resolveQualityPreset,
 } from './batchImageSettings';
@@ -100,5 +102,38 @@ describe('buildFinalPrompts', () => {
   it('returns [] for empty input so callers can refuse to start', () => {
     expect(buildFinalPrompts({ inputMode: 'single', batchItems: '  ', lookAndFeel: 'x', quantity: 3 })).toEqual([]);
     expect(buildFinalPrompts({ inputMode: 'bulk', batchItems: '\n\n', lookAndFeel: '', quantity: 1 })).toEqual([]);
+  });
+});
+
+describe('model install state', () => {
+  const row = (id, extra) => ({ id, label: id, name: id, size_gb: 16, ...extra });
+  const AUTO = { value: 'auto', label: 'Auto' };
+
+  it('describes a missing model as needing Install, not as a first-use download', () => {
+    const opt = imageModelOption(row('zimage-turbo', { is_downloaded: false, availability: 'downloadable' }));
+    expect(opt.installed).toBe(false);
+    expect(opt.description).toContain('not installed');
+    expect(opt.description).toContain('Install downloads ~16 GB');
+    expect(opt.description).not.toContain('first use');
+    expect(imageModelOption(row('sd-xl', { is_downloaded: true })).installed).toBe(true);
+  });
+
+  it('blocks Generate for a picked model that is not installed', () => {
+    const options = [AUTO, imageModelOption(row('krea2-turbo', { is_downloaded: false }))];
+    const need = modelInstallNeed(options, 'krea2-turbo');
+    expect(need.blocks).toBe(true);
+    expect(need.option.value).toBe('krea2-turbo');
+  });
+
+  it('never blocks Auto, and points it at the recommended model when nothing is installed', () => {
+    const none = [
+      AUTO,
+      imageModelOption(row('sd-xl', { is_downloaded: false })),
+      imageModelOption(row('zimage-turbo', { is_downloaded: false, recommended: true })),
+    ];
+    expect(modelInstallNeed(none, 'auto')).toEqual({ option: none[2], blocks: false });
+    const some = [AUTO, imageModelOption(row('sd-xl', { is_downloaded: true }))];
+    expect(modelInstallNeed(some, 'auto')).toBeNull();
+    expect(modelInstallNeed(some, 'sd-xl')).toBeNull();
   });
 });

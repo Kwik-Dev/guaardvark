@@ -2,6 +2,9 @@
 
 Handles model registry, download, loading into VRAM, torch.compile,
 and precision control. One model in VRAM at a time (LRU-1).
+
+Weights arrive only through ``download_model`` (the Install button, POST
+/models/download). Loading a model that is not on disk is refused.
 """
 import logging
 import os
@@ -97,6 +100,11 @@ def _registry_entry(name: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+class ModelNotInstalledError(FileNotFoundError):
+    """The requested model's weights are not on disk. The message names the
+    model and what to do about it."""
+
+
 class ModelManager:
     """Manages upscaling model lifecycle: download, load, compile, evict."""
 
@@ -115,6 +123,25 @@ class ModelManager:
 
     def is_downloaded(self, name: str) -> bool:
         return os.path.isfile(self._model_path(name))
+
+    def missing_model_message(self, name: str) -> Optional[str]:
+        """Why ``name`` cannot be used, or None when its weights are on disk.
+
+        Raises ValueError for a name that would resolve outside the models dir.
+        """
+        if self.is_downloaded(name):
+            return None
+        if _registry_entry(name):
+            return (
+                f"Upscaling model '{name}' is not installed. Install it from the "
+                "Upscaling page (Manage Upscaling Models), then try again. "
+                "Upscaling never downloads a model on its own."
+            )
+        return (
+            f"Upscaling model '{name}' was not found: it is not one the Upscaling "
+            f"page installs and there is no {name}.pth in {self.models_dir}. "
+            "Pick an installed model."
+        )
 
     def list_models(self) -> Dict[str, List[Dict[str, Any]]]:
         """List downloaded and available (not yet downloaded) models."""
@@ -149,7 +176,7 @@ class ModelManager:
         return {"downloaded": downloaded, "available": available}
 
     def download_model(self, name: str) -> str:
-        """Download a model from the registry. Returns local path."""
+        """Download a model from the registry (the Install route only). Returns local path."""
         entry = _registry_entry(name)
         if not entry:
             raise ValueError(f"Unknown model: {name}. Drop custom .pth files into {self.models_dir}")
@@ -163,16 +190,17 @@ class ModelManager:
         return dest
 
     def load_model(self, name: str) -> None:
-        """Load a model into VRAM via spandrel. Evicts previous model."""
-        import spandrel
+        """Load a model into VRAM via spandrel. Evicts previous model.
 
+        Raises ModelNotInstalledError when the weights are not on disk; it
+        never downloads them.
+        """
         model_path = self._model_path(name)
-        if not os.path.isfile(model_path):
-            entry = _registry_entry(name)
-            if entry:
-                self.download_model(name)
-            else:
-                raise FileNotFoundError(f"Model file not found: {model_path}")
+        missing = self.missing_model_message(name)
+        if missing:
+            raise ModelNotInstalledError(missing)
+
+        import spandrel
 
         # Evict current model
         if self._model is not None:

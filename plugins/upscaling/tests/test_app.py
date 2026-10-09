@@ -129,6 +129,90 @@ def test_upscale_images_validates_inputs_exist(client):
     assert resp.status_code == 400
 
 
+def _empty_models_dir(monkeypatch, tmp_path):
+    """Point the service at an empty models dir; any download fails the test."""
+    import service.app as app_module
+    import service.model_manager as model_manager_module
+    from service.model_manager import ModelManager
+
+    def _no_download(*_args, **_kwargs):
+        raise AssertionError("an upscale request must not download a model")
+
+    monkeypatch.setattr(model_manager_module, "urlretrieve", _no_download)
+    monkeypatch.setattr(
+        app_module,
+        "_model_manager",
+        ModelManager(models_dir=str(tmp_path / "models"), precision="fp32", compile_enabled=False),
+    )
+    return app_module
+
+
+def test_upscale_image_refuses_a_model_that_is_not_installed(client, monkeypatch, tmp_path):
+    import cv2
+    import numpy as np
+
+    _empty_models_dir(monkeypatch, tmp_path)
+    source = tmp_path / "in.png"
+    cv2.imwrite(str(source), np.zeros((8, 8, 3), np.uint8))
+
+    resp = client.post(
+        "/upscale/image",
+        json={
+            "input_path": str(source),
+            "output_path": str(tmp_path / "out.png"),
+            "model": "RealESRGAN_x2plus",
+        },
+        headers=AUTH_HEADER,
+    )
+
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert "'RealESRGAN_x2plus' is not installed" in detail
+    assert "Manage Upscaling Models" in detail
+    assert not (tmp_path / "out.png").exists()
+
+
+def test_upscale_video_refuses_the_default_model_before_queueing(client, monkeypatch, tmp_path):
+    app_module = _empty_models_dir(monkeypatch, tmp_path)
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"not decoded: the refusal comes first")
+
+    resp = client.post("/upscale/video", json={"input_path": str(source)}, headers=AUTH_HEADER)
+
+    assert resp.status_code == 409
+    assert f"'{app_module._config.default_model}' is not installed" in resp.json()["detail"]
+    jobs = client.get("/jobs", headers=AUTH_HEADER).json()
+    assert all(job["input_path"] != str(source) for job in jobs)
+
+
+def test_a_queued_job_records_the_refusal_as_its_error(client, monkeypatch, tmp_path):
+    """Watch-folder jobs reach the worker without the request check."""
+    import functools
+    import threading
+
+    app_module = _empty_models_dir(monkeypatch, tmp_path)
+    # The worker's free-VRAM check would fail first on a busy card.
+    monkeypatch.setattr(
+        torch.cuda, "is_available", functools.wraps(torch.cuda.is_available)(lambda: False)
+    )
+    job = app_module._job_manager.create_job(
+        input_path=str(tmp_path / "a.png"),
+        output_path=str(tmp_path / "out"),
+        model="RealESRGAN_x2plus",
+        scale=0,
+        kind="image_batch",
+    )
+
+    app_module._run_image_batch_job(
+        job["job_id"], [str(tmp_path / "a.png")], str(tmp_path / "out"), "RealESRGAN_x2plus",
+        None, 0.0, 0.3, False, False, "upscaled", threading.Event(),
+    )
+
+    stored = app_module._job_manager.get_job(job["job_id"])
+    assert stored["status"] == "failed"
+    assert "'RealESRGAN_x2plus' is not installed" in stored["error"]
+
+
 def test_atomic_imwrite_keeps_the_target_extension(tmp_path):
     """OpenCV picks its encoder off the final extension, so the temp file keeps it."""
     import numpy as np

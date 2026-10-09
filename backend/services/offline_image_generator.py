@@ -192,9 +192,9 @@ class ImageGenerationRequest:
     # Character LoRAs (Z-Image / future). Paths to .safetensors + optional strength.
     loras: Optional[List[str]] = None
     lora_scale: float = 1.0
-    # Only the Studio page sets this: its model picker says a model that is not
-    # installed "downloads ~N GB on first use". Chat, agents, MCP and edits never
-    # download; a missing model is refused with where to install it.
+    # Lets generation download a model that is not installed. No caller in the
+    # product sets it: the Studio, chat, agents, MCP and edits all refuse a
+    # missing model with where to install it, and Install fetches it.
     allow_model_download: bool = False
 
 @dataclass
@@ -825,9 +825,9 @@ class OfflineImageGenerator:
             )
         if getattr(self, "_install_needed", None) == model_id:
             return (
-                f"'{model_key}' is not installed ({model_id}). Install it in Settings > Model "
-                "libraries > Image, or pick an installed model. Generating from chat, agents "
-                "or MCP never downloads a model on its own."
+                f"'{model_key}' is not installed ({model_id}). Install it from Manage models "
+                "on the Images page or Settings > Model libraries > Image, or pick an "
+                "installed model. Generating never downloads a model on its own."
             )
         if not self._is_model_downloaded(model_id):
             access = self._probe_repo_access(model_id)
@@ -865,9 +865,9 @@ class OfflineImageGenerator:
     def missing_model_message(self, model_key: str) -> Optional[str]:
         """The install hint when an offline model's weights are not on this machine, else None.
 
-        For the paths that may not download (everything but the Studio page);
-        checked before any GPU admission, which would evict the chat model for
-        a request about to be refused.
+        For every generation path, none of which downloads; checked before any
+        GPU admission, which would evict the chat model for a request about to
+        be refused.
         """
         if not model_key or model_key == "auto" or self.is_comfy_only_model(model_key):
             return None
@@ -3865,7 +3865,7 @@ Negative Prompt: {negative_prompt}""",
         dropdowns are driven entirely from this single source, plus ``availability``:
 
           ``ready``          weights on disk, selectable now
-          ``downloadable``   not on disk but fetchable — selecting it starts a download
+          ``downloadable``   not on disk but fetchable — Install fetches it; selecting it does not
           ``needs_token``    gated repo and no HF_TOKEN configured
           ``unreachable``    not on disk and the repo could not be reached
 
