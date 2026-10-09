@@ -115,7 +115,7 @@ Short, unscripted-feeling screen recordings of the real system doing real work �
 - Swarm: parallel agents in isolated git worktrees (Claude Code or fully local Cline/OpenClaw via Ollama), Flight Mode (offline), dependency-ordered merge, cost tracking, up to 20 concurrent.
 - Film Crew: 5 specialized agents that turn a logline into a finished video (script → casting with LoRAs → shots → keyframes → edit).
 - Self-improvement engine (test → agent fix → verify → broadcast) with guardian review and kill switches.
-- Supervised social outreach (Reddit fully working; others drafting+review ready) with persona, grading, cadence, audit, and global kill switch.
+- Supervised social outreach (Reddit and Facebook post end to end; others drafting+review ready) with persona, grading, cadence, audit, and global kill switch.
 - MCP server + client integration (Claude Desktop, Cursor, etc.).
 
 **Knowledge, Code & Workflow**
@@ -311,7 +311,7 @@ A supervised, auditable framework for drafting and posting authentic comments on
 3. **Draft** — your local LLM composes a reply grounded in the thread context plus citations from your indexed documents (clients, projects, products, examples — whatever you've fed the knowledge base).
 4. **Grade** — every draft is scored against a relevance + quality rubric. Anything below threshold is dropped before it reaches the queue. Generic "great post!" replies don't survive grading.
 5. **Review** — drafts land in a queue. In supervised mode (the default), nothing posts without your approval. Edit, save, approve, reject — your call on each one.
-6. **Post** — approved drafts post via the logged-in browser session (Reddit/YouTube servo) or Discord API, cadence-gated. Natural language from chat (`/outreach …`) or `llx outreach "…"` runs recon+draft; posting still needs approve while supervised. Twitter/Facebook drafting works; auto-post for those platforms is not wired.
+6. **Post** — approved drafts post via the logged-in browser session (Reddit comments and link posts, Facebook comments, YouTube) or Discord API, cadence-gated. The Reddit and Facebook posters read the page at every step: they check the browser is still on the approved post, read the text back out of the box before submitting, and count a post only once it shows on the page. Natural language from chat (`/outreach …`) or `llx outreach "…"` runs recon+draft; posting still needs approve while supervised. Twitter/X drafting works; posting there is not yet verified.
 
 **Three layers of safety**:
 
@@ -622,7 +622,7 @@ PostgreSQL  Redis  Ollama  Agent Display (:99, on-demand)  ComfyUI / Audio Found
 See the more detailed view in the project plans and CAPABILITIES for status.
 
 **Near term / in flight**
-- Polish + full platform support for supervised outreach (Discord, X, Facebook posting).
+- Polish + full platform support for supervised outreach (Discord, X posting).
 - Stronger tier-gated memory and conversation context.
 - Continued video/music pipeline unification and Film Crew robustness.
 - Plugin GPU auto-orchestration (intent-driven start/stop based on route + VRAM).
