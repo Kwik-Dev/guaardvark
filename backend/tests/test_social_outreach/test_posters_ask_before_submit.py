@@ -98,7 +98,7 @@ def events(monkeypatch):
         "url": "https://www.reddit.com/r/SideProject/submit/?type=LINK", "kind": "LINK",
         "title": "a title", "link": "https://guaardvark.com",
         "button": {"disabled": False, "shown": True, "x": 600, "y": 900}}, ""))
-    monkeypatch.setattr(self_share, "_post_landed", lambda subreddit, title: (True, "posted"))
+    monkeypatch.setattr(self_share, "_post_landed", lambda *a, **k: (True, "posted"))
 
     def facebook_box(*args, **kwargs):
         box = focused_editable()

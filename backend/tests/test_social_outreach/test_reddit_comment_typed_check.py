@@ -23,7 +23,7 @@ TEXT = "The Matryoshka part is a huge win for local RAG."
 def rig(monkeypatch):
     """A recording screen and a page whose focus and thread the test sets."""
     state = {"log": [], "focus": {"editable": True, "tag": "div", "label": ""},
-             "drop": 0, "thread": {"foundInThread": True, "composerEmpty": True, "errorVisible": False}}
+             "drop": 0, "clears": True, "thread": {"foundInThread": True, "composerEmpty": True, "errorVisible": False}}
 
     class Screen:
         def click(self, x, y):
@@ -35,6 +35,8 @@ def rig(monkeypatch):
 
         def hotkey(self, *keys):
             state["log"].append("hotkey " + "+".join(keys))
+            if keys == ("BackSpace",) and state["clears"]:
+                state["focus"] = {**state["focus"], "text": ""}
 
     class Service:
         is_active = False
@@ -108,6 +110,21 @@ def test_visible_error_is_a_plain_failure(rig):
     ok, reason = reddit_outreach.post_comment_via_servo(PERMALINK, TEXT)
     assert ok is False
     assert reason.startswith("submit_failed")
+
+
+def test_a_restored_draft_is_emptied_before_typing(rig):
+    rig["focus"] = {"editable": True, "tag": "div", "label": "", "text": "an unsent comment from before"}
+    assert reddit_outreach.post_comment_via_servo(PERMALINK, TEXT) == (True, "ok")
+    assert rig["log"][1:4] == ["hotkey ctrl+a", "hotkey BackSpace", "type"]
+
+
+def test_a_draft_that_will_not_clear_types_nothing(rig):
+    rig["focus"] = {"editable": True, "tag": "div", "label": "", "text": "an unsent comment from before"}
+    rig["clears"] = False
+    ok, reason = reddit_outreach.post_comment_via_servo(PERMALINK, TEXT)
+    assert ok is False
+    assert reason.startswith("composer_not_empty: nothing was posted")
+    assert "type" not in rig["log"]
 
 
 def test_same_text_ignores_paragraph_breaks():
