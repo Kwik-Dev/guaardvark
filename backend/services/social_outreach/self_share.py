@@ -34,11 +34,25 @@ from backend.services.social_outreach.transitions import WITHDRAWN_BEFORE_SUBMIT
 
 logger = logging.getLogger(__name__)
 
-# Reads the page after the submit: its address, and whether the title is on
-# it (outside any text box, compared with all whitespace removed).
+# Reads the page after the submit: its address, whether the title is on it
+# (outside any text box, compared with all whitespace removed), and, for a
+# subreddit feed, the permalink of a listed post with this title and link
+# created since the submit. Reddit sometimes returns to the feed after Post.
 _POST_CHECK_JS = r"""(() => {
   const squash = (s) => (s || '').replace(/\s+/g, '');
   const want = squash(__TITLE__);
+  const link = squash(__LINK__).replace(/\/+$/, '');
+  const since = __SINCE__;
+  const when = (s) => Date.parse((s || '').replace(/(\.\d{3})\d*/, '$1').replace(/([+-]\d\d)(\d\d)$/, '$1:$2')) || 0;
+  let listed = '';
+  for (const p of document.querySelectorAll('shreddit-post')) {
+    const href = squash(p.getAttribute('content-href')).replace(/\/+$/, '');
+    if (want && squash(p.getAttribute('post-title')) === want && (!link || href === link)
+        && when(p.getAttribute('created-timestamp')) >= since) {
+      listed = p.getAttribute('permalink') || '';
+      break;
+    }
+  }
   const SKIP = 'script, style, noscript, template, textarea, [contenteditable]:not([contenteditable="false"])';
   let text = document.title || '';
   const walk = (root) => {
@@ -53,7 +67,7 @@ _POST_CHECK_JS = r"""(() => {
     }
   };
   walk(document.body || document.documentElement);
-  return JSON.stringify({url: location.href, title_on_page: !!want && squash(text).includes(want)});
+  return JSON.stringify({url: location.href, title_on_page: !!want && squash(text).includes(want), listed});
 })()"""
 
 
@@ -134,16 +148,26 @@ def _is_post_url(url: str, subreddit: str) -> bool:
     return re.match(pattern, parsed.path, re.IGNORECASE) is not None
 
 
-def _post_landed(subreddit: str, title: str) -> tuple[bool, str]:
+def _post_landed(subreddit: str, title: str, link_url: str = "", since: float = 0.0) -> tuple[bool, str]:
     """Read the page after the submit; ``(landed, url)``.
 
-    Landed means the browser is on the new post's page in ``subreddit`` and
-    the title is on it. A failed submit leaves the browser on /submit.
+    Landed means the browser is on the new post's page in ``subreddit`` with
+    the title on it, or on a feed that lists a post in ``subreddit`` with this
+    title and link created at or after ``since`` (seconds since the epoch).
+    A failed submit leaves the browser on /submit.
     """
-    data, why = bidi_evaluate_json(_POST_CHECK_JS.replace("__TITLE__", json.dumps(title.strip())))
+    script = (
+        _POST_CHECK_JS.replace("__TITLE__", json.dumps(title.strip()))
+        .replace("__LINK__", json.dumps((link_url or "").strip()))
+        .replace("__SINCE__", str(int(since * 1000)))
+    )
+    data, why = bidi_evaluate_json(script)
     if data is None:
         return False, f"page not readable ({why})"
     url = str(data.get("url") or "")[:300]
+    listed = str(data.get("listed") or "")
+    if listed and _is_post_url(REDDIT_BASE + listed, subreddit):
+        return True, REDDIT_BASE + listed
     if not _is_post_url(url, subreddit):
         return False, url
     if not data.get("title_on_page"):
@@ -247,6 +271,9 @@ def _submit_post_via_servo(
 
     if before_submit is not None and not before_submit():
         return False, WITHDRAWN_BEFORE_SUBMIT
+    # Clocks differ between this machine and Reddit, so a listed post may
+    # carry a time a little before the click.
+    clicked_at = time.time() - 120.0
     screen.click(int(form["button"]["x"]), int(form["button"]["y"]))
 
     # The post counts only once the browser is on the new post with the
@@ -254,7 +281,7 @@ def _submit_post_via_servo(
     deadline = time.monotonic() + _LANDED_WAIT_S
     while True:
         time.sleep(2.0)
-        landed, where = _post_landed(subreddit, title)
+        landed, where = _post_landed(subreddit, title, link_url, clicked_at)
         if landed or time.monotonic() >= deadline:
             break
     logger.info("self_share: post-submit check r/%s: landed=%s %s", subreddit, landed, where)

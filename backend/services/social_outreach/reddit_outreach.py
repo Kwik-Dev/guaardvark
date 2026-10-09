@@ -780,6 +780,16 @@ def post_comment_via_servo(
     focused, why = _wait_for_composer_focus()
     if not focused:
         return False, why
+    # Reddit restores an unsent comment from an earlier visit into the box,
+    # so it is emptied before the approved text goes in.
+    held = _focused_editable()
+    if held is not None and (held.get("text") or "").strip():
+        screen.hotkey("ctrl", "a")
+        screen.hotkey("BackSpace")
+        time.sleep(0.3)
+        held = _focused_editable()
+        if held is None or (held.get("text") or "").strip():
+            return False, "composer_not_empty: nothing was posted; the comment box held earlier text"
     _human_pause(0.5, 1.0)
 
     logger.warning("typing comment (%s chars)", len(comment_text))

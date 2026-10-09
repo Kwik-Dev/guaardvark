@@ -228,6 +228,23 @@ def test_share_post_in_another_subreddit_is_unverified(monkeypatch):
     assert ok is False
 
 
+def test_share_listed_on_the_feed_after_the_submit_is_posted(monkeypatch):
+    # Reddit can return to the subreddit's feed after Post; the new post is
+    # listed there with its permalink.
+    page = {"url": "https://www.reddit.com/r/x/", "title_on_page": True,
+            "listed": "/r/x/comments/1x1ar00/local_first_ai_studio/"}
+    (ok, reason), seen = _submit_with_page(monkeypatch, (page, ""))
+    assert (ok, reason) == (True, "ok")
+    assert '"https://guaardvark.com"' in seen[0]
+
+
+def test_share_listed_in_another_subreddit_is_unverified(monkeypatch):
+    page = {"url": "https://www.reddit.com/", "title_on_page": True,
+            "listed": "/r/other/comments/1x1ar00/local_first_ai_studio/"}
+    (ok, reason), _ = _submit_with_page(monkeypatch, (page, ""))
+    assert ok is False
+
+
 def test_share_unreadable_page_is_unverified(monkeypatch):
     (ok, reason), _ = _submit_with_page(monkeypatch, (None, "connect failed: refused"))
     assert ok is False
