@@ -460,7 +460,7 @@ Five-agent swarm for coordinated media generation:
 
 ### LoRA Trainer Plugin
 - **Character / environment / prop LoRAs** trained from reference images
-- **CUDA daemon** with bf16 precision (~46 MB per LoRA, down from 93 MB in v1.0)
+- **CUDA daemon** with bf16 precision (about 33 MB per LoRA, down from 93 MB in v1.0)
 - **Real-torch isolation** — separate venv prevents torch version conflicts with the main backend
 
 ---
