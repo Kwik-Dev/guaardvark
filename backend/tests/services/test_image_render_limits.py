@@ -160,7 +160,6 @@ OLD_MODEL_SETTINGS = {'epic-realism': {'best_for': ['faces', 'portraits', 'cinem
 OLD_FAMILY_LIMITS = {  # image_resolution_limits: (max_side, max_pixels)
     "zimage": (2688, 2048 * 2048), "krea2": (2688, 2048 * 2048),
     "flux": (1920, 2_100_000), "sdxl": (1536, 1536 * 1536), "sd": (768, 768 * 768),
-    "sana": (2048, 1024 * 1024),
 }
 
 
@@ -257,6 +256,20 @@ def test_resolve_canvas_matches_the_old_clamp(family):
     from backend.services.image_resolution_limits import clamp_image_dimensions
     for w, h in itertools.product(SIZES, SIZES):
         assert clamp_image_dimensions(w, h, family)[:2] == _old_clamp(w, h, family), (family, w, h)
+
+
+def test_sana_canvas_holds_one_megapixel_on_its_grid():
+    # Sana Sprint is newer than the frozen clamp above: 512 px minimum side, 1 MP
+    # area (it renders the nearest ~1 MP bin), sides on the DC-AE's 32 px grid.
+    from backend.services.image_resolution_limits import clamp_image_dimensions, family_limits
+    assert family_limits("sana") == (2048, 1024 * 1024)
+    assert clamp_image_dimensions(0, 0, "sana")[:2] == (512, 512)
+    assert clamp_image_dimensions(768, 768, "sana")[:2] == (768, 768)
+    assert clamp_image_dimensions(1024, 1024, "sana")[:2] == (1024, 1024)
+    for w, h in itertools.product(SIZES, SIZES):
+        cw, ch = clamp_image_dimensions(w, h, "sana")[:2]
+        assert cw * ch <= 1024 * 1024 and cw % 32 == 0 and ch % 32 == 0, (w, h, cw, ch)
+        assert min(cw, ch) >= 512, (w, h, cw, ch)
 
 
 # ── the offline sampling envelope: the old clamp, frozen ─────────────────────
