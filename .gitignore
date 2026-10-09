@@ -1,6 +1,10 @@
 # Python
-backend/venv/
-cli/venv/
+# No trailing slash on the venv paths: a trailing slash matches only a directory,
+# so a stray `backend/venv` *symlink* (e.g. a sync worktree's test-venv link) slipped
+# past this, got committed by `git add -A` in a merge, and then resolved to itself on
+# checkout (ELOOP) — which broke start.sh. The bare name covers the dir and the symlink.
+backend/venv
+cli/venv
 plugins/*/venv-*/
 cli/llx.egg-info/
 __pycache__/
@@ -14,7 +18,7 @@ build/
 *.egg
 
 # Node
-node_modules/
+node_modules
 
 # Application data (generated at runtime)
 data/uploads/
