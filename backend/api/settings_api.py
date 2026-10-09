@@ -626,6 +626,33 @@ def set_chat_thinking_default():
     return success_response({"chat_thinking_default": enabled})
 
 
+@settings_bp.route("/chat_tools_always_approved", methods=["GET"])
+def get_chat_tools_always_approved():
+    """Tools chat runs without an approval card or file card."""
+    from backend.services.tool_approval_prefs import always_approved
+    return success_response({"tools": sorted(always_approved())})
+
+
+@settings_bp.route("/chat_tools_always_approved", methods=["POST"])
+def set_chat_tools_always_approved():
+    """Body: {"add": [...]}, {"remove": [...]} or {"tools": [...]} to replace."""
+    from backend.services import tool_approval_prefs as prefs
+    data = request.get_json(silent=True) or {}
+    try:
+        if isinstance(data.get("tools"), list):
+            stored = prefs.set_always_approved(data["tools"])
+        else:
+            if isinstance(data.get("add"), list):
+                prefs.allow_always(data["add"])
+            if isinstance(data.get("remove"), list):
+                prefs.ask_again(data["remove"])
+            stored = sorted(prefs.always_approved())
+    except Exception as e:
+        current_app.logger.error(f"Failed to update always-approved tools: {e}", exc_info=True)
+        return error_response("Failed to update setting", status_code=500)
+    return success_response({"tools": stored})
+
+
 @settings_bp.route("/behavior_learning", methods=["GET"])
 def get_behavior_learning():
     enabled = False

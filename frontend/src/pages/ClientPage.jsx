@@ -40,6 +40,8 @@ import ClientActionModal from "../components/modals/ClientActionModal";
 import LinkingModal from "../components/modals/LinkingModal";
 import PageLayout from "../components/layout/PageLayout";
 import EntityContextMenu from "../components/common/EntityContextMenu";
+import useContextMenu from "../hooks/useContextMenu";
+import { entityLinkActions } from "../utils/entityLinks";
 import { useStatus } from "../contexts/StatusContext";
 import { getLogoUrl } from "../config/logoConfig";
 import { ContextualLoader } from "../components/common/LoadingStates";
@@ -88,16 +90,10 @@ const ClientPage = () => {
   const [order, setOrder] = useState("asc");
   const [orderBy, setOrderBy] = useState("name");
 
-  // Context menu state
-  const [contextMenu, setContextMenu] = useState(null);
-  const [contextItem, setContextItem] = useState(null);
-
-  const handleContextMenu = (e, client = null) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setContextMenu({ top: e.clientY, left: e.clientX });
-    setContextItem(client);
-  };
+  // Right-click menu; fields and dialogs keep the browser's own menu.
+  const pageMenu = useContextMenu();
+  const contextItem = pageMenu.payload;
+  const handleContextMenu = (e, client = null) => pageMenu.open(e, client);
 
   const fetchClients = useCallback(async () => {
     setIsLoading(true);
@@ -707,13 +703,12 @@ const ClientPage = () => {
       </Box>
 
       <EntityContextMenu
-        anchorPosition={contextMenu}
-        onClose={() => { setContextMenu(null); setContextItem(null); }}
+        anchorPosition={pageMenu.anchorPosition}
+        onClose={pageMenu.close}
         actions={contextItem ? [
           { label: 'Edit', onClick: () => handleOpenActionModal(contextItem) },
           { label: 'Delete', onClick: () => handleDeleteClient(contextItem.id, contextItem.name), color: 'error.main' },
-          { label: 'Files', onClick: () => navigate(`/documents?client_id=${contextItem.id}`), dividerBefore: true },
-          { label: 'Schedule Task', onClick: () => navigate(`/tasks?client_id=${contextItem.id}`) },
+          ...entityLinkActions('client', contextItem.id, navigate),
         ] : [
           { label: 'New Client', icon: <AddIcon fontSize="small" />, onClick: () => handleOpenActionModal(null) },
         ]}

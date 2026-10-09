@@ -1,27 +1,16 @@
 // frontend/src/components/dashboard/CSVGenerationCard.jsx
 // CSV Generation Dashboard Card - Quick access to CSV generation functionality
 
-import React, { useState, useEffect, useCallback } from "react";
-import {
-  CircularProgress,
-  Box,
-  Typography,
-  List,
-  ListItem,
-  ListItemText,
-  Button,
-  Chip,
-  IconButton,
-  Tooltip,
-} from "@mui/material";
-import CollapsibleAlert from "../common/CollapsibleAlert";
-import {
-  Add,
-  Upload,
-  Refresh,
-} from "@mui/icons-material";
-import { Link as RouterLink, useNavigate } from "react-router-dom";
+import React from "react";
+import { Box, Button, IconButton, Tooltip } from "@mui/material";
+import { Add, Upload, Refresh } from "@mui/icons-material";
+import { useNavigate } from "react-router-dom";
 import DashboardCardWrapper from "./DashboardCardWrapper";
+import RecentRunsList from "./RecentRunsList";
+import { isCsvJob, loadJobRows, useRecentRuns } from "./recentRuns";
+
+// CSV runs are file-generation jobs that write a .csv (File Generation page, Jobs page).
+const loadCsvJobs = () => loadJobRows("file_generation", isCsvJob);
 
 const CSVGenerationCard = React.forwardRef(
   (
@@ -35,54 +24,8 @@ const CSVGenerationCard = React.forwardRef(
     },
     ref,
   ) => {
-    const [recentGenerations, setRecentGenerations] = useState([]);
-    const [isLoading, _setIsLoading] = useState(false);
-    const [error, _setError] = useState(null);
     const navigate = useNavigate();
-
-    const fetchRecentGenerations = useCallback(async () => {
-      // The File Generation page owns CSV runs; this card has no history feed yet.
-      setRecentGenerations([]);
-    }, []);
-
-    useEffect(() => {
-      fetchRecentGenerations();
-    }, [fetchRecentGenerations]);
-
-    const getStatusColor = (status) => {
-      switch (status?.toLowerCase()) {
-        case "completed":
-          return "success";
-        case "running":
-          return "primary";
-        case "failed":
-          return "error";
-        case "pending":
-          return "warning";
-        default:
-          return "default";
-      }
-    };
-
-    const getStatusLabel = (status) => {
-      switch (status?.toLowerCase()) {
-        case "completed":
-          return "Completed";
-        case "running":
-          return "Running";
-        case "failed":
-          return "Failed";
-        case "pending":
-          return "Pending";
-        default:
-          return status || "Unknown";
-      }
-    };
-
-    const formatDate = (dateString) => {
-      if (!dateString) return "";
-      return new Date(dateString).toLocaleDateString();
-    };
+    const recent = useRecentRuns(loadCsvJobs);
 
     return (
       <DashboardCardWrapper
@@ -98,18 +41,6 @@ const CSVGenerationCard = React.forwardRef(
           { label: "New CSV", onClick: () => navigate("/file-generation") },
         ]}
       >
-        {isLoading && (
-          <CircularProgress
-            size={22}
-            sx={{ display: "block", mx: "auto", my: 2 }}
-          />
-        )}
-        {error && (
-          <CollapsibleAlert severity="error" sx={{ my: 1 }}>
-            {error}
-          </CollapsibleAlert>
-        )}
-
         {/* Quick Actions */}
         <Box sx={{ mb: 2, display: "flex", gap: 1, flexWrap: "wrap" }}>
           <Button
@@ -145,7 +76,7 @@ const CSVGenerationCard = React.forwardRef(
           <Tooltip title="Refresh data">
             <IconButton
               size="small"
-              onClick={fetchRecentGenerations}
+              onClick={recent.refresh}
               className="non-draggable"
             >
               <Refresh fontSize="small" />
@@ -153,124 +84,14 @@ const CSVGenerationCard = React.forwardRef(
           </Tooltip>
         </Box>
 
-        {!isLoading && !error && recentGenerations.length === 0 && (
-          <Typography
-            variant="body2"
-            sx={{ color: "text.secondary", mt: 2, textAlign: "center" }}
-          >
-            No recent CSV generations found.
-          </Typography>
-        )}
-
-        {!isLoading && !error && recentGenerations.length > 0 && (
-          <List
-            dense
-            sx={{ pt: 0, overflowY: "auto", maxHeight: "calc(100% - 80px)" }}
-          >
-            {recentGenerations.slice(0, 5).map((generation) => (
-              <ListItem
-                key={generation.id}
-                disableGutters
-                sx={{
-                  py: 0.5,
-                  cursor: "pointer",
-                  "&:hover": {
-                    backgroundColor: "action.hover",
-                    borderRadius: 1,
-                  },
-                }}
-                onClick={() => navigate("/file-generation")}
-                className="non-draggable"
-              >
-                <ListItemText
-                  primary={
-                    <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                      <Typography
-                        variant="body2"
-                        sx={{
-                          fontWeight: "medium",
-                          fontSize: "0.8rem",
-                          flexGrow: 1,
-                          whiteSpace: "nowrap",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                        }}
-                      >
-                        {generation.name || "Unnamed Generation"}
-                      </Typography>
-                      <Chip
-                        label={getStatusLabel(generation.status)}
-                        color={getStatusColor(generation.status)}
-                        size="small"
-                        sx={{
-                          fontSize: "0.6rem",
-                          height: "18px",
-                          minWidth: "60px",
-                        }}
-                      />
-                    </Box>
-                  }
-                  secondary={
-                    <Box sx={{ display: "flex", alignItems: "center", gap: 1, mt: 0.5 }}>
-                      <Typography
-                        variant="caption"
-                        sx={{
-                          color: "text.secondary",
-                          fontSize: "0.65rem",
-                        }}
-                      >
-                        {formatDate(generation.created_at)}
-                      </Typography>
-                      {generation.record_count && (
-                        <Typography
-                          variant="caption"
-                          sx={{
-                            color: "text.secondary",
-                            fontSize: "0.65rem",
-                          }}
-                        >
-                          • {generation.record_count} records
-                        </Typography>
-                      )}
-                      {generation.file_size && (
-                        <Typography
-                          variant="caption"
-                          sx={{
-                            color: "text.secondary",
-                            fontSize: "0.65rem",
-                          }}
-                        >
-                          • {generation.file_size}
-                        </Typography>
-                      )}
-                    </Box>
-                  }
-                />
-              </ListItem>
-            ))}
-          </List>
-        )}
-
-        {recentGenerations.length > 5 && (
-          <Box sx={{ textAlign: "center", mt: 1 }}>
-            <Button
-              component={RouterLink}
-              to="/file-generation"
-              variant="text"
-              size="small"
-              sx={{
-                textDecoration: "none",
-                fontSize: "0.75rem",
-                textTransform: "none",
-                "&:hover": {
-                  textDecoration: "underline",
-                },
-              }}
-            >
-              View All Generations ({recentGenerations.length})
-            </Button>
-          </Box>
-        )}
+        <RecentRunsList
+          rows={recent.rows}
+          loading={recent.loading}
+          error={recent.error}
+          emptyText="No CSV jobs yet."
+          onOpen={navigate}
+          viewAll={{ label: "View all jobs", path: "/tasks" }}
+        />
       </DashboardCardWrapper>
     );
   },

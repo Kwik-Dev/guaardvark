@@ -5,14 +5,14 @@
   "paths": [
     {
       "id": "huggingface",
-      "title": "Hugging Face: model installs, Check access, first use of a model not on disk",
+      "title": "Hugging Face: model installs a person starts with Install (image Studio and upscaling models among them), and Check access",
       "hosts": ["huggingface.co", "*.huggingface.co", "hf.co", "*.hf.co"],
       "switch": {"person": true},
       "sends": "model repository names; HF_TOKEN on downloads, never on Check access"
     },
     {
       "id": "github-downloads",
-      "title": "GitHub release weights and tools a person installs (CodeFormer, facexlib, rembg, whisper.cpp)",
+      "title": "GitHub release weights and tools a person installs (CodeFormer, facexlib, rembg, whisper.cpp; Real-ESRGAN upscaling models from Install only)",
       "hosts": ["github.com", "*.github.com", "*.githubusercontent.com"],
       "switch": {"person": true},
       "sends": "requests for the files being installed"

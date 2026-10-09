@@ -1,6 +1,6 @@
 // frontend/src/components/images/ImagesContextMenu.jsx
 // Context menu for ImagesPage - adapted from DocumentsContextMenu
-// Supports: desktop, folder, folder-window, image context types
+// Supports: desktop, folder, folder-window, folder-background (empty space in a window), image
 
 import React from 'react';
 import { Menu, MenuItem, ListItemIcon, ListItemText, Divider, Box, Tooltip } from '@mui/material';
@@ -104,6 +104,37 @@ const ImagesContextMenu = ({
             <ListItemText>Paste</ListItemText>
           </MenuItem>,
         ] : null,
+      ]}
+
+      {/* Empty space inside a folder window: acts on the folder it shows */}
+      {contextType === 'folder-background' && [
+        <MenuItem key="new-folder" onClick={() => { onNewFolder?.(); onClose(); }}>
+          <ListItemIcon><NewFolderIcon fontSize="small" /></ListItemIcon>
+          <ListItemText>New Folder</ListItemText>
+        </MenuItem>,
+        hasClipboard && (
+          <MenuItem key="paste" onClick={() => { onPaste?.(); onClose(); }}>
+            <ListItemIcon><PasteIcon fontSize="small" /></ListItemIcon>
+            <ListItemText>Paste into this folder</ListItemText>
+          </MenuItem>
+        ),
+        <MenuItem key="select-all" onClick={() => { onSelectAll?.(); onClose(); }}>
+          <ListItemIcon><SelectAllIcon fontSize="small" /></ListItemIcon>
+          <ListItemText>Select All</ListItemText>
+        </MenuItem>,
+        <Divider key="d1" />,
+        <MenuItem key="sort-name" onClick={() => handleSortBy('name')}>
+          <ListItemIcon><SortIcon fontSize="small" /></ListItemIcon>
+          <ListItemText>Sort by Name</ListItemText>
+        </MenuItem>,
+        <MenuItem key="sort-date" onClick={() => handleSortBy('date')}>
+          <ListItemIcon><SortIcon fontSize="small" /></ListItemIcon>
+          <ListItemText>Sort by Date</ListItemText>
+        </MenuItem>,
+        <MenuItem key="sort-size" onClick={() => handleSortBy('size')}>
+          <ListItemIcon><SortIcon fontSize="small" /></ListItemIcon>
+          <ListItemText>Sort by Size</ListItemText>
+        </MenuItem>,
       ]}
 
       {/* Folder context (icon or window) */}

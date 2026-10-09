@@ -71,9 +71,14 @@ const ToolCallCard = ({
 
   const showFeedback = FEEDBACK_TOOLS.has(toolName) && result && !isPending;
 
-  const handleApproval = (approved) => {
+  // scope "always": run this tool without a card from now on (withdrawn on
+  // the Approvals page). Plain Approve covers this call only.
+  const handleApproval = (approved, scope) => {
     setResponded(true);
-    if (onApproval) onApproval(approved);
+    if (onApproval) {
+      if (scope) onApproval(approved, scope);
+      else onApproval(approved);
+    }
   };
 
   const handleFeedback = async (positive) => {
@@ -291,6 +296,13 @@ const ToolCallCard = ({
                 <Box sx={{ display: "flex", gap: 1, alignItems: "center", flexWrap: "wrap" }}>
                   <ActionButton kind="primary" onClick={() => handleApproval(true)}>
                     Approve
+                  </ActionButton>
+                  <ActionButton
+                    kind="neutral"
+                    tooltip={`Run ${toolName} without asking from now on. Undo it on the Approvals page.`}
+                    onClick={() => handleApproval(true, "always")}
+                  >
+                    Always approve
                   </ActionButton>
                   <ActionButton kind="link" onClick={() => handleApproval(false)}>
                     Reject

@@ -1,10 +1,11 @@
-// Accepts files dropped from the OS file browser and uploads them as Documents.
-// Returns a stable `onDrop` handler + a `uploading` flag. The dropped files
-// land under data/uploads/Videos/ (folder name is configurable) via the
-// existing /api/files/upload pipeline.
+// Accepts files dropped from the OS file browser and uploads them as Documents
+// through /api/files/upload. Each file goes into the top-level Files folder for
+// its kind (Videos, Audio, Images), created when missing; those are the folders
+// generated media is registered under.
 
 import { useCallback, useState } from "react";
 import axios from "axios";
+import { ensureFolderPath, filesFolderApi } from "../../utils/droppedFiles";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 
@@ -15,12 +16,45 @@ const EXT_KIND = {
   audio: ["mp3", "wav", "flac", "m4a", "aac", "ogg"],
   image: ["jpg", "jpeg", "png", "webp", "gif", "bmp"],
 };
-const FOLDER_FOR_KIND = { video: "Videos", audio: "Audio", image: "Images" };
+export const FOLDER_FOR_KIND = { video: "Videos", audio: "Audio", image: "Images" };
 
 export function kindForFile(name = "", fallback = "video") {
   const ext = (name.split(".").pop() || "").toLowerCase();
   for (const [k, exts] of Object.entries(EXT_KIND)) if (exts.includes(ext)) return k;
   return fallback;
+}
+
+/**
+ * Upload dropped files, each into the Files folder for its kind.
+ *
+ * @param {File[]} files
+ * @param {object} opts
+ * @param {{get: Function, post: Function}} opts.http  axios or a compatible client
+ * @param {string} [opts.apiBase]  API root, e.g. "/api"
+ * @param {string} [opts.fallbackFolder]  folder for a kind with no folder of its own
+ * @param {(pct: number) => void} [opts.onProgress]
+ * @returns {Promise<Array<object>>} the created Documents, each with its `kind`
+ */
+export async function uploadDroppedMedia(files, { http, apiBase = API_BASE, fallbackFolder = "Videos", onProgress } = {}) {
+  const folderApi = filesFolderApi(http, `${apiBase}/files`);
+  const folderCache = new Map();
+  const uploaded = [];
+  for (const [idx, file] of files.entries()) {
+    const kind = kindForFile(file.name);
+    const folderPath = await ensureFolderPath(FOLDER_FOR_KIND[kind] || fallbackFolder, "/", folderApi, folderCache);
+    const form = new FormData();
+    form.append("file", file);
+    form.append("folder_path", folderPath);
+    const res = await http.post(`${apiBase}/files/upload`, form, {
+      headers: { "Content-Type": "multipart/form-data" },
+      onUploadProgress: (e) => {
+        if (e.total && onProgress) onProgress(((idx + e.loaded / e.total) / files.length) * 100);
+      },
+    });
+    const doc = res.data?.data || res.data?.document || res.data;
+    if (doc?.id) uploaded.push({ ...doc, kind });
+  }
+  return uploaded;
 }
 
 export function useExternalDrop({ folderName = "Videos", onUploaded }) {
@@ -37,26 +71,13 @@ export function useExternalDrop({ folderName = "Videos", onUploaded }) {
 
     setUploading(true);
     setError(null);
-    const uploaded = [];
 
     try {
-      for (const [idx, file] of files.entries()) {
-        const kind = kindForFile(file.name);
-        const form = new FormData();
-        form.append("file", file);
-        form.append("folder_name", FOLDER_FOR_KIND[kind] || folderName);
-        const res = await axios.post(`${API_BASE}/files/upload`, form, {
-          headers: { "Content-Type": "multipart/form-data" },
-          onUploadProgress: (e) => {
-            if (e.total) {
-              const filePct = (e.loaded / e.total) * 100;
-              setProgress(((idx + filePct / 100) / files.length) * 100);
-            }
-          },
-        });
-        const doc = res.data?.data || res.data?.document || res.data;
-        if (doc?.id) uploaded.push({ ...doc, kind });
-      }
+      const uploaded = await uploadDroppedMedia(files, {
+        http: axios,
+        fallbackFolder: folderName,
+        onProgress: setProgress,
+      });
       if (onUploaded) onUploaded(uploaded);
     } catch (e) {
       console.error("useExternalDrop: upload failed:", e);

@@ -17,9 +17,12 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { getChatHistory, sendChatMessage } from "../api";
 import { generateFileFromChat } from "../api/filegenService";
+import { getAlwaysApprovedTools, updateAlwaysApprovedTools } from "../api/settingsService";
 import FileGenPopup from "../components/FileGenPopup";
 import ChatInput from "../components/chat/ChatInput";
 import MessageList from "../components/chat/MessageList";
+import FileDropOverlay from "../components/chat/FileDropOverlay";
+import useFileDropZone from "../hooks/useFileDropZone";
 import UnifiedUploadModal from "../components/modals/UnifiedUploadModal";
 import PageLayout from "../components/layout/PageLayout";
 import BackgroundWaveform from "../components/voice/BackgroundWaveform";
@@ -208,6 +211,11 @@ const ChatPage = () => {
     if (!isSending) setAgentWorking(false);
   }, [isSending]);
   const chatInputRef = useRef(null);
+  // The whole chat (messages and composer) takes dropped files; the composer
+  // treats them exactly like the paperclip.
+  const chatDrop = useFileDropZone({
+    onFiles: (files) => chatInputRef.current?.addFiles(files),
+  });
   const historyLoadedRef = useRef(false); // Track if we've already loaded history
   const historyLoadingRef = useRef(false); // Prevent concurrent history fetches
   const lastMessageRef = useRef(null);
@@ -876,11 +884,9 @@ const ChatPage = () => {
     fetch('/api/agent-control/kill', { method: 'POST' }).catch(() => {});
   }, [resourceManager, processId, sessionId, isStreamingMessage, unifiedChatService]);
 
-  const handleFileGenConfirm = useCallback(async () => {
-    if (!fileGenPopup.fileData || !fileGenPopup.originalMessage) return;
-
-    const { fileData, originalMessage } = fileGenPopup;
-
+  // Writes the file a chat request asked for: from the card's Create, or at
+  // once when the person chose to always allow that tool.
+  const runFileGeneration = useCallback(async (fileData, originalMessage) => {
     try {
       resourceManager.updateDialogState(dialogStateId, {
         open: false,
@@ -892,8 +898,6 @@ const ChatPage = () => {
     } catch (error) {
       console.error("Error updating dialog state:", error);
     }
-
-    setFileGenPopup({ open: false, fileData: null, originalMessage: null });
 
     try {
       if (fileData.isBulkRequest) {
@@ -999,13 +1003,31 @@ const ChatPage = () => {
       }
     }
   }, [
-    fileGenPopup,
     projectId,
     resourceManager,
     dialogStateId,
     processId,
     managedApiCall,
   ]);
+
+  const handleFileGenConfirm = useCallback(() => {
+    if (!fileGenPopup.fileData || !fileGenPopup.originalMessage) return;
+    const { fileData, originalMessage } = fileGenPopup;
+    setFileGenPopup({ open: false, fileData: null, originalMessage: null });
+    runFileGeneration(fileData, originalMessage);
+  }, [fileGenPopup, runFileGeneration]);
+
+  const handleFileGenAlways = useCallback(async () => {
+    const toolName = fileGenPopup.fileData?.toolName;
+    if (toolName) {
+      try {
+        await updateAlwaysApprovedTools({ add: [toolName] });
+      } catch (error) {
+        console.error("Could not store the always-create choice:", error);
+      }
+    }
+    handleFileGenConfirm();
+  }, [fileGenPopup, handleFileGenConfirm]);
 
   const handleFileGenDismiss = useCallback(() => {
     try {
@@ -1577,6 +1599,9 @@ const ChatPage = () => {
         }
       }
 
+      // Told to the model with this turn only, never stored in the message:
+      // "offered" while the file card waits, "started" when it was skipped.
+      let fileGenerationState = null;
       if (fileDetection && (fileDetection.isCSVRequest || fileDetection.isCodeRequest)) {
 
         const continuityMarker = preserveContextDuringFileGeneration(sessionId, inputText, fileDetection);
@@ -1608,29 +1633,41 @@ const ChatPage = () => {
           continuityMarkerId: continuityMarker.id
         });
 
+        const fileData = {
+          filename: fileDetection.filename || "generated_file.jsx",
+          description: fileDetection.description || "Generated file",
+          isBulkRequest: fileDetection.isBulkRequest,
+          quantity: fileDetection.quantity,
+          toolName: fileDetection.toolName,
+        };
+        let alwaysTools = [];
+        try {
+          alwaysTools = await getAlwaysApprovedTools();
+        } catch {
+          // unreadable: show the card as usual
+        }
         const currentState = resourceManager.getDialogState(dialogStateId);
-        if (!currentState || !currentState.open) {
+        if (fileData.toolName && alwaysTools.includes(fileData.toolName)) {
+          fileGenerationState = "started";
+          runFileGeneration(fileData, inputText);
+        } else if (!currentState || !currentState.open) {
           try {
             resourceManager.updateDialogState(dialogStateId, {
               open: true,
               type: fileDetection.isCSVRequest ? "csv_generation" : "code_generation",
               fileData: {
-                filename: fileDetection.filename || "generated_file.jsx",
-                description: fileDetection.description || "Generated file",
+                filename: fileData.filename,
+                description: fileData.description,
               },
               originalMessage: inputText,
             });
 
             setFileGenPopup({
               open: true,
-              fileData: {
-                filename: fileDetection.filename || "generated_file.jsx",
-                description: fileDetection.description || "Generated file",
-                isBulkRequest: fileDetection.isBulkRequest,
-                quantity: fileDetection.quantity,
-              },
+              fileData,
               originalMessage: inputText,
             });
+            fileGenerationState = "offered";
           } catch (error) {
             console.error("Error opening file generation dialog:", error);
           }
@@ -1784,10 +1821,7 @@ const ChatPage = () => {
         }
 
         try {
-          let modifiedInputText = inputText;
-          if (fileDetection && (fileDetection.isCSVRequest || fileDetection.isCodeRequest)) {
-            modifiedInputText += "\n\n[SYSTEM NOTE: The frontend has successfully intercepted this file generation request and opened the dedicated File Generation popup for the user. Acknowledge this briefly, do not say you cannot generate files, and do not attempt to generate the file yourself.]";
-          }
+          const modifiedInputText = inputText;
           // Pass image data through unified chat if present
           const imageBase64 = voiceOptions?.imageBase64 || null;
           const isVoice = !!(voiceOptions?.isVoiceMessage);
@@ -1848,6 +1882,10 @@ const ChatPage = () => {
             project_id: projectId,
             ...directToolOptions,
           };
+          if (fileGenerationState) {
+            sendOptions.file_generation = fileGenerationState;
+            sendOptions.file_generation_filename = fileDetection.filename || "";
+          }
           // Heuristic: if message mentions an absolute path, treat as project_root for context loading
           const pathMatch = modifiedInputText.match(/(\/[^\s'"]+\/[^\s'"]*)/);
           if (pathMatch && (modifiedInputText.toLowerCase().includes('analyze') || modifiedInputText.toLowerCase().includes('suggest') || modifiedInputText.toLowerCase().includes('review'))) {
@@ -1916,10 +1954,7 @@ const ChatPage = () => {
         if (canRetryUnified && serviceToUse) {
           // One more attempt through the unified path.
           try {
-            let modifiedInputText = inputText;
-            if (fileDetection && (fileDetection.isCSVRequest || fileDetection.isCodeRequest)) {
-              modifiedInputText += "\n\n[SYSTEM NOTE: The frontend has successfully intercepted this file generation request and opened the dedicated File Generation popup for the user. Acknowledge this briefly, do not say you cannot generate files, and do not attempt to generate the file yourself.]";
-            }
+            const modifiedInputText = inputText;
             const imageBase64 = voiceOptions?.imageBase64 || null;
             const isVoice = !!(voiceOptions?.isVoiceMessage);
 
@@ -1960,6 +1995,12 @@ const ChatPage = () => {
               use_rag: true,
               chat_mode: chatMode,
               project_id: projectId,
+              ...(fileGenerationState
+                ? {
+                    file_generation: fileGenerationState,
+                    file_generation_filename: fileDetection.filename || "",
+                  }
+                : {}),
             }, imageBase64, isVoice);
             console.debug(`[SOCKET-CHAT] POST-SEND ack (agent retry) session=${sessionId}`);
 
@@ -2191,6 +2232,7 @@ const ChatPage = () => {
       speak,
       useUnifiedChat,
       unifiedChatService,
+      runFileGeneration,
     ]
   );
 
@@ -2215,6 +2257,8 @@ const ChatPage = () => {
   return (
     <PageLayout variant="fullscreen" noPadding>
     <Paper
+      {...chatDrop.dropProps}
+      data-testid="chat-drop-zone"
       sx={{
         display: "flex",
         flexDirection: "column",
@@ -2223,7 +2267,7 @@ const ChatPage = () => {
         position: "relative",
       }}
     >
-      {}
+      <FileDropOverlay active={chatDrop.isDragActive} />
       <BackgroundWaveform
         isVoiceChatActive={voiceState.isListening}
         isUserSpeaking={voiceState.isUserSpeaking}
@@ -2521,9 +2565,9 @@ const ChatPage = () => {
       <FileGenPopup
         open={fileGenPopup.open}
         onConfirm={handleFileGenConfirm}
+        onAlways={handleFileGenAlways}
         onDismiss={handleFileGenDismiss}
         fileData={fileGenPopup.fileData}
-        useRAG={true}
       />
 
       <UnifiedUploadModal

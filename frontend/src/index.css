@@ -72,82 +72,166 @@ code {
 
 /* --- End Custom Scrollbar Styles --- */
 
-/* --- Styles for react-resizable handles --- */
-/* Make handles invisible but easier to grab with a larger edge */
+/* --- Resize handles on react-grid-layout pages ---
+   Thin strips on the edges, small squares in the corners. The top strip and
+   the top corners stay clear of card headers, so the title, buttons and colour
+   dot take the click and the header drags; the side strips start below the
+   header. react-grid-layout's own sheet rotates and centres each handle with
+   three-class selectors, so these use four to win in any load order. */
 .react-resizable-handle {
+  pointer-events: auto !important;
+}
+
+.react-grid-layout > .react-grid-item > .react-resizable-handle.react-resizable-handle-n,
+.react-grid-layout > .react-grid-item > .react-resizable-handle.react-resizable-handle-s,
+.react-grid-layout > .react-grid-item > .react-resizable-handle.react-resizable-handle-e,
+.react-grid-layout > .react-grid-item > .react-resizable-handle.react-resizable-handle-w,
+.react-grid-layout > .react-grid-item > .react-resizable-handle.react-resizable-handle-nw,
+.react-grid-layout > .react-grid-item > .react-resizable-handle.react-resizable-handle-ne,
+.react-grid-layout > .react-grid-item > .react-resizable-handle.react-resizable-handle-sw,
+.react-grid-layout > .react-grid-item > .react-resizable-handle.react-resizable-handle-se {
   position: absolute;
-  background: transparent; /* Make transparent */
-  opacity: 0; /* Fully transparent but still interactive */
   box-sizing: border-box;
-  z-index: 1000 !important; /* Ensure handles are clickable and above all content */
-  background-image: none; /* Remove any default background images */
-  pointer-events: auto !important; /* Ensure handles are interactive */
+  margin: 0;
+  padding: 0;
+  transform: none;
+  background-image: none;
+  background-color: transparent;
+  border-radius: 3px;
+  opacity: 0;
+  transition: opacity 0.15s ease, background-color 0.15s ease;
 }
 
-/* Edge handles - enlarged activation zones */
-.react-resizable-handle-s {
-  bottom: 0;
-  left: 0;
-  width: 100%;
-  height: 16px;
-  cursor: s-resize;
-  margin-left: 0;
-}
-.react-resizable-handle-e {
-  right: 0;
-  top: 0;
-  height: 100%;
-  width: 16px;
-  cursor: e-resize;
-  margin-top: 0;
-}
-.react-resizable-handle-w {
-  left: 0;
-  top: 0;
-  height: 100%;
-  width: 16px;
-  cursor: w-resize;
-  margin-top: 0;
-}
-.react-resizable-handle-n {
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 16px;
-  cursor: n-resize;
-  margin-left: 0;
+.react-grid-layout > .react-grid-item > .react-resizable-handle::after {
+  content: none;
 }
 
-/* Corner handles - small activation zones */
-.react-resizable-handle-sw {
-  bottom: 0;
-  left: 0;
-  cursor: sw-resize;
-  width: 32px;
-  height: 32px;
-}
-.react-resizable-handle-nw {
+.react-grid-layout > .react-grid-item > .react-resizable-handle.react-resizable-handle-n {
   top: 0;
-  left: 0;
-  cursor: nw-resize;
-  width: 32px;
-  height: 32px;
+  right: 16px;
+  bottom: auto;
+  left: 16px;
+  width: auto;
+  height: 4px;
+  cursor: ns-resize;
 }
-.react-resizable-handle-ne {
+
+.react-grid-layout > .react-grid-item > .react-resizable-handle.react-resizable-handle-s {
+  top: auto;
+  right: 16px;
+  bottom: 0;
+  left: 16px;
+  width: auto;
+  height: 8px;
+  cursor: ns-resize;
+}
+
+.react-grid-layout > .react-grid-item > .react-resizable-handle.react-resizable-handle-e {
+  top: 48px;
+  right: 0;
+  bottom: 16px;
+  left: auto;
+  width: 8px;
+  height: auto;
+  cursor: ew-resize;
+}
+
+.react-grid-layout > .react-grid-item > .react-resizable-handle.react-resizable-handle-w {
+  top: 48px;
+  right: auto;
+  bottom: 16px;
+  left: 0;
+  width: 8px;
+  height: auto;
+  cursor: ew-resize;
+}
+
+.react-grid-layout > .react-grid-item > .react-resizable-handle.react-resizable-handle-nw {
+  top: 0;
+  right: auto;
+  bottom: auto;
+  left: 0;
+  width: 12px;
+  height: 12px;
+  cursor: nwse-resize;
+}
+
+.react-grid-layout > .react-grid-item > .react-resizable-handle.react-resizable-handle-ne {
   top: 0;
   right: 0;
-  cursor: ne-resize;
-  width: 32px;
-  height: 32px;
+  bottom: auto;
+  left: auto;
+  width: 12px;
+  height: 12px;
+  cursor: nesw-resize;
 }
-.react-resizable-handle-se {
+
+.react-grid-layout > .react-grid-item > .react-resizable-handle.react-resizable-handle-sw {
+  top: auto;
+  right: auto;
   bottom: 0;
-  right: 0;
-  cursor: se-resize;
-  width: 32px;
-  height: 32px;
+  left: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nesw-resize;
 }
-/* --- End Resize Handle Styles --- */
+
+.react-grid-layout > .react-grid-item > .react-resizable-handle.react-resizable-handle-se {
+  top: auto;
+  right: 0;
+  bottom: 0;
+  left: auto;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+}
+
+/* A handle under the pointer shows itself. */
+.react-grid-layout > .react-grid-item > .react-resizable-handle.react-resizable-handle-n:hover,
+.react-grid-layout > .react-grid-item > .react-resizable-handle.react-resizable-handle-s:hover,
+.react-grid-layout > .react-grid-item > .react-resizable-handle.react-resizable-handle-e:hover,
+.react-grid-layout > .react-grid-item > .react-resizable-handle.react-resizable-handle-w:hover,
+.react-grid-layout > .react-grid-item > .react-resizable-handle.react-resizable-handle-nw:hover,
+.react-grid-layout > .react-grid-item > .react-resizable-handle.react-resizable-handle-ne:hover,
+.react-grid-layout > .react-grid-item > .react-resizable-handle.react-resizable-handle-sw:hover,
+.react-grid-layout > .react-grid-item > .react-resizable-handle.react-resizable-handle-se:hover {
+  opacity: 1;
+  background-color: rgba(128, 128, 128, 0.35);
+}
+
+/* The bottom-right corner shows a grip mark while the pointer is on the card. */
+.react-grid-layout > .react-grid-item:hover > .react-resizable-handle.react-resizable-handle-se {
+  opacity: 1;
+}
+
+.react-grid-layout > .react-grid-item > .react-resizable-handle.react-resizable-handle-se::after {
+  content: "";
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  width: 5px;
+  height: 5px;
+  border-right: 2px solid var(--text-secondary);
+  border-bottom: 2px solid var(--text-secondary);
+  opacity: 0.6;
+}
+/* --- End resize handles --- */
+
+/* --- Drop placeholder on react-grid-layout pages ---
+   Where a card or window will land while it is moved or resized: a dashed
+   outline in the theme's primary colour (--primary-main, set by App.jsx) on
+   every grid page, in place of the library's red block. Three classes beat
+   the library's two in any load order; pages do not override it. */
+.react-grid-layout > .react-grid-item.react-grid-placeholder {
+  background: transparent;
+  border-width: 1px;
+  border-style: dashed;
+  border-color: var(--primary-main, currentColor);
+  border-radius: 4px;
+  opacity: 0.15;
+  transition: all 0.2s ease-out !important;
+}
+/* --- End drop placeholder --- */
 
 /* Ensure react-grid-item doesn't clip resize handles */
 .react-grid-item {

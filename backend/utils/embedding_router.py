@@ -138,6 +138,7 @@ class EmbeddingRouter:
         self._cpu_embedding = None  # OllamaEmbedding (num_gpu=0, CPU only)
         self._active_model_name = None
         self._embed_dim = None
+        self._choice_checked_at = 0.0
 
         logger.info(
             f"EmbeddingRouter initialized: profile={self.hardware_profile.value}, "
@@ -186,11 +187,17 @@ class EmbeddingRouter:
             return HardwareProfile.LOW_RESOURCE
 
     def _configure_for_profile(self) -> Dict[str, Any]:
+        # No GPU+CPU split on a GPU box (parallel_threshold 0). Ollama keeps one
+        # copy of a model: a num_gpu=0 call reloads it onto the CPU and every
+        # call after it, GPU path included, runs on that CPU copy until it
+        # unloads. Measured on qwen3-embedding:4b-q4_K_M, 12 texts (RTX 4070 Ti
+        # SUPER, Ollama 0.40): 0.13 s on the GPU; the first num_gpu=0 call 7.98 s
+        # (6.78 s reload); each later call 1.20 s, still on the CPU.
         configs = {
             HardwareProfile.HIGH_END_GPU: {
                 "gpu_enabled": True,
                 "batch_size": 64,
-                "parallel_threshold": 20,  # Split batches >= 20 across GPU+CPU
+                "parallel_threshold": 0,
                 "gpu_ratio": 0.8,
                 "max_workers": 4,
                 "latency_window": 100,
@@ -198,7 +205,7 @@ class EmbeddingRouter:
             HardwareProfile.MID_RANGE_GPU: {
                 "gpu_enabled": True,
                 "batch_size": 32,
-                "parallel_threshold": 10,
+                "parallel_threshold": 0,
                 "gpu_ratio": 0.7,
                 "max_workers": 3,
                 "latency_window": 100,
@@ -237,16 +244,58 @@ class EmbeddingRouter:
         except ImportError:
             return "http://127.0.0.1:11434"
 
+    def use_model(self, model_name: str, embed_dim: Optional[int] = None) -> None:
+        """Embed with ``model_name`` from now on.
+
+        Both clients are rebuilt on next use, so the CPU one keeps num_gpu=0
+        and the model's query/text prefixes. Replacing one client and leaving
+        the other cached kept the old model in use until a restart.
+        """
+        with self.lock:
+            if model_name != self._active_model_name:
+                logger.info(f"EmbeddingRouter: {self._active_model_name} -> {model_name}")
+            self._gpu_embedding = None
+            self._cpu_embedding = None
+            self._active_model_name = model_name
+            self._embed_dim = embed_dim
+            self.latency_tracker = LatencyTracker(
+                window_size=self.profile_config.get("latency_window", 100)
+            )
+
+    def _follow_saved_choice(self) -> None:
+        """Switch to the model saved in Settings when another process changed it.
+
+        Checked at most every 10 s. Only an explicit choice counts: the
+        automatic pick depends on free VRAM and may differ from call to call,
+        and following it would mix vector widths in one index.
+        """
+        now = time.time()
+        if now - self._choice_checked_at < 10.0:
+            return
+        self._choice_checked_at = now
+        try:
+            from backend.config import get_saved_embedding_model
+            saved = get_saved_embedding_model()
+        except Exception:
+            return
+        if saved and self._active_model_name and saved != self._active_model_name:
+            self.use_model(saved)
+
+    def _model_name(self) -> str:
+        if not self._active_model_name:
+            from backend.config import get_active_embedding_model
+            self._active_model_name = get_active_embedding_model()
+        return self._active_model_name
+
     def _get_gpu_embedding(self):
         """Get or create GPU embedding client (default Ollama, uses VRAM)."""
         if self._gpu_embedding is None:
             try:
-                from backend.config import get_active_embedding_model, get_embedding_keep_alive
+                from backend.config import get_embedding_keep_alive
                 from llama_index.embeddings.ollama import OllamaEmbedding
                 from backend.utils.llama_index_local_config import get_embedding_instructions
 
-                model_name = get_active_embedding_model()
-                self._active_model_name = model_name
+                model_name = self._model_name()
 
                 query_inst, text_inst = get_embedding_instructions(model_name)
                 ollama_kwargs = {
@@ -275,12 +324,11 @@ class EmbeddingRouter:
         """Get or create CPU embedding client (Ollama with num_gpu=0, zero VRAM)."""
         if self._cpu_embedding is None:
             try:
-                from backend.config import get_active_embedding_model, get_embedding_keep_alive
+                from backend.config import get_embedding_keep_alive
                 from llama_index.embeddings.ollama import OllamaEmbedding
                 from backend.utils.llama_index_local_config import get_embedding_instructions
 
-                model_name = get_active_embedding_model()
-                self._active_model_name = model_name
+                model_name = self._model_name()
 
                 query_inst, text_inst = get_embedding_instructions(model_name)
                 ollama_kwargs = {
@@ -344,6 +392,13 @@ class EmbeddingRouter:
     def _route_to_gpu(self, texts: List[str]) -> List[List[float]]:
         """Embed via GPU path (default Ollama)."""
         model = self._get_gpu_embedding()
+        # A CPU fallback after a GPU error leaves the model on the CPU for
+        # every later call; move it back once the GPU has room.
+        try:
+            from backend.utils.ollama_resource_manager import reload_onto_gpu_if_room
+            reload_onto_gpu_if_room(self._model_name())
+        except Exception:
+            pass
         start = time.time()
         try:
             if len(texts) == 1:
@@ -425,6 +480,7 @@ class EmbeddingRouter:
     def get_embedding(self, text: str) -> List[float]:
         """Get embedding for a single text. Uses GPU if available, else CPU."""
         with self.lock:
+            self._follow_saved_choice()
             if self.profile_config["gpu_enabled"]:
                 try:
                     return self._route_to_gpu([text])[0]
@@ -441,6 +497,7 @@ class EmbeddingRouter:
         with self.lock:
             if not texts:
                 return []
+            self._follow_saved_choice()
 
             threshold = self.profile_config["parallel_threshold"]
 

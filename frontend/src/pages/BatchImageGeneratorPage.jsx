@@ -49,6 +49,7 @@ import {
   Settings as SettingsIcon,
   Refresh as RefreshIcon,
   Image as ImageIcon,
+  CloudDownload,
 } from '@mui/icons-material';
 
 import { useUnifiedProgress } from '../contexts/UnifiedProgressContext';
@@ -69,8 +70,10 @@ import {
   buildFinalPrompts,
   clampQuantity,
   ignoresNegativeAndAnatomy,
+  imageModelOption,
   isZimageModel,
   modelFamily,
+  modelInstallNeed,
   qualityPresetsForModel,
   resolveQualityPreset,
   stripCopyCounter,
@@ -114,6 +117,7 @@ const mapBatchResultsToImages = (batchStatus) => {
     }));
 };
 
+const INPUT_MODES = ['single', 'bulk', 'csv', 'blueprint'];
 const POLLABLE_STATUSES = new Set(['queued', 'pending', 'running']);
 const TERMINAL_BATCH_STATUSES = new Set(['completed', 'error', 'cancelled']);
 // Recent Batches reloads at most this often while a batch is landing images.
@@ -160,6 +164,8 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [imageModelsModalOpen, setImageModelsModalOpen] = useState(false);
+  // Set by an Install button: Manage models opens on that row and starts it.
+  const [installModelId, setInstallModelId] = useState(null);
   const [showPromptPreview, setShowPromptPreview] = useState(false);
   // Live queue panel (mirrors Video Gen) — stacked batches drain one-at-a-time
   const [queue, setQueue] = useState([]);
@@ -186,6 +192,12 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     const cid = searchParams.get('character');
     if (cid) setCastSubjectIds([parseInt(cid, 10)]);
   }, [searchParams]);
+
+  // ?mode=bulk (or single, csv, blueprint) opens that input mode.
+  const modeParam = searchParams.get('mode');
+  useEffect(() => {
+    if (INPUT_MODES.includes(modeParam)) setInputMode(modeParam);
+  }, [modeParam]);
 
   // Generation parameters
   const [params, setParams] = useState({
@@ -262,13 +274,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       const response = await fetch(`${API_BASE}/batch-image/models`);
       const data = await response.json();
       if (data.success && data.data?.models) {
-        const fetched = data.data.models.map(m => ({
-          value: m.id,
-          label: m.recommended ? `${m.label} ⭐` : m.label,
-          description: m.availability === 'downloadable'
-            ? `${m.description || ''} (downloads ~${m.size_gb}GB on first use)`.trim()
-            : (m.description || ''),
-        }));
+        const fetched = data.data.models.map(imageModelOption);
         setModelOptions([AUTO_MODEL_OPTION, ...fetched]);
         setUnavailableModels(data.data.unavailable_models || []);
         setUserAdapters((data.data.adapters || []).filter((a) => a.is_downloaded));
@@ -301,6 +307,32 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   // picked. Every mode but CSV sends the cast.
   const castLocked = castSubjectIds.length > 0 && inputMode !== 'csv';
   const castLockedNote = 'Set by the selected character\u2019s base model while a character is picked.';
+
+  // Generating never downloads a model. A picked model that is not installed
+  // holds Start until Install finishes. A character renders with its own base
+  // model and blueprints use none, so neither waits on the picker.
+  const installNeed = (inputMode === 'blueprint' || castLocked)
+    ? null
+    : modelInstallNeed(modelOptions, params.model);
+  const installBlocksStart = !!installNeed?.blocks;
+  // Manage models; given a model id, it opens on that row and starts Install.
+  const openModels = (installId = null) => {
+    setInstallModelId(installId);
+    setImageModelsModalOpen(true);
+  };
+  const installName = installNeed?.option.name;
+  const installSize = installNeed?.option.sizeGb ? ` (about ${installNeed.option.sizeGb} GB)` : '';
+  const installButton = installNeed && (
+    <Button
+      color="inherit"
+      size="small"
+      startIcon={<CloudDownload />}
+      onClick={() => openModels(installNeed.option.value)}
+      sx={{ textTransform: 'none', whiteSpace: 'nowrap' }}
+    >
+      Install
+    </Button>
+  );
 
   // Dimension presets — base + model-family 2K / Flux~2MP packs (filtered below)
   const dimensionPresetsBase = [
@@ -1776,13 +1808,14 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                   <Box sx={{ mt: 3, p: 2, backgroundColor: 'background.paper', borderRadius: 1, border: '1px solid', borderColor: 'divider' }}>
                     <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, mb: 1 }}>
                       <Typography variant="subtitle2" sx={{ fontWeight: 500 }}>Current Settings</Typography>
-                      <ActionButton onClick={() => setImageModelsModalOpen(true)}>Manage models</ActionButton>
+                      <ActionButton onClick={() => openModels()}>Manage models</ActionButton>
                     </Box>
                     <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
                       <Chip
-                        label={`Model: ${modelOptions.find(m => m.value === params.model)?.label || params.model}`}
+                        label={`Model: ${modelOptions.find(m => m.value === params.model)?.label || params.model}${installBlocksStart ? ' (not installed)' : ''}`}
                         size="small"
                         variant="outlined"
+                        color={installBlocksStart ? 'warning' : 'default'}
                       />
                       <Chip
                         label={`Style: ${params.style}`}
@@ -1846,6 +1879,13 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                               ))}
                             </Select>
                           </FormControl>
+                          {installNeed && (
+                            <CollapsibleAlert severity={installNeed.blocks ? 'warning' : 'info'} action={installButton} sx={{ mt: 1, borderRadius: 1 }}>
+                              {installNeed.blocks
+                                ? `${installName} is not installed. Install downloads it${installSize}; Start stays off until it finishes.`
+                                : `No image model is installed yet. Install ${installName}${installSize} for Auto to use.`}
+                            </CollapsibleAlert>
+                          )}
                           {applicableAdapters.length > 0 && (
                             <Box sx={{ mt: 1 }}>
                               <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
@@ -2122,11 +2162,21 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
               {/* Action Buttons — queue mode: never blocked by an in-flight batch */}
               <Box sx={{ mt: 3, display: 'flex', flexDirection: 'column', gap: 1 }}>
                 <GpuGateBanner gpuBusy={gpuBusy} blockReason={blockReason} queueMode />
+                {installNeed && (
+                  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
+                    <Hint>
+                      {installNeed.blocks
+                        ? `Start is off: ${installName} is not installed.`
+                        : 'No image model is installed yet.'}
+                    </Hint>
+                    {installButton}
+                  </Box>
+                )}
                 <Box sx={{ display: 'flex', gap: 2 }}>
                   <Button
                     variant="contained"
                     onClick={startGeneration}
-                    disabled={loading}
+                    disabled={loading || installBlocksStart}
                     startIcon={<PlayArrow />}
                     fullWidth
                     size="large"
@@ -2561,8 +2611,10 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       <React.Suspense fallback={null}>
         <ImageModelsModal
           open={imageModelsModalOpen}
+          installModelId={installModelId}
           onClose={() => {
             setImageModelsModalOpen(false);
+            setInstallModelId(null);
             loadImageModels();
           }}
           showMessage={(msg, severity) => {

@@ -2,7 +2,7 @@
 // Version 2.0: Complete rewrite with Rules integration and job management
 // Unified task creation with built-in job execution for file_generation tasks
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   Dialog,
   DialogTitle,
@@ -62,6 +62,7 @@ const TaskActionModal = ({
   onTaskCreated, // New callback for when task is created and job started
   onTaskDeleted, // Callback for when task is deleted
   onTaskDuplicated, // Callback for when task is duplicated
+  defaults = null, // New task only: { project_id, client_id, client_name, website_id } to start from
 }) => {
   const [formData, setFormData] = useState({
     id: null,
@@ -295,15 +296,18 @@ const TaskActionModal = ({
           name: "",
           description: "",
           type: "file_generation",
-          project_id: "",
-          client_name: "",
+          project_id: defaults?.project_id ?? "",
+          client_name: defaults?.client_name ?? "",
           target_website: "",
           output_filename: formData.type === "code_generation" ? `generated_file.jsx` : `content_${timestamp}.csv`,
           model_name: "",
           prompt_rule_id: null,
           page_count: 50,
           auto_start_job: true,
+          client_id: defaults?.client_id ?? null,
+          website_id: defaults?.website_id ?? null,
         });
+        setSelectedWebsite(null);
 
         // Reset FileGenerationPage-specific fields for new tasks
         setBatchItems("");
@@ -326,7 +330,7 @@ const TaskActionModal = ({
         fetchFileInfo();
       }
     }
-  }, [open, taskData, isEditMode, fetchProjects, fetchModels, fetchRules, fetchWebsites, fetchFileInfo]);
+  }, [open, taskData, isEditMode, fetchProjects, fetchModels, fetchRules, fetchWebsites, fetchFileInfo, defaults]);
 
   // Sync dropdown values with form data
   useEffect(() => {
@@ -388,7 +392,9 @@ const TaskActionModal = ({
         ...prev,
         target_website: newValue.url,
         client_name: newValue.client?.name || "",
-        project_id: newValue.project?.id || prev.project_id
+        project_id: newValue.project?.id || prev.project_id,
+        website_id: newValue.id ?? null,
+        client_id: newValue.client?.id ?? newValue.client_id ?? prev.client_id ?? null,
       }));
       
       // Auto-set project if available
@@ -407,10 +413,26 @@ const TaskActionModal = ({
       setFormData(prev => ({
         ...prev,
         target_website: "",
-        client_name: ""
+        client_name: "",
+        website_id: null,
       }));
     }
   };
+
+  // A new task started from a website picks that website once the list is in.
+  const appliedDefaultWebsiteRef = useRef(null);
+  useEffect(() => {
+    if (!open) {
+      appliedDefaultWebsiteRef.current = null;
+      return;
+    }
+    const wanted = defaults?.website_id;
+    if (isEditMode || !wanted || appliedDefaultWebsiteRef.current === wanted) return;
+    const site = availableWebsites.find((w) => String(w.id) === String(wanted));
+    if (!site) return;
+    appliedDefaultWebsiteRef.current = wanted;
+    handleWebsiteSelection(null, site);
+  }, [open, isEditMode, defaults, availableWebsites]);
 
   // Validation function
   const validateForm = () => {
@@ -494,6 +516,11 @@ const TaskActionModal = ({
       prompt_rule_id: formData.prompt_rule_id,
       page_count: isFileGeneration ? formData.page_count : null,
     };
+    // Links to the client and website records; the update endpoint does not take them.
+    if (!isEditMode) {
+      if (formData.client_id) taskPayload.client_id = formData.client_id;
+      if (formData.website_id) taskPayload.website_id = formData.website_id;
+    }
 
     // BUG FIX: Create/update workflow_config with all FileGenerationPage fields
     if (isFileGeneration) {

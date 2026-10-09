@@ -84,6 +84,32 @@ _FATAL_CUDA_MARKERS = (
 )
 
 
+def forget_pipeline_slot() -> None:
+    """Drop the orchestrator's ``sd:pipeline`` slot once the pipeline is unloaded.
+
+    ``release_model`` would only restart the slot's idle timer, and the GPU card
+    would keep listing the pipeline as loaded at its booked size until a sync.
+    """
+    try:
+        from backend.services.gpu_memory_orchestrator import get_orchestrator_if_created
+        orch = get_orchestrator_if_created()
+        if orch is not None:
+            orch.drop_booking("sd:pipeline")
+    except Exception:  # noqa: BLE001 — bookkeeping must not fail an unload
+        pass
+
+
+def record_pipeline_vram(peak_mb: int) -> None:
+    """Show the pipeline's measured VRAM on its slot instead of the admission estimate."""
+    try:
+        from backend.services.gpu_memory_orchestrator import get_orchestrator_if_created
+        orch = get_orchestrator_if_created()
+        if orch is not None:
+            orch.set_measured_vram("sd:pipeline", peak_mb)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def is_fatal_cuda_error(exc: BaseException) -> bool:
     """True when ``exc`` is a CUDA error that leaves the process's context dead."""
     msg = (str(exc) or "").lower()
@@ -114,6 +140,13 @@ try:
 except Exception:
     Krea2Pipeline = None
     krea2_available = False
+
+# Sana Sprint (NVIDIA): 0.6B/1.6B DiT with a Gemma-2 encoder, 1-4 step sampling.
+# Ships in diffusers >= 0.33.
+try:
+    from diffusers import SanaSprintPipeline
+except Exception:
+    SanaSprintPipeline = None
 
 try:
     from backend.config import CACHE_DIR
@@ -159,6 +192,10 @@ class ImageGenerationRequest:
     # Character LoRAs (Z-Image / future). Paths to .safetensors + optional strength.
     loras: Optional[List[str]] = None
     lora_scale: float = 1.0
+    # Lets generation download a model that is not installed. No caller in the
+    # product sets it: the Studio, chat, agents, MCP and edits all refuse a
+    # missing model with where to install it, and Install fetches it.
+    allow_model_download: bool = False
 
 @dataclass
 class ImageGenerationResult:
@@ -272,6 +309,23 @@ def _has_word(text: str, terms) -> bool:
     return any(re.search(r"\b" + re.escape(t) + r"\b", text) for t in terms)
 
 
+@contextlib.contextmanager
+def _cudnn_benchmark_off():
+    """Run a pipeline call with cuDNN benchmark mode off.
+
+    cuDNN's autotune cache is per thread and every image batch runs on a new
+    one, so benchmark mode re-tuned the convolutions on every render instead of
+    once. Measured 2026-10-08 on an 8 GB GTX 1080 through the batch path:
+    Sana Sprint 0.6B 37 s -> 9 s with 1.9 GB less peak memory.
+    """
+    prev = torch.backends.cudnn.benchmark
+    torch.backends.cudnn.benchmark = False
+    try:
+        yield
+    finally:
+        torch.backends.cudnn.benchmark = prev
+
+
 class OfflineImageGenerator:
 
     def __init__(self):
@@ -308,6 +362,8 @@ class OfflineImageGenerator:
             "sdxl-turbo": "stabilityai/sdxl-turbo",
             "realistic-vision": "SG161222/Realistic_Vision_V5.1_noVAE",
             "epic-realism": "emilianJR/epiCRealism",
+            "sana-sprint": "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers",
+            "sana-sprint-0.6b": "Efficient-Large-Model/Sana_Sprint_0.6B_1024px_diffusers",
         }
         # Models resolvable internally but NOT shown in menus / list_available_models.
         # Empty since the sd-1.5 hidden fallback was removed; the mechanism stays because
@@ -333,6 +389,8 @@ class OfflineImageGenerator:
             "sdxl-turbo": {"label": "SDXL Turbo (Fast)", "description": "Fast 1024 previews, few steps.", "recommended": False, "order": 5},
             "realistic-vision": {"label": "Realistic Vision", "description": "Top photoreal faces & portraits.", "recommended": False, "order": 6},
             "epic-realism": {"label": "Epic Realism", "description": "Cinematic photorealism.", "recommended": False, "order": 7},
+            "sana-sprint": {"label": "Sana Sprint 1.6B (Fast)", "description": "1024 stills in 2 steps; sharper than the 0.6B.", "recommended": False, "order": 8},
+            "sana-sprint-0.6b": {"label": "Sana Sprint 0.6B (Fastest)", "description": "The quickest 1024 stills; runs on 8 GB cards.", "recommended": False, "order": 9},
         }
 
         self.anatomy_negative = "deformed body, distorted anatomy, extra limbs, missing limbs, extra arms, missing arms, extra legs, missing legs, fused limbs, disconnected limbs, floating limbs, asymmetrical body, disproportionate limbs, twisted torso, broken spine, impossible pose, malformed body, mutated anatomy, gross proportions, extra heads, conjoined, siamese, bad anatomy, cropped body, out of frame body, duplicate person, clone"
@@ -565,8 +623,9 @@ class OfflineImageGenerator:
             if component.startswith("_") or component in self._WEIGHTLESS_COMPONENTS:
                 continue
             # Component entries look like ["diffusers", "AutoencoderKL"]; anything
-            # else (nulls for optional pieces, scalars) carries no weights to check.
-            if not isinstance(spec, (list, tuple)) or len(spec) != 2:
+            # else carries no weights to check. save_pretrained writes an absent
+            # optional piece (safety_checker, image_encoder) as [null, null].
+            if not isinstance(spec, (list, tuple)) or len(spec) != 2 or None in spec:
                 continue
             comp_dir = model_path / component
             if not comp_dir.is_dir():
@@ -764,6 +823,12 @@ class OfflineImageGenerator:
                 f"'{model_key}' runs through ComfyUI and its weights are not installed. "
                 "Install the FLUX dev unet/clip/vae assets, then retry."
             )
+        if getattr(self, "_install_needed", None) == model_id:
+            return (
+                f"'{model_key}' is not installed ({model_id}). Install it from Manage models "
+                "on the Images page or Settings > Model libraries > Image, or pick an "
+                "installed model. Generating never downloads a model on its own."
+            )
         if not self._is_model_downloaded(model_id):
             access = self._probe_repo_access(model_id)
             if access == "gated":
@@ -797,6 +862,21 @@ class OfflineImageGenerator:
             "log for the loader error — usually VRAM pressure or an incomplete download."
         )
 
+    def missing_model_message(self, model_key: str) -> Optional[str]:
+        """The install hint when an offline model's weights are not on this machine, else None.
+
+        For every generation path, none of which downloads; checked before any
+        GPU admission, which would evict the chat model for a request about to
+        be refused.
+        """
+        if not model_key or model_key == "auto" or self.is_comfy_only_model(model_key):
+            return None
+        model_id = self.available_models.get(model_key)
+        if not model_id or self._is_model_downloaded(model_id):
+            return None
+        self._install_needed = model_id
+        return self._load_failure_reason(model_key, model_id)
+
     def _resolve_model_ref(self, model_ref: str) -> str:
         """Catalog key (e.g. krea2-turbo) → HF repo id; pass through HF ids and auto."""
         if not model_ref or model_ref in ("auto", ""):
@@ -818,6 +898,14 @@ class OfflineImageGenerator:
         if family == "zimage":
             return guidance_scale <= 1.0
         return False
+
+    def _limits_row(self, model_id: str) -> dict:
+        """The IMAGE_MODEL_LIMITS row for a catalog key or the HF id it maps to."""
+        from backend.services.media_model_registry import IMAGE_MODEL_LIMITS
+        key = model_id or ""
+        if key not in IMAGE_MODEL_LIMITS:
+            key = next((k for k, v in self.available_models.items() if v == model_id), key)
+        return IMAGE_MODEL_LIMITS.get(key) or {}
 
     def _model_family(self, model_id: str) -> str:
         """Map a catalog key or HF model id to a pipeline family.
@@ -843,6 +931,8 @@ class OfflineImageGenerator:
             return "zimage"
         if "flux" in mid or key.startswith("flux"):
             return "flux"
+        if "sana" in mid or key.startswith("sana"):
+            return "sana"
         if "xl" in mid or "sdxl" in mid:
             return "sdxl"
         return "sd"
@@ -988,6 +1078,10 @@ class OfflineImageGenerator:
                 base = int(_image_limits_for("flux")["vram_mb"])
             elif family == "krea2" and self._will_use_sequential_for_krea2():
                 base = self._KREA2_SEQUENTIAL_VRAM_MB
+            elif family == "sdxl" and self._sdxl_offloads():
+                base = int(_image_limits_for("sdxl")["vram_mb_offload"])
+            elif self._limits_row(model_id).get("vram_mb"):
+                base = int(self._limits_row(model_id)["vram_mb"])
             else:
                 base = self._FAMILY_VRAM_MB.get(family, 4000)
         extra_mp = self._extra_megapixels(width, height)
@@ -1008,6 +1102,8 @@ class OfflineImageGenerator:
             family = self._model_family(model_id)
             if family == "flux":
                 base = float(_image_limits_for("flux")["ram_gb"])
+            elif self._limits_row(model_id).get("ram_gb"):
+                base = float(self._limits_row(model_id)["ram_gb"])
             else:
                 base = self._FAMILY_RAM_GB.get(family, 6.0)
         extra_mp = self._extra_megapixels(width, height)
@@ -1153,7 +1249,7 @@ class OfflineImageGenerator:
         its metadata still said 960x544).
         """
         if (
-            family in ("sdxl", "zimage", "krea2")
+            family in ("sdxl", "zimage", "krea2", "sana")
             and width <= cls._LEGACY_CANVAS
             and height <= cls._LEGACY_CANVAS
         ):
@@ -1190,6 +1286,12 @@ class OfflineImageGenerator:
             return True
         msg = (str(exc) or "").lower()
         return "out of memory" in msg and ("cuda" in msg or "cublas" in msg or "cudnn" in msg)
+
+    def _sdxl_offloads(self) -> bool:
+        """True when this card is too small to hold SDXL whole (see the sdxl family row)."""
+        below = _image_limits_for("sdxl").get("offload_below_vram_gb")
+        total = self._cuda_total_vram_gb()
+        return bool(below) and 0 < total < float(below)
 
     def _prefer_krea2_for_auto(self) -> bool:
         """Krea2 is aesthetic-first but ~14GB peak; only auto-lead on roomy GPUs."""
@@ -1243,6 +1345,8 @@ class OfflineImageGenerator:
             candidates = ["krea2-turbo", "zimage-turbo", "sd-xl", "realistic-vision"]
         elif failed_family == "zimage":
             candidates = ["sd-xl", "realistic-vision"]
+        elif failed_family == "sana":
+            candidates = ["sana-sprint-0.6b", "sd-xl", "realistic-vision"]
         else:
             candidates = ["sd-xl", "realistic-vision"]
         failed_resolved = self._resolve_model_ref(failed_key)
@@ -1267,6 +1371,8 @@ class OfflineImageGenerator:
             key = "zimage-turbo"
         elif family == "krea2":
             key = "krea2-raw" if self._krea2_variant(request.model or "") == "raw" else "krea2-turbo"
+        elif self._limits_row(request.model).get("distilled"):
+            key = request.model
         else:
             return
         from backend.services.image_render_limits import envelope_cfg, envelope_steps
@@ -1288,6 +1394,11 @@ class OfflineImageGenerator:
             # Official HF recipe (9 steps → 8 DiT forwards, CFG distilled → 0.0)
             request.num_inference_steps = 9
             request.guidance_scale = 0.0
+        elif family == "sana":
+            # Embedded guidance, not CFG; values from the sana family row.
+            lim = _image_limits_for("sana")
+            request.num_inference_steps = int(lim["default_steps"])
+            request.guidance_scale = float(lim["cfg_when_unset"])
         elif family == "sdxl":
             if request.guidance_scale > 9.0:
                 request.guidance_scale = 7.5
@@ -1434,7 +1545,11 @@ class OfflineImageGenerator:
             # Large DiT pipelines (Krea2, Z-Image): snapshot only — do not instantiate
             # during download. from_pretrained() loads weights into RAM and fails on
             # Krea2 with transformers<5.2 (tokenizer vocab + Qwen3-VL rope_parameters).
-            if family in ('krea2', 'zimage'):
+            if family in ('krea2', 'zimage', 'sana'):
+                if family == 'sana' and SanaSprintPipeline is None:
+                    msg = "Sana Sprint requested but SanaSprintPipeline unavailable (upgrade diffusers >= 0.33)"
+                    logger.error(msg)
+                    return False, msg
                 if family == 'krea2' and Krea2Pipeline is None:
                     msg = "Krea 2 requested but Krea2Pipeline unavailable (upgrade diffusers >= 0.39)"
                     logger.error(msg)
@@ -1548,7 +1663,9 @@ class OfflineImageGenerator:
             return False
         return False
 
-    def _load_pipeline(self, model_id: str, *, force_sequential: bool = False) -> bool:
+    def _load_pipeline(self, model_id: str, *, force_sequential: bool = False,
+                       allow_download: bool = False) -> bool:
+        self._install_needed = None
         if not self.service_available:
             return False
         if self._gpu_fault is not None:
@@ -1572,6 +1689,10 @@ class OfflineImageGenerator:
                 self._unload_pipeline()
 
             if not self._is_model_downloaded(model_id):
+                if not allow_download:
+                    self._install_needed = model_id
+                    logger.warning("Model %s is not installed; not downloading it from a generate call", model_id)
+                    return False
                 logger.info(f"Model {model_id} not found locally, downloading...")
                 ok, dl_err = self._download_model(model_id)
                 if not ok:
@@ -1589,6 +1710,11 @@ class OfflineImageGenerator:
                 pipeline_class = Krea2Pipeline
             elif family == 'zimage':
                 pipeline_class = ZImagePipeline
+            elif family == 'sana':
+                if SanaSprintPipeline is None:
+                    logger.error("Sana Sprint requested but SanaSprintPipeline unavailable (upgrade diffusers >= 0.33)")
+                    return False
+                pipeline_class = SanaSprintPipeline
             elif family == 'sdxl':
                 pipeline_class = StableDiffusionXLPipeline
             else:
@@ -1615,6 +1741,18 @@ class OfflineImageGenerator:
                 "torch_dtype": gpu_dtype,
             }
 
+            # Sana on a card without native bf16 (Pascal, Turing): the transformer
+            # and VAE run in fp32 and only the Gemma encoder in bf16. In fp16 the
+            # 1.6B transformer renders black frames (GTX 1080, 2026-10-08). The
+            # encoder loads straight to bf16: an fp32 copy first is 10 GB of RAM.
+            if (
+                family == 'sana'
+                and self._device == "cuda"
+                and not torch.cuda.is_bf16_supported(including_emulation=False)
+            ):
+                load_kwargs["torch_dtype"] = {"text_encoder": torch.bfloat16, "default": torch.float32}
+                logger.info("sana: float32 transformer/VAE, bfloat16 text encoder (no native bf16)")
+
             if family == 'sd':
                 load_kwargs["safety_checker"] = None
                 load_kwargs["requires_safety_checker"] = False
@@ -1633,9 +1771,18 @@ class OfflineImageGenerator:
                 )
 
             # Flow-matching DiTs ship their own scheduler — don't force DPM (SD/SDXL only).
-            if family not in ('zimage', 'krea2'):
+            # Distilled models (row "distilled") keep theirs too.
+            if family not in ('zimage', 'krea2', 'sana') and not self._limits_row(model_id).get("distilled"):
+                sched_cfg = self._pipeline.scheduler.config
+                # A DEIS config (Realistic Vision 5.1) carries algorithm_type "deis",
+                # which DPMSolver rejects with its default final_sigmas_type.
+                dpm_kwargs = {}
+                if sched_cfg.get("algorithm_type") not in (
+                    None, "dpmsolver", "dpmsolver++", "sde-dpmsolver", "sde-dpmsolver++"
+                ):
+                    dpm_kwargs = {"algorithm_type": "dpmsolver++", "solver_type": "midpoint"}
                 self._pipeline.scheduler = DPMSolverMultistepScheduler.from_config(
-                    self._pipeline.scheduler.config
+                    sched_cfg, **dpm_kwargs
                 )
 
             # Z-Image / Krea 2 are flow-matching DiTs too large to sit fully resident
@@ -1672,6 +1819,29 @@ class OfflineImageGenerator:
                         logger.warning(f"{family} CPU offload unavailable ({e}); loading fully on GPU")
                         self._pipeline = self._pipeline.to(self._device)
                         offload_mode = "full"
+            elif family == 'sana' and self._device == "cuda":
+                # One component on the card at a time: the Gemma encoder (5.2 GB)
+                # and the transformer never sit there together.
+                try:
+                    self._pipeline.enable_model_cpu_offload()
+                    offload_mode = "model"
+                    logger.info("sana: enabled model CPU offload")
+                except Exception as e:
+                    logger.warning(f"sana CPU offload unavailable ({e}); loading fully on GPU")
+                    self._pipeline = self._pipeline.to(self._device)
+                    offload_mode = "full"
+            elif family == 'sdxl' and self._device == "cuda" and self._sdxl_offloads():
+                try:
+                    self._pipeline.enable_model_cpu_offload()
+                    offload_mode = "model"
+                    logger.info(
+                        f"sdxl: enabled model CPU offload "
+                        f"(VRAM={self._cuda_total_vram_gb():.1f}GB is too small to hold it whole)"
+                    )
+                except Exception as e:
+                    logger.warning(f"sdxl CPU offload unavailable ({e}); loading fully on GPU")
+                    self._pipeline = self._pipeline.to(self._device)
+                    offload_mode = "full"
             else:
                 self._pipeline = self._pipeline.to(self._device)
                 offload_mode = "full"
@@ -2238,7 +2408,7 @@ class OfflineImageGenerator:
             return prompt
         fam = (family or "").lower()
         # Long-context text encoders: pass through; the tokenizer handles real limits.
-        if fam in ("zimage", "krea2"):
+        if fam in ("zimage", "krea2", "sana"):
             return prompt
         # SDXL dual-CLIP still ~77 tokens/encoder, but detailed prompts routinely
         # exceed 75 *words*. Soft-cap higher so tails survive; encoder truncates
@@ -2379,6 +2549,7 @@ Negative Prompt: {negative_prompt}""",
             if (
                 self._has_text_intent(request.prompt)
                 and "sd-xl" in self.available_models
+                and self._is_model_downloaded(self.available_models["sd-xl"])
                 and request.model in (None, "", "auto", "sdxl-turbo")
             ):
                 if request.model != "sd-xl":
@@ -2402,6 +2573,12 @@ Negative Prompt: {negative_prompt}""",
                 )
                 return result
             logger.info(f"Using model: {request.model} -> {model_id}")
+            if not request.allow_model_download:
+                missing = self.missing_model_message(request.model)
+                if missing:
+                    result.error = missing
+                    logger.warning(f"Model {request.model} ({model_id}) refused: {missing}")
+                    return result
 
             # Family-aware max side + area clamp BEFORE the estimates (2026-08-04):
             # admission must see the final W×H now that estimates scale with
@@ -2479,7 +2656,7 @@ Negative Prompt: {negative_prompt}""",
                 # those turbo params produce soft/painterly "artwork" instead of photos.
                 # Turbo/DiT: soft-clamp only so quality presets/sliders are not placebo.
                 # SDXL: hard correct (black-image / turbo-leftover hazards).
-                if family in ('krea2', 'zimage'):
+                if family in ('krea2', 'zimage') or self._limits_row(request.model).get("distilled"):
                     self._soft_clamp_family_sampling(request, family)
                 elif family == 'sdxl':
                     if request.guidance_scale > 9.0:
@@ -2509,7 +2686,7 @@ Negative Prompt: {negative_prompt}""",
                 # estimate matches the model we actually load.
                 self._ensure_vram_for_pipeline(model_id, request.width, request.height)
 
-                if not self._load_pipeline(model_id):
+                if not self._load_pipeline(model_id, allow_download=request.allow_model_download):
                     # No substitution. This used to silently swap in SD 1.5 and carry
                     # on, which returned a plausible-looking image from a completely
                     # different (and much older) model — the user then blamed the model
@@ -2708,6 +2885,27 @@ Negative Prompt: {negative_prompt}""",
 
                 def _call_pipeline(pos_prompt: str, neg_prompt: Optional[str]):
                     """Single forward; raises on OOM / compile failure for recovery."""
+                    with _cudnn_benchmark_off():
+                        return _forward(pos_prompt, neg_prompt)
+
+                def _forward(pos_prompt: str, neg_prompt: Optional[str]):
+                    if family == 'sana':
+                        # No negative prompt; dtypes were set at load, so no autocast.
+                        # The pipeline's intermediate timestep is valid at 2 steps only.
+                        sana_kwargs = (
+                            {} if request.num_inference_steps == 2
+                            else {"intermediate_timesteps": None}
+                        )
+                        return self._pipeline(
+                            prompt=pos_prompt,
+                            width=request.width,
+                            height=request.height,
+                            num_inference_steps=request.num_inference_steps,
+                            guidance_scale=request.guidance_scale,
+                            generator=generator,
+                            **sana_kwargs,
+                            **_watchdog_kwargs,
+                        )
                     if family in ('zimage', 'krea2'):
                         self._ensure_flow_scheduler(family)
                         return self._pipeline(
@@ -2881,7 +3079,8 @@ Negative Prompt: {negative_prompt}""",
                                 raise RuntimeError(
                                     f"GPU busy after OOM — cannot reload: {admit_err}"
                                 ) from infer_err
-                            if self._load_pipeline(model_id, force_sequential=True):
+                            if self._load_pipeline(model_id, force_sequential=True,
+                                                   allow_download=request.allow_model_download):
                                 try:
                                     # Rebuild generator after OOM (device state may be dirty)
                                     if request.seed is not None:
@@ -3069,6 +3268,7 @@ Negative Prompt: {negative_prompt}""",
                             f"{_peak_mb}MB ({request.width}x{request.height}, "
                             f"offload={self._pipeline_offload_mode})"
                         )
+                        record_pipeline_vram(_peak_mb)
                 except Exception:
                     pass
 
@@ -3096,12 +3296,9 @@ Negative Prompt: {negative_prompt}""",
                 if not getattr(request, "keep_pipeline_loaded", False):
                     # Immediately free VRAM — don't wait for the 300s idle timer.
                     # The LLM needs the GPU back for the next chat turn.
-                    self._unload_pipeline()
-                    try:
-                        from backend.services.gpu_memory_orchestrator import get_orchestrator
-                        get_orchestrator().release_model("sd:pipeline")
-                    except Exception:
-                        pass
+                    # Still under _generation_lock, so no new booking can be hit.
+                    if self._unload_pipeline():
+                        forget_pipeline_slot()
                 # Release the gpu_session LAST — after LoRA/pipeline teardown — so
                 # the lease and gate cover the whole unit of work (2026-08-04).
                 # Guarded own try/except: a close failure must not mask the result.
@@ -3253,7 +3450,7 @@ Negative Prompt: {negative_prompt}""",
             type(sched).__name__,
         )
 
-    def _unload_pipeline(self, wait: bool = True) -> bool:
+    def _unload_pipeline(self, wait: bool = True, forget_slot: bool = False) -> bool:
         """Fully unload the pipeline and return RAM/VRAM to the pool.
 
         Aggressive host RAM release for heavy offloaded models (Z-Image etc).
@@ -3265,6 +3462,10 @@ Negative Prompt: {negative_prompt}""",
                 (orchestrator idle eviction), refuse immediately when a
                 generation is in progress so we never null ``scheduler`` under
                 a live ``__call__``.
+            forget_slot: Also drop the orchestrator's ``sd:pipeline`` slot, for
+                callers that are done with the pipeline. Unloads in the middle of
+                a load or an OOM retry leave it, because the slot is that job's
+                booking. Done under the lock so a new job's booking is never hit.
 
         Returns:
             True if unloaded (or already empty), False if refused because busy.
@@ -3277,7 +3478,10 @@ Negative Prompt: {negative_prompt}""",
             )
             return False
         try:
-            return self._unload_pipeline_unlocked()
+            unloaded = self._unload_pipeline_unlocked()
+            if unloaded and forget_slot:
+                forget_pipeline_slot()
+            return unloaded
         finally:
             self._generation_lock.release()
 
@@ -3337,7 +3541,7 @@ Negative Prompt: {negative_prompt}""",
         if held is None or (keep_model and keep_model == held):
             return False
         logger.info("Unloading %s kept after a batch: another GPU job needs the memory", held)
-        return bool(self._unload_pipeline(wait=False))
+        return bool(self._unload_pipeline(wait=False, forget_slot=True))
 
     def _clear_kept(self) -> None:
         with self._kept_lock:
@@ -3517,6 +3721,12 @@ Negative Prompt: {negative_prompt}""",
                 from backend.services.image_resolution_limits import clamp_image_dimensions
                 width, height, _ = clamp_image_dimensions(int(width), int(height), family)
 
+                # Edits never download: a missing model is refused before admission.
+                if not self._is_model_downloaded(model_id):
+                    self._install_needed = model_id
+                    result.error = self._load_failure_reason(model, model_id)
+                    return result
+
                 # Priced admission, as for txt2img: book sd:pipeline against the
                 # real card before loading, so a too-large edit is refused as
                 # busy instead of thrashing CUDA.
@@ -3526,7 +3736,7 @@ Negative Prompt: {negative_prompt}""",
                     result.error = f"GPU busy: {admit_err}"
                     return result
 
-                # Ensure the base txt2img pipeline is loaded (downloads model if needed)
+                # Ensure the base txt2img pipeline is loaded (installed models only)
                 if not self._load_pipeline(model_id):
                     result.error = self._load_failure_reason(model, model_id)
                     return result
@@ -3588,24 +3798,25 @@ Negative Prompt: {negative_prompt}""",
                 if _watchdog:
                     call_kwargs["callback_on_step_end"] = _watchdog
 
-                if family == 'zimage':
-                    # Z-Image is bf16 flow-matching — no autocast; CFG distilled out.
-                    call_kwargs["negative_prompt"] = None
-                    output = self._img2img_pipeline(**call_kwargs)
-                elif self._device == "cuda":
-                    _ac_dtype = (
-                        torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-                    )
-                    with torch.autocast("cuda", dtype=_ac_dtype):
+                with _cudnn_benchmark_off():
+                    if family == 'zimage':
+                        # Z-Image is bf16 flow-matching — no autocast; CFG distilled out.
+                        call_kwargs["negative_prompt"] = None
+                        output = self._img2img_pipeline(**call_kwargs)
+                    elif self._device == "cuda":
+                        _ac_dtype = (
+                            torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+                        )
+                        with torch.autocast("cuda", dtype=_ac_dtype):
+                            output = self._img2img_pipeline(
+                                **call_kwargs,
+                                negative_prompt=combined_negative,
+                            )
+                    else:
                         output = self._img2img_pipeline(
                             **call_kwargs,
                             negative_prompt=combined_negative,
                         )
-                else:
-                    output = self._img2img_pipeline(
-                        **call_kwargs,
-                        negative_prompt=combined_negative,
-                    )
 
                 image = output.images[0]
                 if image is None:
@@ -3642,7 +3853,8 @@ Negative Prompt: {negative_prompt}""",
                     except Exception:
                         pass
                 if not keep_pipeline_loaded:
-                    self._unload_pipeline()
+                    if self._unload_pipeline():
+                        forget_pipeline_slot()
 
         return result
 
@@ -3653,7 +3865,7 @@ Negative Prompt: {negative_prompt}""",
         dropdowns are driven entirely from this single source, plus ``availability``:
 
           ``ready``          weights on disk, selectable now
-          ``downloadable``   not on disk but fetchable — selecting it starts a download
+          ``downloadable``   not on disk but fetchable — Install fetches it; selecting it does not
           ``needs_token``    gated repo and no HF_TOKEN configured
           ``unreachable``    not on disk and the repo could not be reached
 

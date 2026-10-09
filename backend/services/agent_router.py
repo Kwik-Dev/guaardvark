@@ -89,6 +89,34 @@ def requested_file(message: str) -> Dict[str, str]:
     return {}
 
 
+# Room between a request's verb and its object: the same sentence, at most 60
+# characters. An unbounded ".*" across a pasted paragraph read "to create depth
+# ... typical of classic film noir" in an image prompt as "create ... class".
+_GAP = r"(?:(?![.!?](?:\s|$))[^\n]){0,60}?"
+
+
+def _near(verbs: str, objects: str) -> str:
+    """A whole-word verb with a whole-word object later in the same sentence."""
+    return rf"\b(?:{verbs})\b{_GAP}\b(?:{objects})\b"
+
+
+# A person saying the turn needs no tools or files: "do not generate anything",
+# "no tool calling", "without tools", "don't create a file".
+_DECLINES_TOOLS_RE = re.compile(
+    r"\b(?:do\s+not|don[’']?t|dont)\s+(?:generate|create|make)\s+"
+    r"(?:anything|any\s+files?|a\s+file|files?)\b"
+    r"|\b(?:do\s+not|don[’']?t|dont)\s+(?:use|call)\s+(?:any\s+)?tools?\b"
+    r"|\bno\s+tool(?:s|\s+calls?|\s+calling)?\b"
+    r"|\bwithout\s+(?:any\s+|using\s+(?:any\s+)?)?tools?\b",
+    re.IGNORECASE,
+)
+
+
+def declines_tools(message: str) -> bool:
+    """True when the message asks for no tools or generated files this turn."""
+    return bool(_DECLINES_TOOLS_RE.search(message or ""))
+
+
 class AgentRouter:
     """
     Routes user messages to appropriate handling mechanisms.
@@ -128,9 +156,9 @@ class AgentRouter:
             IntentPattern(
                 name="wordpress_content",
                 patterns=[
-                    r"generate.*wordpress",
-                    r"create.*csv.*wordpress",
-                    r"wordpress.*csv",
+                    _near("generate", "wordpress"),
+                    _near("create", "csv") + _GAP + r"\bwordpress\b",
+                    _near("wordpress", "csv"),
                     r"/wordpress\b",
                 ],
                 route_type=RouteType.TOOL_DIRECT,
@@ -141,11 +169,11 @@ class AgentRouter:
             IntentPattern(
                 name="bulk_csv",
                 patterns=[
-                    r"generate\s+(\d+)\s+(?:pages?|rows?|entries)",
-                    r"bulk.*csv",
-                    r"batch.*generate",
+                    r"\bgenerate\s+(\d+)\s+(?:pages?|rows?|entries)\b",
+                    _near("bulk", "csv"),
+                    _near("batch", "generate"),
                     r"/batchcsv\b",
-                    r"create\s+(\d+).*csv",
+                    r"\bcreate\s+(\d+)" + _GAP + r"\bcsv\b",
                 ],
                 route_type=RouteType.TOOL_DIRECT,
                 tool_name="generate_bulk_csv",
@@ -171,8 +199,8 @@ class AgentRouter:
             IntentPattern(
                 name="csv_generation",
                 patterns=[
-                    r"create.*csv",
-                    r"generate.*csv",
+                    _near("create", "csv"),
+                    _near("generate", "csv"),
                     r"/createcsv\b",
                 ],
                 route_type=RouteType.TOOL_DIRECT,
@@ -183,9 +211,9 @@ class AgentRouter:
             IntentPattern(
                 name="file_generation",
                 patterns=[
-                    r"create.*file",
-                    r"generate.*file",
-                    r"write.*to\s+(\w+\.\w+)",
+                    _near("create", "files?"),
+                    _near("generate", "files?"),
+                    r"\bwrite\b" + _GAP + r"\bto\s+(\w+\.\w+)",
                     r"/createfile\b",
                 ],
                 route_type=RouteType.FILE_GENERATION,
@@ -196,11 +224,11 @@ class AgentRouter:
             IntentPattern(
                 name="code_generation",
                 patterns=[
-                    r"generate.*code",
-                    r"write.*(?:python|javascript|java|code)",
-                    r"create.*(?:function|class|module)",
+                    _near("generate", "code"),
+                    _near("write", "python|javascript|java|code"),
+                    _near("create", "function|class|module"),
                     r"/codegen\b",
-                    r"modify.*(?:file|code)",
+                    _near("modify", "file|code"),
                     # "improve/refactor/optimize/rewrite this file" — must be
                     # grounded in the real file, so route to codegen (reads
                     # input_file), never to generate_file (fabricates).
@@ -229,10 +257,11 @@ class AgentRouter:
                 name="browser_automation",
                 patterns=[
                     r"(?i)take\s+(?:a\s+)?screenshot",
-                    r"(?i)screenshot\s+(?:of\s+)?(?:https?://|\w+\.)",
+                    r"(?i)screenshot\s+(?:of\s+)?(?:https?://|[\w-]+\.[a-z]{2,})",
                     r"(?i)(?:scrape|extract)\s+(?:the\s+)?(?:data|text|links|content)\s+from",
-                    r"(?i)navigate\s+to\s+(?:https?://|\w+\.)",
-                    r"(?i)open\s+(?:https?://|\w+\.)",
+                    r"(?i)navigate\s+to\s+(?:https?://|[\w-]+\.[a-z]{2,})",
+                    # A site, not the end of a sentence ("an open doorway. High").
+                    r"(?i)\bopen\s+(?:https?://|[\w-]+\.[a-z]{2,})",
                     r"(?i)fill\s+(?:out|in)\s+(?:the\s+)?form",
                     r"(?i)click\s+(?:the\s+)?(?:button|link|element)",
                     r"(?i)browser\s+automat",
@@ -409,6 +438,13 @@ class AgentRouter:
         # First, check for explicit command patterns (highest priority)
         if message_lower.startswith("/"):
             return self._handle_command(message, context)
+
+        if declines_tools(message):
+            return RouteDecision(
+                route_type=RouteType.CHAT_ONLY,
+                confidence=1.0,
+                reasoning="The message asks for no tools or files",
+            )
 
         # Check intent patterns
         for pattern in self._intent_patterns:

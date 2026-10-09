@@ -27,7 +27,7 @@ from service.config_loader import load_config, resolve_backend_url
 from service.dispatcher import BackendUnavailable, Dispatcher, Intent, NotWired
 from service.jobs import JobManager
 from service.orchestrator_client import OrchestratorClient
-from service.registration import register_output
+from service.registration import register_output, spoken_display_name
 
 logger = logging.getLogger(__name__)
 
@@ -152,18 +152,27 @@ _FX_RT_FACTOR = float(_async_cfg.get("fx_realtime_factor", 1.2))
 _ASYNC_ENABLED = bool(_async_cfg.get("enabled", True))
 
 
-def _finalize(result) -> dict:
+def _finalize(result, intent: Intent | None = None, params: dict | None = None) -> dict:
     """Register the output and build the response dict. Shared by the inline
-    path and the async worker so the shape is identical."""
+    path and the async worker so the shape is identical.
+
+    Spoken clips are filed in their own subfolder under a name taken from their
+    text, so chat replies and narration don't bury the music and effects."""
     reg_cfg = _config.get("runtime", {}).get("registration", {})
     doc = None
     registration_error = None
     if reg_cfg.get("enabled", True):
         backend_url = resolve_backend_url(reg_cfg.get("backend_url"))
+        subfolder = filename = None
+        if intent == Intent.VOICE:
+            subfolder = _config.get("runtime", {}).get("output", {}).get("voice_subdir", "Voice")
+            filename = spoken_display_name((params or {}).get("text"), Path(result.path).suffix)
         doc = register_output(
             result,
             backend_url=backend_url,
             folder=reg_cfg.get("folder", "Audio"),
+            subfolder=subfolder,
+            filename=filename,
         )
         if doc is None:
             registration_error = (
@@ -188,7 +197,7 @@ def _job_runner(intent_value: str, params: dict, progress_cb, cancel_event) -> d
     result = _dispatcher.generate(
         Intent(intent_value), progress_cb=progress_cb, cancel_event=cancel_event, **params,
     )
-    return _finalize(result)
+    return _finalize(result, Intent(intent_value), params)
 
 
 _jobs = JobManager(
@@ -470,7 +479,7 @@ def _run(intent: Intent, params: dict[str, Any]) -> dict[str, Any]:
     params.pop("cancel_event", None)
     with _http_errors(intent):
         result = _dispatcher.generate(intent, **params)
-    return _finalize(result)
+    return _finalize(result, intent, params)
 
 
 @contextmanager

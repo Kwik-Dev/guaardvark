@@ -340,11 +340,13 @@ class GPUResourceCoordinator:
                 return True
 
             # Try starting ollama serve directly
+            from backend.services.plugin_runner import service_env
             subprocess.Popen(
                 ["ollama", "serve"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                start_new_session=True
+                start_new_session=True,
+                env=service_env(),
             )
             time.sleep(3)
 

@@ -215,6 +215,8 @@ class ImageCog(commands.Cog):
                 width=dim,
                 height=dim,
                 subject_ids=subject_ids or None,
+                # A Cast character renders on its own LoRA's base model.
+                model=None if subject_ids else (img_config.get("model") or None),
             )
             batch_id = result.get("batch_id")
             if not batch_id:

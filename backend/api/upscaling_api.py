@@ -183,7 +183,7 @@ def upscale_video():
     data, status = _proxy_post("/upscale/video", payload, timeout=30)
     if status in (200, 202):
         return success_response(data=data, message="Upscale job submitted")
-    return error_response(data.get("error", "Failed to submit job"), status)
+    return error_response(_proxy_error(data, "Failed to submit job"), status)
 
 
 @upscaling_bp.route("/jobs", methods=["GET"])
@@ -280,7 +280,7 @@ def preview_upscale():
             )
         try:
             err_json = resp.json()
-            return error_response(err_json.get("error", "Failed to upscale preview"), resp.status_code)
+            return error_response(_proxy_error(err_json, "Failed to upscale preview"), resp.status_code)
         except Exception:
             return error_response(f"Upscaling failed: {resp.text}", resp.status_code)
     except requests.ConnectionError:
@@ -566,7 +566,7 @@ def upload_and_upscale():
             data={**(data if isinstance(data, dict) else {}), "output_path": str(output_path)},
             message="Upload received, upscale job submitted",
         )
-    return error_response(data.get("error", "Failed to submit upscale job"), status)
+    return error_response(_proxy_error(data, "Failed to submit upscale job"), status)
 
 
 @upscaling_bp.route("/output/<path:filename>", methods=["GET"])

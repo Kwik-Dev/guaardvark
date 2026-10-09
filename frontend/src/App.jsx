@@ -4,6 +4,7 @@ import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from "r
 import useNavigationCancel from "./hooks/useNavigationCancel";
 import useGpuIntent from "./hooks/useGpuIntent";
 import useKeyboardForwarding from "./hooks/useKeyboardForwarding";
+import useFileDropGuard from "./hooks/useFileDropGuard";
 import {
   ThemeProvider as MuiThemeProvider,
   CssBaseline,
@@ -12,6 +13,7 @@ import {
 } from "@mui/material";
 import { themes } from "./theme";
 import { spacing } from "./theme/tokens";
+import { themeCssVars } from "./theme/cssVars";
 import { useAppStore } from "./stores/useAppStore";
 import { BrandLogo } from "./components/branding";
 import brand from "./config/brand";
@@ -87,6 +89,7 @@ import { VoiceProvider } from "./contexts/VoiceContext";
 import { VoiceSessionProvider } from "./contexts/VoiceSessionContext";
 import FloatingChatProvider from "./components/chat/FloatingChatProvider";
 import KeyboardShortcutsOverlay from "./components/common/KeyboardShortcutsOverlay";
+import DidYouKnowTip from "./components/common/DidYouKnowTip";
 import useUncleNotifications from "./hooks/useUncleNotifications";
 
 function UncleNotificationListener() {
@@ -183,6 +186,7 @@ const AppContainer = () => {
   // Route keystrokes to DISPLAY=:99 when the user flips the toggle on either
   // floater. No-op when disabled.
   useKeyboardForwarding();
+  useFileDropGuard();
 
   React.useEffect(() => {
     fetchSystemInfo();
@@ -212,18 +216,7 @@ const AppContainer = () => {
   React.useEffect(() => {
     const { palette } = theme;
     const root = document.documentElement;
-    const vars = {
-      "--bg-default": palette.background.default,
-      "--bg-paper": palette.background.paper,
-      "--text-primary": palette.text.primary,
-      "--text-secondary": palette.text.secondary,
-      "--divider": palette.divider,
-      "--scrollbar-track": palette.background.paper,
-      "--scrollbar-thumb": palette.divider,
-      "--scrollbar-thumb-hover": palette.action.hover,
-      "--scrollbar-thumb-active": palette.primary.main,
-    };
-    Object.entries(vars).forEach(([name, value]) => {
+    Object.entries(themeCssVars(palette)).forEach(([name, value]) => {
       if (value) root.style.setProperty(name, value);
     });
     const meta = document.querySelector('meta[name="theme-color"]');
@@ -739,6 +732,7 @@ const AppContainer = () => {
                     <FloatingChatProvider />
                     <GlobalTrainer />
                     <KeyboardShortcutsOverlay />
+                    <DidYouKnowTip />
                   </ErrorProvider>
                 </SnackbarProvider>
               </VoiceSessionProvider>

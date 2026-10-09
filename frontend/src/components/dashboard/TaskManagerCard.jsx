@@ -24,6 +24,7 @@ import { Link } from "@mui/material";
 import { Link as RouterLink, useNavigate } from "react-router-dom";
 import DashboardCardWrapper from "./DashboardCardWrapper";
 import EntityContextMenu from "../common/EntityContextMenu";
+import { taskPath } from "../../utils/entityLinks";
 import useContextMenu from "../../hooks/useContextMenu";
 // Import API functions - getTasks (functional), createTask (now functional)
 import { getTasks, createTask } from "../../api";
@@ -267,10 +268,7 @@ const TaskManagerCard = React.forwardRef(
                           backgroundColor: "action.hover",
                         },
                       }}
-                      onClick={() => {
-                        // Navigate to Tasks page with the task ID
-                        navigate(`/tasks?taskId=${task.id || task.task_id}`);
-                      }}
+                      onClick={() => navigate(taskPath(task.id || task.task_id))}
                       onContextMenu={(e) => rowMenu.open(e, task)}
                     >
                       <ListItemText
@@ -347,7 +345,7 @@ const TaskManagerCard = React.forwardRef(
                 ? [
                     {
                       label: "Open",
-                      onClick: () => navigate(`/tasks?taskId=${rowMenu.payload.id || rowMenu.payload.task_id}`),
+                      onClick: () => navigate(taskPath(rowMenu.payload.id || rowMenu.payload.task_id)),
                     },
                   ]
                 : []

@@ -7,8 +7,8 @@ prompt) tells the brain what's actually on THIS page. So instead of a hand-writt
 BiDi poster per platform, one NL-driven loop finds the composer, types the text,
 and submits — on any site the operator is logged into.
 
-Used for platforms without a dedicated calibrated fast-path (X/Twitter, Facebook).
-Reddit and YouTube keep their existing BiDi posters for now; once this loop is
+Used for platforms without a dedicated calibrated fast-path (X/Twitter).
+Reddit, YouTube and Facebook comments have BiDi posters; once this loop is
 live-verified they can migrate here too, and "adding a platform" becomes "log in".
 
 Contract mirrors reddit_outreach.post_comment_via_servo: returns (success, reason).
@@ -118,6 +118,31 @@ _PAGE_CHECK_JS = r"""(() => {
 })()"""
 
 
+def _same_page(url: str, target_url: str) -> bool:
+    """Same host and path, ignoring scheme, query, fragment and a trailing slash."""
+    from urllib.parse import urlparse
+
+    a, b = urlparse(url or ""), urlparse(target_url or "")
+    host = lambda u: (u.hostname or "").lower().removeprefix("www.").removeprefix("m.")
+    return host(a) == host(b) and a.path.rstrip("/") == b.path.rstrip("/")
+
+
+def _still_on_target(target_url: str) -> tuple[bool, str]:
+    """Whether the browser is still on the approved page.
+
+    The loop clicks and scrolls by sight; on a reel viewer one scroll moves
+    to someone else's video, and text typed or submitted there would land
+    on the wrong post.
+    """
+    from backend.services.social_outreach.reddit_outreach import bidi_evaluate_json
+
+    data, why = bidi_evaluate_json("JSON.stringify({url: location.href})")
+    if data is None:
+        return False, f"page not readable ({why})"
+    url = str(data.get("url") or "")
+    return _same_page(url, target_url), url[:200]
+
+
 def _text_published(text: str) -> tuple[bool, str]:
     """Read the page and decide whether ``text`` was published.
 
@@ -172,7 +197,11 @@ def post_via_agent_loop(
     from backend.services.agent_control_service import get_agent_control_service
     from backend.services.local_screen_backend import LocalScreenBackend
     from backend.utils.agent_display_utils import start_agent_display_if_needed
-    from backend.services.social_outreach.reddit_outreach import SERVO_SETTLE_SECONDS
+    from backend.services.social_outreach.reddit_outreach import (
+        SERVO_SETTLE_SECONDS,
+        bidi_reachable,
+        page_check_unavailable_reason,
+    )
 
     if not (text or "").strip():
         return False, "empty_text"
@@ -187,6 +216,9 @@ def post_via_agent_loop(
     except Exception as e:  # noqa: BLE001
         logger.warning("general_poster: display unavailable: %s", e)
         return False, "display_unavailable"
+    readable, why = bidi_reachable()
+    if not readable:
+        return False, page_check_unavailable_reason(why)
 
     # 1) Navigate to the target.
     nav = service.execute_task(f"navigate to {target_url}", screen)
@@ -222,10 +254,16 @@ def post_via_agent_loop(
         return False, f"focus_composer_failed: {focus.reason}"
 
     # 4) Type the user text directly — never through the LLM prompt.
+    on_target, where = _still_on_target(target_url)
+    if not on_target:
+        return False, f"wrong_page: nothing was posted; the browser left the target before typing ({where})"
     screen.type_text(text)
     _human_pause()
 
     # 5) Submit.
+    on_target, where = _still_on_target(target_url)
+    if not on_target:
+        return False, f"wrong_page: nothing was posted; the browser left the target before submitting ({where})"
     if before_submit is not None and not before_submit():
         return False, WITHDRAWN_BEFORE_SUBMIT
     submit_task = (

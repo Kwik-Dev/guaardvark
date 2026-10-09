@@ -73,6 +73,9 @@ import 'react-resizable/css/styles.css';
 
 const WindowsGridLayout = WidthProvider(ReactGridLayoutLib);
 const IMAGES_ROOT_PATH = '/Images';
+// Folder rows store paths without the leading slash; browse accepts either form,
+// but create, move and copy look the folder up by its stored path.
+const IMAGES_ROOT_STORED_PATH = 'Images';
 const WINDOWS_STATE_ENDPOINT = '/api/state/images-windows';
 const API_BASE = '/api/files';
 const VIDEO_API_BASE = '/api/batch-video';
@@ -141,6 +144,7 @@ const ImagesPage = () => {
   // Dialogs
   const [newFolderOpen, setNewFolderOpen] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
+  const [newFolderParent, setNewFolderParent] = useState(IMAGES_ROOT_STORED_PATH);
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [renameItem, setRenameItem] = useState(null);
   const [renameName, setRenameName] = useState('');
@@ -183,8 +187,10 @@ const ImagesPage = () => {
   const isTogglingRef = useRef(false); // Skip onLayoutChange during programmatic minimize/expand
   const windowLayoutRef = useRef(windowLayout);
 
-  // Keep refs in sync
-  useEffect(() => { windowsRef.current = windows; }, [windows]);
+  // Keep refs in sync. windowsRef is assigned during render: the grid reports
+  // its first layout from its own effect, before these run, and that report
+  // saves the window list read from it.
+  windowsRef.current = windows;
   useEffect(() => { iconPositionsRef.current = iconPositions; }, [iconPositions]);
   useEffect(() => { windowLayoutRef.current = windowLayout; }, [windowLayout]);
   useEffect(() => {
@@ -827,7 +833,7 @@ const ImagesPage = () => {
   const handleContextMenu = useCallback((e, item = null, type = 'desktop') => {
     e.preventDefault();
     e.stopPropagation();
-    if (type === 'folder' || type === 'folder-window') {
+    if (type === 'folder' || type === 'folder-window' || type === 'folder-background') {
       setActiveContext({ type: 'folder', path: item?.path || IMAGES_ROOT_PATH, folderId: item?.id });
     } else {
       setDesktopContext();
@@ -836,7 +842,7 @@ const ImagesPage = () => {
     setContextMenuType(type);
     setContextMenuItem(item);
 
-    if (item) {
+    if (item && type !== 'folder-background') {
       const key = type === 'folder' ? `folder-${item.id}` : `file-${item.id}`;
       if (!selectedItems.has(key)) {
         setSelectedItems(new Set([key]));
@@ -846,27 +852,39 @@ const ImagesPage = () => {
 
   // ──────────────────── Folder Operations ────────────────────
 
+  const refreshOpenWindows = useCallback(() => {
+    setFolderRefreshKeys(prev => {
+      const updated = { ...prev };
+      windowsRef.current.forEach(w => {
+        updated[w.folderId] = (updated[w.folderId] || 0) + 1;
+      });
+      return updated;
+    });
+  }, []);
+
+  // The menu clears its item when it closes, so the parent is taken now.
   const handleNewFolder = useCallback(() => {
     setContextMenu(null);
+    setNewFolderParent(contextMenuItem?.path || IMAGES_ROOT_STORED_PATH);
     setNewFolderOpen(true);
-  }, []);
+  }, [contextMenuItem]);
 
   const handleCreateFolder = useCallback(async () => {
     if (!newFolderName.trim()) return;
     try {
-      const parentPath = contextMenuItem?.path || IMAGES_ROOT_PATH;
       await axios.post(`${API_BASE}/folder`, {
         name: newFolderName,
-        parent_path: parentPath,
+        parent_path: newFolderParent,
       });
       showMessage?.(`Folder "${newFolderName}" created`, 'success');
       setNewFolderOpen(false);
       setNewFolderName('');
       await refreshData();
+      refreshOpenWindows();
     } catch (err) {
       showMessage?.('Failed to create folder', 'error');
     }
-  }, [newFolderName, contextMenuItem, showMessage, refreshData]);
+  }, [newFolderName, newFolderParent, showMessage, refreshData, refreshOpenWindows]);
 
   // ──────────────────── Clipboard Operations ────────────────────
 
@@ -889,9 +907,9 @@ const ImagesPage = () => {
     const contextTypeToUse = targetOverride?.type || contextMenuType;
     const contextItemToUse = targetOverride?.item || contextMenuItem;
 
-    let targetPath = IMAGES_ROOT_PATH;
-    if ((contextTypeToUse === 'folder-window' || contextTypeToUse === 'folder') && contextItemToUse) {
-      targetPath = contextItemToUse.path;
+    let targetPath = IMAGES_ROOT_STORED_PATH;
+    if (['folder-window', 'folder', 'folder-background'].includes(contextTypeToUse) && contextItemToUse?.path) {
+      targetPath = contextItemToUse.path === IMAGES_ROOT_PATH ? IMAGES_ROOT_STORED_PATH : contextItemToUse.path;
     }
 
     try {
@@ -1993,38 +2011,6 @@ const ImagesPage = () => {
                 '& .react-grid-item > div': { pointerEvents: 'auto' },
                 '& .react-resizable-handle': { pointerEvents: 'auto', zIndex: 10 },
                 '& .folder-window-drag-handle': { position: 'relative', zIndex: 20 },
-                '& .react-resizable-handle-se': {
-                  width: '20px !important', height: '20px !important',
-                  bottom: '0 !important', right: '0 !important', cursor: 'se-resize',
-                },
-                '& .react-resizable-handle-sw': {
-                  width: '20px !important', height: '20px !important',
-                  bottom: '0 !important', left: '0 !important', cursor: 'sw-resize',
-                },
-                '& .react-resizable-handle-ne': {
-                  width: '20px !important', height: '20px !important',
-                  top: '0 !important', right: '0 !important', cursor: 'ne-resize',
-                },
-                '& .react-resizable-handle-nw': {
-                  width: '20px !important', height: '20px !important',
-                  top: '0 !important', left: '0 !important', cursor: 'nw-resize',
-                },
-                '& .react-resizable-handle-s': {
-                  width: '100% !important', height: '12px !important',
-                  bottom: '0 !important', left: '0 !important', cursor: 's-resize',
-                },
-                '& .react-resizable-handle-n': {
-                  width: '100% !important', height: '6px !important',
-                  top: '0 !important', left: '0 !important', cursor: 'n-resize',
-                },
-                '& .react-resizable-handle-e': {
-                  width: '12px !important', height: '100% !important',
-                  top: '0 !important', right: '0 !important', cursor: 'e-resize',
-                },
-                '& .react-resizable-handle-w': {
-                  width: '12px !important', height: '100% !important',
-                  top: '0 !important', left: '0 !important', cursor: 'w-resize',
-                },
               }}>
                 <WindowsGridLayout
                   layout={windowLayout}
@@ -2298,8 +2284,8 @@ const ImagesPage = () => {
         onEdit={handleEditImage}
         onPublish={handlePublishFromMenu}
         onColorChange={handleColorChange}
-        onSelectAll={handleSelectAll}
-        onSortBy={handleSortBy}
+        onSelectAll={contextMenuType === 'folder-background' ? contextMenuItem?.selectAll : handleSelectAll}
+        onSortBy={contextMenuType === 'folder-background' ? contextMenuItem?.sortBy : handleSortBy}
         onArrangeIcons={handleArrangeIcons}
         onArrangeWindows={handleArrangeWindows}
         hasClipboard={Boolean(clipboard)}

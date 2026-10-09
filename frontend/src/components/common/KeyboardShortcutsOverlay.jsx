@@ -16,6 +16,9 @@ import {
 import CloseIcon from "@mui/icons-material/Close";
 import KeyboardIcon from "@mui/icons-material/Keyboard";
 
+/** Dispatch on window to open the shortcuts reference from elsewhere (a tip's "Show me"). */
+export const SHOW_SHORTCUTS_EVENT = "guaardvark:show-shortcuts";
+
 // Real shortcuts wired elsewhere in the app — keep this list in sync with the
 // handlers that own each key (referenced in comments) rather than inventing new
 // ones. `?` itself is owned here.
@@ -36,6 +39,17 @@ const SHORTCUT_GROUPS = [
       { keys: ["Shift", "Enter"], desc: "Insert a newline" },
       { keys: ["↑"], desc: "Recall previous message" },
       { keys: ["↓"], desc: "Recall next message" },
+    ],
+  },
+  {
+    // pages/CodeEditorPage.jsx and components/codeeditor/CodeEditorCard.jsx
+    group: "Code Editor",
+    items: [
+      { keys: ["Ctrl", "S"], desc: "Save the file" },
+      { keys: ["Ctrl", "Shift", "S"], desc: "Save the session now: open tabs and chat" },
+      { keys: ["Ctrl", "Shift", "O"], desc: "Find a function or class and jump to it" },
+      { keys: ["Ctrl", "1–5"], desc: "Jump to Files, Editor, Chat, Search, Output" },
+      { keys: ["Ctrl", "Shift", "E"], desc: "Explain the selected code in the chat" },
     ],
   },
   {
@@ -111,8 +125,13 @@ const KeyboardShortcutsOverlay = () => {
       e.preventDefault();
       setOpen((prev) => !prev);
     };
+    const onShow = () => setOpen(true);
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    window.addEventListener(SHOW_SHORTCUTS_EVENT, onShow);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener(SHOW_SHORTCUTS_EVENT, onShow);
+    };
   }, []);
 
   return (

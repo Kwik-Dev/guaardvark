@@ -3,8 +3,10 @@
 
 The browser sends one POST /api/voice/speech-to-text per utterance, so every
 outcome must hand its rate-limit slot back; the socket stream handlers answer
-with the stream id they were started with and leave its room; faster-whisper
-picks its device against free VRAM instead of taking CUDA unasked.
+with the stream id they were started with and leave its room; both transcribe
+with the model chosen in Settings → Voice unless the request names one;
+faster-whisper picks its device against free VRAM instead of taking CUDA
+unasked.
 """
 
 import io
@@ -54,6 +56,23 @@ def fresh_limiter(monkeypatch):
     return limiter
 
 
+@pytest.fixture
+def chosen_model(monkeypatch):
+    """Save a speech model choice, with the given ids' weights installed."""
+    voice_api._speech_model_fallback_warned.clear()
+
+    def choose(model_id, installed=None):
+        installed = {model_id} if installed is None else set(installed)
+        monkeypatch.setattr(
+            "backend.utils.settings_utils.get_setting",
+            lambda key, default=None, cast=str: model_id if key == voice_api.SPEECH_MODEL_SETTING else default,
+        )
+        monkeypatch.setattr(fw, "is_model_installed", lambda m: m in installed)
+
+    yield choose
+    voice_api._speech_model_fallback_warned.clear()
+
+
 @needs_faster_whisper
 @pytest.mark.parametrize(
     "transcribe, status",
@@ -95,6 +114,61 @@ def test_speech_reaches_the_client_and_ogg_is_accepted(fresh_limiter):
     assert body["text"] == "hello there"
     assert body["engine"] == "faster-whisper"
     stt.assert_called_once()
+
+
+def _stt_model(fresh_limiter, seconds=2, **form):
+    """The model size one /speech-to-text request transcribed with."""
+    import numpy as np
+
+    with patch("faster_whisper.audio.decode_audio", return_value=np.zeros(int(16000 * seconds))), \
+         patch.object(fw, "transcribe_audio_faster", return_value=("hello", 0.1)) as stt:
+        response = _client().post(
+            "/api/voice/speech-to-text",
+            data={"audio": (io.BytesIO(b"\x00" * 64), "utterance.webm"), **form},
+            content_type="multipart/form-data",
+        )
+    assert response.status_code == 200
+    assert response.get_json()["model_used"] == stt.call_args.kwargs["model_size"]
+    return stt.call_args.kwargs["model_size"]
+
+
+@needs_faster_whisper
+def test_speech_to_text_uses_the_chosen_model_over_the_duration_pick(fresh_limiter, chosen_model):
+    # Unpreferred, 20 s of audio would pick "tiny".
+    chosen_model("base")
+    assert _stt_model(fresh_limiter, seconds=20) == "base"
+
+
+@needs_faster_whisper
+def test_speech_to_text_reaches_turbo_by_its_id(fresh_limiter, chosen_model):
+    chosen_model("large-v3-turbo")
+    assert _stt_model(fresh_limiter) == "large-v3-turbo"
+
+
+@needs_faster_whisper
+def test_a_model_named_in_the_request_wins(fresh_limiter, chosen_model):
+    chosen_model("base", installed={"base", "small"})
+    assert _stt_model(fresh_limiter, model="small") == "small"
+
+
+@needs_faster_whisper
+def test_a_deleted_choice_falls_back_to_installed_tiny_en(fresh_limiter, chosen_model):
+    chosen_model("small", installed={"tiny.en"})
+    assert _stt_model(fresh_limiter) == "tiny.en"
+
+
+@needs_faster_whisper
+def test_a_deleted_choice_without_tiny_en_answers_409_naming_it(fresh_limiter, chosen_model):
+    import numpy as np
+
+    chosen_model("small", installed=set())
+    with patch("faster_whisper.audio.decode_audio", return_value=np.zeros(16000)), \
+         patch.object(fw, "transcribe_audio_faster", side_effect=fw.SpeechModelMissing("small")) as stt:
+        response = _post(_client())
+    assert stt.call_args.kwargs["model_size"] == "small"
+    assert response.status_code == 409
+    assert response.get_json()["model_id"] == "small"
+    assert fresh_limiter.active_requests == set()
 
 
 # --- socket stream handlers -------------------------------------------------
@@ -148,6 +222,19 @@ def test_failed_stream_end_reports_the_stream_and_leaves_the_room(socket_calls):
     errors = [p for e, p, _kw in socket_calls["emit"] if e == "voice:error"]
     assert errors == [{"message": "not audio", "session_id": "s_bad"}]
     assert socket_calls["leave"] == ["voice_s_bad"]
+
+
+@needs_faster_whisper
+def test_stream_end_transcribes_with_the_chosen_model(socket_calls, chosen_model):
+    import numpy as np
+
+    chosen_model("base")
+    sio.handle_voice_stream_start({"session_id": "s_model"})
+    sio.handle_voice_stream_chunk({"session_id": "s_model", "audio": b"\x01" * 2000})
+    with patch("faster_whisper.audio.decode_audio", return_value=np.zeros(16000)), \
+         patch.object(fw, "transcribe_audio_faster", return_value=("hello", 0.1)) as stt:
+        sio.handle_voice_stream_end({"session_id": "s_model"})
+    assert stt.call_args.kwargs["model_size"] == "base"
 
 
 # --- device choice ------------------------------------------------------------

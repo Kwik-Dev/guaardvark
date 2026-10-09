@@ -209,8 +209,13 @@ def clear_task_scoped_tool_grants(session_id: str) -> None:
 
 
 def _preapproved_tool_names(session_id: str) -> set:
+    try:
+        from backend.services.tool_approval_prefs import always_approved
+        s: set = set(always_approved())
+    except Exception:
+        logger.debug("always-approved tools unreadable; asking as usual", exc_info=True)
+        s = set()
     with _approval_lock:
-        s: set = set()
         s |= _session_tool_grants.get(session_id, set())
         s |= _task_tool_grants.get(session_id, set())
         return s
@@ -224,12 +229,13 @@ def set_approval_response(
 ):
     """Set the response for a pending tool approval.
 
-    scope: once | session | task (defaults to once).
+    scope: once | session | task | always (defaults to once). "always" also
+        stores the tools so later chats run them without a card.
     tools: optional explicit list from client; otherwise uses pending batch.
     """
     tools = tools or []
     sc = (scope or "once").strip().lower()
-    if sc not in ("once", "session", "task"):
+    if sc not in ("once", "session", "task", "always"):
         sc = "once"
     with _approval_lock:
         pending = _approval_batch_meta.get(session_id) or {}
@@ -244,17 +250,52 @@ def set_approval_response(
             if sc == "session":
                 g = _session_tool_grants.setdefault(session_id, set())
                 g.update(batch_tools)
+            elif sc == "always":
+                from backend.services.tool_approval_prefs import consent_gated
+                g = _session_tool_grants.setdefault(session_id, set())
+                g.update(t for t in batch_tools if not consent_gated(t))
             elif sc == "task":
                 g = _task_tool_grants.setdefault(session_id, set())
                 g.update(batch_tools)
         _approval_responses[session_id] = approved
         if session_id in _approval_events:
             _approval_events[session_id].set()
+    if approved and batch_tools and sc == "always":
+        try:
+            from backend.services.tool_approval_prefs import allow_always
+            allow_always(batch_tools)
+        except Exception:
+            logger.warning("could not store always-approved tools %s", batch_tools, exc_info=True)
 
 
 # How long a turn waits for the approval card before treating silence as a
 # decline. Tests shorten it.
 APPROVAL_TIMEOUT_S = 300
+
+# Chat templates that accept a system message only as the first message (the
+# Qwen3.5 Jinja template raises this). The engine adds system lines later in a
+# turn (code-search nudge, retries), so such a model is learned from its first
+# refusal and sent the same conversation in a shape its template takes.
+_SYSTEM_FIRST_ERROR = "System message must be at the beginning"
+_SYSTEM_FIRST_MODELS: set = set()
+
+
+def _system_first(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The leading system messages as one; any later system message as a user turn."""
+    lead = 0
+    while lead < len(messages) and messages[lead].get("role") == "system":
+        lead += 1
+    out: List[Dict[str, Any]] = []
+    if lead:
+        joined = "\n\n".join(m.get("content") or "" for m in messages[:lead] if m.get("content"))
+        out.append({**messages[0], "content": joined})
+    for m in messages[lead:]:
+        out.append({**m, "role": "user"} if m.get("role") == "system" else m)
+    return out
+
+
+def _template_safe(model_name: str, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return _system_first(messages) if model_name in _SYSTEM_FIRST_MODELS else messages
 
 
 def _served_output_url(path: Optional[str]) -> Optional[str]:
@@ -2233,6 +2274,28 @@ class UnifiedChatEngine:
             except Exception as e:
                 logger.debug(f"Could not load GUAARDVARK.md from {project_root}: {e}")
 
+        # The chat page handed this request to the file generator (its card, or
+        # straight to work when the person chose to always allow that tool).
+        file_generation = options.get("file_generation")
+        if file_generation in ("offered", "started"):
+            filename = str(options.get("file_generation_filename") or "").strip()[:120]
+            target = f" ({filename})" if filename else ""
+            if file_generation == "started":
+                state = (
+                    f"Guaardvark's file generator is creating this file{target} now. "
+                    "Say so in one sentence."
+                )
+            else:
+                state = (
+                    f"A card on screen offers to create this file{target}; it is created only "
+                    "if the person presses Create there. Say that in one sentence, without "
+                    "saying the file is being or will be created."
+                )
+            parts.append(
+                f"{state} Do not write the file's content yourself and do not say that "
+                "you cannot create files."
+            )
+
         if not parts:
             return ""
         return "\n\n".join(parts)
@@ -2413,7 +2476,14 @@ class UnifiedChatEngine:
         selection_text = f"{accepted_offer}\n{message}" if accepted_offer else message
         model_name = getattr(self.llm, "model", "unknown")
         self._prov_note("model", model_name)
-        _skip_tools = bool(getattr(self, "_skip_tools", False) or options.get("skip_tools"))
+        from backend.services.agent_router import declines_tools
+        # A request the chat page's file card owns is only acknowledged here:
+        # with tools on offer the model also wrote the file, a second copy.
+        _skip_tools = bool(
+            getattr(self, "_skip_tools", False) or options.get("skip_tools")
+            or declines_tools(message)
+            or options.get("file_generation") in ("offered", "started")
+        )
 
         if _skip_tools:
             selected_tools = []
@@ -3831,7 +3901,7 @@ class UnifiedChatEngine:
             "tools": approval_jobs,
             "tool_details": display_params(approval_details),
             "iteration": iteration,
-            "available_scopes": ["once", "session", "task"],
+            "available_scopes": ["once", "session", "task", "always"],
             "session_id": session_id,
             "request_id": request_id,
         }
@@ -4728,6 +4798,11 @@ class UnifiedChatEngine:
             )
         except Exception as _oerr:
             logger.debug(f"Orchestrator pre-load for LLM skipped: {_oerr}")
+        try:
+            from backend.utils.ollama_resource_manager import reload_onto_gpu_if_room
+            reload_onto_gpu_if_room(model_name)
+        except Exception as _perr:
+            logger.debug(f"GPU placement check skipped: {_perr}")
 
         accumulated = []
         accumulated_thinking = []
@@ -4862,6 +4937,7 @@ class UnifiedChatEngine:
             call_messages = messages
             if is_thinking_model:
                 call_messages = self._sanitize_messages_for_thinking_model(messages)
+            call_messages = _template_safe(model_name, call_messages)
 
             # Native tool-calling path (feature-flagged via GUAARDVARK_NATIVE_TOOLCALLS,
             # gated additionally on model 'tools' capability — see _run_chat). When
@@ -5028,9 +5104,9 @@ class UnifiedChatEngine:
                 )
                 retry_kwargs = dict(_chat_kwargs)
                 retry_kwargs["think"] = False
-                retry_kwargs["messages"] = list(call_messages) + [
+                retry_kwargs["messages"] = _template_safe(model_name, list(call_messages) + [
                     {"role": "system", "content": _ANSWER_AFTER_REASONING_NUDGE},
-                ]
+                ])
                 retry_kwargs["options"] = sampling_profiles.profile_options(
                     sampling_profiles.DEFAULT_PROFILE,
                     num_ctx=ctx_window,
@@ -5061,12 +5137,25 @@ class UnifiedChatEngine:
 
         except Exception as e:
             error_str = str(e)
+            if (_SYSTEM_FIRST_ERROR in error_str and model_name not in _SYSTEM_FIRST_MODELS
+                    and not accumulated and not is_aborted(session_id)):
+                _SYSTEM_FIRST_MODELS.add(model_name)
+                logger.warning(
+                    f"{model_name} takes a system message only first; resending with "
+                    "later system lines as user turns"
+                )
+                return self._call_llm_streaming(
+                    messages, emit_fn, session_id, emit_tokens=emit_tokens,
+                    max_tokens=max_tokens, iteration=iteration,
+                )
             # Ollama serialization crash: thinking model output contains XML
             # that breaks Go's JSON encoder.  Retry with sanitized messages.
             if "invalid character" in error_str and is_thinking_model:
                 logger.warning(f"Thinking model serialization error, retrying with sanitized prompt: {error_str}")
                 try:
-                    sanitized = self._sanitize_messages_for_thinking_model(messages, aggressive=True)
+                    sanitized = _template_safe(
+                        model_name, self._sanitize_messages_for_thinking_model(messages, aggressive=True),
+                    )
                     # The retry keeps the turn's thinking choice; rebuilding the
                     # kwargs without it would hand the model its own default (on).
                     _sanitized_kwargs = dict(

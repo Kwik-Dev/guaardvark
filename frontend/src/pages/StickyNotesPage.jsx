@@ -58,8 +58,10 @@ import {
 import { useNavigate } from "react-router-dom";
 import PageLayout from "../components/layout/PageLayout";
 import ClosedNotesDrawer from "../components/notes/ClosedNotesDrawer";
+import { pinnedToTop, pinnedFirst, isEditableTarget } from "../components/notes/notesBoard";
 import { useLayout, useDashboardWidth } from "../contexts/LayoutContext";
 import { ContextualLoader } from "../components/common/LoadingStates";
+import { opaqueMenuPaperSx } from "../components/common/opaqueMenuPaper";
 
 const LAYOUT_MODES = ["normal", "compact", "collapsed"];
 const LAYOUT_MODE_LABELS = {
@@ -643,10 +645,17 @@ const StickyNotesPage = () => {
   // packed layouts below are not rebuilt — rebuilding them pulls dragged
   // notes back to the left edge on Enter.
   const noteIdsKey = Object.keys(notes).join("\0");
+  // Pinned ids in a stable string, so the packed layouts rebuild only on a pin change.
+  const pinnedKey = Object.keys(pinnedNotes).filter((id) => pinnedNotes[id]).sort().join("\0");
+  const orderedNoteIds = useMemo(() => {
+    const ids = noteIdsKey ? noteIdsKey.split("\0") : [];
+    const pinned = Object.fromEntries((pinnedKey ? pinnedKey.split("\0") : []).map((id) => [id, true]));
+    return pinnedFirst(ids, pinned);
+  }, [noteIdsKey, pinnedKey]);
 
   // Compact layout (derived)
   const compactLayout = useMemo(() => {
-    const noteIds = noteIdsKey ? noteIdsKey.split("\0") : [];
+    const noteIds = orderedNoteIds;
     const compactW = Math.round(cardGridW * 0.71);
     const compactH = Math.round(cardGridH * 0.71);
     const colWidthPx = gridWidth / COLS_COUNT;
@@ -663,11 +672,11 @@ const StickyNotesPage = () => {
       isDraggable: true,
       isResizable: false,
     }));
-  }, [noteIdsKey, cardGridW, cardGridH, gridWidth, COLS_COUNT, cardMinGridW]);
+  }, [orderedNoteIds, cardGridW, cardGridH, gridWidth, COLS_COUNT, cardMinGridW]);
 
   // Collapsed layout (derived)
   const collapsedLayout = useMemo(() => {
-    const noteIds = noteIdsKey ? noteIdsKey.split("\0") : [];
+    const noteIds = orderedNoteIds;
     const colWidthPx = gridWidth / COLS_COUNT;
     const barW = Math.round(300 / colWidthPx);
     const barH = Math.round(50 / ROW_HEIGHT_PX);
@@ -683,7 +692,7 @@ const StickyNotesPage = () => {
       isDraggable: true,
       isResizable: false,
     }));
-  }, [noteIdsKey, gridWidth, COLS_COUNT, ROW_HEIGHT_PX, cardMinGridW]);
+  }, [orderedNoteIds, gridWidth, COLS_COUNT, ROW_HEIGHT_PX, cardMinGridW]);
 
   // ── Load saved state ─────────────────────────────────────────────────────
 
@@ -912,8 +921,9 @@ const StickyNotesPage = () => {
   // Global keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e) => {
-      // CTRL+Z — Undo
+      // CTRL+Z — board undo. A note body, title or other text field keeps its own.
       if ((e.ctrlKey || e.metaKey) && e.key === "z" && !e.shiftKey) {
+        if (isEditableTarget(e.target)) return;
         e.preventDefault();
         handleUndo();
       }
@@ -1233,19 +1243,33 @@ const StickyNotesPage = () => {
     [notes, noteColors, layout, minimizedCards, makeLayoutItem, saveState],
   );
 
-  // Toggle pin
+  // Pinning moves the note into the band of pinned notes at the top of the
+  // board and moves the rest below it. Unpinning leaves every note where it is.
   const handleTogglePin = useCallback(
     (noteId) => {
-      const newPinned = { ...pinnedNotes };
-      if (newPinned[noteId]) {
-        delete newPinned[noteId];
-      } else {
+      pushUndo();
+      const newPinned = { ...pinnedNotesRef.current };
+      const pinning = !newPinned[noteId];
+      if (pinning) {
         newPinned[noteId] = true;
+      } else {
+        delete newPinned[noteId];
       }
+      pinnedNotesRef.current = newPinned;
       setPinnedNotes(newPinned);
-      saveState(null, null, null, undefined, undefined, newPinned);
+
+      let newLayout = normalLayoutRef.current || layoutRef.current || [];
+      if (pinning) {
+        const barRows = minimizedBarRows(ROW_HEIGHT_PX, CARD_MARGIN_PX);
+        newLayout = pinnedToTop(newLayout, newPinned, COLS_COUNT, (item) =>
+          minimizedCardsRef.current[item.i] ? barRows : item.h,
+        );
+        normalLayoutRef.current = newLayout;
+        if (layoutModeRef.current === "normal") setLayout(newLayout);
+      }
+      saveState(newLayout, null, null, undefined, undefined, newPinned);
     },
-    [pinnedNotes, saveState],
+    [saveState, pushUndo, ROW_HEIGHT_PX, CARD_MARGIN_PX, COLS_COUNT],
   );
 
   // Format commands via execCommand
@@ -1501,13 +1525,6 @@ const StickyNotesPage = () => {
             width: "100%",
             "& .react-grid-item": {
               transition: "transform 0.2s ease-out !important",
-              "&.react-grid-placeholder": {
-                transition: "all 0.2s ease-out !important",
-                opacity: 0.15,
-                background: "transparent",
-                border: `1px dashed ${theme.palette.primary.main}`,
-                borderRadius: "4px",
-              },
               "&.react-draggable-dragging": {
                 transition: "none !important",
                 opacity: 0.9,
@@ -1518,24 +1535,6 @@ const StickyNotesPage = () => {
                   borderRadius: "4px",
                 },
               },
-            },
-            // Global handles sit above the card. Keep the corner and the top/right
-            // strips off the title bar so Close and the title receive the click.
-            "& .react-resizable-handle-n": {
-              height: 8,
-              top: 0,
-              left: 12,
-              width: "calc(100% - 24px)",
-            },
-            "& .react-resizable-handle-e": {
-              width: 8,
-              top: 44,
-              right: 0,
-              height: "calc(100% - 44px)",
-            },
-            "& .react-resizable-handle-ne, & .react-resizable-handle-nw, & .react-resizable-handle-se, & .react-resizable-handle-sw": {
-              width: 12,
-              height: 12,
             },
           }}
         >
@@ -1727,7 +1726,7 @@ const StickyNotesPage = () => {
         onClose={() => setContextMenu(null)}
         anchorReference="anchorPosition"
         anchorPosition={contextMenu ? { top: contextMenu.y, left: contextMenu.x } : undefined}
-        slotProps={{ paper: { sx: { minWidth: 180, borderRadius: "6px" } } }}
+        slotProps={{ paper: { sx: (t) => ({ minWidth: 180, borderRadius: "6px", ...opaqueMenuPaperSx(t) }) } }}
       >
         {contextMenu?.inContent && (
           <>
@@ -1841,7 +1840,7 @@ const StickyNotesPage = () => {
         onClose={() => setDesktopMenu(null)}
         anchorReference="anchorPosition"
         anchorPosition={desktopMenu ? { top: desktopMenu.y, left: desktopMenu.x } : undefined}
-        slotProps={{ paper: { sx: { minWidth: 160, borderRadius: "6px" } } }}
+        slotProps={{ paper: { sx: (t) => ({ minWidth: 160, borderRadius: "6px", ...opaqueMenuPaperSx(t) }) } }}
       >
         <MenuItem onClick={() => { handleAddNote(); setDesktopMenu(null); }}>
           <ListItemIcon><Add fontSize="small" /></ListItemIcon>

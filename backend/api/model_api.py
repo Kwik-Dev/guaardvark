@@ -719,13 +719,23 @@ def set_embedding_model():
         # app config; reading it afterwards compares the new model with itself.
         prev_dim = _embed_dim_of(current_app.config.get("LLAMA_INDEX_EMBED_MODEL"))
 
-        # Reset the EmbeddingRouter singleton so it picks up the new model
+        # Save the choice first: other processes follow it, and the router's
+        # clients rebuild from it on their next call.
+        try:
+            setting = db.session.get(Setting, "active_embedding_model")
+            if setting:
+                setting.value = model_name
+            else:
+                setting = Setting(key="active_embedding_model", value=model_name)
+                db.session.add(setting)
+            db.session.commit()
+        except Exception as e:
+            logger.warning(f"Failed to persist embedding model to DB: {e}")
+
         try:
             from backend.utils.embedding_router import EmbeddingRouter, RouterEmbeddingAdapter
             router = EmbeddingRouter()
-            router._cpu_embedding = test_embed
-            router._active_model_name = model_name
-            router._embed_dim = embed_dim
+            router.use_model(model_name, embed_dim)
             adapter = RouterEmbeddingAdapter(router)
             current_app.config["LLAMA_INDEX_EMBED_MODEL"] = adapter
             logger.info(f"EmbeddingRouter updated with model: {model_name}")
@@ -771,18 +781,6 @@ def set_embedding_model():
             logger.info(f"Embedding dimension changed {prev_dim} → {embed_dim}: index reset, re-index required")
         else:
             logger.info(f"Embedding dimension unchanged ({embed_dim}d) — keeping existing index")
-
-        # Persist choice to database
-        try:
-            setting = db.session.get(Setting, "active_embedding_model")
-            if setting:
-                setting.value = model_name
-            else:
-                setting = Setting(key="active_embedding_model", value=model_name)
-                db.session.add(setting)
-            db.session.commit()
-        except Exception as e:
-            logger.warning(f"Failed to persist embedding model to DB: {e}")
 
         return success_response({
             "model": model_name,

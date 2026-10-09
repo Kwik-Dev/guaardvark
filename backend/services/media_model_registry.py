@@ -208,11 +208,35 @@ IMAGE_FAMILY_SPECS: dict[str, dict[str, Any]] = {
         "prompt_style": "tags", "engine": "comfy",
         "vram_mb": 12000, "ram_gb": 16.0,
     },
+    # SDXL loads whole onto cards of 10 GB and up (vram_mb 8000: ~6.9 GB of fp16
+    # weights plus the working set). Below that it runs with CPU model offload,
+    # one component on the card at a time. vram_mb_offload measured 2026-10-07 on
+    # an 8 GB GTX 1080 (torch 2.7.1, VAE tiling): peak allocated 5512 MB for
+    # 1024^2 without guidance, 5593 MB with CFG 7.0 (the batch-of-two SD-XL path),
+    # 5682 MB at 1280^2; the allocator reserved up to 6454 MB, which the admission
+    # headroom covers. Loaded whole, the same card ran out of memory at 1024^2.
     "sdxl": {
         "max_side": 1536, "max_pixel_area": 1536 * 1536, "min_side": 256, "dimension_alignment": 16,
         "width": 1024, "height": 1024, "default_steps": 25, "cfg_when_unset": 7.0,
         "prompt_style": "tags", "engine": "offline",
         "vram_mb": 8000, "ram_gb": 10.0, "vram_slope_mb_per_mp": 1500, "ram_slope_gb_per_mp": 1.0,
+        "offload_below_vram_gb": 10.0, "vram_mb_offload": 5700,
+    },
+    # Sana Sprint: 1-4 step DiT on a 32x DC-AE; the pipeline renders the nearest
+    # ~1 MP aspect bin and resizes to the canvas asked, so the area stays at 1 MP.
+    # Guidance is an embedded scale (one forward per step), not CFG. Measured
+    # 2026-10-08 on an 8 GB GTX 1080 (torch 2.7.1, diffusers 0.41), 1024^2, model
+    # CPU offload, fp32 transformer/VAE with a bf16 Gemma encoder. 1.6B (this row):
+    # 10.8 s at 2 steps (1 step 10.9, 4 steps 13.3), peak 6429 MB standalone and
+    # 6280 MB through the generator, peak RSS 18.9 GB. 2 steps was the cleanest of
+    # 1/2/4 on three prompts; embedded guidance 2.5-8.0 all rendered clean (8.0
+    # slightly flat). With the 1 GB admission margin the 1.6B just fits an idle
+    # 8 GB card (~7.5 GB free); the 0.6B row carries its own, smaller price.
+    "sana": {
+        "max_side": 2048, "max_pixel_area": 1024 * 1024, "min_side": 512, "dimension_alignment": 32,
+        "width": 1024, "height": 1024, "default_steps": 2, "cfg_when_unset": 4.5,
+        "prompt_style": "tags", "engine": "offline",
+        "vram_mb": 6450, "ram_gb": 19.0,
     },
     "sd": {
         "max_side": 768, "max_pixel_area": 768 * 768, "min_side": 256, "dimension_alignment": 16,
@@ -239,8 +263,25 @@ IMAGE_MODEL_LIMITS: dict[str, dict[str, Any]] = {
     # SDXL: guidance above 9 renders black images, so its range is enforced.
     "sd-xl": {"family": "sdxl", "steps_range": (20, 40), "cfg_range": (4.0, 9.0),
               "min_dimensions": (768, 768)},
+    # distilled: adversarially distilled for its own Euler Ancestral (trailing)
+    # scheduler, 1-4 steps, no guidance. It keeps that scheduler and samples inside
+    # this row, not the base-SDXL correction (guidance 6, 25 steps, DPM++), which
+    # rendered it over-sharpened and posterized at 5x the work; compared
+    # 2026-10-07 at 512^2 and 1024^2.
     "sdxl-turbo": {"family": "sdxl", "starts_from_family": True, "default_steps": 4, "cfg_when_unset": 0.0,
-                   "steps_range": (1, 4), "cfg_range": (0.0, 1.0), "min_dimensions": (768, 768)},
+                   "steps_range": (1, 4), "cfg_range": (0.0, 1.0), "min_dimensions": (768, 768),
+                   "distilled": True},
+    # distilled: samples with its own SCM scheduler inside this row. Out-of-range
+    # steps are warned about, not clamped, so an unset or runaway count (the
+    # Discord bot sends 9) takes the default instead of the range's top.
+    "sana-sprint": {"family": "sana", "steps_range": (1, 4), "cfg_range": (2.5, 8.0),
+                    "min_dimensions": (512, 512), "hard_clamp": False, "distilled": True},
+    # The 0.6B's own price (vram_mb/ram_gb override the family's 1.6B figures):
+    # peak allocated 5096 MB, the Gemma encoder's stage; peak RSS 15.3 GB. That
+    # plus the 1 GB admission margin fits an idle 8 GB card; the 1.6B does not.
+    "sana-sprint-0.6b": {"family": "sana", "steps_range": (1, 4), "cfg_range": (2.5, 8.0),
+                         "min_dimensions": (512, 512), "hard_clamp": False, "distilled": True,
+                         "vram_mb": 5100, "ram_gb": 15.5},
     "sd-1.5": {"family": "sd", "steps_range": (10, 50), "cfg_range": (1.0, 15.0),
                "min_dimensions": (512, 512)},
     # SD 1.5 fine-tunes, portrait-first canvases.
@@ -401,6 +442,35 @@ def assert_train_ready(base_model_id: str) -> dict[str, Any]:
             f"(default) or '{SDXL_LEGACY}' (legacy)."
         )
     return p
+
+
+def train_base_path(profile: dict[str, Any]) -> Optional[str]:
+    """The folder holding an installed train base, or None when it is not installed."""
+    key = profile.get("offline_model_key")
+    if not key:
+        return None
+    from backend.services.offline_image_generator import get_image_generator
+    gen = get_image_generator()
+    model_id = gen.available_models.get(key)
+    if not model_id or not gen._is_model_downloaded(model_id):
+        return None
+    return str(gen._get_model_path(model_id))
+
+
+def train_base_missing_message(profile: dict[str, Any]) -> Optional[str]:
+    """Why a train base cannot load, or None when its weights are installed.
+
+    Training loads the installed copy only and never downloads a base model, so
+    a base that is not installed is refused before any work starts.
+    """
+    key = profile.get("offline_model_key")
+    if not key or train_base_path(profile):
+        return None
+    return (
+        f"{profile.get('name') or key} is not installed. Install it from Manage models on "
+        "the Images page or Settings > Model libraries > Image, then train again. "
+        "Training never downloads a base model on its own."
+    )
 
 
 def lora_compatible_with_inference(base_model_id: str, inference_model: str | None) -> bool:

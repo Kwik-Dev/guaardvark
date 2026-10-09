@@ -797,11 +797,21 @@ def dispatch_train(subject_id: int):
     # Gate on media model registry: Z-Image/FLUX train backends land next;
     # only train_ready profiles (currently sdxl-legacy PEFT) may dispatch.
     from backend.services.lora_training_settings import settings_for_subject
-    from backend.services.media_model_registry import assert_train_ready, get_profile
+    from backend.services.media_model_registry import (
+        assert_train_ready, get_profile, train_base_missing_message,
+    )
     train_cfg = settings_for_subject(s)
     base_id = train_cfg.get("base_model_id")
     try:
-        assert_train_ready(base_id)
+        missing = train_base_missing_message(assert_train_ready(base_id))
+        if missing:
+            prof = get_profile(base_id) or {}
+            return jsonify({
+                "error": "train_base_not_installed",
+                "message": missing,
+                "base_model_id": base_id,
+                "base_model_name": prof.get("name"),
+            }), 400
     except ValueError as e:
         prof = get_profile(base_id) or {}
         return jsonify({

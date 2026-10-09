@@ -37,6 +37,14 @@ const createUISlice = (set, get) => ({
     set({ voiceActivationMode: mode });
   },
 
+  // "Did you know" tips (components/common/DidYouKnowTip.jsx); Settings → General turns them off.
+  tipsEnabled: true,
+  setTipsEnabled: (on) => set({ tipsEnabled: Boolean(on) }),
+
+  // Set while the update notice floats above the footer, so a tip stays out of its way. Not persisted.
+  updateNoticeVisible: false,
+  setUpdateNoticeVisible: (visible) => set({ updateNoticeVisible: Boolean(visible) }),
+
   trainerOpen: false,
   setTrainerOpen: (open) => set({ trainerOpen: open }),
 
@@ -117,6 +125,8 @@ const createDataSlice = (set, get) => ({
   profile: DEFAULT_PROFILE,
   // First run: no profile chosen yet (no .env key, no marker, no extension). Not persisted.
   profileFirstRun: false,
+  // The first branding fetch has finished (either way), so profileFirstRun can be trusted. Not persisted.
+  systemInfoLoaded: false,
   isFetchingSystemInfo: false,
 
   setProjects: (projects) => set({ projects }),
@@ -166,7 +176,7 @@ const createDataSlice = (set, get) => ({
       setError(err.message);
     } finally {
       setIsLoading(false);
-      set({ isFetchingSystemInfo: false });
+      set({ isFetchingSystemInfo: false, systemInfoLoaded: true });
     }
   },
   
@@ -209,6 +219,7 @@ export const useAppStore = create(
             sidebarExpanded: state.sidebarExpanded,
             navChrome: state.navChrome,
             voiceActivationMode: state.voiceActivationMode,
+            tipsEnabled: state.tipsEnabled,
             activeModel: state.activeModel,
             activeProjectId: state.activeProjectId,
             systemName: state.systemName,

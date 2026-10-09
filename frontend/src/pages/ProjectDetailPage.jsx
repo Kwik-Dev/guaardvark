@@ -6,7 +6,7 @@
 // WARNING: Visual/UX changes to this file are forbidden without explicit written approval from the project maintainer.
 
 import React, { useState, useEffect, useCallback } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import {
   Box,
   Typography,
@@ -55,6 +55,9 @@ import { useStatus } from "../contexts/StatusContext"; // For active model displ
 import { formatTimestamp } from "../utils/fileTypeUtils";
 import PageLayout from "../components/layout/PageLayout";
 import { ContextualLoader } from "../components/common/LoadingStates";
+import { PROJECT_TABS } from "../utils/entityLinks";
+
+const tabIndexFor = (name) => Math.max(0, PROJECT_TABS.indexOf(name));
 
 
 // Simplified ProjectActionModal (inline for edit) - assumes client selection is not part of this modal for now.
@@ -183,7 +186,13 @@ const ProjectDetailPage = () => {
   const [project, setProject] = useState(null);
   const [isLoadingProject, setIsLoadingProject] = useState(true);
   const [projectError, setProjectError] = useState(null);
-  const [tabValue, setTabValue] = useState(0);
+  // ?tab=documents (and the other PROJECT_TABS names) opens that tab.
+  const [searchParams] = useSearchParams();
+  const tabParam = searchParams.get("tab");
+  const [tabValue, setTabValue] = useState(() => tabIndexFor(tabParam));
+  useEffect(() => {
+    if (tabParam) setTabValue(tabIndexFor(tabParam));
+  }, [tabParam]);
   const [feedback, setFeedback] = useState({
     message: "",
     severity: "info",

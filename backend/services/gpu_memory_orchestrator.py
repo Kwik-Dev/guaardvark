@@ -435,12 +435,30 @@ class GPUMemoryOrchestrator:
                 slot.last_used = time.time()
                 logger.debug(f"Model {slot_id} released (still in VRAM, eviction timer started)")
 
+    def set_measured_vram(self, slot_id: str, vram_mb: int) -> bool:
+        """Replace a slot's admission estimate with what its model was measured using.
+
+        The estimate books the worst case before a load; a pipeline running with
+        CPU offload then holds a fraction of it, and the status card should show
+        that. False when the slot is not registered or the figure is not positive.
+        """
+        vram_mb = int(vram_mb or 0)
+        if vram_mb <= 0:
+            return False
+        with self._lock:
+            slot = self._registry.get(slot_id)
+            if not slot:
+                return False
+            slot.vram_mb = vram_mb
+            return True
+
     def drop_booking(self, slot_id: str) -> bool:
-        """Forget a session booking without touching any model.
+        """Forget a slot without touching any model.
 
         Session slots (video_render:*, image_batch:*) account for VRAM a caller
         holds; once the caller's gpu_session exits the booking is stale, but the
-        weights behind it belong to whichever generator owns them.
+        weights behind it belong to whichever generator owns them. A model's own
+        slot is dropped the same way once its owner has unloaded it.
         """
         with self._lock:
             slot = self._registry.pop(slot_id, None)

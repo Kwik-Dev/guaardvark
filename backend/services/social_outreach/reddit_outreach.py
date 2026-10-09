@@ -56,7 +56,10 @@ _REDDIT_COOKIE_TTL_S = 120.0
 
 def _bidi_scroll_to_composer() -> tuple[bool, str, Optional[tuple[int, int]]]:
     """Use BiDi to scroll Reddit's 'Join the conversation' composer into
-    view. Returns (success, info_message, (cx, cy) center coords or None).
+    view. Returns (success, info_message, (x, y) of its centre in screen
+    pixels, or None). The page reports positions inside the browser's
+    viewport; the toolbars above it (about 110 px on the agent display) are
+    added back, or the click lands above the box.
 
     Why BiDi instead of xdotool wheel-click: on Xvfb, scroll-wheel events
     via `xdotool click 5` don't reliably propagate to the page body
@@ -100,7 +103,6 @@ def _bidi_scroll_to_composer() -> tuple[bool, str, Optional[tuple[int, int]]]:
           // non-zero dimensions. Also accept elements whose own rect is
           // 0x0 but whose parent shreddit-composer has a real rect.
           let found = null;
-          let foundRect = null;
           const candidates = [];
           const visit = (root) => {
             const els = root.querySelectorAll('faceplate-textarea, faceplate-textarea-input, textarea, div[contenteditable], shreddit-composer');
@@ -118,15 +120,17 @@ def _bidi_scroll_to_composer() -> tuple[bool, str, Optional[tuple[int, int]]]:
             }
           };
           visit(document);
-          // Pick the first candidate (or its closest ancestor) that has
-          // a non-zero rect.
-          for (const c of candidates) {
+          // A candidate that is itself on screen wins: the hidden copies
+          // Reddit keeps earlier in the page climb to a parent that holds
+          // the vote and share row, not the box.
+          const sized = (el) => { const r = el.getBoundingClientRect(); return r.width >= 30 && r.height >= 20; };
+          found = candidates.find(sized) || null;
+          // Otherwise the first candidate's closest ancestor with a size.
+          for (const c of (found ? [] : candidates)) {
             let probe = c;
             while (probe) {
-              const r = probe.getBoundingClientRect();
-              if (r.width >= 30 && r.height >= 20) {
+              if (sized(probe)) {
                 found = probe;
-                foundRect = r;
                 break;
               }
               probe = probe.parentElement;
@@ -135,15 +139,16 @@ def _bidi_scroll_to_composer() -> tuple[bool, str, Optional[tuple[int, int]]]:
           }
           if (!found) return JSON.stringify({found:false, candidates: candidates.length});
           found.scrollIntoView({block:'center', behavior:'instant'});
-          // Re-read rect after scroll so we report post-scroll viewport coords.
+          // Re-read rect after scroll; report the centre in screen pixels.
           const r = found.getBoundingClientRect();
+          const dpr = window.devicePixelRatio || 1;
           return JSON.stringify({
             found: true,
             tag: found.tagName.toLowerCase(),
             x: Math.round(r.x), y: Math.round(r.y),
             w: Math.round(r.width), h: Math.round(r.height),
-            cx: Math.round(r.x + r.width/2),
-            cy: Math.round(r.y + r.height/2),
+            cx: Math.round((window.mozInnerScreenX + r.x + r.width/2) * dpr),
+            cy: Math.round((window.mozInnerScreenY + r.y + r.height/2) * dpr),
             candidates: candidates.length
           });
         })()
@@ -298,6 +303,41 @@ def bidi_evaluate_json(expression: str) -> tuple[Optional[dict], str]:
         except Exception:
             pass
 
+
+
+# Reason a poster gives when it refuses because the page could not be read back.
+PAGE_CHECK_UNAVAILABLE = "page_check_unavailable"
+# bidi_evaluate_json reasons given after the browser answered the session.
+_BIDI_ANSWERED = ("evaluate error", "empty evaluate result", "evaluate result is not an object")
+
+
+def bidi_reachable(wait_s: float = 10.0) -> tuple[bool, str]:
+    """Whether the agent Firefox answers on its BiDi port; ``(ok, why)``.
+
+    Posters that confirm a submit by reading the page check this before they
+    touch anything: without the port a post that did go out is recorded as a
+    failure, and re-approving the draft posts it again. Firefox opens the port
+    only when launched with GUAARDVARK_AGENT_CDP=1 (scripts/agent_firefox_launch.sh).
+    ``wait_s`` covers a Firefox the display start has just launched.
+    """
+    deadline = time.monotonic() + wait_s
+    while True:
+        data, why = bidi_evaluate_json("JSON.stringify({ok: true})")
+        # A fresh Firefox opens on a built-in page that refuses scripts
+        # ("System access is required"); the session still answered, and the
+        # poster navigates away from that page before reading anything.
+        if data is not None or why.startswith(_BIDI_ANSWERED):
+            return True, ""
+        if time.monotonic() >= deadline:
+            return False, why
+        time.sleep(1.0)
+
+
+def page_check_unavailable_reason(why: str) -> str:
+    return (
+        f"{PAGE_CHECK_UNAVAILABLE}: nothing was posted; the agent browser's control port "
+        f"is closed, so the post could not be confirmed ({why})"
+    )
 
 def _human_pause(min_s: float = 0.3, max_s: float = 2.0) -> None:
     """Random sleep to avoid deterministic bot timing fingerprints.
@@ -594,6 +634,55 @@ def record_post_via_backend(
         logger.warning("record-post call failed: %s", e)
 
 
+# The element holding keyboard focus, followed through shadow roots: what a
+# typed comment actually lands in. Joined into one line, so no // comments.
+_FOCUSED_EDITABLE_JS = (
+    "JSON.stringify((() => {"
+    "  let el = document.activeElement;"
+    "  while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;"
+    "  if (!el) return {editable: false};"
+    "  const tag = el.tagName.toLowerCase();"
+    "  const editable = !!el.isContentEditable || tag === 'textarea';"
+    "  const label = ((el.getAttribute('placeholder') || '') + ' ' + (el.getAttribute('aria-label') || '')).trim();"
+    "  return {editable, tag, label: label.slice(0, 80), text: el.isContentEditable ? (el.innerText || '') : (el.value || '')};"
+    "})())"
+)
+_FOCUS_WAIT_S = 3.0
+
+
+def _focused_editable() -> Optional[dict]:
+    """What has keyboard focus in the agent Firefox, or None when unreadable."""
+    data, _why = bidi_evaluate_json(_FOCUSED_EDITABLE_JS)
+    return data
+
+
+def _same_text(typed: str, intended: str) -> bool:
+    """Whitespace-insensitive equality: the rich editor turns newlines into
+    paragraphs, so only the words and their order are compared."""
+    return " ".join((typed or "").split()) == " ".join((intended or "").split())
+
+
+def _wait_for_composer_focus() -> tuple[bool, str]:
+    """Wait for the clicked composer to take focus before typing.
+
+    Reddit expands the composer into its editor on the click; keystrokes sent
+    before the editor holds focus are lost, which once dropped the opening
+    words of a published comment.
+    """
+    deadline = time.monotonic() + _FOCUS_WAIT_S
+    last = None
+    while True:
+        last = _focused_editable()
+        if last and last.get("editable") and not re.search(r"search", last.get("label") or "", re.I):
+            return True, ""
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.25)
+    if last is None:
+        return False, "composer_not_focused: the page could not be read"
+    return False, f"composer_not_focused: focus is on <{last.get('tag')}> {last.get('label') or ''}".rstrip()
+
+
 def post_comment_via_servo(
     permalink: str,
     comment_text: str,
@@ -688,12 +777,39 @@ def post_comment_via_servo(
     cx, cy = coords
     logger.warning("clicking composer at (%s, %s)", cx, cy)
     screen.click(cx, cy)
+    focused, why = _wait_for_composer_focus()
+    if not focused:
+        return False, why
+    # Reddit restores an unsent comment from an earlier visit into the box,
+    # so it is emptied before the approved text goes in.
+    held = _focused_editable()
+    if held is not None and (held.get("text") or "").strip():
+        screen.hotkey("ctrl", "a")
+        screen.hotkey("BackSpace")
+        time.sleep(0.3)
+        held = _focused_editable()
+        if held is None or (held.get("text") or "").strip():
+            return False, "composer_not_empty: nothing was posted; the comment box held earlier text"
     _human_pause(0.5, 1.0)
 
     logger.warning("typing comment (%s chars)", len(comment_text))
     screen.type_text(comment_text)
     time.sleep(1.0)
     _human_pause()
+
+    # Only the approved text is ever submitted: read the composer back and,
+    # on any difference, empty it and stop.
+    held = _focused_editable()
+    if held is None or not _same_text(held.get("text", ""), comment_text):
+        screen.hotkey("ctrl", "a")
+        screen.hotkey("BackSpace")
+        shown = " ".join(((held or {}).get("text") or "").split())[:60]
+        return False, (
+            "typed_text_mismatch: nothing was posted; the comment box held "
+            f"{shown!r} instead of the approved text"
+            if held is not None else
+            "typed_text_unreadable: nothing was posted; the comment box could not be read back"
+        )
 
     # Submit via Reddit's standard Ctrl+Enter shortcut. The textarea is
     # already focused from the click and type, so this keystroke routes to
@@ -751,7 +867,13 @@ def post_comment_via_servo(
         "  return JSON.stringify({foundInThread, composerEmpty, errorVisible, url});"
         "})()"
     )
-    d, why = bidi_evaluate_json(check_js)
+    # A new comment can take a moment to render, so the thread is read a few times.
+    for attempt in range(3):
+        d, why = bidi_evaluate_json(check_js)
+        if d is not None and d.get("foundInThread"):
+            break
+        if attempt < 2:
+            time.sleep(2.0)
     if d is None:
         posted = False
         verify_msg = f"verify failed: {why}"
@@ -766,6 +888,10 @@ def post_comment_via_servo(
     logger.warning("post-submit verify: posted=%s %s", posted, verify_msg)
 
     if not posted:
+        if d is not None and d.get("composerEmpty") and not d.get("errorVisible"):
+            # Reddit took the submit but the comment is not on the page yet:
+            # it may well be live, and approving the draft again would post twice.
+            return False, f"submitted_unconfirmed: may be live, check the thread before approving again ({verify_msg})"
         return False, f"submit_failed: {verify_msg}"
     return True, "ok"
 

@@ -54,7 +54,10 @@ import {
   getTasks,
   updateTask,
   duplicateTask,
+  getClients,
+  getWebsite,
 } from "../api";
+import { TASK_PARAMS } from "../utils/entityLinks";
 import { listJobs, cancelJob as cancelUnifiedJob, JOB_KINDS } from "../api/jobsService";
 import { processTaskQueue } from "../api/taskService";
 import { useStatus } from "../contexts/StatusContext";
@@ -63,6 +66,7 @@ import TaskCard from "../components/cards/TaskCard";
 import TaskActionModal from "../components/modals/TaskActionModal";
 import PageLayout from "../components/layout/PageLayout";
 import EntityContextMenu from "../components/common/EntityContextMenu";
+import useContextMenu from "../hooks/useContextMenu";
 import EmptyState from "../components/common/EmptyState";
 import { ContextualLoader } from "../components/common/LoadingStates";
 
@@ -71,7 +75,26 @@ import { ContextualLoader } from "../components/common/LoadingStates";
 // Removed table-related functions and constants - now using card-based layout
 
 const TaskPage = () => {
-  const [searchParams] = useSearchParams();
+  // Links from elsewhere (utils/entityLinks.js): show one project's, client's
+  // or website's tasks, open one task, or start a new task for that entity.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const projectFilter = searchParams.get(TASK_PARAMS.project);
+  const clientFilter = searchParams.get(TASK_PARAMS.client);
+  const websiteFilter = searchParams.get(TASK_PARAMS.website);
+  const taskIdParam = searchParams.get(TASK_PARAMS.taskId);
+  const wantsNewTask = searchParams.get(TASK_PARAMS.create) === "1";
+  const dropParams = useCallback(
+    (...names) =>
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          names.forEach((name) => next.delete(name));
+          return next;
+        },
+        { replace: true },
+      ),
+    [setSearchParams],
+  );
   const { activeModel, isLoadingModel, modelError } = useStatus();
   useUnifiedProgress();
 
@@ -93,6 +116,12 @@ const TaskPage = () => {
   // Task creation state
   const [showTaskForm, setShowTaskForm] = useState(false);
   const [editingTask, setEditingTask] = useState(null);
+  const [createDefaults, setCreateDefaults] = useState(null);
+  const [tasksLoaded, setTasksLoaded] = useState(false);
+
+  // The linked client and website: undefined while loading, null if not found.
+  const [linkedClient, setLinkedClient] = useState(undefined);
+  const [linkedWebsite, setLinkedWebsite] = useState(undefined);
 
   // Sorting state (simplified for card view)
   const [sortBy] = useState("created_at");
@@ -104,28 +133,21 @@ const TaskPage = () => {
   const [statusFilter, setStatusFilter] = useState('all');
   const [typeFilter, setTypeFilter] = useState('all');
 
-  // Context menu state
-  const [contextMenu, setContextMenu] = useState(null);
-  const [contextItem, setContextItem] = useState(null);
+  // Right-click menu; fields and dialogs keep the browser's own menu.
+  const pageMenu = useContextMenu();
+  const contextItem = pageMenu.payload;
+  const handleContextMenu = (e, task = null) => pageMenu.open(e, task);
 
   const [videoGenJobs, setVideoGenJobs] = useState([]);
   const [videoGenLoading, setVideoGenLoading] = useState(false);
   const [videoGenError, setVideoGenError] = useState(null);
-
-  const handleContextMenu = (e, task = null) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setContextMenu({ top: e.clientY, left: e.clientX });
-    setContextItem(task);
-  };
 
   // Fetch tasks
   const fetchTasks = useCallback(async () => {
     setIsLoading(true);
     setError(null);
     try {
-      const projectId = searchParams.get("project_id");
-      const result = await getTasks(projectId);
+      const result = await getTasks(projectFilter);
       if (result.error) {
         setError(result.error);
       } else {
@@ -144,8 +166,9 @@ const TaskPage = () => {
       setError(err.message);
     } finally {
       setIsLoading(false);
+      setTasksLoaded(true);
     }
-  }, [searchParams]);
+  }, [projectFilter]);
 
   // Fetch projects
   const fetchProjects = useCallback(async () => {
@@ -216,11 +239,77 @@ const TaskPage = () => {
 
   // Load data on component mount
   useEffect(() => {
-    fetchTasks();
     fetchProjects();
     fetchAvailableModels();
     fetchVideoGenJobs();
   }, [fetchVideoGenJobs]);
+
+  useEffect(() => {
+    fetchTasks();
+  }, [fetchTasks]);
+
+  useEffect(() => {
+    if (!clientFilter) {
+      setLinkedClient(undefined);
+      return undefined;
+    }
+    let live = true;
+    setLinkedClient(undefined);
+    getClients()
+      .then((list) => {
+        if (!live) return;
+        const found = Array.isArray(list) ? list.find((c) => String(c.id) === String(clientFilter)) : null;
+        setLinkedClient(found || null);
+      })
+      .catch(() => live && setLinkedClient(null));
+    return () => {
+      live = false;
+    };
+  }, [clientFilter]);
+
+  useEffect(() => {
+    if (!websiteFilter) {
+      setLinkedWebsite(undefined);
+      return undefined;
+    }
+    let live = true;
+    setLinkedWebsite(undefined);
+    getWebsite(websiteFilter)
+      .then((site) => live && setLinkedWebsite(site?.id ? site : null))
+      .catch(() => live && setLinkedWebsite(null));
+    return () => {
+      live = false;
+    };
+  }, [websiteFilter]);
+
+  // ?new=1: a new task for the linked project, client or website, once their names are known.
+  useEffect(() => {
+    if (!wantsNewTask) return;
+    if ((clientFilter && linkedClient === undefined) || (websiteFilter && linkedWebsite === undefined)) return;
+    setEditingTask(null);
+    setCreateDefaults({
+      project_id: projectFilter ? Number(projectFilter) : linkedWebsite?.project?.id ?? undefined,
+      client_id: clientFilter ? Number(clientFilter) : linkedWebsite?.client_id ?? undefined,
+      client_name: linkedClient?.name ?? linkedWebsite?.client?.name ?? undefined,
+      website_id: websiteFilter ? Number(websiteFilter) : undefined,
+    });
+    setShowTaskForm(true);
+    dropParams(TASK_PARAMS.create);
+  }, [wantsNewTask, clientFilter, websiteFilter, projectFilter, linkedClient, linkedWebsite, dropParams]);
+
+  // ?taskId=: open that task once the list is in.
+  useEffect(() => {
+    if (!taskIdParam || !tasksLoaded) return;
+    const task = tasks.find((t) => String(t.id) === String(taskIdParam));
+    if (task) {
+      setCreateDefaults(null);
+      setEditingTask(task);
+      setShowTaskForm(true);
+    } else {
+      setFeedback({ open: true, message: `Task ${taskIdParam} was not found`, severity: "warning" });
+    }
+    dropParams(TASK_PARAMS.taskId);
+  }, [taskIdParam, tasksLoaded, tasks, dropParams]);
 
   // Auto-refresh when tasks are running
   useEffect(() => {
@@ -267,6 +356,7 @@ const TaskPage = () => {
 
   // Task form handlers
   const handleOpenTaskForm = () => {
+    setCreateDefaults(null);
     setEditingTask(null);
     setShowTaskForm(true);
   };
@@ -274,9 +364,11 @@ const TaskPage = () => {
   const handleCloseTaskForm = () => {
     setShowTaskForm(false);
     setEditingTask(null);
+    setCreateDefaults(null);
   };
 
   const handleEditTask = (task) => {
+    setCreateDefaults(null);
     setEditingTask(task);
     setShowTaskForm(true);
   };
@@ -368,6 +460,7 @@ const TaskPage = () => {
     const action = actionMap[actionId];
     if (action) {
       // Set up the editing task with pre-filled data
+      setCreateDefaults(null);
       setEditingTask({
         name: action.name,
         type: action.type,
@@ -555,6 +648,18 @@ const TaskPage = () => {
       filtered = filtered.filter(t => t.type === typeFilter);
     }
 
+    // Client / website from a link. Older tasks carry only the name or URL.
+    if (clientFilter) {
+      filtered = filtered.filter((t) =>
+        String(t.client_id ?? t.client_info?.id ?? "") === String(clientFilter) ||
+        (linkedClient?.name && t.client_name === linkedClient.name));
+    }
+    if (websiteFilter) {
+      filtered = filtered.filter((t) =>
+        String(t.website_id ?? t.website_info?.id ?? "") === String(websiteFilter) ||
+        (linkedWebsite?.url && t.target_website === linkedWebsite.url));
+    }
+
     return filtered.sort((a, b) => {
       if (sortBy === "created_at") {
         return new Date(b.created_at) - new Date(a.created_at);
@@ -584,7 +689,16 @@ const TaskPage = () => {
       }
       return 0;
     });
-  }, [tasks, sortBy, statusFilter, typeFilter]);
+  }, [tasks, sortBy, statusFilter, typeFilter, clientFilter, websiteFilter, linkedClient, linkedWebsite]);
+
+  const entityFilterLabel = [
+    projectFilter &&
+      `Project: ${availableProjects.find((p) => String(p.id) === String(projectFilter))?.name || `#${projectFilter}`}`,
+    clientFilter && `Client: ${linkedClient?.name || `#${clientFilter}`}`,
+    websiteFilter && `Website: ${linkedWebsite?.url || `#${websiteFilter}`}`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
     <PageLayout
@@ -675,6 +789,7 @@ const TaskPage = () => {
           open={showTaskForm}
           onClose={handleCloseTaskForm}
           taskData={editingTask}
+          defaults={editingTask ? null : createDefaults}
           onSave={handleTaskSave}
           isSaving={isSaving}
           onTaskCreated={handleTaskCreated}
@@ -763,6 +878,17 @@ const TaskPage = () => {
 
         {/* Filter bar */}
         <Box sx={{ display: 'flex', gap: 1, mb: 2, flexWrap: 'wrap', alignItems: 'center' }}>
+          {entityFilterLabel && (
+            <>
+              <Chip
+                label={entityFilterLabel}
+                size="small"
+                color="primary"
+                onDelete={() => dropParams(TASK_PARAMS.project, TASK_PARAMS.client, TASK_PARAMS.website)}
+              />
+              <Divider orientation="vertical" flexItem sx={{ mx: 1 }} />
+            </>
+          )}
           {['all', 'active', 'completed', 'failed'].map(f => (
             <Chip
               key={f}
@@ -835,8 +961,8 @@ const TaskPage = () => {
       </Box>
 
         <EntityContextMenu
-          anchorPosition={contextMenu}
-          onClose={() => { setContextMenu(null); setContextItem(null); }}
+          anchorPosition={pageMenu.anchorPosition}
+          onClose={pageMenu.close}
           actions={contextItem ? [
             {
               label: 'Start',

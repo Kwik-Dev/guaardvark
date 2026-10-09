@@ -169,10 +169,14 @@ class UnifiedChatService {
 
   /**
    * Send tool approval response.
+   * @param {{scope?: "once"|"session"|"task"|"always", tools?: string[]}} [opts]
    */
-  sendToolApproval(sessionId, approved) {
+  sendToolApproval(sessionId, approved, opts) {
     if (this.socket?.connected) {
-      this.socket.emit("chat:tool_approval_response", { session_id: sessionId, approved });
+      const payload = { session_id: sessionId, approved };
+      if (opts?.scope) payload.approval_scope = opts.scope;
+      if (opts?.tools?.length) payload.tools = opts.tools;
+      this.socket.emit("chat:tool_approval_response", payload);
     }
   }
 

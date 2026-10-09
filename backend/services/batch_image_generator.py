@@ -102,6 +102,9 @@ class BatchImageRequest:
     user_treatment: Optional[str] = None
     ui_config: Optional[Dict[str, Any]] = None
     retry_data: Optional[Dict[str, Any]] = None
+    # Lets the run download a model that is not installed. No page sets it:
+    # models install from Install in Manage models, never from Generate.
+    allow_model_download: bool = False
 
 
 # Batch-level kwargs the create_batch_from_* factories forward into
@@ -408,12 +411,7 @@ class BatchImageGenerator:
 
         try:
             if self.image_generator and hasattr(self.image_generator, "_unload_pipeline"):
-                self.image_generator._unload_pipeline()
-            try:
-                from backend.services.gpu_memory_orchestrator import get_orchestrator
-                get_orchestrator().release_model("sd:pipeline")
-            except Exception:
-                pass
+                self.image_generator._unload_pipeline(forget_slot=True)
             import gc
             import torch
             gc.collect()
@@ -483,18 +481,13 @@ class BatchImageGenerator:
         except Exception as e:  # noqa: BLE001
             logger.debug("drop_booking(image_batch:%s) failed: %s", batch_id, e)
 
-    def _resolve_batch_model_key(self, model_key: str) -> str:
+    def _resolve_batch_model_key(self, model_key: str, prompt_text: str = "") -> str:
         """Map a batch prompt model key to a catalog key for resource estimates."""
         if not model_key or model_key in ("auto", ""):
             gen = self.image_generator
-            if gen:
-                # Match offline auto-router: zimage first on consumer cards
-                for preferred in ("zimage-turbo", "krea2-turbo", "sd-xl"):
-                    if gen.available_models.get(preferred):
-                        if gen._is_model_downloaded(gen.available_models[preferred]):
-                            return preferred
-                return "zimage-turbo"
-            return "zimage-turbo"
+            # Price the model the offline auto-router will render with.
+            picked = gen._auto_select_model(prompt_text or "") if gen else None
+            return picked or "zimage-turbo"
         return model_key
 
     @staticmethod
@@ -537,7 +530,7 @@ class BatchImageGenerator:
         elif self._zimage_via_comfyui_enabled() and self._is_zimage_model(prompt.model):
             return None
         else:
-            model_key = self._resolve_batch_model_key(prompt.model)
+            model_key = self._resolve_batch_model_key(prompt.model, prompt.prompt)
         if self._is_comfy_flux_model(model_key):
             return None
         return gen.available_models.get(model_key, model_key)
@@ -571,7 +564,7 @@ class BatchImageGenerator:
             if prompt.loras or getattr(prompt, "subject_ids", None):
                 model_key = self._character_model_key(prompt)
             else:
-                model_key = self._resolve_batch_model_key(prompt.model)
+                model_key = self._resolve_batch_model_key(prompt.model, prompt.prompt)
             if self._is_comfy_flux_model(model_key):
                 # Full FLUX-dev fp8 stills: ~12GB+ with T5; serialize workers elsewhere
                 vram_mb = max(vram_mb, 12000)
@@ -660,6 +653,48 @@ class BatchImageGenerator:
             except Exception:
                 pass
 
+    def _report_gpu_wait(
+        self,
+        batch_id: str,
+        batch_status: BatchGenerationStatus,
+        refusal: BaseException,
+        need_mb: int,
+        reserve_mb: int = 0,
+    ) -> str:
+        """Mark the batch as waiting for the GPU and tell the progress feed why.
+
+        The text names the job holding the card when the refusal says who it is,
+        so the footer and queue panel read "Queued behind Video Gen" rather than
+        "Starting". Returns the message.
+        """
+        from backend.services.gpu_resource_policy import vram_probe_snapshot
+        from backend.services.job_operation_gate import gpu_wait_message
+
+        try:
+            snap = vram_probe_snapshot(reserve_mb=reserve_mb)
+        except Exception:  # noqa: BLE001 — the wait text is still useful without a probe
+            snap = {}
+        wait_msg = gpu_wait_message(refusal, snap.get("free_mb"), need_mb)
+        batch_status.gpu_wait_reason = wait_msg
+        if batch_status.status not in ("running", "queued", "pending"):
+            batch_status.status = "queued"
+        if self.progress_system:
+            try:
+                self.progress_system.update_process(
+                    process_id=batch_id,
+                    progress=0,
+                    message=wait_msg,
+                    additional_data={
+                        "batch_id": batch_id,
+                        "gpu_wait_reason": wait_msg,
+                        "vram_free_mb": snap.get("free_mb"),
+                        "vram_need_mb": need_mb,
+                    },
+                )
+            except Exception:
+                pass
+        return wait_msg
+
     def _finish_cancelled_before_start(
         self,
         batch_id: str,
@@ -698,6 +733,51 @@ class BatchImageGenerator:
                 )
             except Exception:
                 pass
+
+    def _finish_refused_before_start(
+        self,
+        batch_id: str,
+        batch_status: BatchGenerationStatus,
+        output_dir: Path,
+        request: BatchImageRequest,
+        reason: str,
+    ) -> None:
+        """Terminal bookkeeping for a batch none of whose images can run, decided
+        before the GPU session so nothing was evicted for it."""
+        batch_status.status = "error"
+        batch_status.error = reason
+        batch_status.failed_images = batch_status.total_images
+        batch_status.end_time = datetime.now()
+        batch_status.gpu_wait_reason = None
+        if request.save_metadata:
+            try:
+                self._save_batch_metadata(batch_status, output_dir)
+            except Exception:
+                pass
+        if self.progress_system:
+            try:
+                self.progress_system.error_process(
+                    process_id=batch_id,
+                    message=f"Batch generation error: {reason}",
+                    additional_data={"batch_id": batch_id, "error": reason},
+                )
+            except Exception:
+                pass
+
+    def _missing_offline_model(self, prompt: BatchPrompt) -> Optional[str]:
+        """The install hint when this prompt would render offline with a model that
+        is not installed, else None. Cast characters and ComfyUI routes have their
+        own weights and are never refused here."""
+        if getattr(prompt, "subject_ids", None) or getattr(prompt, "loras", None):
+            return None
+        if self._should_use_comfy_stills(prompt):
+            return None
+        if self._zimage_via_comfyui_enabled() and self._is_zimage_model(prompt.model):
+            return None
+        gen = self.image_generator
+        if gen is None or not hasattr(gen, "missing_model_message"):
+            return None
+        return gen.missing_model_message(prompt.model or "auto")
 
     @staticmethod
     def _is_comfy_flux_model(model_key: str | None) -> bool:
@@ -1005,6 +1085,7 @@ class BatchImageGenerator:
                     auto_enhance=prompt.auto_enhance,
                     keep_pipeline=True,
                     output="path",
+                    allow_model_download=getattr(batch_status, "allow_model_download", False),
                     content_preset=prompt.content_preset,
                     enhance_anatomy=prompt.enhance_anatomy,
                     enhance_faces=prompt.enhance_faces,
@@ -1373,6 +1454,7 @@ class BatchImageGenerator:
         batch_status.face_restoration_weight = request.face_restoration_weight
         batch_status.generate_thumbnails = request.generate_thumbnails
         batch_status.remove_background = request.remove_background
+        batch_status.allow_model_download = request.allow_model_download
 
         first_p = request.prompts[0] if request.prompts else None
         prompts_list = [p.prompt for p in (request.prompts or [])]
@@ -1682,16 +1764,25 @@ class BatchImageGenerator:
                 except Exception as e:  # noqa: BLE001
                     logger.warning("Could not unload the kept image model: %s", e)
 
+            # Every image would need a model that is not installed: end here,
+            # before the GPU session evicts the chat model to make room for it.
+            if not request.allow_model_download and request.prompts:
+                refusals = [self._missing_offline_model(p) for p in request.prompts]
+                if all(refusals):
+                    logger.warning(f"Batch {batch_id} refused: {refusals[0]}")
+                    self._finish_refused_before_start(
+                        batch_id, batch_status, output_dir, request, refusals[0],
+                    )
+                    return
+
             if self._batch_uses_cuda_offline_gen():
                 from backend.services.gpu_resource_policy import (
                     compositor_vram_reserve_mb,
                     gpu_session,
-                    vram_probe_snapshot,
                 )
                 from backend.services.job_operation_gate import (
                     GpuBusyError,
                     GpuCapacityError,
-                    gpu_wait_message,
                 )
                 from backend.services.job_types import JobKind
 
@@ -1722,6 +1813,11 @@ class BatchImageGenerator:
                 backoff_s = 2.0
                 need_mb = int(vram_mb) + 1024
 
+                def _on_gate_wait(reason: str) -> None:
+                    self._report_gpu_wait(
+                        batch_id, batch_status, GpuBusyError(reason), need_mb, reserve_mb
+                    )
+
                 while True:
                     if cancel_event and cancel_event.is_set():
                         self._finish_cancelled_before_start(
@@ -1749,6 +1845,8 @@ class BatchImageGenerator:
                             # admitted against raw card totals).
                             vram_reserve_mb=reserve_mb,
                             image_model=reuse_model,
+                            cancel_event=cancel_event,
+                            on_wait=_on_gate_wait,
                         ):
                             if batch_status.gpu_wait_reason and self.progress_system:
                                 # Progress consumers merge additional_data, so the
@@ -1775,6 +1873,8 @@ class BatchImageGenerator:
                         )
                         return
                     except GpuBusyError as e:
+                        if cancel_event and cancel_event.is_set():
+                            continue
                         remaining = deadline - time.time()
                         if remaining <= 0:
                             batch_status.gpu_wait_reason = None
@@ -1785,26 +1885,7 @@ class BatchImageGenerator:
                             )
                             return
 
-                        snap = vram_probe_snapshot(reserve_mb=reserve_mb)
-                        wait_msg = gpu_wait_message(e, snap.get("free_mb"), need_mb)
-                        batch_status.gpu_wait_reason = wait_msg
-                        if batch_status.status not in ("running", "queued", "pending"):
-                            batch_status.status = "queued"
-                        if self.progress_system:
-                            try:
-                                self.progress_system.update_process(
-                                    process_id=batch_id,
-                                    progress=0,
-                                    message=wait_msg,
-                                    additional_data={
-                                        "batch_id": batch_id,
-                                        "gpu_wait_reason": wait_msg,
-                                        "vram_free_mb": snap.get("free_mb"),
-                                        "vram_need_mb": need_mb,
-                                    },
-                                )
-                            except Exception:
-                                pass
+                        self._report_gpu_wait(batch_id, batch_status, e, need_mb, reserve_mb)
                         logger.warning(
                             "Batch %s VRAM resident/busy (%s) — retrying in %.0fs (%.0fs left)",
                             batch_id, e, min(backoff_s, remaining), remaining,

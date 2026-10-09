@@ -15,6 +15,7 @@ import CollapsibleAlert from "../common/CollapsibleAlert";
 import { useNavigate } from "react-router-dom";
 import DashboardCardWrapper from "./DashboardCardWrapper";
 import EntityContextMenu from "../common/EntityContextMenu";
+import { entityLinkActions } from "../../utils/entityLinks";
 import useContextMenu from "../../hooks/useContextMenu";
 import { getClients } from "../../api";
 import { getLogoUrl } from "../../config/logoConfig";
@@ -150,12 +151,7 @@ const ClientsDashboardCard = React.forwardRef(
             rowMenu.payload
               ? [
                   { label: "Open", onClick: () => navigate(`/clients?clientId=${rowMenu.payload.id}`) },
-                  {
-                    label: "Files",
-                    onClick: () => navigate(`/documents?client_id=${rowMenu.payload.id}`),
-                    dividerBefore: true,
-                  },
-                  { label: "Schedule Task", onClick: () => navigate(`/tasks?client_id=${rowMenu.payload.id}`) },
+                  ...entityLinkActions("client", rowMenu.payload.id, navigate),
                 ]
               : []
           }

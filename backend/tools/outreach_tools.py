@@ -253,7 +253,9 @@ class OutreachDraftPostTool(BaseTool):
         "reddit, share_target is the subreddit (e.g. 'r/SideProject') and share_link is "
         "optional (defaults to guaardvark.com). "
         "The draft lands in the queue at status='drafted' for human approval — nothing "
-        "posts until the user approves it in the OutreachPage UI."
+        "posts until the user approves it on the Approvals page (Outreach tab). For a post "
+        "to the user's own connected accounts (Discord webhook, Bluesky, Mastodon, Telegram) "
+        "use request_publish."
     )
     parameters = {
         "platform": ToolParameter(

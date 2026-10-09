@@ -104,12 +104,13 @@ def test_session_covers_load_and_teardown(monkeypatch):
         oig.torch.cuda, "mem_get_info", lambda: (8 * GB, 16 * GB), raising=False
     )
 
-    def _fake_load(model_id, *, force_sequential=False):
+    def _fake_load(model_id, *, force_sequential=False, allow_download=False):
         events.append("load")
         gen._pipeline = _OomPipeline()
         return True
 
     monkeypatch.setattr(gen, "_load_pipeline", _fake_load)
+    monkeypatch.setattr(gen, "_is_model_downloaded", lambda model_id: True)
 
     request = ImageGenerationRequest(
         prompt="a scenic mountain valley at dawn",

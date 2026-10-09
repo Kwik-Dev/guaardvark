@@ -17,6 +17,7 @@ export function modelFamily(model) {
   if (m.includes('flux')) return 'flux';
   if (m.includes('zimage') || m.includes('z-image')) return 'zimage';
   if (m.includes('krea')) return m.includes('raw') ? 'krea-raw' : 'krea-turbo';
+  if (m.includes('sana')) return 'sana';
   if (m.includes('xl')) return m.includes('turbo') ? 'sdxl-turbo' : 'sdxl';
   return 'sd';
 }
@@ -25,13 +26,14 @@ export function modelFamily(model) {
 export const isZimageModel = (model) => modelFamily(model) === 'zimage';
 
 /**
- * CFG-free stills path (guidance 0): Z-Image and Krea 2 Turbo. The backend
- * ignores negative prompt and enhance-anatomy on this path. Krea Raw still
- * uses both; `auto` may route to SDXL so it stays editable.
+ * Stills paths with no negative prompt: Z-Image and Krea 2 Turbo (CFG-free)
+ * and Sana Sprint (its pipeline takes none). The backend ignores negative
+ * prompt and enhance-anatomy on these. Krea Raw still uses both; `auto` may
+ * route to SDXL so it stays editable.
  */
 export function ignoresNegativeAndAnatomy(model) {
   const fam = modelFamily(model);
-  return fam === 'zimage' || fam === 'krea-turbo';
+  return fam === 'zimage' || fam === 'krea-turbo' || fam === 'sana';
 }
 
 export const ZIMAGE_STEPS = 9;
@@ -76,6 +78,12 @@ const PRESETS_BY_FAMILY = {
     { value: 'fast', label: 'Fast', steps: 1, guidance: 0.0, description: 'Single-step preview' },
     { value: 'standard', label: 'Standard', steps: 4, guidance: 0.0, description: 'Turbo recipe (4 steps, CFG-free)' },
   ],
+  // Sana Sprint samples in 1-4 steps with an embedded guidance of 4.5; 2 steps
+  // was the cleanest of 1/2/4 (media_model_registry, sana family row).
+  sana: [
+    { value: 'fast', label: 'Fast', steps: 1, guidance: 4.5, description: 'Single-step preview' },
+    { value: 'standard', label: 'Standard', steps: 2, guidance: 4.5, description: 'Sana Sprint recipe (2 steps)' },
+  ],
   sdxl: [
     { value: 'fast', label: 'Fast', steps: 20, guidance: 6.0, description: 'Quick SDXL' },
     { value: 'standard', label: 'Standard', steps: 25, guidance: 7.0, description: 'Balanced SDXL' },
@@ -101,6 +109,7 @@ const DEFAULT_PRESET_BY_FAMILY = {
   'krea-turbo': 'standard',
   'krea-raw': 'high',
   'sdxl-turbo': 'standard',
+  sana: 'standard',
   sdxl: 'standard',
   sd: 'standard',
 };
@@ -163,4 +172,42 @@ export function buildFinalPrompts({ inputMode, batchItems, lookAndFeel, quantity
     for (let i = 0; i < copies; i++) out.push(finalPrompt);
   });
   return out;
+}
+
+/**
+ * Picker option for one row of /batch-image/models. A model that is not on
+ * disk says so: it installs from Install (Manage models), never from Generate.
+ */
+export function imageModelOption(m) {
+  const installed = m.is_downloaded !== false;
+  const size = m.size_gb ? ` ~${m.size_gb} GB` : '';
+  return {
+    value: m.id,
+    label: m.recommended ? `${m.label} ⭐` : m.label,
+    description: installed
+      ? (m.description || '')
+      : `${m.description || ''} (not installed — Install downloads${size})`.trim(),
+    installed,
+    recommended: !!m.recommended,
+    name: m.name || m.label || m.id,
+    sizeGb: m.size_gb || 0,
+  };
+}
+
+/**
+ * What Generate is waiting on for `value`, or null when nothing is.
+ *
+ * A picked model that is not installed blocks Generate: the run would be
+ * refused. Auto chooses among installed models, so it never blocks; when no
+ * listed model is installed it names the recommended one so the page can
+ * offer Install (a ComfyUI route may still render without it).
+ */
+export function modelInstallNeed(options, value) {
+  if (!value || value === 'auto') {
+    const listed = options.filter((o) => o.value !== 'auto');
+    if (listed.length === 0 || listed.some((o) => o.installed)) return null;
+    return { option: listed.find((o) => o.recommended) || listed[0], blocks: false };
+  }
+  const option = options.find((o) => o.value === value);
+  return option && option.installed === false ? { option, blocks: true } : null;
 }

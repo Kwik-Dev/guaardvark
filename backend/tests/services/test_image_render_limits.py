@@ -37,6 +37,7 @@ OLD_STILLS_DEFAULTS = {
     "sdxl": {"width": 1024, "height": 1024, "steps": 25, "guidance": 7.0, "prompt_style": "tags"},
     "sd": {"width": 512, "height": 512, "steps": 20, "guidance": 7.5, "prompt_style": "tags"},
     "flux": {"width": 1024, "height": 1024, "steps": 28, "guidance": 3.5, "prompt_style": "tags"},
+    "sana": {"width": 1024, "height": 1024, "steps": 2, "guidance": 4.5, "prompt_style": "tags"},
 }
 
 OLD_MODEL_SETTINGS = {'epic-realism': {'best_for': ['faces', 'portraits', 'cinematic'],
@@ -132,7 +133,29 @@ OLD_MODEL_SETTINGS = {'epic-realism': {'best_for': ['faces', 'portraits', 'cinem
                       'recommended_guidance': 0.0,
                       'recommended_steps': 9,
                       'steps_range': (2, 30),
-                      'warnings': []}}
+                      'warnings': []},
+     'sana-sprint': {'best_for': ['speed', 'previews', 'high_res', 'low_vram'],
+                     'guidance_range': (2.5, 8.0),
+                     'hard_clamp': False,
+                     'max_dimensions': (2048, 2048),
+                     'max_pixels': 1048576,
+                     'min_dimensions': (512, 512),
+                     'recommended_dimensions': (1024, 1024),
+                     'recommended_guidance': 4.5,
+                     'recommended_steps': 2,
+                     'steps_range': (1, 4),
+                     'warnings': ['Ignores negative prompts.']},
+     'sana-sprint-0.6b': {'best_for': ['speed', 'previews', 'low_vram'],
+                          'guidance_range': (2.5, 8.0),
+                          'hard_clamp': False,
+                          'max_dimensions': (2048, 2048),
+                          'max_pixels': 1048576,
+                          'min_dimensions': (512, 512),
+                          'recommended_dimensions': (1024, 1024),
+                          'recommended_guidance': 4.5,
+                          'recommended_steps': 2,
+                          'steps_range': (1, 4),
+                          'warnings': ['Ignores negative prompts.']}}
 
 OLD_FAMILY_LIMITS = {  # image_resolution_limits: (max_side, max_pixels)
     "zimage": (2688, 2048 * 2048), "krea2": (2688, 2048 * 2048),
@@ -158,9 +181,9 @@ def test_family_ceilings_are_unchanged(family, limits):
 
 def test_offline_prices_are_unchanged():
     from backend.services.offline_image_generator import OfflineImageGenerator as G
-    assert G._FAMILY_VRAM_MB == {"krea2": 14000, "zimage": 11000, "sdxl": 8000, "sd": 4000}
+    assert G._FAMILY_VRAM_MB == {"krea2": 14000, "zimage": 11000, "sdxl": 8000, "sana": 6450, "sd": 4000}
     assert G._KREA2_SEQUENTIAL_VRAM_MB == 10000
-    assert G._FAMILY_RAM_GB == {"krea2": 24.0, "zimage": 21.0, "sdxl": 10.0, "sd": 6.0}
+    assert G._FAMILY_RAM_GB == {"krea2": 24.0, "zimage": 21.0, "sdxl": 10.0, "sana": 19.0, "sd": 6.0}
     assert G._FAMILY_VRAM_SLOPE_MB_PER_MP == {"krea2": 1000, "zimage": 500, "sdxl": 1500, "sd": 800}
     assert G._FAMILY_RAM_SLOPE_GB_PER_MP == {"krea2": 1.0, "zimage": 1.0, "sdxl": 1.0, "sd": 0.5}
     gen = G.__new__(G)
@@ -186,7 +209,8 @@ def test_every_model_row_names_a_family_with_a_full_row():
 
 def test_the_catalog_models_all_have_a_row():
     catalog = {"zimage-turbo", "flux-dev", "krea2-turbo", "krea2-raw", "sd-xl", "sdxl-turbo",
-               "realistic-vision", "epic-realism"}   # OfflineImageGenerator.available_models
+               "realistic-vision", "epic-realism", "sana-sprint",
+               "sana-sprint-0.6b"}   # OfflineImageGenerator.available_models
     assert catalog <= set(IMAGE_MODEL_LIMITS)
 
 
@@ -195,6 +219,7 @@ def test_the_catalog_models_all_have_a_row():
     ("krea/Krea-2-Turbo", "krea2"), ("flux-dev", "flux"), ("flux-schnell", "flux"),
     ("sd-xl", "sdxl"), ("sdxl-turbo", "sdxl"), ("stabilityai/stable-diffusion-xl-base-1.0", "sdxl"),
     ("realistic-vision", "sd"), ("epic-realism", "sd"), ("", "sd"), (None, "sd"),
+    ("sana-sprint", "sana"), ("Efficient-Large-Model/Sana_Sprint_0.6B_1024px_diffusers", "sana"),
 ])
 def test_one_family_mapper(model, family):
     from backend.services.image_resolution_limits import resolve_family
@@ -231,6 +256,20 @@ def test_resolve_canvas_matches_the_old_clamp(family):
     from backend.services.image_resolution_limits import clamp_image_dimensions
     for w, h in itertools.product(SIZES, SIZES):
         assert clamp_image_dimensions(w, h, family)[:2] == _old_clamp(w, h, family), (family, w, h)
+
+
+def test_sana_canvas_holds_one_megapixel_on_its_grid():
+    # Sana Sprint is newer than the frozen clamp above: 512 px minimum side, 1 MP
+    # area (it renders the nearest ~1 MP bin), sides on the DC-AE's 32 px grid.
+    from backend.services.image_resolution_limits import clamp_image_dimensions, family_limits
+    assert family_limits("sana") == (2048, 1024 * 1024)
+    assert clamp_image_dimensions(0, 0, "sana")[:2] == (512, 512)
+    assert clamp_image_dimensions(768, 768, "sana")[:2] == (768, 768)
+    assert clamp_image_dimensions(1024, 1024, "sana")[:2] == (1024, 1024)
+    for w, h in itertools.product(SIZES, SIZES):
+        cw, ch = clamp_image_dimensions(w, h, "sana")[:2]
+        assert cw * ch <= 1024 * 1024 and cw % 32 == 0 and ch % 32 == 0, (w, h, cw, ch)
+        assert min(cw, ch) >= 512, (w, h, cw, ch)
 
 
 # ── the offline sampling envelope: the old clamp, frozen ─────────────────────

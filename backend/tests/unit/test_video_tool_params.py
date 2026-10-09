@@ -6,13 +6,23 @@ from backend.services import video_model_registry as vmr
 resolve = VideoGeneratorTool.resolve_request
 
 
-def test_default_model_and_legacy_frames():
+def test_default_model_and_legacy_frames(monkeypatch):
+    # A machine where the resolver picks a model; CI has no GPU to read.
+    monkeypatch.setattr(vmr, "resolve_active_video_model", lambda role, *a, **k: ("wan22-5b", None))
     params, err = resolve("a dog")
     assert err is None
     caps = vmr.model_capabilities(params["model"])
     assert caps.get("supports_t2v")
     assert params["duration_frames"] == 49
     assert params["metadata"] == {"source": "chat"}
+
+
+def test_no_picked_model_is_refused_with_the_resolvers_reason(monkeypatch):
+    reason = "The GPU's memory could not be read, so no video model was picked automatically."
+    monkeypatch.setattr(vmr, "resolve_active_video_model", lambda role, *a, **k: (None, reason))
+    params, err = resolve("a dog")
+    assert params is None
+    assert err == reason
 
 
 def test_h3_with_audio_and_seconds():

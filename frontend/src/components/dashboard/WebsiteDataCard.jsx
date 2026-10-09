@@ -17,6 +17,7 @@ import { useNavigate } from "react-router-dom";
 import DashboardCardWrapper from "./DashboardCardWrapper";
 import WebsiteActionModal from "../modals/WebsiteActionModal";
 import EntityContextMenu from "../common/EntityContextMenu";
+import { entityLinkActions } from "../../utils/entityLinks";
 import useContextMenu from "../../hooks/useContextMenu";
 import copyText from "../../utils/copyText";
 import {
@@ -228,12 +229,7 @@ const WebsiteDataCard = React.forwardRef(
                     rowMenu.payload.url && { label: "Copy URL", onClick: () => copyText(rowMenu.payload.url) },
                     { label: "Edit…", onClick: () => handleOpenModal(rowMenu.payload), dividerBefore: true },
                     { label: "Delete", onClick: () => handleDelete(rowMenu.payload.id), color: "error.main" },
-                    {
-                      label: "Files",
-                      onClick: () => navigate(`/documents?website_id=${rowMenu.payload.id}`),
-                      dividerBefore: true,
-                    },
-                    { label: "Schedule Task", onClick: () => navigate(`/tasks?website_id=${rowMenu.payload.id}`) },
+                    ...entityLinkActions("website", rowMenu.payload.id, navigate),
                   ]
                 : []
             }

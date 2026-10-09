@@ -405,6 +405,24 @@ const FolderContents = ({
     }
   };
 
+  // Right-click on an item. A subfolder can be opened in this window from its menu.
+  const handleItemContextMenu = (e, item, type) => {
+    if (!onContextMenu) return;
+    const extras = type === 'folder' && onNavigateToPath
+      ? { openInPlace: () => onNavigateToPath(item.path) }
+      : null;
+    onContextMenu(e, item, type, extras);
+  };
+
+  // Right-click on empty space: the menu acts on the folder this window shows.
+  const handleBackgroundContextMenu = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (onContextMenu) {
+      onContextMenu(e, { ...folder, path: currentPath || folder.path }, 'folder-window');
+    }
+  };
+
   // Handle item click
   const handleItemClick = (e, item, type) => {
     if (e.ctrlKey || e.metaKey) {
@@ -459,7 +477,7 @@ const FolderContents = ({
   const handlersRef = useRef({});
   handlersRef.current = {
     handleItemClick, handleFolderDoubleClick, handleDragStart, handleDrop,
-    onContextMenu, selectedItems, items,
+    handleItemContextMenu, handleBackgroundContextMenu, selectedItems, items,
   };
 
   // Stable TableRow component for TableVirtuoso — never recreated, reads current data via ref
@@ -490,7 +508,7 @@ const FolderContents = ({
           onDragStart={(e) => h.handleDragStart(e, item, item.itemType)}
           onDragOver={(e) => e.preventDefault()}
           onDrop={h.handleDrop}
-          onContextMenu={(e) => h.onContextMenu && h.onContextMenu(e, item, item.itemType)}
+          onContextMenu={(e) => h.handleItemContextMenu(e, item, item.itemType)}
           sx={{
             cursor: 'pointer',
             height: 36,
@@ -516,11 +534,10 @@ const FolderContents = ({
           }
         }}
         onContextMenu={(e) => {
-          const clickedOnItem = e.target.closest('.MuiTableRow-root');
-          if (!clickedOnItem) {
-            e.preventDefault();
-            e.stopPropagation();
-            // delegated via ref so always fresh
+          // Item rows open their own menu and stop the event; the header and
+          // any space around the rows get the window's menu.
+          if (!e.target.closest('.MuiTableRow-root[data-index]')) {
+            handlersRef.current.handleBackgroundContextMenu(e);
           }
         }}
       />
@@ -557,16 +574,7 @@ const FolderContents = ({
     return (
       <Box
         sx={{ p: 3, textAlign: 'center', minHeight: '200px', cursor: 'default' }}
-        onContextMenu={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          if (onContextMenu) {
-            // Pass folder with current path so DocumentsPage knows the context
-            const pathToUse = currentPath || folder.path;
-            const targetFolder = { ...folder, path: pathToUse };
-            onContextMenu(e, targetFolder, 'folder-window');
-          }
-        }}
+        onContextMenu={handleBackgroundContextMenu}
         onDrop={handleDrop}
         onDragOver={(e) => {
           e.preventDefault();
@@ -612,6 +620,9 @@ const FolderContents = ({
           }
         }}
         onMouseDown={handleSelectionMouseDown}
+        onContextMenu={(e) => {
+          if (!e.target.closest('.MuiTableRow-root[data-index]')) handleBackgroundContextMenu(e);
+        }}
       >
         {/* Selection box overlay */}
         {isSelecting && selectionBox && (
@@ -780,16 +791,7 @@ const FolderContents = ({
         }
       }}
       onContextMenu={(e) => {
-        const clickedOnItem = e.target.closest('.MuiCard-root');
-        if (!clickedOnItem) {
-          e.preventDefault();
-          e.stopPropagation();
-          if (onContextMenu) {
-            const pathToUse = currentPath || folder.path;
-            const targetFolder = { ...folder, path: pathToUse };
-            onContextMenu(e, targetFolder, 'folder-window');
-          }
-        }
+        if (!e.target.closest('.MuiCard-root')) handleBackgroundContextMenu(e);
       }}
     >
       {/* Selection box overlay */}
@@ -853,7 +855,7 @@ const FolderContents = ({
                 onDragStart={(e) => handleDragStart(e, item, type)}
                 onDragOver={(e) => e.preventDefault()}
                 onDrop={handleDrop}
-                onContextMenu={(e) => onContextMenu && onContextMenu(e, item, type)}
+                onContextMenu={(e) => handleItemContextMenu(e, item, type)}
               >
                 <CardContent sx={{ textAlign: 'center', p: 1 }}>
                   {isFolder ? (

@@ -260,18 +260,20 @@ const AICommandPalette = ({
                         />
                         <ListItemSecondaryAction>
                           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                            <Chip
-                              label={command.shortcut}
-                              size="small"
-                              variant="outlined"
-                              sx={{
-                                height: '20px',
-                                fontSize: '0.6rem',
-                                opacity: isSelected ? 0.9 : 0.7,
-                                borderColor: isSelected ? 'currentColor' : 'text.secondary',
-                                color: isSelected ? 'inherit' : 'text.secondary',
-                              }}
-                            />
+                            {command.shortcut && (
+                              <Chip
+                                label={command.shortcut}
+                                size="small"
+                                variant="outlined"
+                                sx={{
+                                  height: '20px',
+                                  fontSize: '0.6rem',
+                                  opacity: isSelected ? 0.9 : 0.7,
+                                  borderColor: isSelected ? 'currentColor' : 'text.secondary',
+                                  color: isSelected ? 'inherit' : 'text.secondary',
+                                }}
+                              />
+                            )}
                             {isSelected && (
                               <ArrowIcon
                                 sx={{

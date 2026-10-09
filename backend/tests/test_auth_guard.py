@@ -56,7 +56,137 @@ def app():
     def settings_profile():
         return {"ok": True}
 
+    @test_app.route("/api/connections", methods=["GET"])
+    def connections_list():
+        return {"ok": True}
+
+    @test_app.route("/api/connections/publishes/<int:pid>/approve", methods=["POST"])
+    def connections_approve(pid):
+        return {"ok": True}
+
+    @test_app.route("/api/connections/settings", methods=["GET", "POST"])
+    def connections_settings():
+        return {"ok": True}
+
+    @test_app.route("/api/social-outreach/status", methods=["GET"])
+    def outreach_status():
+        return {"ok": True}
+
     return test_app
+
+
+CONNECTIONS_REQUESTS = [
+    ("GET", "/api/connections"),
+    ("POST", "/api/connections/publishes/7/approve"),
+    ("POST", "/api/connections/settings"),
+]
+
+
+@pytest.mark.parametrize("method,path", CONNECTIONS_REQUESTS)
+def test_connections_refuse_another_host_without_api_key(app, monkeypatch, method, path):
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    client = app.test_client()
+
+    response = client.open(path, method=method, json={}, environ_base={"REMOTE_ADDR": "192.168.1.20"})
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == auth_guard.LOCAL_ONLY_CODE
+
+
+@pytest.mark.parametrize("method,path", CONNECTIONS_REQUESTS)
+def test_connections_refuse_a_lan_device_through_the_local_proxy(app, monkeypatch, method, path):
+    # The web UI reaches /api through the loopback Vite proxy, which forwards the
+    # browser's address in X-Forwarded-For.
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    client = app.test_client()
+
+    response = client.open(
+        path, method=method, json={},
+        headers={"X-Forwarded-For": "192.168.1.20"},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == auth_guard.LOCAL_ONLY_CODE
+
+
+@pytest.mark.parametrize("method,path", CONNECTIONS_REQUESTS)
+def test_connections_answer_this_machine_without_api_key(app, monkeypatch, method, path):
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    client = app.test_client()
+
+    direct = client.open(path, method=method, json={}, environ_base={"REMOTE_ADDR": "127.0.0.1"})
+    proxied = client.open(
+        path, method=method, json={},
+        headers={"X-Forwarded-For": "127.0.0.1"},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert direct.status_code == 200
+    assert proxied.status_code == 200
+
+
+@pytest.mark.parametrize("method,path", CONNECTIONS_REQUESTS)
+def test_connections_need_the_key_once_one_is_configured(app, monkeypatch, method, path):
+    monkeypatch.setenv("GUAARDVARK_API_KEY", "secret")
+    client = app.test_client()
+
+    def send(addr, **headers):
+        return client.open(path, method=method, json={}, headers=headers, environ_base={"REMOTE_ADDR": addr})
+
+    remote_without_key = send("192.168.1.20")
+    local_without_key = send("127.0.0.1")
+    wrong_key = send("192.168.1.20", **{"X-API-Key": "not-it"})
+
+    assert remote_without_key.status_code == 401
+    assert remote_without_key.get_json()["code"] == auth_guard.API_KEY_CODE
+    assert local_without_key.status_code == 401
+    assert wrong_key.status_code == 401
+    assert wrong_key.get_json()["credential_rejected"] is True
+    assert send("192.168.1.20", **{"X-API-Key": "secret"}).status_code == 200
+    assert send("127.0.0.1", **{"X-API-Key": "secret"}).status_code == 200
+
+
+@pytest.mark.parametrize("api_key", [None, "secret"])
+@pytest.mark.parametrize("addr", ["192.168.1.20", "127.0.0.1"])
+def test_connections_get_the_same_answer_as_social_outreach(app, monkeypatch, api_key, addr):
+    if api_key:
+        monkeypatch.setenv("GUAARDVARK_API_KEY", api_key)
+    else:
+        monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    client = app.test_client()
+
+    outreach = client.get("/api/social-outreach/status", environ_base={"REMOTE_ADDR": addr})
+    connections = client.get("/api/connections", environ_base={"REMOTE_ADDR": addr})
+
+    assert connections.status_code == outreach.status_code
+    assert connections.get_json() == outreach.get_json()
+
+
+def test_every_connections_route_refuses_another_host_without_api_key(monkeypatch):
+    """Each route the Connections blueprint serves, not only the sampled ones."""
+    import re
+
+    from backend.api.connections_api import connections_bp
+
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    real_app = Flask(__name__)
+    real_app.before_request(auth_guard.check_endpoint_auth)
+    real_app.register_blueprint(connections_bp)
+    client = real_app.test_client()
+
+    checked = []
+    for rule in real_app.url_map.iter_rules():
+        if not rule.endpoint.startswith(f"{connections_bp.name}."):
+            continue
+        path = re.sub(r"<(?:\w+:)?\w+>", "1", rule.rule)
+        for method in sorted(rule.methods - {"HEAD", "OPTIONS"}):
+            response = client.open(path, method=method, json={}, environ_base={"REMOTE_ADDR": "192.168.1.20"})
+            assert response.status_code == 403, f"{method} {path}"
+            checked.append((method, path))
+
+    # Fewer would mean the blueprint lost routes or the walk above missed them.
+    assert len(checked) >= 20
 
 
 def test_profile_write_blocked_from_remote_host_but_readable(app, monkeypatch):
@@ -149,6 +279,22 @@ def test_forged_xff_from_direct_remote_peer_is_ignored(app, monkeypatch):
         "/api/files/write",
         headers={"X-Forwarded-For": "127.0.0.1"},
         environ_base={"REMOTE_ADDR": "192.168.1.20"},
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["error"] == auth_guard.LOCAL_ONLY_MESSAGE
+
+
+def test_forged_xff_through_the_proxy_is_ignored(app, monkeypatch):
+    # A LAN device sends X-Forwarded-For: 127.0.0.1 to the UI port; the proxy
+    # appends the address it really saw, and that last entry is the one trusted.
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+
+    client = app.test_client()
+    response = client.post(
+        "/api/files/write",
+        headers={"X-Forwarded-For": "127.0.0.1, 192.168.1.20"},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
     )
 
     assert response.status_code == 403

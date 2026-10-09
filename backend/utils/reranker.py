@@ -21,6 +21,7 @@ import gc
 import logging
 import os
 import threading
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from backend.utils.backend_http import in_mcp_process
@@ -48,6 +49,43 @@ def is_enabled() -> bool:
 
 def model_name() -> str:
     return os.environ.get("GUAARDVARK_RERANK_MODEL", DEFAULT_MODEL)
+
+
+# The weights are fetched only by Install (Settings > Knowledge), never by a
+# search: a first query on a fresh install used to download 2.2 GB unannounced.
+# Install takes the files CrossEncoder reads, not the repo's other formats.
+_INSTALL_PATTERNS = ["*.json", "*.safetensors", "*.model", "*.txt"]
+INSTALL_SIZE_GB = {"BAAI/bge-reranker-v2-m3": 2.3}
+
+_install_lock = threading.Lock()
+_install: Dict[str, Any] = {"state": "idle", "model": None, "progress": None,
+                            "downloaded_gb": 0.0, "error": None}
+
+
+def _local_snapshot(name: str) -> Optional[str]:
+    """The model's folder in the Hugging Face cache, or None. Never touches the network."""
+    try:
+        from huggingface_hub import snapshot_download
+        path = snapshot_download(repo_id=name, local_files_only=True,
+                                 allow_patterns=_INSTALL_PATTERNS, token=False)
+    except Exception:
+        return None
+    folder = os.fspath(path)
+    has_config = os.path.isfile(os.path.join(folder, "config.json"))
+    has_weights = any(f.endswith(".safetensors") for f in os.listdir(folder))
+    return folder if has_config and has_weights else None
+
+
+def is_installed() -> bool:
+    return _local_snapshot(model_name()) is not None
+
+
+def not_installed_reason() -> str:
+    name = model_name()
+    size = INSTALL_SIZE_GB.get(name)
+    about = f", about {size} GB" if size else ""
+    return (f"the reranker model ({name}{about}) is not installed; install it in "
+            f"Settings > Knowledge. Searches run without reranking until then.")
 
 
 # Below this rerank score a passage is unrelated to the question, per model: the
@@ -154,10 +192,17 @@ def _measure_vram_mb(model) -> int:
 
 
 def _get_model():
-    """Load the cross-encoder once. Returns None if unavailable (never raises)."""
+    """Load the cross-encoder once. Returns None if unavailable (never raises).
+
+    Loads only from the local cache. A model that is not installed is not a
+    failure to remember: the next query checks again, so an Install takes
+    effect without a restart.
+    """
     global _model, _model_device, _load_failed_reason, _model_vram_mb
     if _model is not None or _load_failed_reason is not None:
         return _model
+    if not is_installed():
+        return None
     with _lock:
         if _model is not None or _load_failed_reason is not None:
             return _model
@@ -174,7 +219,7 @@ def _get_model():
                 import torch
                 kwargs["model_kwargs"] = {"torch_dtype": torch.float16}
             logger.info("Reranker: loading %s on %s", name, device)
-            _model = CrossEncoder(name, **kwargs)
+            _model = CrossEncoder(name, local_files_only=True, **kwargs)
             _model_device = device
             _model_vram_mb = _measure_vram_mb(_model) if device == "cuda" else 0
             logger.info(
@@ -197,6 +242,88 @@ def status() -> Dict[str, Any]:
         "in_use": _inflight,
         "model": model_name(),
     }
+
+
+def install_status() -> Dict[str, Any]:
+    """For Settings > Knowledge: on or off, installed or not, and any install in progress."""
+    name = model_name()
+    with _install_lock:
+        job = dict(_install)
+    return {
+        "enabled": is_enabled(),
+        "model": name,
+        "installed": is_installed(),
+        "size_gb": INSTALL_SIZE_GB.get(name),
+        "load_error": _load_failed_reason,
+        "install": job,
+    }
+
+
+def start_install() -> Dict[str, Any]:
+    """Download the reranker's weights in the background. The only path that fetches them."""
+    name = model_name()
+    if is_installed():
+        return install_status()
+    with _install_lock:
+        if _install["state"] == "running":
+            return install_status()
+        _install.update({"state": "running", "model": name, "progress": 0 if INSTALL_SIZE_GB.get(name) else None,
+                         "downloaded_gb": 0.0, "error": None, "started_at": time.time()})
+    threading.Thread(target=_run_install, args=(name,), daemon=True,
+                     name="reranker-install").start()
+    return install_status()
+
+
+def _run_install(name: str) -> None:
+    global _load_failed_reason
+    from huggingface_hub import snapshot_download
+    from backend.services.local_weights import hf_repo_cache_dir
+
+    cache = hf_repo_cache_dir(name)
+    stop = threading.Event()
+    total = INSTALL_SIZE_GB.get(name)
+
+    def _bytes() -> int:
+        n = 0
+        for root, _dirs, files in os.walk(cache):
+            for f in files:
+                try:
+                    n += os.path.getsize(os.path.join(root, f))
+                except OSError:
+                    pass
+        return n
+
+    baseline = _bytes()
+
+    def _watch() -> None:
+        while not stop.wait(1.0):
+            done = max(0, _bytes() - baseline) / 1024 ** 3
+            with _install_lock:
+                if _install["state"] != "running":
+                    return
+                _install["downloaded_gb"] = round(done, 2)
+                if total:
+                    _install["progress"] = min(99, int(100 * done / total))
+
+    threading.Thread(target=_watch, daemon=True, name="reranker-install-progress").start()
+    try:
+        logger.info("Reranker: installing %s", name)
+        snapshot_download(repo_id=name, allow_patterns=_INSTALL_PATTERNS, token=False)
+        if not _local_snapshot(name):
+            raise RuntimeError("the download finished without config.json and a .safetensors file")
+        with _lock:
+            _load_failed_reason = None
+        with _install_lock:
+            _install.update({"state": "done", "progress": 100, "finished_at": time.time(),
+                             "downloaded_gb": round(max(0, _bytes() - baseline) / 1024 ** 3, 2)})
+        logger.info("Reranker: %s installed", name)
+    except Exception as e:
+        logger.error("Reranker install failed: %s", e)
+        with _install_lock:
+            _install.update({"state": "failed", "error": f"{e.__class__.__name__}: {str(e)[:200]}",
+                             "finished_at": time.time()})
+    finally:
+        stop.set()
 
 
 def unload() -> Dict[str, Any]:
@@ -258,7 +385,8 @@ def rerank(query: str, results: List[Dict[str, Any]],
 
     model = _get_model()
     if model is None:
-        info["reason"] = _load_failed_reason or "model unavailable"
+        info["reason"] = _load_failed_reason or (
+            "model unavailable" if is_installed() else not_installed_reason())
         return results, info
 
     # Pin across predict() so an eviction racing this call is refused rather than

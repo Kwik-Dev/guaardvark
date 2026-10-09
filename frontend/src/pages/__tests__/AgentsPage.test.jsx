@@ -167,6 +167,29 @@ describe("AgentsPage", () => {
     expect(screen.getByRole("button", { name: "Reset to default" })).toBeDisabled();
   });
 
+  it("Reset from inside the editor says it reset, not that it updated", async () => {
+    agentsService.resetAgent.mockResolvedValue({ success: true, agent: detail({ ...AGENTS[1], overridden: [],
+                                                                                  max_iterations: 15 }) });
+    renderPage();
+    fireEvent.click(within(await screen.findByTestId("agent-tile-code_assistant")).getByRole("button"));
+    await screen.findByLabelText("Max iterations");
+    fireEvent.click(screen.getByRole("button", { name: "Reset to default" }));
+    const confirm = (await screen.findAllByRole("dialog")).at(-1);
+    fireEvent.click(within(confirm).getByRole("button", { name: "Reset" }));
+    await waitFor(() => expect(agentsService.resetAgent).toHaveBeenCalledWith("code_assistant"));
+    expect(await screen.findByText("Code Assistant reset to default")).toBeInTheDocument();
+    expect(screen.queryByText("Agent updated")).not.toBeInTheDocument();
+  });
+
+  it("Save from the editor says the agent was updated", async () => {
+    agentsService.updateAgent.mockResolvedValue({ success: true, agent: detail({ ...AGENTS[0], max_iterations: 12 }) });
+    renderPage();
+    fireEvent.click(within(await screen.findByTestId("agent-tile-research_agent")).getByRole("button"));
+    fireEvent.change(await screen.findByLabelText("Max iterations"), { target: { value: "12" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Agent updated")).toBeInTheDocument();
+  });
+
   it("saves only what changed", async () => {
     agentsService.updateAgent.mockResolvedValue({ success: true, agent: detail({ ...AGENTS[0], max_iterations: 12 }) });
     renderPage();

@@ -10,7 +10,7 @@ import React, { useState, useCallback, useEffect, useRef, useMemo } from "react"
 import { Box, Typography, Card, CardActionArea, CardContent, IconButton, Tooltip, Dialog, DialogTitle, DialogContent, DialogActions, Button, TextField, useTheme, CircularProgress } from "@mui/material";
 import { BrandLogo } from "../components/branding";
 import { Apps as AppsIcon, GridView as GridViewIcon, FolderOutlined, Code, UploadFile as UploadFileIcon } from "@mui/icons-material";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { getFileIcon, getItemKey, FolderIndexIndicator, isImageFile, isVideoFile, isCodeFile, isPdfFile, isDocxFile, isAudioFile } from "../components/documents/fileUtils.jsx";
 import ImageLightbox from "../components/images/ImageLightbox";
 import CodeViewerModal from "../components/documents/CodeViewerModal";
@@ -21,8 +21,18 @@ import MediaPreviewOverlay from "../components/documents/MediaPreviewOverlay";
 import ReactGridLayoutLib, { WidthProvider } from 'react-grid-layout/legacy';
 import FolderWindow from "../components/documents/FolderWindow";
 import DocumentsContextMenu from "../components/documents/DocumentsContextMenu";
+import { menuTargetPath, folderLabel } from "../components/documents/menuTarget";
+import {
+  snapshotDrop,
+  collectDroppedFiles,
+  dragCarriesFiles,
+  ensureFolderPath,
+  filesFolderApi,
+} from "../utils/droppedFiles";
 import FilePropertiesModal from "../components/modals/FilePropertiesModal";
 import FolderPropertiesModal from "../components/modals/FolderPropertiesModal";
+import EntityFilesPanel from "../components/documents/EntityFilesPanel";
+import { entityFilesFilter } from "../utils/entityLinks";
 import { useLayout } from "../contexts/LayoutContext";
 import { useSnackbar } from "../components/common/SnackbarProvider";
 import { useStatus } from "../contexts/StatusContext";
@@ -67,6 +77,9 @@ const DocumentsPage = () => {
   const [windows, setWindows] = useState([]); // Array of { id, folderId, folder, state: 'folded'|'minimized'|'maximized' }
   const [windowLayout, setWindowLayout] = useState([]); // Layout for maximized/minimized windows
   const [windowColors, setWindowColors] = useState({});
+  // Colours for folders below the top level, keyed by folder id (they have no window).
+  const [subfolderColors, setSubfolderColors] = useState({});
+  const subfolderColorsRef = useRef({});
   const [windowZIndex, setWindowZIndex] = useState({});
   const [maxZIndex, setMaxZIndex] = useState(0);
   // Per-surface selection: `desktop` is the root, each window.id is its own slot.
@@ -90,10 +103,11 @@ const DocumentsPage = () => {
   const [desktopSelectionBox, setDesktopSelectionBox] = useState(null);
   const [isDesktopSelecting, setIsDesktopSelecting] = useState(false);
 
-  // Keep a ref of windows so event listeners don't need re-registration
-  useEffect(() => {
-    windowsRef.current = windows;
-  }, [windows]);
+  // Keep a ref of windows so event listeners don't need re-registration.
+  // Assigned during render: the grid reports its first layout from its own
+  // effect, which runs before this component's effects, and that report saves
+  // the window list read from here.
+  windowsRef.current = windows;
 
   // Which selection slot "owns" the current keyboard/context-menu actions.
   // Desktop surface → 'desktop'; a focused folder window → that window's id.
@@ -148,9 +162,14 @@ const DocumentsPage = () => {
   const [contextMenu, setContextMenu] = useState(null);
   const [contextMenuType, setContextMenuType] = useState('desktop'); // 'desktop', 'folder', 'file'
   const [contextMenuItem, setContextMenuItem] = useState(null); // The item that was right-clicked
+  // Actions the surface that opened the menu offers, e.g. opening a subfolder in place.
+  const [contextMenuExtras, setContextMenuExtras] = useState(null);
   const [clipboard, setClipboard] = useState(null);
   const [newFolderOpen, setNewFolderOpen] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
+  const [newFolderParent, setNewFolderParent] = useState('/');
+  // Folder the next file-picker import lands in; set by whoever opens the picker.
+  const uploadTargetRef = useRef('/');
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [renameItem, setRenameItem] = useState(null);
   const [renameName, setRenameName] = useState('');
@@ -165,7 +184,10 @@ const DocumentsPage = () => {
   const [audioPlayer, setAudioPlayer] = useState(null); // { file } for AudioPlayerModal
   const [docxViewer, setDocxViewer] = useState(null); // { file } for DocxViewerModal
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const entityFilter = entityFilesFilter(searchParams);
   const [dragOverFolderId, setDragOverFolderId] = useState(null); // Folder ID being dragged over
+  const [desktopFileDragOver, setDesktopFileDragOver] = useState(false);
   const fileInputRef = useRef(null);
   const dragDropHandledRef = useRef(false); // Track if drop was handled to prevent repositioning
   const newFolderInputRef = useRef(null);
@@ -255,6 +277,10 @@ const DocumentsPage = () => {
 
           setWindowLayout(sanitizedLayout);
           if (savedState.windowColors) setWindowColors(savedState.windowColors);
+          if (savedState.subfolderColors && typeof savedState.subfolderColors === 'object') {
+            setSubfolderColors(savedState.subfolderColors);
+            subfolderColorsRef.current = savedState.subfolderColors;
+          }
           if (savedState.windowZIndex) setWindowZIndex(savedState.windowZIndex);
           if (savedState.maxZIndex) setMaxZIndex(savedState.maxZIndex);
           if (savedState.iconPositions) {
@@ -361,6 +387,18 @@ const DocumentsPage = () => {
     }
   }, [showMessage]);
 
+  // Re-fetch every open folder window. Changes made on this page announce
+  // themselves as self-originated, which the listener below skips.
+  const refreshOpenWindows = useCallback(() => {
+    setFolderRefreshKeys(prev => {
+      const updated = { ...prev };
+      windowsRef.current.forEach(w => {
+        updated[w.folderId] = (updated[w.folderId] || 0) + 1;
+      });
+      return updated;
+    });
+  }, []);
+
   // Listen for file/folder changes from any tab/component and refresh in place
   useEffect(() => {
     const handleExternalUpdate = (event) => {
@@ -455,6 +493,7 @@ const DocumentsPage = () => {
           windowZIndex: zIndex,
           maxZIndex: maxZ,
           iconPositions: positionsToSave,
+          subfolderColors: subfolderColorsRef.current,
           lastSaved: new Date().toISOString(),
         }),
       });
@@ -609,14 +648,14 @@ const DocumentsPage = () => {
 
   // Build folder-ID-to-color map for propagating colors into nested FolderContents
   const folderIdToColor = useMemo(() => {
-    const map = {};
+    const map = { ...subfolderColors };
     windows.forEach(w => {
       if (windowColors[w.id]) {
         map[w.folderId] = windowColors[w.id];
       }
     });
     return map;
-  }, [windows, windowColors]);
+  }, [windows, windowColors, subfolderColors]);
 
   // Handle window layout change (drag/resize)
   // Guard: RGL may report layouts missing items or with extra items during transitions.
@@ -675,81 +714,20 @@ const DocumentsPage = () => {
     // Drag start is handled by FolderContents, just log for debugging
   }, []);
 
-  // Recursively traverse a FileSystemEntry (file or directory) and collect files with relative paths
-  const traverseFolderEntry = useCallback(async (entry, basePath = '') => {
-    const files = [];
-
-    if (entry.isFile) {
-      const file = await new Promise((resolve, reject) => {
-        entry.file(resolve, reject);
-      });
-      files.push({
-        file,
-        relativePath: basePath ? `${basePath}/${file.name}` : file.name
-      });
-    } else if (entry.isDirectory) {
-      const dirReader = entry.createReader();
-
-      const readEntries = async () => {
-        const entries = await new Promise((resolve, reject) => {
-          dirReader.readEntries(resolve, reject);
-        });
-
-        if (entries.length > 0) {
-          for (const childEntry of entries) {
-            const childPath = basePath ? `${basePath}/${entry.name}` : entry.name;
-            const childFiles = await traverseFolderEntry(childEntry, childPath);
-            files.push(...childFiles);
-          }
-
-          // Continue reading batches (browser API may batch at ~100 entries)
-          await readEntries();
-        }
-      };
-
-      await readEntries();
-    }
-
-    return files;
-  }, []);
-
-  // Ensure a nested folder path exists, creating parent folders as needed
-  const ensureFolderPath = useCallback(async (relativePath, baseFolder = '/') => {
-    if (!relativePath || relativePath === '/') return baseFolder;
-
-    const parts = relativePath.split('/').filter(Boolean);
-    let currentFolder = baseFolder;
-
-    for (const part of parts) {
-      const checkResponse = await axios.get(`${API_BASE}/browse`, {
-        params: { path: currentFolder },
-      });
-
-      const existingFolder = checkResponse.data.data.folders?.find(f => f.name === part);
-
-      if (existingFolder) {
-        currentFolder = existingFolder.path;
-      } else {
-        const createResponse = await axios.post(`${API_BASE}/folder`, {
-          name: part,
-          parent_path: currentFolder,
-        });
-        currentFolder = createResponse.data.data.path;
-      }
-    }
-
-    return currentFolder;
-  }, []);
-
   // Handle drop in folder window or on desktop
   const handleDrop = useCallback(async (e, targetFolder = null) => {
     e.preventDefault();
     e.stopPropagation();
+    // Drop targets inside the desktop stop propagation, so its highlight is cleared here.
+    setDesktopFileDragOver(false);
 
     try {
       // Check if this is a file drop from outside the browser
-      const hasFiles = e.dataTransfer.types?.includes('Files') && e.dataTransfer.items?.length > 0;
+      const hasFiles = dragCarriesFiles(e)
+        && (e.dataTransfer.items?.length > 0 || e.dataTransfer.files?.length > 0);
       if (hasFiles) {
+        // Before any await: the browser empties the item list once this handler yields.
+        const dropped = snapshotDrop(e.dataTransfer);
         // Mark that drop was handled (file upload)
         dragDropHandledRef.current = true;
 
@@ -775,70 +753,61 @@ const DocumentsPage = () => {
           }
         }
 
-        // Collect files with relative paths (supports recursive folder traversal)
-        const filesToUpload = [];
-        const items = e.dataTransfer.items;
-
-        for (let i = 0; i < items.length; i++) {
-          const item = items[i];
-          if (item.kind === 'file') {
-            const entry = item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
-            if (entry) {
-              const filesWithPaths = await traverseFolderEntry(entry);
-              filesToUpload.push(...filesWithPaths);
-            } else {
-              // Fallback for browsers without webkitGetAsEntry
-              const file = item.getAsFile();
-              if (file) {
-                filesToUpload.push({ file, relativePath: file.name });
-              }
-            }
-          }
-        }
-
-        // Fallback to e.dataTransfer.files if nothing collected
-        if (filesToUpload.length === 0 && e.dataTransfer.files?.length > 0) {
-          for (const file of e.dataTransfer.files) {
-            filesToUpload.push({ file, relativePath: file.name });
-          }
-        }
+        // Files with relative paths; dropped folders are walked recursively
+        const filesToUpload = await collectDroppedFiles(dropped);
 
         if (filesToUpload.length === 0) {
           setTimeout(() => { dragDropHandledRef.current = false; }, 100);
           return;
         }
 
-        // Upload each file, creating nested folders as needed
+        // Upload each file, creating nested folders as needed. One failure
+        // does not stop the rest; the message reports both counts.
         let uploadedCount = 0;
+        const failures = [];
+        const folderApi = filesFolderApi(axios, API_BASE);
+        const folderCache = new Map();
         setUploadProgress({ current: 0, total: filesToUpload.length });
         try {
           for (const { file, relativePath } of filesToUpload) {
-            const lastSlash = relativePath.lastIndexOf('/');
-            const folderPath = lastSlash > 0 ? relativePath.substring(0, lastSlash) : '';
+            try {
+              const lastSlash = relativePath.lastIndexOf('/');
+              const folderPath = lastSlash > 0 ? relativePath.substring(0, lastSlash) : '';
 
-            let targetUploadPath = uploadPath;
-            if (folderPath) {
-              targetUploadPath = await ensureFolderPath(folderPath, uploadPath);
+              let targetUploadPath = uploadPath;
+              if (folderPath) {
+                targetUploadPath = await ensureFolderPath(folderPath, uploadPath, folderApi, folderCache);
+              }
+
+              const formData = new FormData();
+              formData.append('file', file);
+              formData.append('folder_path', targetUploadPath);
+
+              await axios.post(`${API_BASE}/upload`, formData, {
+                headers: { 'Content-Type': 'multipart/form-data' },
+              });
+              uploadedCount++;
+            } catch (uploadErr) {
+              failures.push(`${relativePath}: ${uploadErr.response?.data?.message || uploadErr.message || 'upload failed'}`);
             }
-
-            const formData = new FormData();
-            formData.append('file', file);
-            formData.append('folder_path', targetUploadPath);
-
-            await axios.post(`${API_BASE}/upload`, formData, {
-              headers: { 'Content-Type': 'multipart/form-data' },
-            });
-            uploadedCount++;
-            setUploadProgress({ current: uploadedCount, total: filesToUpload.length });
+            setUploadProgress({ current: uploadedCount + failures.length, total: filesToUpload.length });
           }
         } finally {
           setUploadProgress(null);
         }
 
-        showMessage?.(`Imported ${uploadedCount} file(s)`, 'success');
+        const destination = folderLabel(uploadPath);
+        if (failures.length === 0) {
+          showMessage?.(`Imported ${uploadedCount} file(s) into ${destination}`, 'success');
+        } else if (uploadedCount > 0) {
+          showMessage?.(`Imported ${uploadedCount} file(s) into ${destination}; ${failures.length} failed (${failures[0]})`, 'warning');
+        } else {
+          showMessage?.(`Import failed: ${failures[0]}`, 'error');
+        }
 
         // Refresh data after upload
         await refreshData();
+        refreshOpenWindows();
 
         // Reset after a short delay
         setTimeout(() => {
@@ -999,6 +968,7 @@ const DocumentsPage = () => {
 
         // Refresh data after move
         await refreshData();
+        refreshOpenWindows();
       }
     } catch (err) {
       const errorMsg = err.response?.data?.message || err.message || 'Failed to handle drop';
@@ -1009,7 +979,7 @@ const DocumentsPage = () => {
         dragDropHandledRef.current = false;
       }, 100);
     }
-  }, [windows, showMessage, refreshData, traverseFolderEntry, ensureFolderPath]);
+  }, [windows, showMessage, refreshData, refreshOpenWindows]);
 
   // Separate windows by state (needed by arrange callbacks and render)
   const foldedWindows = windows.filter(w => w.state === 'folded');
@@ -1119,6 +1089,7 @@ const DocumentsPage = () => {
         windowZIndex,
         maxZIndex,
         iconPositions: newPositions,
+        subfolderColors: subfolderColorsRef.current,
         lastSaved: new Date().toISOString(),
       }),
     }).catch(() => { });
@@ -1129,22 +1100,28 @@ const DocumentsPage = () => {
   // 'desktop' for icons/space on the desktop, 'window' for anything inside a folder
   // window. Without it, type='folder' couldn't distinguish a desktop folder icon
   // from an in-window subfolder, and copy/cut would key off the wrong selection slot.
-  const handleContextMenu = useCallback((e, item = null, type = 'desktop', surface = 'desktop') => {
+  const handleContextMenu = useCallback((e, item = null, type = 'desktop', surface = 'desktop', extras = null) => {
     e.preventDefault();
     e.stopPropagation();
     if (surface === 'desktop') {
       setDesktopContext();
+      // A right button press does not focus the desktop first, so the ref
+      // can still name the last window; the selection below must not land there.
+      activeContextKeyRef.current = 'desktop';
     }
     // For surface='window', the folder window's onMouseDown has already set
     // activeContext to that window — don't clobber it from the item type.
     setContextMenu({ top: e.clientY, left: e.clientX });
     setContextMenuType(type);
     setContextMenuItem(item);
+    setContextMenuExtras(extras);
 
     // If right-clicking on an item, select it if not already selected.
     // Refs are used here because the mouseDown that set the new activeContext
     // fires immediately before this callback, and we want the freshest slot.
-    if (item) {
+    // A window background ('folder-window') carries the window's own folder,
+    // which is not an item of that window and must not become its selection.
+    if (item && (type === 'folder' || type === 'file')) {
       const key = type === 'folder' ? `folder-${item.id}` : `file-${item.id}`;
       const currentKey = activeContextKeyRef.current;
       const currentSelection = selectionByContextRef.current[currentKey] || EMPTY_SELECTION;
@@ -1154,22 +1131,25 @@ const DocumentsPage = () => {
     }
   }, [setDesktopContext, handleSelectionChange]);
 
-  const handleNewFolder = useCallback(async () => {
+  const closeContextMenu = useCallback(() => {
+    setContextMenu(null);
+    setContextMenuItem(null);
+    setContextMenuType('desktop');
+    setContextMenuExtras(null);
+  }, []);
+
+  const handleNewFolder = useCallback(() => {
+    setNewFolderParent(menuTargetPath(contextMenuType, contextMenuItem));
     setContextMenu(null);
     setNewFolderOpen(true);
-  }, []);
+  }, [contextMenuType, contextMenuItem]);
 
   const handleCreateFolder = useCallback(async () => {
     if (!newFolderName.trim()) return;
     try {
-      // Determine parent path based on context
-      // If contextMenuItem is set and has a path, use it (folder window context)
-      // Otherwise, default to root '/' (desktop context)
-      const parentPath = contextMenuItem?.path || '/';
-
       await axios.post(`${API_BASE}/folder`, {
         name: newFolderName,
-        parent_path: parentPath,
+        parent_path: newFolderParent,
       });
       showMessage?.(`Folder "${newFolderName}" created`, 'success');
       setNewFolderOpen(false);
@@ -1177,24 +1157,39 @@ const DocumentsPage = () => {
 
       // Directly refresh data after creating folder
       await refreshData();
+      refreshOpenWindows();
     } catch (err) {
       showMessage?.('Failed to create folder', 'error');
     }
-  }, [newFolderName, contextMenuItem, showMessage, refreshData]);
+  }, [newFolderName, newFolderParent, showMessage, refreshData, refreshOpenWindows]);
 
-  const handleUpload = useCallback(() => {
-    setContextMenu(null);
+  const openImportPicker = useCallback((targetPath) => {
+    uploadTargetRef.current = targetPath || '/';
     fileInputRef.current?.click();
   }, []);
+
+  // Import from the right-click menu lands in whatever was right-clicked.
+  const handleUpload = useCallback(() => {
+    setContextMenu(null);
+    openImportPicker(menuTargetPath(contextMenuType, contextMenuItem));
+  }, [contextMenuType, contextMenuItem, openImportPicker]);
+
+  // Import from the toolbar lands in the focused open folder window, else the desktop.
+  const handleToolbarImport = useCallback(() => {
+    closeContextMenu();
+    let target = '/';
+    if (activeContext.type === 'folder') {
+      const win = windowsRef.current.find(w => w.folderId === activeContext.folderId);
+      if (win && win.state === 'maximized') target = activeContext.path || win.folder.path;
+    }
+    openImportPicker(target);
+  }, [activeContext, closeContextMenu, openImportPicker]);
 
   const handleFileUpload = useCallback(async (e) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
 
-    // Determine upload path based on context
-    // If contextMenuItem is set and has a path, use it (folder window context)
-    // Otherwise, default to root '/' (desktop context)
-    const uploadPath = contextMenuItem?.path || '/';
+    const uploadPath = uploadTargetRef.current || '/';
 
     try {
       // Upload files one by one (backend expects single file per request)
@@ -1214,13 +1209,15 @@ const DocumentsPage = () => {
       const results = await Promise.all(uploadPromises);
       const uploaded = results.filter(r => !r?.skipped).length;
       const skipped = results.filter(r => r?.skipped).length;
+      const destination = folderLabel(uploadPath);
       const msg = skipped > 0
-        ? `Imported ${uploaded} file(s) (${skipped} ignored by filter)`
-        : `Imported ${uploaded} file(s)`;
+        ? `Imported ${uploaded} file(s) into ${destination} (${skipped} ignored by filter)`
+        : `Imported ${uploaded} file(s) into ${destination}`;
       showMessage?.(msg, 'success');
 
       // Refresh data after upload
       await refreshData();
+      refreshOpenWindows();
     } catch (err) {
       const errorMsg = err.response?.data?.message || err.message || 'Import failed';
       showMessage?.(`Import failed: ${errorMsg}`, 'error');
@@ -1230,7 +1227,7 @@ const DocumentsPage = () => {
         e.target.value = '';
       }
     }
-  }, [contextMenuItem, showMessage, refreshData]);
+  }, [showMessage, refreshData, refreshOpenWindows]);
 
   const handleCopy = useCallback(() => {
     setClipboard({ items: Array.from(activeSelection), operation: 'copy' });
@@ -1244,74 +1241,77 @@ const DocumentsPage = () => {
     showMessage?.(`Cut ${activeSelection.size} item(s)`, 'info');
   }, [activeSelection, showMessage]);
 
-  const handlePaste = useCallback(async (targetOverride = null) => {
+  // The folder copy route takes a folder id; everything else on this page knows paths.
+  const folderIdForPath = useCallback(async (path) => {
+    if (!path || path === '/') return null;
+    const response = await axios.get(`${API_BASE}/browse`, {
+      params: { path, fields: 'light', limit: 1 },
+    });
+    const id = response.data?.data?.folder_id;
+    if (id === undefined || id === null) {
+      throw new Error(`Folders cannot be pasted into ${folderLabel(path)}`);
+    }
+    return id;
+  }, []);
+
+  // `target` is { path } from Ctrl+V; from the menu it is omitted and the
+  // right-clicked item decides.
+  const handlePaste = useCallback(async (target = null) => {
     setContextMenu(null);
     if (!clipboard || clipboard.items.length === 0) return;
 
-    // Determine target path based on context
-    const contextTypeToUse = targetOverride?.type || contextMenuType;
-    const contextItemToUse = targetOverride?.item || contextMenuItem;
+    const targetPath = typeof target?.path === 'string'
+      ? target.path
+      : menuTargetPath(contextMenuType, contextMenuItem);
+    const isCopy = clipboard.operation === 'copy';
+    // A right-clicked folder already carries its id; otherwise it is looked up once.
+    let destFolderId = contextMenuType === 'folder' && contextMenuItem?.path === targetPath
+      ? contextMenuItem.id
+      : undefined;
 
-    let targetPath = '/'; // Default to desktop root
-    if (contextTypeToUse === 'folder-window' && contextItemToUse) {
-      targetPath = contextItemToUse.path;
-    } else if (contextTypeToUse === 'folder' && contextItemToUse) {
-      targetPath = contextItemToUse.path;
-    }
-
-    try {
-      for (const key of clipboard.items) {
-        const [type, id] = key.split('-');
-        if (type === 'folder') {
-          const folder = windows.find(w => w.folderId === parseInt(id))?.folder;
-          if (folder) {
-            if (clipboard.operation === 'copy') {
-              // Copy folder
-              await axios.post(`${API_BASE}/folder`, {
-                name: `${folder.name} (Copy)`,
-                parent_path: targetPath,
-              });
-            } else {
-              // Move folder (cut)
-              await axios.put(`${API_BASE}/folder/${id}`, {
-                name: folder.name,
-                parent_path: targetPath,
-              });
-            }
-          }
-        } else {
-          // Document operations
-          if (clipboard.operation === 'copy') {
-            // Reference-based copy (will be implemented in backend)
-            await axios.post(`${API_BASE}/document/${id}/copy`, {
-              destination_path: targetPath,
-            });
-          } else {
-            // Move document (cut)
-            await axios.post(`${API_BASE}/document/${id}/move`, {
-              destination_path: targetPath,
-            });
-          }
+    let done = 0;
+    const errors = [];
+    for (const key of clipboard.items) {
+      const sep = key.indexOf('-');
+      const type = key.slice(0, sep);
+      const id = Number(key.slice(sep + 1));
+      try {
+        if (!Number.isInteger(id)) {
+          throw new Error('Items in the live repository are read-only here');
         }
+        if (type === 'folder') {
+          if (isCopy) {
+            if (destFolderId === undefined) destFolderId = await folderIdForPath(targetPath);
+            await axios.post(`${API_BASE}/folder/${id}/copy`, { target_folder_id: destFolderId });
+          } else {
+            await axios.post(`${API_BASE}/folder/${id}/move`, { destination_path: targetPath });
+          }
+        } else if (isCopy) {
+          await axios.post(`${API_BASE}/document/${id}/copy`, { destination_path: targetPath });
+        } else {
+          await axios.post(`${API_BASE}/document/${id}/move`, { destination_path: targetPath });
+        }
+        done += 1;
+      } catch (err) {
+        errors.push(err.response?.data?.message || err.message || 'failed');
       }
-      showMessage?.(`${clipboard.operation === 'copy' ? 'Pasted' : 'Moved'} ${clipboard.items.length} item(s)`, 'success');
-      setClipboard(null); // Clear clipboard after paste
-
-      // Refresh data to show pasted items
-      await refreshData();
-
-      // Also refresh open folder windows
-      setFolderRefreshKeys(prev => {
-        const updated = { ...prev };
-        windowsRef.current.forEach(w => {
-          updated[w.folderId] = (updated[w.folderId] || 0) + 1;
-        });
-        return updated;
-      });
-    } catch (err) {
-      showMessage?.(`${clipboard.operation === 'copy' ? 'Paste' : 'Move'} failed`, 'error');
     }
-  }, [clipboard, windows, showMessage, contextMenuType, contextMenuItem, refreshData, setFolderRefreshKeys]);
+
+    const verb = isCopy ? 'Pasted' : 'Moved';
+    const destination = folderLabel(targetPath);
+    if (errors.length === 0) {
+      showMessage?.(`${verb} ${done} item(s) into ${destination}`, 'success');
+    } else if (done > 0) {
+      showMessage?.(`${verb} ${done} item(s) into ${destination}; ${errors.length} failed: ${errors[0]}`, 'warning');
+    } else {
+      showMessage?.(`${isCopy ? 'Paste' : 'Move'} failed: ${errors[0]}`, 'error');
+      return;
+    }
+    setClipboard(null);
+
+    await refreshData();
+    refreshOpenWindows();
+  }, [clipboard, showMessage, contextMenuType, contextMenuItem, refreshData, refreshOpenWindows, folderIdForPath]);
 
   const handleDelete = useCallback(() => {
     setContextMenu(null);
@@ -1501,9 +1501,14 @@ const DocumentsPage = () => {
     const window = windows.find(w => w.folderId === contextMenuItem.id);
     if (window) {
       handleWindowColorChange(window.id, color);
-      setContextMenu(null);
+    } else {
+      const next = { ...subfolderColorsRef.current, [contextMenuItem.id]: color };
+      subfolderColorsRef.current = next;
+      setSubfolderColors(next);
+      saveWindowState(windows, windowLayout, windowColors, windowZIndex, maxZIndex);
     }
-  }, [contextMenuItem, contextMenuType, windows, handleWindowColorChange]);
+    setContextMenu(null);
+  }, [contextMenuItem, contextMenuType, windows, windowLayout, windowColors, windowZIndex, maxZIndex, handleWindowColorChange, saveWindowState]);
 
   const handleDownload = useCallback(() => {
     setContextMenu(null);
@@ -1855,10 +1860,7 @@ const DocumentsPage = () => {
 
       if (e.ctrlKey && key === 'v') {
         e.preventDefault();
-        const target = activeContext.type === 'folder'
-          ? { type: 'folder-window', item: { path: activeContext.path, id: activeContext.folderId } }
-          : { type: 'desktop', item: null };
-        handlePaste(target);
+        handlePaste({ path: activeContext.type === 'folder' ? activeContext.path : '/' });
         return;
       }
 
@@ -2002,6 +2004,11 @@ const DocumentsPage = () => {
     saveWindowState(windowsData, windowLayout, windowColors, windowZIndex, maxZIndex, newIconPositions);
   }, [windows, windowLayout, windowColors, windowZIndex, maxZIndex, saveWindowState, snapToGrid, resolvedIconPositions, iconPositions]);
 
+  // Top-level folders own a window; folders inside a window do not.
+  const contextMenuFolderWindow = contextMenuItem && contextMenuType === 'folder'
+    ? windows.find(w => w.folderId === contextMenuItem.id) || null
+    : null;
+
   if (loading) {
     return (
       <Box sx={{ display: "flex", flexDirection: "column", gap: 2, height: "100%", p: 2 }}>
@@ -2018,7 +2025,7 @@ const DocumentsPage = () => {
       actions={
         <>
           <Tooltip title="Import Files">
-            <IconButton onClick={handleUpload} size="small" sx={{ opacity: 0.6 }}>
+            <IconButton onClick={handleToolbarImport} size="small" sx={{ opacity: 0.6 }}>
               <UploadFileIcon fontSize="small" />
             </IconButton>
           </Tooltip>
@@ -2038,11 +2045,23 @@ const DocumentsPage = () => {
       activeModel={isLoadingModel ? "Loading..." : modelError ? "Error" : activeModel}
     >
       <Box ref={windowContainerRef} sx={{ flex: 1, minHeight: 0, position: "relative", overflow: "hidden" }}>
+        {entityFilter && (
+          <EntityFilesPanel
+            kind={entityFilter.kind}
+            id={entityFilter.id}
+            onOpenFile={(doc) => openFile(doc)}
+            onClose={() => setSearchParams({})}
+          />
+        )}
         {/* Desktop area with folded folder icons */}
         <Box
           data-desktop-container
           ref={desktopContentRef}
-          sx={{ position: "absolute", inset: 0, overflow: "auto", zIndex: 1, p: 2 }}
+          sx={{
+            position: "absolute", inset: 0, overflow: "auto", zIndex: 1, p: 2,
+            transition: "background-color 0.15s ease",
+            backgroundColor: desktopFileDragOver ? theme.palette.action.hover : "transparent",
+          }}
           onContextMenu={handleContextMenu}
           onMouseDown={handleDesktopSelectionMouseDown}
           onDragOver={(e) => {
@@ -2054,16 +2073,10 @@ const DocumentsPage = () => {
             }
           }}
           onDragEnter={(e) => {
-            // Visual feedback for file drops
-            if (e.dataTransfer.types.includes('Files')) {
-              e.currentTarget.style.backgroundColor = 'action.hover';
-            }
+            if (dragCarriesFiles(e)) setDesktopFileDragOver(true);
           }}
           onDragLeave={(e) => {
-            // Remove visual feedback
-            if (!e.currentTarget.contains(e.relatedTarget)) {
-              e.currentTarget.style.backgroundColor = '';
-            }
+            if (!e.currentTarget.contains(e.relatedTarget)) setDesktopFileDragOver(false);
           }}
           onDrop={handleDrop}
         >
@@ -2370,67 +2383,9 @@ const DocumentsPage = () => {
             '& .react-grid-layout': { pointerEvents: 'none' },
             '& .react-grid-item': { pointerEvents: 'none' },
             '& .react-grid-item > div': { pointerEvents: 'auto' },
-            // Resize handles — large hit area for easy grabbing
-            '& .react-resizable-handle': {
-              pointerEvents: 'auto',
-              zIndex: 10,
-            },
-            '& .react-resizable-handle-se': {
-              width: '20px !important',
-              height: '20px !important',
-              bottom: '0 !important',
-              right: '0 !important',
-              cursor: 'se-resize',
-            },
-            '& .react-resizable-handle-sw': {
-              width: '20px !important',
-              height: '20px !important',
-              bottom: '0 !important',
-              left: '0 !important',
-              cursor: 'sw-resize',
-            },
-            '& .react-resizable-handle-ne': {
-              width: '20px !important',
-              height: '20px !important',
-              top: '0 !important',
-              right: '0 !important',
-              cursor: 'ne-resize',
-            },
-            '& .react-resizable-handle-nw': {
-              width: '20px !important',
-              height: '20px !important',
-              top: '0 !important',
-              left: '0 !important',
-              cursor: 'nw-resize',
-            },
-            '& .react-resizable-handle-s': {
-              width: '100% !important',
-              height: '12px !important',
-              bottom: '0 !important',
-              left: '0 !important',
-              cursor: 's-resize',
-            },
-            '& .react-resizable-handle-n': {
-              width: '100% !important',
-              height: '6px !important',
-              top: '0 !important',
-              left: '0 !important',
-              cursor: 'n-resize',
-            },
-            '& .react-resizable-handle-e': {
-              width: '12px !important',
-              height: '100% !important',
-              top: '0 !important',
-              right: '0 !important',
-              cursor: 'e-resize',
-            },
-            '& .react-resizable-handle-w': {
-              width: '12px !important',
-              height: '100% !important',
-              top: '0 !important',
-              left: '0 !important',
-              cursor: 'w-resize',
-            },
+            // Handle size and position are global (index.css); this layer only
+            // hands them the pointer back.
+            '& .react-resizable-handle': { pointerEvents: 'auto' },
           }}>
             <WindowsGridLayout
               layout={windowLayout}
@@ -2485,7 +2440,7 @@ const DocumentsPage = () => {
                         e?.stopPropagation?.();
                         openFile(file, extras);
                       }}
-                      onContextMenu={(e, item, type) => handleContextMenu(e, item, type, 'window')}
+                      onContextMenu={(e, item, type, extras) => handleContextMenu(e, item, type, 'window', extras)}
                       onFocusContext={setActiveContext}
                       refreshKey={folderRefreshKeys[window.folderId] || 0}
                       folderColors={folderIdToColor}
@@ -2502,16 +2457,12 @@ const DocumentsPage = () => {
       {/* Context Menu */}
       <DocumentsContextMenu
         anchorPosition={contextMenu}
-        onClose={() => {
-          setContextMenu(null);
-          setContextMenuItem(null);
-          setContextMenuType('desktop');
-        }}
+        onClose={closeContextMenu}
         onNewFolder={handleNewFolder}
         onUpload={handleUpload}
         onCopy={handleCopy}
         onCut={handleCut}
-        onPaste={handlePaste}
+        onPaste={() => handlePaste()}
         onDelete={contextMenuItem?.source_type === 'live_repo' ? undefined : handleDelete}
         onProperties={contextMenuItem?.source_type === 'live_repo' ? undefined : handleProperties}
         onRename={contextMenuItem?.source_type === 'live_repo' ? undefined : handleRename}
@@ -2520,14 +2471,10 @@ const DocumentsPage = () => {
         onColorChange={handleColorChange}
         onIndex={contextMenuItem?.source_type === 'live_repo' ? undefined : handleIndex}
         onReviewWithAgent={contextMenuItem?.source_type === 'live_repo' ? handleReviewWithAgent : undefined}
-        onOpenWindow={contextMenuItem && contextMenuType === 'folder' ? () => {
-          const win = windows.find(w => w.folderId === contextMenuItem.id);
-          if (win) {
-            handleFolderExpand(win.id);
-          }
-          setContextMenu(null);
-          setContextMenuItem(null);
-        } : undefined}
+        onOpenWindow={contextMenuFolderWindow
+          ? () => handleFolderExpand(contextMenuFolderWindow.id)
+          : contextMenuType === 'folder' ? contextMenuExtras?.openInPlace : undefined}
+        openLabel={contextMenuFolderWindow ? 'Open in Window' : 'Open'}
         isImage={contextMenuItem && contextMenuType === 'file' && isImageFile(contextMenuItem.filename || contextMenuItem.name || '')}
         isCode={contextMenuItem && contextMenuType === 'file' && isCodeFile(contextMenuItem.filename || contextMenuItem.name || '')}
         isPdf={contextMenuItem && contextMenuType === 'file' && isPdfFile(contextMenuItem.filename || contextMenuItem.name || '')}
@@ -2537,7 +2484,7 @@ const DocumentsPage = () => {
         contextType={contextMenuType}
         selectedItem={contextMenuItem}
         folderColor={contextMenuItem && contextMenuType === 'folder'
-          ? windowColors[windows.find(w => w.folderId === contextMenuItem.id)?.id]
+          ? folderIdToColor[contextMenuItem.id] || null
           : null}
       />
 

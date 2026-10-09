@@ -253,8 +253,10 @@ data/training/loras/
 # Google Indexing service-account key
 data/credentials/
 
-# Swarm internal secret (never publish) + per-film cast reference images (runtime, machine-local)
+# Swarm, upscaling and vision pipeline internal secrets (never publish) + per-film cast reference images (runtime, machine-local)
 data/.swarm_internal_secret
+data/.upscaling_internal_secret
+data/.vision_pipeline_internal_secret
 data/cast_refs/
 
 # Per-clone check_portable.sh lists — the names and patterns they hold must stay

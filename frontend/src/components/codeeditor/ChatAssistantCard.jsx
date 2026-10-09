@@ -173,7 +173,6 @@ const ChatAssistantCard = React.forwardRef(
         icon: ExplainIcon,
         description: 'Explain selected code or analyze entire file structure',
         color: 'info',
-        shortcut: 'Ctrl+E',
         contextual: true
       },
       edit: {
@@ -181,7 +180,6 @@ const ChatAssistantCard = React.forwardRef(
         icon: EditIcon,
         description: 'AI-powered code editing with context understanding',
         color: 'primary',
-        shortcut: 'Ctrl+M',
         contextual: true
       },
       optimize: {
@@ -189,7 +187,6 @@ const ChatAssistantCard = React.forwardRef(
         icon: OptimizeIcon,
         description: 'Performance optimization with detailed analysis',
         color: 'success',
-        shortcut: 'Ctrl+O',
         contextual: true
       },
       refactor: {
@@ -197,7 +194,6 @@ const ChatAssistantCard = React.forwardRef(
         icon: RefactorIcon,
         description: 'Intelligent code restructuring',
         color: 'warning',
-        shortcut: 'Ctrl+R',
         contextual: true
       },
       test: {
@@ -205,7 +201,6 @@ const ChatAssistantCard = React.forwardRef(
         icon: TestIcon,
         description: 'Create comprehensive unit tests',
         color: 'secondary',
-        shortcut: 'Ctrl+T',
         contextual: true
       },
       fix: {
@@ -213,7 +208,6 @@ const ChatAssistantCard = React.forwardRef(
         icon: FixIcon,
         description: 'Automatically fix detected errors and issues',
         color: 'error',
-        shortcut: 'Ctrl+F',
         contextual: true
       },
       document: {
@@ -221,7 +215,6 @@ const ChatAssistantCard = React.forwardRef(
         icon: DocumentIcon,
         description: 'Generate documentation and comments',
         color: 'info',
-        shortcut: 'Ctrl+D',
         contextual: true
       },
       secure: {
@@ -229,7 +222,6 @@ const ChatAssistantCard = React.forwardRef(
         icon: SecurityIcon,
         description: 'Comprehensive security vulnerability analysis',
         color: 'error',
-        shortcut: 'Ctrl+S',
         contextual: true
       },
       suggest: {
@@ -237,7 +229,6 @@ const ChatAssistantCard = React.forwardRef(
         icon: SuggestionIcon,
         description: 'Get intelligent code suggestions',
         color: 'primary',
-        shortcut: 'Ctrl+Space',
         contextual: true
       }
     }), []);

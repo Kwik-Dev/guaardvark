@@ -68,10 +68,11 @@ def install_model(model_size: str) -> str:
 
     The only call in this module that reaches the network. It belongs behind
     a visible Install; transcription paths use get_faster_whisper_model().
+    The Whisper repos are public, so no stored Hugging Face token is sent.
     """
     if not FASTER_WHISPER_AVAILABLE:
         raise ImportError("faster-whisper is not installed. Run: pip install faster-whisper")
-    return download_model(model_size)
+    return download_model(model_size, use_auth_token=False)
 
 
 def weights_cache_dir(model_size: str) -> Optional[str]:

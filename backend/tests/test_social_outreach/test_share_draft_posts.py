@@ -156,8 +156,18 @@ def test_an_approved_share_draft_is_submitted_to_its_subreddit(draft_post, app, 
 # After the submit click, the post counts only when the page shows it landed
 # ---------------------------------------------------------------------------
 
+def _filled_form(subreddit, title, link="https://guaardvark.com", **changes):
+    form = {
+        "url": f"https://www.reddit.com/r/{subreddit}/submit/?type=LINK",
+        "kind": "LINK", "title": title, "link": link,
+        "button": {"disabled": False, "shown": True, "x": 600, "y": 900},
+    }
+    form.update(changes)
+    return form
+
+
 def _submit_with_page(monkeypatch, page, subreddit="x", title="Local-first AI studio"):
-    """Run the real Reddit submit poster with every agent task succeeding and
+    """Run the real Reddit submit poster on a form that holds the draft, with
     the post-submit page read answering ``page``."""
     from types import SimpleNamespace
     from unittest.mock import MagicMock
@@ -183,6 +193,10 @@ def _submit_with_page(monkeypatch, page, subreddit="x", title="Local-first AI st
     monkeypatch.setattr("backend.services.local_screen_backend.LocalScreenBackend", MagicMock)
     monkeypatch.setattr("time.sleep", lambda seconds: None)
     monkeypatch.setattr(self_share, "bidi_evaluate_json", evaluate)
+    monkeypatch.setattr(self_share, "bidi_reachable", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(self_share, "_bidi_navigate", lambda *a, **k: True)
+    monkeypatch.setattr(self_share, "_read_form", lambda: (_filled_form(subreddit, title), ""))
+    monkeypatch.setattr(self_share, "_LANDED_WAIT_S", 0)
     result = self_share._submit_post_via_servo(subreddit, title, "https://guaardvark.com")
     return result, seen
 
@@ -214,6 +228,23 @@ def test_share_post_in_another_subreddit_is_unverified(monkeypatch):
     assert ok is False
 
 
+def test_share_listed_on_the_feed_after_the_submit_is_posted(monkeypatch):
+    # Reddit can return to the subreddit's feed after Post; the new post is
+    # listed there with its permalink.
+    page = {"url": "https://www.reddit.com/r/x/", "title_on_page": True,
+            "listed": "/r/x/comments/1x1ar00/local_first_ai_studio/"}
+    (ok, reason), seen = _submit_with_page(monkeypatch, (page, ""))
+    assert (ok, reason) == (True, "ok")
+    assert '"https://guaardvark.com"' in seen[0]
+
+
+def test_share_listed_in_another_subreddit_is_unverified(monkeypatch):
+    page = {"url": "https://www.reddit.com/", "title_on_page": True,
+            "listed": "/r/other/comments/1x1ar00/local_first_ai_studio/"}
+    (ok, reason), _ = _submit_with_page(monkeypatch, (page, ""))
+    assert ok is False
+
+
 def test_share_unreadable_page_is_unverified(monkeypatch):
     (ok, reason), _ = _submit_with_page(monkeypatch, (None, "connect failed: refused"))
     assert ok is False
@@ -231,3 +262,76 @@ def test_share_unreadable_page_is_unverified(monkeypatch):
 def test_post_url_shape(url, landed):
     from backend.services.social_outreach.self_share import _is_post_url
     assert _is_post_url(url, "SideProject") is landed
+
+
+def test_share_refuses_before_touching_reddit_when_the_page_cannot_be_read(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from backend.services.social_outreach import self_share
+
+    tasks = []
+
+    class Service:
+        is_active = False
+
+        def execute_task(self, task, screen):
+            tasks.append(task)
+            return SimpleNamespace(success=True, reason="ok")
+
+    monkeypatch.setattr("backend.services.agent_control_service.get_agent_control_service",
+                        lambda: Service())
+    monkeypatch.setattr("backend.utils.agent_display_utils.start_agent_display_if_needed",
+                        lambda: True)
+    monkeypatch.setattr("backend.services.local_screen_backend.LocalScreenBackend", MagicMock)
+    monkeypatch.setattr(self_share, "bidi_reachable", lambda *a, **k: (False, "connect failed: refused"))
+    ok, reason = self_share._submit_post_via_servo("test", "a title", "https://guaardvark.com")
+    assert ok is False
+    assert reason.startswith("page_check_unavailable: nothing was posted")
+    assert "connect failed: refused" in reason
+    assert tasks == []
+
+
+
+# ---------------------------------------------------------------------------
+# The form is posted only when it holds exactly the approved title and link
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("changes, needle", [
+    ({}, ""),
+    ({"url": "https://www.reddit.com/login/?dest=x"}, "not r/Test's submit form"),
+    ({"kind": "TEXT"}, "not a link post"),
+    ({"title": "A different title"}, "not the approved title"),
+    ({"title": None}, "not the approved title"),
+    ({"link": "https://example.com"}, "not the approved link"),
+    ({"button": {"disabled": True, "shown": True, "x": 1, "y": 1}}, "Post button"),
+    ({"button": None}, "Post button"),
+])
+def test_form_problem(changes, needle):
+    from backend.services.social_outreach.self_share import _form_problem
+
+    form = {**_filled_form("test", "Local-first AI studio"), **changes}
+    problem = _form_problem(form, "Test", "Local-first  AI studio", "https://guaardvark.com")
+    assert (needle in problem) if needle else problem == ""
+
+
+def test_a_form_that_never_holds_the_draft_is_not_clicked(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from backend.services.social_outreach import self_share
+
+    screen = MagicMock()
+    monkeypatch.setattr("backend.services.agent_control_service.get_agent_control_service",
+                        lambda: MagicMock(is_active=False))
+    monkeypatch.setattr("backend.utils.agent_display_utils.start_agent_display_if_needed",
+                        lambda: True)
+    monkeypatch.setattr("backend.services.local_screen_backend.LocalScreenBackend", lambda: screen)
+    monkeypatch.setattr("time.sleep", lambda seconds: None)
+    monkeypatch.setattr(self_share, "bidi_reachable", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(self_share, "_bidi_navigate", lambda *a, **k: True)
+    monkeypatch.setattr(self_share, "_read_form", lambda: (_filled_form("test", "Prefilled by someone else"), ""))
+    monkeypatch.setattr(self_share, "_FORM_WAIT_S", 0)
+    ok, reason = self_share._submit_post_via_servo("test", "Local-first AI studio", "https://guaardvark.com")
+    assert ok is False
+    assert reason.startswith("form_not_ready: nothing was posted; the title field holds")
+    screen.click.assert_not_called()

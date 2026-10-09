@@ -15,6 +15,7 @@
     "default_auto_start": true,
     "service_url": "http://127.0.0.1:8188",
     "timeout": 60,
+    "start_timeout": 900,
     "fallback_enabled": true
   },
   "requirements": {

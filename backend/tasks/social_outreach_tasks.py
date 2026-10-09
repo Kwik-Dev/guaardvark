@@ -15,7 +15,8 @@ by default, and the SQLAlchemy/audit code needs it.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from contextlib import ExitStack
+from typing import Any, Optional
 
 from celery import shared_task
 
@@ -246,9 +247,9 @@ def tick_self_share(self) -> dict:
 
 
 # What the approved-drafts tick can post, by action. Comments go to the
-# calibrated BiDi posters (Reddit, YouTube) or the general agent loop
-# (X/Twitter, Facebook); only YouTube has a reply poster; a share is a Reddit
-# link post. Platforms are compared lowercased.
+# BiDi posters (Reddit, YouTube, Facebook) or the general agent loop
+# (X/Twitter); only YouTube has a reply poster; a share is a Reddit link post.
+# Platforms are compared lowercased.
 _POSTABLE_PLATFORMS = {
     "comment": ("reddit", "youtube", "x", "twitter", "facebook"),
     "reply": ("youtube",),
@@ -264,13 +265,15 @@ def tick_process_approved_drafts(self) -> dict:
     At most one successful post per platform per tick; remaining approved
     rows stay approved for a later tick. A row whose action has no poster on
     its platform (``_POSTABLE_PLATFORMS``) is moved to ``unsupported`` without
-    being claimed.
+    being claimed. While the tick posts, the agent browser runs with its
+    control port open (``agent_browser_control``); while the agent is busy,
+    rows stay approved.
     """
     skipped = _skip_if_kill_switch_off()
     if skipped:
         return {"processed": 0, "reason": "kill_switch_off"}
 
-    def _run():
+    def _run(browser: ExitStack):
         # Posting reaches an outside site, so web access (Settings) gates it
         # like the scouting does; approved rows stay approved until it is on.
         from backend.utils.settings_utils import web_access_block_reason
@@ -284,15 +287,15 @@ def tick_process_approved_drafts(self) -> dict:
             post_youtube_reply_via_servo,
         )
         from backend.services.social_outreach.self_share import _submit_post_via_servo
+        from backend.utils.agent_browser_control import agent_browser_control
         import json
         import requests
         from sqlalchemy import func
         from backend.services.social_outreach.reddit_outreach import backend_url
         from backend.services.social_outreach.reddit_outreach import REDDIT_BASE
 
-        # Reddit/YouTube keep their calibrated BiDi posters; x/twitter/facebook
-        # post through the general agent loop (general_poster). Widened from
-        # reddit+youtube so approved X/FB rows are fetched instead of ignored.
+        # Reddit/YouTube/Facebook have BiDi posters; x/twitter post through
+        # the general agent loop (general_poster).
         rows = (
             SocialOutreachLog.query
             .filter(SocialOutreachLog.status == "approved")
@@ -310,7 +313,17 @@ def tick_process_approved_drafts(self) -> dict:
         skipped_not_approved = 0
         withdrawn = 0
         unsupported = 0
+        skipped_browser_busy = 0
         posted_platforms: set[str] = set()
+        # Every poster here reads the page back over the agent browser's
+        # control port. It is opened before the first claim and closed when
+        # the tick ends (``browser``); a refusal means the agent is in use.
+        browser_refusal: list[Optional[str]] = []
+
+        def _browser_refusal() -> Optional[str]:
+            if not browser_refusal:
+                browser_refusal.append(browser.enter_context(agent_browser_control()))
+            return browser_refusal[0]
 
         def _give_up(row_id: int, reason: str) -> None:
             # A row rejected while the poster was working stays rejected.
@@ -346,6 +359,11 @@ def tick_process_approved_drafts(self) -> dict:
                 )
                 continue
 
+            # Rows stay approved while the agent is busy, as with web access off.
+            if _browser_refusal():
+                skipped_browser_busy += 1
+                continue
+
             # Claim the row up-front so a mid-flight failure (servo crash,
             # record-post HTTP blip) doesn't leave it as "approved" and trigger
             # a double-post on the next 60s tick. The claim only succeeds if
@@ -367,10 +385,9 @@ def tick_process_approved_drafts(self) -> dict:
                 # silently drop the tags Content already applied.
                 comment_text = row.posted_text or row.draft_text
 
-                # Branch on platform. Reddit/YouTube use their calibrated BiDi
-                # posters; everything else (X/Twitter, Facebook, …) posts through
-                # the general NL agent loop — no per-platform code, driven by the
-                # grounded eye. "Adding a platform" is now "be logged into it".
+                # Branch on platform. Reddit, YouTube and Facebook use their BiDi
+                # posters; everything else (X/Twitter, …) posts through the
+                # general NL agent loop, driven by the grounded eye.
                 if platform == "reddit":
                     success, reason = reddit_post_comment(
                         row.target_url, comment_text, before_submit=before_submit,
@@ -378,6 +395,11 @@ def tick_process_approved_drafts(self) -> dict:
                 elif platform == "youtube":
                     success, reason = post_youtube_comment_via_servo(
                         row.target_url, comment_text, row.task_id, before_submit=before_submit,
+                    )
+                elif platform == "facebook":
+                    from backend.services.social_outreach.facebook_outreach import post_comment_via_bidi
+                    success, reason = post_comment_via_bidi(
+                        row.target_url, comment_text, before_submit=before_submit,
                     )
                 else:
                     from backend.services.social_outreach.general_poster import post_via_agent_loop
@@ -496,9 +518,13 @@ def tick_process_approved_drafts(self) -> dict:
             "skipped_not_approved": skipped_not_approved,
             "withdrawn": withdrawn,
             "unsupported": unsupported,
+            "skipped_browser_busy": skipped_browser_busy,
+            "browser_refusal": browser_refusal[0] if browser_refusal else None,
             "posted_platforms": sorted(posted_platforms),
         }
-    return _with_app_context(_run)
+
+    with ExitStack() as browser:
+        return _with_app_context(_run, browser)
 
 
 # How long a row may sit at status=processing or submitting before we abort it

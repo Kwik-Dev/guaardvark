@@ -37,6 +37,8 @@ def spy(monkeypatch, gen):
     # The probe runs only when torch reports CUDA; stub it so the eviction
     # tests exercise the same branch on a CPU-only or Apple Silicon box.
     monkeypatch.setattr(oig.torch.cuda, "is_available", lambda: True)
+    # The 16 GB card _set_vram describes; estimates depend on the card size.
+    monkeypatch.setattr(gen, "_cuda_total_vram_gb", lambda: 16.0)
     return calls
 
 
@@ -139,14 +141,68 @@ def test_auto_vram_uses_offload_turbo_default(gen, monkeypatch):
     assert gen._vram_estimate_mb("auto") == 11000
 
 
-def test_estimate_sdxl(gen):
+def test_estimate_sdxl(gen, monkeypatch):
+    monkeypatch.setattr(gen, "_cuda_total_vram_gb", lambda: 16.0)
     assert gen._vram_estimate_mb("stabilityai/stable-diffusion-xl-base-1.0") == 8000
+
+
+def test_estimate_sdxl_offloaded_on_a_small_card(gen, monkeypatch):
+    # Below the family's offload_below_vram_gb SDXL runs with CPU model offload
+    # and is priced at its measured offload peak, not the whole-card 8000.
+    monkeypatch.setattr(gen, "_cuda_total_vram_gb", lambda: 7.9)
+    spec = oig._image_limits_for("sdxl")
+    assert gen._vram_estimate_mb("stabilityai/sdxl-turbo") == spec["vram_mb_offload"]
+    assert spec["vram_mb_offload"] < spec["vram_mb"]
 
 
 def test_estimate_sd_family_default(gen):
     # SD-class models fall through _FAMILY_VRAM_MB to the 4000 MB default.
     # (Was SD 1.5 before it was removed from the system, 2026-08-07.)
     assert gen._vram_estimate_mb("SG161222/Realistic_Vision_V5.1_noVAE") == 4000
+
+
+def test_sana_family_and_prices(gen):
+    # Its own family, not the SD fallback every unmatched id used to land in.
+    for ref in ("sana-sprint", "sana-sprint-0.6b",
+                "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers"):
+        assert gen._model_family(ref) == "sana"
+    spec = oig._image_limits_for("sana")
+    assert gen._vram_estimate_mb("sana-sprint") == spec["vram_mb"]
+    assert gen._ram_estimate_gb("sana-sprint") == spec["ram_gb"]
+    assert gen.supports_img2img("sana-sprint") is False
+
+
+def test_sana_small_model_has_its_own_price(gen):
+    # The 0.6B row's measured price, not the 1.6B family figure: priced as the
+    # family it could never pass admission on an idle 8 GB card.
+    from backend.services.media_model_registry import IMAGE_MODEL_LIMITS
+    row = IMAGE_MODEL_LIMITS["sana-sprint-0.6b"]
+    for ref in ("sana-sprint-0.6b", "Efficient-Large-Model/Sana_Sprint_0.6B_1024px_diffusers"):
+        assert gen._vram_estimate_mb(ref) == row["vram_mb"]
+        assert gen._ram_estimate_gb(ref) == row["ram_gb"]
+    assert row["vram_mb"] < oig._image_limits_for("sana")["vram_mb"]
+
+
+def test_soft_clamp_sana_takes_its_default_for_a_runaway_count(gen):
+    # The Discord bot sends 9 steps unmarked; Sana Sprint samples in 1-4.
+    from backend.services.offline_image_generator import ImageGenerationRequest
+    req = ImageGenerationRequest(
+        prompt="test", model="sana-sprint", num_inference_steps=9, guidance_scale=0.0
+    )
+    gen._soft_clamp_family_sampling(req, "sana")
+    spec = oig._image_limits_for("sana")
+    assert req.num_inference_steps == spec["default_steps"]
+    assert req.guidance_scale == spec["cfg_when_unset"]
+
+
+def test_apply_family_sampling_sana(gen):
+    from backend.services.offline_image_generator import ImageGenerationRequest
+    req = ImageGenerationRequest(
+        prompt="test", model="sana-sprint", num_inference_steps=25, guidance_scale=7.0
+    )
+    gen._apply_family_sampling(req, "sana")
+    assert req.num_inference_steps == 2
+    assert req.guidance_scale == 4.5
 
 
 def test_ram_estimate_zimage(gen):

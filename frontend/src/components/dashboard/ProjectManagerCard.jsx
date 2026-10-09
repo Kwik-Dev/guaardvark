@@ -15,6 +15,7 @@ import CollapsibleAlert from "../common/CollapsibleAlert";
 import { useNavigate } from "react-router-dom";
 import DashboardCardWrapper from "./DashboardCardWrapper";
 import EntityContextMenu from "../common/EntityContextMenu";
+import { entityLinkActions } from "../../utils/entityLinks";
 import useContextMenu from "../../hooks/useContextMenu";
 import { getProjects } from "../../api";
 import { getLogoUrl } from "../../config/logoConfig";
@@ -156,12 +157,7 @@ const ProjectManagerCard = React.forwardRef(
               ? [
                   { label: "Open", onClick: () => navigate(`/projects/${rowMenu.payload.id}`) },
                   { label: "Edit…", onClick: () => navigate(`/projects?projectId=${rowMenu.payload.id}`) },
-                  {
-                    label: "Files",
-                    onClick: () => navigate(`/documents?project_id=${rowMenu.payload.id}`),
-                    dividerBefore: true,
-                  },
-                  { label: "Schedule Task", onClick: () => navigate(`/tasks?project_id=${rowMenu.payload.id}`) },
+                  ...entityLinkActions("project", rowMenu.payload.id, navigate),
                 ]
               : []
           }

@@ -38,6 +38,7 @@ import InterconnectorSettingsModal from "../components/modals/InterconnectorSett
 import VoiceSettingsModal from "../components/modals/VoiceSettingsModal";
 import ExportChatsButton from "../components/settings/ExportChatsButton";
 import ProfileSection from "../components/settings/ProfileSection";
+import TipsSetting from "../components/settings/TipsSetting";
 import { SOCKET_URL } from "../api/apiClient";
 import { SUPPORT_LINKS } from "../config/constants";
 import CoffeeIcon from "@mui/icons-material/Coffee";
@@ -73,6 +74,7 @@ import {
   DashboardTile,
 } from "../components/settings/ui";
 import IndexProfileChips from "../components/settings/IndexProfileChips";
+import RerankerControl from "../components/settings/RerankerControl";
 import RebuildIndexDialog from "../components/settings/RebuildIndexDialog";
 import IndexProfileEditDialog from "../components/settings/IndexProfileEditDialog";
 import ModelManagementSection from "../components/settings/ModelManagementSection";
@@ -2499,7 +2501,7 @@ const SettingsPage = () => {
     <SettingsPanel
       id="settings-general"
       title="General"
-      help="Your name, picture and theme, how pages are listed, the music folder and the product profile."
+      help="Your name, picture and theme, how pages are listed, tips, the music folder and the product profile."
     >
       <input
         type="file"
@@ -2608,6 +2610,7 @@ const SettingsPage = () => {
           />
         </Line>
       </Cluster>
+      <TipsSetting />
       <Cluster
         label="Media library"
         help="The music folder the assistant searches when you ask it to play music. Left empty, it uses ~/Music."
@@ -3249,6 +3252,12 @@ const SettingsPage = () => {
         </Line>
       </Cluster>
       <Cluster
+        label="Search reranker"
+        help="A second model that rereads the passages a search found and puts the most relevant first. Searches work without it."
+      >
+        <RerankerControl showMessage={showMessage} />
+      </Cluster>
+      <Cluster
         label="Autoresearch"
         help="Overnight tests that tune how chat searches your documents. Its settings and history are on the Autoresearch page."
       >
@@ -3847,6 +3856,8 @@ const SettingsPage = () => {
         systemName={persistedSystemName}
         whisperManualInstall={whisperManualInstall}
         onCopyWhisperCommand={copyWhisperCommand}
+        onManageVoiceModels={() => setVoiceModelsModalOpen(true)}
+        showMessage={showMessage}
       />
       <InterconnectorSettingsModal
         open={interconnectorModalOpen}

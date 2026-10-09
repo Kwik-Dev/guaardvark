@@ -11,6 +11,7 @@ import {
   CardMedia,
   Chip,
   IconButton,
+  LinearProgress,
   TextField,
   Tooltip,
   Typography,
@@ -25,7 +26,6 @@ import React, {
   useState,
 } from "react";
 
-import * as apiService from "../../api";
 import GlobalMicButton from "../voice/GlobalMicButton";
 import { useAppStore } from "../../stores/useAppStore";
 import { useVoiceSession, useVoiceSessionState } from "../../contexts/VoiceSessionContext";
@@ -40,6 +40,12 @@ import {
   formatAttachmentSize,
   refuseAttachmentMessage,
 } from "../../utils/chatAttachment";
+import {
+  CHAT_ATTACH_ACCEPT,
+  chatDocumentRefusal,
+  splitChatFiles,
+  uploadChatDocument,
+} from "../../utils/chatDocumentUpload";
 
 const ChatInput = forwardRef(
   ({ onSendMessage, onStop, disabled = false, chimeIn = false, onChimeIn, sessionId = "default", codeGenMode = false, onVoiceStateChange = () => { }, onAddMessage, onUpdateMessage, onClearMessages, onPlanCreated, projectId, composerError, onClearComposerError }, ref) => {
@@ -227,335 +233,69 @@ const ChatInput = forwardRef(
     const _selectedImage = imageState.images.length > 0 ? imageState.images[0].file : null;
     const _imagePreview = imageState.images.length > 0 ? imageState.images[0].preview : null;
 
+    // A document notice waits here while a reply is streaming: the page drops
+    // messages sent while it is busy.
+    const [pendingNotices, setPendingNotices] = useState([]);
+    useEffect(() => {
+      if (disabled || pendingNotices.length === 0) return;
+      onSendMessage(pendingNotices.join("\n\n"), null);
+      setPendingNotices([]);
+    }, [disabled, pendingNotices, onSendMessage]);
+
+    // Documents from the paperclip or a drop: uploaded one after another, then
+    // one notice for all of them.
+    const handleDocumentFiles = async (files) => {
+      const notices = [];
+      for (const file of files) {
+        debugLog("Starting file upload", { fileName: file.name, size: file.size });
+        const refusal = chatDocumentRefusal(file);
+        if (refusal) {
+          notices.push(refusal);
+          continue;
+        }
+        setFileUploadState({ uploading: true, progress: 0, fileName: file.name, error: null });
+        const result = await uploadChatDocument(file, {
+          sessionId,
+          codeGenMode,
+          onStage: ({ progress, indexing }) =>
+            setFileUploadState((prev) => ({
+              ...prev,
+              progress,
+              fileName: indexing ? `${file.name} (indexing...)` : file.name,
+            })),
+        });
+        if (!result.ok) {
+          setFileUploadState({ uploading: false, progress: 0, fileName: null, error: result.error });
+        }
+        notices.push(result.message);
+      }
+      if (fileRef.current) fileRef.current.value = "";
+      setFileUploadState((prev) => (prev.error ? prev : { uploading: false, progress: 0, fileName: null, error: null }));
+      if (notices.length) setPendingNotices((prev) => [...prev, ...notices]);
+    };
+
+    // Everything the paperclip, a paste or a drop hands the composer.
+    const addFiles = (files) => {
+      const { images, documents } = splitChatFiles(files);
+      images.forEach((img) => handleImageUpload(img));
+      if (documents.length) handleDocumentFiles(documents);
+    };
+
     useImperativeHandle(ref, () => ({
       focus: () => {
         inputRef.current?.focus();
       },
+      addFiles,
     }));
 
-    // Enhanced file upload handler using unified API service
-    const handleFileUpload = async (file) => {
-      debugLog("Starting file upload", { fileName: file.name, size: file.size });
-
-      setFileUploadState({
-        uploading: true,
-        progress: 0,
-        fileName: file.name,
-        error: null,
-      });
-
-      try {
-        // Add session ID to tags for proper file association
-        const _extension = "." + file.name.split(".").pop().toLowerCase();
-        const tags = `chat-upload,file-upload,${sessionId}`;
-
-        // Upload file using unified API service
-        const result = await apiService.uploadFile(
-          file,
-          null, // projectId
-          tags,
-          {},
-          null, // signal
-          (progressData) => {
-            setFileUploadState((prev) => ({
-              ...prev,
-              progress: progressData.percentage,
-            }));
-          }
-        );
-
-        if (result.error) {
-          throw new Error(result.error);
-        }
-
-        debugLog("Upload result", {
-          success: result?.success,
-          documentId: result?.document_id || result?.id,
-        });
-
-        // Enhanced file storage: Check if this is a code file
-        const fileType = file.name.split(".").pop().toLowerCase();
-        const codeFileExtensions = [
-          ".js",
-          ".jsx",
-          ".ts",
-          ".tsx",
-          ".py",
-          ".java",
-          ".cpp",
-          ".c",
-          ".h",
-          ".hpp",
-          ".cs",
-          ".php",
-          ".rb",
-          ".go",
-          ".rs",
-          ".swift",
-          ".kt",
-          ".scala",
-          ".sh",
-          ".bash",
-          ".sql",
-          ".css",
-          ".scss",
-          ".sass",
-          ".html",
-          ".htm",
-          ".xml",
-          ".json",
-          ".yaml",
-          ".yml",
-          ".vue",
-          ".svelte",
-          ".dart",
-          ".r",
-          ".lua",
-        ];
-        const isCodeFile = codeFileExtensions.includes("." + fileType);
-
-        setFileUploadState((prev) => ({
-          ...prev,
-          progress: 75,
-          fileName: file.name,
-          error: null,
-        }));
-
-        // Wait for indexing to complete before sending chat message
-        let indexingComplete = false;
-        let attempts = 0;
-        const maxAttempts = 30; // 30 seconds max wait
-
-        while (!indexingComplete && attempts < maxAttempts) {
-          await new Promise((resolve) => setTimeout(resolve, 1000)); // Wait 1 second
-          attempts++;
-
-          try {
-            // Check document indexing status
-            const statusResponse = await fetch(
-              `/api/docs/${result.document_id}`
-            );
-            if (statusResponse.ok) {
-              const docData = await statusResponse.json();
-              if (
-                docData.index_status === "INDEXED" ||
-                docData.index_status === "STORED"
-              ) {
-                indexingComplete = true;
-                break;
-              } else if (docData.index_status === "ERROR") {
-                console.warn("Document indexing failed");
-                break;
-              }
-            }
-          } catch (error) {
-            console.warn("Error checking indexing status:", error);
-          }
-
-          // Update progress to show we're waiting
-          setFileUploadState((prev) => ({
-            ...prev,
-            progress: 75 + (attempts / maxAttempts) * 20,
-            fileName: `${file.name} (indexing...)`,
-          }));
-        }
-
-        setFileUploadState((prev) => ({ ...prev, progress: 100 }));
-
-        // Enhanced success message based on file type and indexing status
-        const fileSizeKB = (file.size / 1024).toFixed(1);
-        const indexingStatus = indexingComplete
-          ? "Uploaded and indexed successfully"
-          : "Uploaded (indexing in progress)";
-
-        let uploadMessage;
-        if (codeGenMode && isCodeFile && indexingComplete) {
-          // For CodeGen mode, send processing request instead of notification
-          uploadMessage = `/codegen
-
-Please analyze and refactor the uploaded code file: ${file.name}
-
-Requirements:
-- Analyze the complete file content (${fileSizeKB} KB)
-- Provide clean, refactored code only (no commentary)
-- Maintain all functionality while improving code structure
-- Fix any obvious issues or inefficiencies
-
-Document ID: ${result.document_id}`;
-        } else if (codeGenMode && !indexingComplete) {
-          // If indexing not complete in CodeGen mode, inform user to wait
-          uploadMessage = `**File Upload Complete - Indexing in Progress**
-
-Please wait for indexing to complete before processing. File: ${file.name} (${fileSizeKB} KB)`;
-        } else if (isCodeFile) {
-          // Regular notification for non-CodeGen mode
-          uploadMessage = `**Code File Uploaded Successfully**
-
-**File Details:**
-- **Name:** ${file.name}
-- **Type:** ${fileType.toUpperCase()} (Code File)
-- **Size:** ${fileSizeKB} KB
-- **Document ID:** ${result.document_id || "N/A"}
-
-**Status:** ${indexingStatus}
-**Enhanced Analysis:** Code content is ${indexingComplete ? "now" : "being"
-            } indexed and ${indexingComplete ? "available" : "will be available"
-            } for search and discussion.
-
-${indexingComplete
-              ? "You can ask questions about this code file and I'll analyze the complete content!"
-              : "Please wait a moment for indexing to complete, then ask questions about the code."
-            }`;
-        } else {
-          uploadMessage = `**Document Uploaded Successfully**
-
-**File Details:**
-- **Name:** ${file.name}
-- **Type:** ${fileType.toUpperCase()}
-- **Size:** ${fileSizeKB} KB
-- **Document ID:** ${result.document_id || "N/A"}
-
-**Status:** ${indexingStatus}
-**RAG Integration:** The document is ${indexingComplete ? "now" : "being"
-            } indexed and ${indexingComplete ? "available" : "will be available"
-            } for search and context retrieval.`;
-        }
-
-        // Send message to chat
-        onSendMessage(uploadMessage, null);
-
-        // Clear file input
-        if (fileRef.current) {
-          fileRef.current.value = "";
-        }
-
-        debugLog("File upload process completed successfully");
-      } catch (error) {
-        console.error("File upload failed:", error);
-
-        setFileUploadState({
-          uploading: false,
-          progress: 0,
-          fileName: null,
-          error: error.message,
-        });
-
-        // Send error message to chat
-        const errorMessage = `**File Upload Failed**
-
-**File:** ${file.name}
-**Error:** ${error.message}
-
-Please try uploading the file again or contact support if the issue persists.`;
-
-        onSendMessage(errorMessage, null);
-      } finally {
-        // Reset upload state after delay
-        setTimeout(() => {
-          setFileUploadState({
-            uploading: false,
-            progress: 0,
-            fileName: null,
-            error: null,
-          });
-        }, 2000);
-      }
-    };
-
-    // Supported file types for chat analysis
-    const supportedFileTypes = {
-      // Programming files
-      ".py": "Python",
-      ".js": "JavaScript",
-      ".jsx": "React JSX",
-      ".ts": "TypeScript",
-      ".tsx": "TypeScript React",
-      ".html": "HTML",
-      ".css": "CSS",
-      ".scss": "SCSS",
-      ".json": "JSON",
-      ".xml": "XML",
-      ".yaml": "YAML",
-      ".yml": "YAML",
-      ".toml": "TOML",
-      ".ini": "INI Config",
-      ".conf": "Config",
-      ".env": "Environment",
-
-      // Data files
-      ".csv": "CSV Data",
-      ".xlsx": "Excel",
-      ".xls": "Excel",
-
-      // Documents
-      ".pdf": "PDF Document",
-      ".txt": "Text File",
-      ".md": "Markdown",
-      ".rst": "ReStructuredText",
-
-      // Other common formats
-      ".sql": "SQL",
-      ".sh": "Shell Script",
-      ".bat": "Batch File",
-      ".ps1": "PowerShell",
-      ".dockerfile": "Dockerfile",
-      ".gitignore": "Git Ignore",
-      ".gitattributes": "Git Attributes",
-    };
-
-    // File selection handler
     const handleFileSelect = (event) => {
       const file = event.target.files?.[0];
-      if (file) {
-        debugLog("File selected", { fileName: file.name, size: file.size });
-
-        // Check if it's an image first
-        if (file.type.startsWith("image/")) {
-          handleImageUpload(file);
-          // The image now lives in imageState. Left in the input, the send
-          // path would read it back as a document for the next message and
-          // open the upload dialog instead of sending that message.
-          event.target.value = "";
-          return;
-        }
-
-        // Validate file size (100MB limit)
-        const maxSize = 100 * 1024 * 1024;
-        if (file.size > maxSize) {
-          const errorMessage = `**File Too Large**
-
-**File:** ${file.name}
-**Size:** ${(file.size / 1024 / 1024).toFixed(1)} MB
-**Limit:** 100 MB
-
-Please select a smaller file or compress the file before uploading.`;
-
-          onSendMessage(errorMessage, null);
-          return;
-        }
-
-        // Validate file type
-        const extension = "." + file.name.split(".").pop().toLowerCase();
-        const isSupported =
-          supportedFileTypes[extension] || file.type.startsWith("text/");
-
-        if (!isSupported) {
-          const supportedTypes = Object.keys(supportedFileTypes).join(", ");
-          const errorMessage = `**Unsupported File Type**
-
-**File:** ${file.name}
-**Type:** ${extension}
-**Supported Types:** ${supportedTypes}, images
-
-Please select a supported file type.`;
-
-          onSendMessage(errorMessage, null);
-          return;
-        }
-
-        // Start upload process
-        handleFileUpload(file);
-      }
+      if (!file) return;
+      debugLog("File selected", { fileName: file.name, size: file.size });
+      // Cleared now: left in the input, the send path would read it back as a
+      // document for the next message and open the upload dialog.
+      event.target.value = "";
+      addFiles([file]);
     };
 
     // Image handling functions — downscale through a canvas before the
@@ -598,22 +338,6 @@ Please select a supported file type.`;
           error: err?.message || "Could not prepare this image",
         }));
       }
-    };
-
-    // Drag-and-drop: accept LOCAL image files only. We read dataTransfer.FILES and
-    // deliberately NEVER read dataTransfer URLs (text/uri-list / text/html) — a drag
-    // from a browser tab carries a remote URL there, and fetching it would break
-    // offline-first. Local files go through the same base64 path as paste/paperclip.
-    const handleImageDrop = (event) => {
-      event.preventDefault();
-      const files = event.dataTransfer?.files;
-      if (!files || !files.length) return;
-      for (const f of Array.from(files)) {
-        if (f.type && f.type.startsWith("image/")) handleImageUpload(f);
-      }
-    };
-    const handleDragOver = (event) => {
-      event.preventDefault();
     };
 
     const handleImagePaste = (event) => {
@@ -673,12 +397,10 @@ Please select a supported file type.`;
           const base64 = primaryImage.preview.split(",")[1];
           const messageText =
             inputText || `Describe this image: ${primaryImage.file.name}`;
-          const fileNames = imageState.images.map((img) => img.file.name).join(", ");
-
           onSendMessage(messageText, null, {
             isImageAnalysis: true,
             imageBase64: base64,
-            imageFileName: fileNames,
+            imageFileName: primaryImage.file.name,
             imagePreview: primaryImage.preview,
           });
 
@@ -884,8 +606,6 @@ Please try a different image or check if the vision model is properly loaded.`;
     return (
       <Box
         ref={rootRef}
-        onDrop={handleImageDrop}
-        onDragOver={handleDragOver}
         sx={{
           p: 2,
           borderTop: 1,
@@ -895,6 +615,19 @@ Please try a different image or check if the vision model is properly loaded.`;
           gap: 1,
         }}
       >
+        {fileUploadState.uploading && (
+          <Box data-testid="chat-upload-progress">
+            <Typography variant="caption" color="text.secondary">
+              Uploading {fileUploadState.fileName}
+            </Typography>
+            <LinearProgress
+              variant="determinate"
+              value={Math.min(100, Math.max(0, fileUploadState.progress || 0))}
+              sx={{ height: 4, borderRadius: 2 }}
+            />
+          </Box>
+        )}
+
         {/* File upload error */}
         {fileUploadState.error && (
           <CollapsibleAlert
@@ -957,12 +690,12 @@ Please try a different image or check if the vision model is properly loaded.`;
                   />
                 </Box>
               ))}
-              {imageState.images.length < MAX_IMAGES && (
-                <Typography variant="caption" color="text.secondary">
-                  add up to {MAX_IMAGES - imageState.images.length} more
-                </Typography>
-              )}
             </Box>
+            {imageState.images.length > 1 && (
+              <Alert severity="info" sx={{ mt: 1, py: 0 }}>
+                Only the first image is sent to the model. Remove it to send another one.
+              </Alert>
+            )}
             <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mt: 1 }}>
               <Chip
                 icon={<AttachFileIcon />}
@@ -1022,7 +755,7 @@ Please try a different image or check if the vision model is properly loaded.`;
             hidden
             ref={fileRef}
             onChange={handleFileSelect}
-            accept=".pdf,.txt,.csv,.docx,.md,.json,.py,.js,.jsx,.ts,.tsx,.html,.css,.xml,.yaml,.yml,image/*"
+            accept={CHAT_ATTACH_ACCEPT}
           />
 
           {/* File attachment button */}
