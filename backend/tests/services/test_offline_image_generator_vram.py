@@ -37,6 +37,8 @@ def spy(monkeypatch, gen):
     # The probe runs only when torch reports CUDA; stub it so the eviction
     # tests exercise the same branch on a CPU-only or Apple Silicon box.
     monkeypatch.setattr(oig.torch.cuda, "is_available", lambda: True)
+    # The 16 GB card _set_vram describes; estimates depend on the card size.
+    monkeypatch.setattr(gen, "_cuda_total_vram_gb", lambda: 16.0)
     return calls
 
 
@@ -139,8 +141,18 @@ def test_auto_vram_uses_offload_turbo_default(gen, monkeypatch):
     assert gen._vram_estimate_mb("auto") == 11000
 
 
-def test_estimate_sdxl(gen):
+def test_estimate_sdxl(gen, monkeypatch):
+    monkeypatch.setattr(gen, "_cuda_total_vram_gb", lambda: 16.0)
     assert gen._vram_estimate_mb("stabilityai/stable-diffusion-xl-base-1.0") == 8000
+
+
+def test_estimate_sdxl_offloaded_on_a_small_card(gen, monkeypatch):
+    # Below the family's offload_below_vram_gb SDXL runs with CPU model offload
+    # and is priced at its measured offload peak, not the whole-card 8000.
+    monkeypatch.setattr(gen, "_cuda_total_vram_gb", lambda: 7.9)
+    spec = oig._image_limits_for("sdxl")
+    assert gen._vram_estimate_mb("stabilityai/sdxl-turbo") == spec["vram_mb_offload"]
+    assert spec["vram_mb_offload"] < spec["vram_mb"]
 
 
 def test_estimate_sd_family_default(gen):

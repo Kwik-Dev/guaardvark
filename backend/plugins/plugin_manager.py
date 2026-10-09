@@ -903,7 +903,11 @@ class PluginManager:
                 return self._fail_plugin_start(plugin_id, {'success': False, 'error': 'No start script found'})
 
             try:
-                plugin_timeout = getattr(getattr(metadata, 'config', None), 'timeout', 30) + 30
+                cfg = getattr(metadata, 'config', None)
+                # A start script that installs dependencies on first run declares
+                # how long that may take as config.start_timeout (seconds).
+                start_timeout = (getattr(cfg, 'extra', None) or {}).get('start_timeout')
+                plugin_timeout = int(start_timeout) if start_timeout else getattr(cfg, 'timeout', 30) + 30
                 result = _run_plugin_script(
                     argv=['bash', str(start_script)],
                     cwd=str(plugin_dir),

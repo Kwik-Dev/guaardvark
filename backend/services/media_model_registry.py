@@ -208,11 +208,19 @@ IMAGE_FAMILY_SPECS: dict[str, dict[str, Any]] = {
         "prompt_style": "tags", "engine": "comfy",
         "vram_mb": 12000, "ram_gb": 16.0,
     },
+    # SDXL loads whole onto cards of 10 GB and up (vram_mb 8000: ~6.9 GB of fp16
+    # weights plus the working set). Below that it runs with CPU model offload,
+    # one component on the card at a time. vram_mb_offload measured 2026-10-07 on
+    # an 8 GB GTX 1080 (torch 2.7.1, VAE tiling): peak allocated 5512 MB for
+    # 1024^2 without guidance, 5593 MB with CFG 7.0 (the batch-of-two SD-XL path),
+    # 5682 MB at 1280^2; the allocator reserved up to 6454 MB, which the admission
+    # headroom covers. Loaded whole, the same card ran out of memory at 1024^2.
     "sdxl": {
         "max_side": 1536, "max_pixel_area": 1536 * 1536, "min_side": 256, "dimension_alignment": 16,
         "width": 1024, "height": 1024, "default_steps": 25, "cfg_when_unset": 7.0,
         "prompt_style": "tags", "engine": "offline",
         "vram_mb": 8000, "ram_gb": 10.0, "vram_slope_mb_per_mp": 1500, "ram_slope_gb_per_mp": 1.0,
+        "offload_below_vram_gb": 10.0, "vram_mb_offload": 5700,
     },
     "sd": {
         "max_side": 768, "max_pixel_area": 768 * 768, "min_side": 256, "dimension_alignment": 16,
@@ -239,8 +247,14 @@ IMAGE_MODEL_LIMITS: dict[str, dict[str, Any]] = {
     # SDXL: guidance above 9 renders black images, so its range is enforced.
     "sd-xl": {"family": "sdxl", "steps_range": (20, 40), "cfg_range": (4.0, 9.0),
               "min_dimensions": (768, 768)},
+    # distilled: adversarially distilled for its own Euler Ancestral (trailing)
+    # scheduler, 1-4 steps, no guidance. It keeps that scheduler and samples inside
+    # this row, not the base-SDXL correction (guidance 6, 25 steps, DPM++), which
+    # rendered it over-sharpened and posterized at 5x the work; compared
+    # 2026-10-07 at 512^2 and 1024^2.
     "sdxl-turbo": {"family": "sdxl", "starts_from_family": True, "default_steps": 4, "cfg_when_unset": 0.0,
-                   "steps_range": (1, 4), "cfg_range": (0.0, 1.0), "min_dimensions": (768, 768)},
+                   "steps_range": (1, 4), "cfg_range": (0.0, 1.0), "min_dimensions": (768, 768),
+                   "distilled": True},
     "sd-1.5": {"family": "sd", "steps_range": (10, 50), "cfg_range": (1.0, 15.0),
                "min_dimensions": (512, 512)},
     # SD 1.5 fine-tunes, portrait-first canvases.
