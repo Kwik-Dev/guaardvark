@@ -43,6 +43,20 @@ class TestGuaardvarkClient:
         assert payload["steps"] == 9
         assert payload["width"] == 1024
         assert "subject_ids" not in payload
+        assert "model" not in payload  # the backend's auto-router picks
+
+    @pytest.mark.asyncio
+    async def test_generate_image_sends_a_chosen_model(self):
+        client = GuaardvarkClient()
+        captured_kwargs = {}
+
+        async def mock_post(path, **kwargs):
+            captured_kwargs.update(kwargs)
+            return {"batch_id": "test-123"}
+
+        client._post = mock_post
+        await client.generate_image("a cute cat", model="sana-sprint")
+        assert captured_kwargs["json"]["model"] == "sana-sprint"
 
     @pytest.mark.asyncio
     async def test_generate_image_includes_subject_ids(self):

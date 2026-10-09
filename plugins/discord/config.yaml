@@ -36,6 +36,9 @@ image:
   max_queue_depth: 5
   default_steps: 9
   default_size: 1024
+  # Catalog key such as "sana-sprint" (DISCORD_IMAGE_MODEL in .env); empty lets
+  # the backend's auto-router pick. Cast characters always use their LoRA's model.
+  model: "${DISCORD_IMAGE_MODEL:-}"
 
 conversation:
   max_history: 50
