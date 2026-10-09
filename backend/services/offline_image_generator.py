@@ -309,6 +309,23 @@ def _has_word(text: str, terms) -> bool:
     return any(re.search(r"\b" + re.escape(t) + r"\b", text) for t in terms)
 
 
+@contextlib.contextmanager
+def _cudnn_benchmark_off():
+    """Run a pipeline call with cuDNN benchmark mode off.
+
+    cuDNN's autotune cache is per thread and every image batch runs on a new
+    one, so benchmark mode re-tuned the convolutions on every render instead of
+    once. Measured 2026-10-08 on an 8 GB GTX 1080 through the batch path:
+    Sana Sprint 0.6B 37 s -> 9 s with 1.9 GB less peak memory.
+    """
+    prev = torch.backends.cudnn.benchmark
+    torch.backends.cudnn.benchmark = False
+    try:
+        yield
+    finally:
+        torch.backends.cudnn.benchmark = prev
+
+
 class OfflineImageGenerator:
 
     def __init__(self):
@@ -2868,6 +2885,10 @@ Negative Prompt: {negative_prompt}""",
 
                 def _call_pipeline(pos_prompt: str, neg_prompt: Optional[str]):
                     """Single forward; raises on OOM / compile failure for recovery."""
+                    with _cudnn_benchmark_off():
+                        return _forward(pos_prompt, neg_prompt)
+
+                def _forward(pos_prompt: str, neg_prompt: Optional[str]):
                     if family == 'sana':
                         # No negative prompt; dtypes were set at load, so no autocast.
                         # The pipeline's intermediate timestep is valid at 2 steps only.
@@ -2875,25 +2896,16 @@ Negative Prompt: {negative_prompt}""",
                             {} if request.num_inference_steps == 2
                             else {"intermediate_timesteps": None}
                         )
-                        # cuDNN's autotune cache is per thread and every batch runs on a
-                        # new one, so benchmark mode re-tuned the DC-AE convolutions on
-                        # each render: 37 s instead of 9 s for the 0.6B on a GTX 1080,
-                        # and 1.9 GB more peak memory (2026-10-08).
-                        bench = torch.backends.cudnn.benchmark
-                        torch.backends.cudnn.benchmark = False
-                        try:
-                            return self._pipeline(
-                                prompt=pos_prompt,
-                                width=request.width,
-                                height=request.height,
-                                num_inference_steps=request.num_inference_steps,
-                                guidance_scale=request.guidance_scale,
-                                generator=generator,
-                                **sana_kwargs,
-                                **_watchdog_kwargs,
-                            )
-                        finally:
-                            torch.backends.cudnn.benchmark = bench
+                        return self._pipeline(
+                            prompt=pos_prompt,
+                            width=request.width,
+                            height=request.height,
+                            num_inference_steps=request.num_inference_steps,
+                            guidance_scale=request.guidance_scale,
+                            generator=generator,
+                            **sana_kwargs,
+                            **_watchdog_kwargs,
+                        )
                     if family in ('zimage', 'krea2'):
                         self._ensure_flow_scheduler(family)
                         return self._pipeline(
@@ -3786,24 +3798,25 @@ Negative Prompt: {negative_prompt}""",
                 if _watchdog:
                     call_kwargs["callback_on_step_end"] = _watchdog
 
-                if family == 'zimage':
-                    # Z-Image is bf16 flow-matching — no autocast; CFG distilled out.
-                    call_kwargs["negative_prompt"] = None
-                    output = self._img2img_pipeline(**call_kwargs)
-                elif self._device == "cuda":
-                    _ac_dtype = (
-                        torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-                    )
-                    with torch.autocast("cuda", dtype=_ac_dtype):
+                with _cudnn_benchmark_off():
+                    if family == 'zimage':
+                        # Z-Image is bf16 flow-matching — no autocast; CFG distilled out.
+                        call_kwargs["negative_prompt"] = None
+                        output = self._img2img_pipeline(**call_kwargs)
+                    elif self._device == "cuda":
+                        _ac_dtype = (
+                            torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+                        )
+                        with torch.autocast("cuda", dtype=_ac_dtype):
+                            output = self._img2img_pipeline(
+                                **call_kwargs,
+                                negative_prompt=combined_negative,
+                            )
+                    else:
                         output = self._img2img_pipeline(
                             **call_kwargs,
                             negative_prompt=combined_negative,
                         )
-                else:
-                    output = self._img2img_pipeline(
-                        **call_kwargs,
-                        negative_prompt=combined_negative,
-                    )
 
                 image = output.images[0]
                 if image is None:
