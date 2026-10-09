@@ -42,6 +42,7 @@ import {
   Visibility as PreviewIcon,
   Movie as MovieIcon,
   Image as ImageIcon,
+  CloudDownload as CloudDownloadIcon,
 } from "@mui/icons-material";
 import { useNavigate } from "react-router-dom";
 import * as upscalingService from "../api/upscalingService";
@@ -83,6 +84,7 @@ const UpscalingPage = ({ embedded = false }) => {
   const [serviceAvailable, setServiceAvailable] = useState(null);
   const [serviceHealth, setServiceHealth] = useState(null);
   const [models, setModels] = useState({ downloaded: [], available: [] });
+  const [modelsLoaded, setModelsLoaded] = useState(false);
 
   // Upload state — selectedFiles is an array so we can batch-queue a bunch at once
   const [dragActive, setDragActive] = useState(false);
@@ -120,6 +122,12 @@ const UpscalingPage = ({ embedded = false }) => {
   const videoRef = useRef(null);
 
   const [upscalingModelsModalOpen, setUpscalingModelsModalOpen] = useState(false);
+  // Set by an Install button: Manage Upscaling Models opens and installs that row.
+  const [installModelName, setInstallModelName] = useState(null);
+  const openUpscalingModels = (installName = null) => {
+    setInstallModelName(installName);
+    setUpscalingModelsModalOpen(true);
+  };
 
   // --- Init ---
   useEffect(() => {
@@ -172,6 +180,7 @@ const UpscalingPage = ({ embedded = false }) => {
         const res = await upscalingService.getModels();
         const data = res.data || res;
         setModels(data);
+        setModelsLoaded(true);
         if (selectModel) {
           setSelectedModel(selectModel);
         } else if (data.downloaded?.length > 0) {
@@ -205,6 +214,13 @@ const UpscalingPage = ({ embedded = false }) => {
     },
     [refreshModels],
   );
+
+  // Upscaling never downloads a model. With none installed a request would use
+  // the service's default and be refused, so the page offers Install for it.
+  const noModelInstalled = !!serviceAvailable && modelsLoaded && !(models.downloaded?.length > 0);
+  const modelToInstall = noModelInstalled
+    ? (models.available || []).find((m) => m.name === models.default_model) || models.available?.[0] || null
+    : null;
 
   // If the plugin goes down mid-session, kill the polling interval so it
   // doesn't keep firing with a stale fetchJobs closure that thinks the
@@ -720,13 +736,38 @@ const UpscalingPage = ({ embedded = false }) => {
                   <Button
                     variant="outlined"
                     size="small"
-                    onClick={() => setUpscalingModelsModalOpen(true)}
+                    onClick={() => openUpscalingModels()}
                     disabled={!serviceAvailable}
                     sx={{ mt: 0.5, flexShrink: 0, whiteSpace: "nowrap" }}
                   >
                     Manage Upscaling Models
                   </Button>
                 </Stack>
+
+                {noModelInstalled && (
+                  <Alert
+                    severity="warning"
+                    action={
+                      modelToInstall && (
+                        <Button
+                          color="inherit"
+                          size="small"
+                          startIcon={<CloudDownloadIcon />}
+                          onClick={() => openUpscalingModels(modelToInstall.name)}
+                          sx={{ whiteSpace: "nowrap" }}
+                        >
+                          Install
+                        </Button>
+                      )
+                    }
+                  >
+                    {modelToInstall
+                      ? `No upscaling model is installed. Install ${modelToInstall.name}${
+                          modelToInstall.size_mb ? ` (${modelToInstall.size_mb} MB)` : ""
+                        } to upscale; upscaling never downloads one on its own.`
+                      : "No upscaling model is installed. Add one in Manage Upscaling Models to upscale."}
+                  </Alert>
+                )}
 
                 {isImageMode ? (
                   <FormControl fullWidth size="small">
@@ -859,7 +900,7 @@ const UpscalingPage = ({ embedded = false }) => {
                   size="large"
                   startIcon={isUploading ? <CircularProgress size={20} color="inherit" /> : <EnhanceIcon />}
                   onClick={handleSubmit}
-                  disabled={selectedFiles.length === 0 || isUploading || !serviceAvailable}
+                  disabled={selectedFiles.length === 0 || isUploading || !serviceAvailable || noModelInstalled}
                   fullWidth
                   sx={{ mt: 1 }}
                 >
@@ -1011,7 +1052,7 @@ const UpscalingPage = ({ embedded = false }) => {
                       <Button
                         variant="contained"
                         onClick={handleGeneratePreview}
-                        disabled={isPreviewing || !serviceAvailable}
+                        disabled={isPreviewing || !serviceAvailable || noModelInstalled}
                       >
                         {isPreviewing ? "Generating..." : "Generate Preview"}
                       </Button>
@@ -1205,7 +1246,11 @@ const UpscalingPage = ({ embedded = false }) => {
       <Suspense fallback={null}>
         <UpscalingModelsModal
           open={upscalingModelsModalOpen}
-          onClose={() => setUpscalingModelsModalOpen(false)}
+          installModelName={installModelName}
+          onClose={() => {
+            setUpscalingModelsModalOpen(false);
+            setInstallModelName(null);
+          }}
           showMessage={upscalingModelsShowMessage}
           onInstalled={handleUpscalingModelInstalled}
         />

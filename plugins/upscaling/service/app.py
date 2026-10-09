@@ -210,10 +210,30 @@ def _atomic_imwrite(output_path: str, image) -> bool:
 
 
 def _ensure_model(model_name: Optional[str] = None) -> str:
-    """Ensure the requested (or default) model is loaded. Returns model name."""
+    """Ensure the requested (or default) model is loaded. Returns model name.
+
+    Raises ModelNotInstalledError when its weights are not on disk; queued
+    jobs record that message as their error.
+    """
     name = model_name or _config.default_model
     if _model_manager.current_model_name != name:
         _model_manager.load_model(name)
+    return name
+
+
+def _require_installed(model_name: Optional[str]) -> str:
+    """The model a request will use, refused with 409 when it is not installed.
+
+    Checked before a job is queued or a model is loaded, so the caller hears
+    which model is missing and where to install it.
+    """
+    name = model_name or _config.default_model
+    try:
+        missing = _model_manager.missing_model_message(name)
+    except ValueError as e:
+        raise HTTPException(400, f"Invalid model name: {e}")
+    if missing:
+        raise HTTPException(409, missing)
     return name
 
 
@@ -630,7 +650,9 @@ def health():
 def list_models():
     if not _model_manager:
         raise HTTPException(503, "Service not initialized")
-    return _model_manager.list_models()
+    # default_model: what a request without a model uses, so the page can
+    # offer Install for it when nothing is installed.
+    return {**_model_manager.list_models(), "default_model": _config.default_model if _config else None}
 
 
 @app.post("/models/download")
@@ -654,6 +676,7 @@ def upscale_image_endpoint(req: ImageUpscaleRequest, request: Request):
     img = cv2.imread(req.input_path, cv2.IMREAD_UNCHANGED)
     if img is None:
         raise HTTPException(400, f"Could not read image: {req.input_path}")
+    _require_installed(req.model)
 
     # Serialise model swap + upscale together — see `_image_upscale_lock`
     # comment near the globals for the race we're avoiding.
@@ -700,6 +723,7 @@ async def upscale_image_upload(
     img = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
     if img is None:
         raise HTTPException(400, "Could not decode image")
+    _require_installed(model)
 
     # See `_image_upscale_lock` comment — same race as /upscale/image.
     with _image_upscale_lock:
@@ -744,6 +768,7 @@ def upscale_images_endpoint(req: ImageBatchUpscaleRequest, request: Request):
     missing = [p for p in req.inputs if not os.path.isfile(p)]
     if missing:
         raise HTTPException(400, f"Input file not found: {missing[0]}")
+    _require_installed(req.model)
 
     job = _start_image_batch_job(
         inputs=req.inputs,
@@ -764,6 +789,7 @@ def upscale_video_endpoint(req: VideoUpscaleRequest, request: Request):
     verify_token(request)
     if not os.path.isfile(req.input_path):
         raise HTTPException(400, f"Input file not found: {req.input_path}")
+    _require_installed(req.model)
 
     # Note: VRAM is checked at job-start time (inside the worker), not here.
     # When jobs are queued, free VRAM at submission time is irrelevant — by

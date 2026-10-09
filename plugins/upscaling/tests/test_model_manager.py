@@ -1,5 +1,15 @@
+import os
+
 import pytest
-from service.model_manager import ModelManager, MODEL_REGISTRY
+import service.model_manager as model_manager_module
+from service.model_manager import ModelManager, ModelNotInstalledError, MODEL_REGISTRY
+
+
+def _forbid_downloads(monkeypatch):
+    def _no_download(*_args, **_kwargs):
+        raise AssertionError("using a model must not download it")
+
+    monkeypatch.setattr(model_manager_module, "urlretrieve", _no_download)
 
 
 def test_model_registry_has_default_models():
@@ -43,3 +53,55 @@ def test_model_manager_current_model_none(tmp_path):
     """No model loaded initially."""
     mm = ModelManager(models_dir=str(tmp_path), precision="fp32", compile_enabled=False)
     assert mm.current_model_name is None
+
+
+def test_load_model_refuses_a_registry_model_that_is_not_installed(tmp_path, monkeypatch):
+    """Loading never downloads: the refusal names the model and where to install it."""
+    _forbid_downloads(monkeypatch)
+    mm = ModelManager(models_dir=str(tmp_path), precision="fp32", compile_enabled=False)
+
+    with pytest.raises(ModelNotInstalledError) as refused:
+        mm.load_model("RealESRGAN_x4plus")
+
+    message = str(refused.value)
+    assert "'RealESRGAN_x4plus' is not installed" in message
+    assert "Manage Upscaling Models" in message
+    assert not (tmp_path / "RealESRGAN_x4plus.pth").exists()
+    assert mm.current_model_name is None
+
+
+def test_missing_model_message_tells_registry_and_unknown_models_apart(tmp_path):
+    mm = ModelManager(models_dir=str(tmp_path), precision="fp32", compile_enabled=False)
+    assert "is not installed" in mm.missing_model_message("RealESRGAN_x2plus")
+    assert "was not found" in mm.missing_model_message("my-own-model")
+
+    (tmp_path / "RealESRGAN_x2plus.pth").write_bytes(b"fake")
+    (tmp_path / "my-own-model.pth").write_bytes(b"fake")
+    assert mm.missing_model_message("RealESRGAN_x2plus") is None
+    assert mm.missing_model_message("my-own-model") is None
+
+
+def test_an_unknown_model_is_refused_without_a_download(tmp_path, monkeypatch):
+    _forbid_downloads(monkeypatch)
+    mm = ModelManager(models_dir=str(tmp_path), precision="fp32", compile_enabled=False)
+    with pytest.raises(FileNotFoundError, match="my-own-model"):
+        mm.load_model("my-own-model")
+
+
+def test_download_model_is_the_install_path(tmp_path, monkeypatch):
+    """The explicit install still fetches the registry file."""
+    fetched = []
+
+    def _fake_retrieve(url, dest):
+        fetched.append(url)
+        with open(dest, "wb") as f:
+            f.write(b"weights")
+
+    monkeypatch.setattr(model_manager_module, "urlretrieve", _fake_retrieve)
+    mm = ModelManager(models_dir=str(tmp_path), precision="fp32", compile_enabled=False)
+
+    path = mm.download_model("RealESRGAN_x2plus")
+
+    assert fetched and fetched[0].endswith("RealESRGAN_x2plus.pth")
+    assert os.path.isfile(path)
+    assert mm.missing_model_message("RealESRGAN_x2plus") is None
