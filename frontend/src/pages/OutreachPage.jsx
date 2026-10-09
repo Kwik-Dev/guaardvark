@@ -69,7 +69,7 @@ const TONE_OPTIONS = [
 ];
 
 // `auto: true` = an approved draft is posted (tick_process_approved_drafts:
-// Reddit/YouTube BiDi posters, the agent loop for X and Facebook comments,
+// Reddit/YouTube/Facebook BiDi posters, the agent loop for X comments,
 // the Discord cog). For the others the queue is the only output, flagged in
 // the modal so an approved draft that never goes anywhere is no surprise.
 const PLATFORM_OPTIONS = [

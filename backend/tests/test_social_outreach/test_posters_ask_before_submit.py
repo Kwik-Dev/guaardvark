@@ -15,6 +15,7 @@ import types
 import pytest
 
 from backend.services.social_outreach import (
+    facebook_outreach,
     general_poster,
     reddit_outreach,
     self_share,
@@ -23,6 +24,7 @@ from backend.services.social_outreach import (
 from backend.services.social_outreach.transitions import WITHDRAWN_BEFORE_SUBMIT
 
 YOUTUBE_URL = "https://www.youtube.com/watch?v=abcdefghijk"
+FACEBOOK_URL = "https://www.facebook.com/reel/2412479772578341"
 
 
 @pytest.fixture
@@ -91,6 +93,19 @@ def events(monkeypatch):
     monkeypatch.setattr(general_poster, "_still_on_target", lambda url: (True, url))
     monkeypatch.setattr(reddit_outreach, "bidi_reachable", lambda *a, **k: (True, ""))
     monkeypatch.setattr(self_share, "bidi_reachable", lambda *a, **k: (True, ""))
+
+    def facebook_box(*args, **kwargs):
+        box = focused_editable()
+        box["label"] = "Comment as guaardvark"
+        return box
+
+    monkeypatch.delenv(facebook_outreach.POST_AS_ENV, raising=False)
+    monkeypatch.setattr(facebook_outreach, "_location", lambda: FACEBOOK_URL)
+    monkeypatch.setattr(facebook_outreach, "_find_composer", lambda *a, **k: (
+        {"count": 1, "actor": "guaardvark", "x": 40, "y": 50, "text": ""}, ""))
+    monkeypatch.setattr(facebook_outreach, "_composer_focused", facebook_box)
+    monkeypatch.setattr(facebook_outreach, "_wait_for_focus", facebook_box)
+    monkeypatch.setattr(facebook_outreach, "_verify", lambda text, actor: (True, {"mine": True}, ""))
     return log
 
 
@@ -110,6 +125,10 @@ POSTERS = {
         lambda gate: youtube_outreach.post_youtube_reply_via_servo(
             YOUTUBE_URL, "a parent comment long enough", "hello", 7, before_submit=gate),
         "recipe send the comment",
+    ),
+    "facebook_comment": (
+        lambda gate: facebook_outreach.post_comment_via_bidi(FACEBOOK_URL, "hello", before_submit=gate),
+        "hotkey Return",
     ),
     "agent_loop": (
         lambda gate: general_poster.post_via_agent_loop(
