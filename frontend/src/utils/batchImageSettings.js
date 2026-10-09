@@ -164,3 +164,41 @@ export function buildFinalPrompts({ inputMode, batchItems, lookAndFeel, quantity
   });
   return out;
 }
+
+/**
+ * Picker option for one row of /batch-image/models. A model that is not on
+ * disk says so: it installs from Install (Manage models), never from Generate.
+ */
+export function imageModelOption(m) {
+  const installed = m.is_downloaded !== false;
+  const size = m.size_gb ? ` ~${m.size_gb} GB` : '';
+  return {
+    value: m.id,
+    label: m.recommended ? `${m.label} ⭐` : m.label,
+    description: installed
+      ? (m.description || '')
+      : `${m.description || ''} (not installed — Install downloads${size})`.trim(),
+    installed,
+    recommended: !!m.recommended,
+    name: m.name || m.label || m.id,
+    sizeGb: m.size_gb || 0,
+  };
+}
+
+/**
+ * What Generate is waiting on for `value`, or null when nothing is.
+ *
+ * A picked model that is not installed blocks Generate: the run would be
+ * refused. Auto chooses among installed models, so it never blocks; when no
+ * listed model is installed it names the recommended one so the page can
+ * offer Install (a ComfyUI route may still render without it).
+ */
+export function modelInstallNeed(options, value) {
+  if (!value || value === 'auto') {
+    const listed = options.filter((o) => o.value !== 'auto');
+    if (listed.length === 0 || listed.some((o) => o.installed)) return null;
+    return { option: listed.find((o) => o.recommended) || listed[0], blocks: false };
+  }
+  const option = options.find((o) => o.value === value);
+  return option && option.installed === false ? { option, blocks: true } : null;
+}

@@ -605,8 +605,9 @@ def _parse_generation_params(data: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict
 
     # Transparent-background (rembg post-process) — RGBA PNG for icons/clip-art/logos
     params['remove_background'] = _as_bool(data.get('remove_background'), False)
-    # Sent by the Studio page only, whose model picker says what a missing model
-    # would download. Any other caller is refused a model that is not installed.
+    # No page sends this: models install from Install (Manage models, the
+    # /models/download route), and a run whose model is not installed is
+    # refused with where to install it.
     params['allow_model_download'] = _as_bool(data.get('allow_model_download'), False)
 
     # User context

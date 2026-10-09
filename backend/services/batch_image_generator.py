@@ -102,8 +102,8 @@ class BatchImageRequest:
     user_treatment: Optional[str] = None
     ui_config: Optional[Dict[str, Any]] = None
     retry_data: Optional[Dict[str, Any]] = None
-    # The Studio page's picker announces "downloads ~N GB on first use" for a
-    # model that is not installed; only then may a batch download it.
+    # Lets the run download a model that is not installed. No page sets it:
+    # models install from Install in Manage models, never from Generate.
     allow_model_download: bool = False
 
 
