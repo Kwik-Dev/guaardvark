@@ -73,8 +73,9 @@ def test_lost_opening_words_are_never_submitted(rig):
 
 
 def test_unreadable_composer_is_never_submitted(rig, monkeypatch):
-    reads = iter([rig["focus"], None])
-    monkeypatch.setattr(reddit_outreach, "_focused_editable", lambda: next(reads))
+    # Readable while the poster focuses the box, unreadable once it has typed.
+    monkeypatch.setattr(reddit_outreach, "_focused_editable",
+                        lambda: None if "type" in rig["log"] else rig["focus"])
     ok, reason = reddit_outreach.post_comment_via_servo(PERMALINK, TEXT)
     assert ok is False
     assert reason.startswith("typed_text_unreadable: nothing was posted")
@@ -115,7 +116,7 @@ def test_visible_error_is_a_plain_failure(rig):
 def test_a_restored_draft_is_emptied_before_typing(rig):
     rig["focus"] = {"editable": True, "tag": "div", "label": "", "text": "an unsent comment from before"}
     assert reddit_outreach.post_comment_via_servo(PERMALINK, TEXT) == (True, "ok")
-    assert rig["log"][1:4] == ["hotkey ctrl+a", "hotkey BackSpace", "type"]
+    assert rig["log"][1:5] == ["click", "hotkey ctrl+a", "hotkey BackSpace", "type"]
 
 
 def test_a_draft_that_will_not_clear_types_nothing(rig):

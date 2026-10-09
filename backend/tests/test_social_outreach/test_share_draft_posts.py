@@ -299,7 +299,7 @@ def test_share_refuses_before_touching_reddit_when_the_page_cannot_be_read(monke
 
 @pytest.mark.parametrize("changes, needle", [
     ({}, ""),
-    ({"url": "https://www.reddit.com/login/?dest=x"}, "not r/test's submit form"),
+    ({"url": "https://www.reddit.com/login/?dest=x"}, "not r/Test's submit form"),
     ({"kind": "TEXT"}, "not a link post"),
     ({"title": "A different title"}, "not the approved title"),
     ({"title": None}, "not the approved title"),
@@ -310,7 +310,7 @@ def test_share_refuses_before_touching_reddit_when_the_page_cannot_be_read(monke
 def test_form_problem(changes, needle):
     from backend.services.social_outreach.self_share import _form_problem
 
-    form = _filled_form("test", "Local-first AI studio", **changes)
+    form = {**_filled_form("test", "Local-first AI studio"), **changes}
     problem = _form_problem(form, "Test", "Local-first  AI studio", "https://guaardvark.com")
     assert (needle in problem) if needle else problem == ""
 
