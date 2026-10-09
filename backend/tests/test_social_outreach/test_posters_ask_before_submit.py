@@ -93,6 +93,12 @@ def events(monkeypatch):
     monkeypatch.setattr(general_poster, "_still_on_target", lambda url: (True, url))
     monkeypatch.setattr(reddit_outreach, "bidi_reachable", lambda *a, **k: (True, ""))
     monkeypatch.setattr(self_share, "bidi_reachable", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(self_share, "_bidi_navigate", lambda *a, **k: True)
+    monkeypatch.setattr(self_share, "_read_form", lambda: ({
+        "url": "https://www.reddit.com/r/SideProject/submit/?type=LINK", "kind": "LINK",
+        "title": "a title", "link": "https://guaardvark.com",
+        "button": {"disabled": False, "shown": True, "x": 600, "y": 900}}, ""))
+    monkeypatch.setattr(self_share, "_post_landed", lambda subreddit, title: (True, "posted"))
 
     def facebook_box(*args, **kwargs):
         box = focused_editable()
@@ -138,7 +144,7 @@ POSTERS = {
     "reddit_share": (
         lambda gate: self_share._submit_post_via_servo(
             "SideProject", "a title", "https://guaardvark.com", before_submit=gate),
-        "task On the open Reddit submit form, do this. 1) Click the submit button",
+        "click",
     ),
 }
 
