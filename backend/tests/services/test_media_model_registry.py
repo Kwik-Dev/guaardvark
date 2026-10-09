@@ -102,3 +102,28 @@ def test_legacy_path_without_sidecar_assumes_sdxl(tmp_path):
     lora.write_bytes(b"x" * 200)
     route = mmr.resolve_inference_for_loras([str(lora)])
     assert route["base_model_id"] == mmr.SDXL_LEGACY
+
+
+def test_train_base_must_be_installed(monkeypatch):
+    # Training loads the installed copy only; a missing base is refused with
+    # where to install it instead of being fetched on first use.
+    import backend.services.offline_image_generator as oig
+
+    class _Gen:
+        available_models = {"zimage-turbo": "Tongyi-MAI/Z-Image-Turbo",
+                            "sd-xl": "stabilityai/stable-diffusion-xl-base-1.0"}
+
+        def _is_model_downloaded(self, model_id):
+            return model_id.startswith("Tongyi-MAI/")
+
+        def _get_model_path(self, model_id):
+            return Path("/models") / model_id.replace("/", "--")
+
+    monkeypatch.setattr(oig, "get_image_generator", lambda: _Gen())
+    zimage = mmr.get_profile(mmr.ZIMAGE_TURBO)
+    assert mmr.train_base_missing_message(zimage) is None
+    assert mmr.train_base_path(zimage) == str(Path("/models/Tongyi-MAI--Z-Image-Turbo"))
+    sdxl = mmr.get_profile(mmr.SDXL_LEGACY)
+    assert mmr.train_base_path(sdxl) is None
+    msg = mmr.train_base_missing_message(sdxl)
+    assert "not installed" in msg and "never downloads" in msg

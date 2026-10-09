@@ -444,6 +444,35 @@ def assert_train_ready(base_model_id: str) -> dict[str, Any]:
     return p
 
 
+def train_base_path(profile: dict[str, Any]) -> Optional[str]:
+    """The folder holding an installed train base, or None when it is not installed."""
+    key = profile.get("offline_model_key")
+    if not key:
+        return None
+    from backend.services.offline_image_generator import get_image_generator
+    gen = get_image_generator()
+    model_id = gen.available_models.get(key)
+    if not model_id or not gen._is_model_downloaded(model_id):
+        return None
+    return str(gen._get_model_path(model_id))
+
+
+def train_base_missing_message(profile: dict[str, Any]) -> Optional[str]:
+    """Why a train base cannot load, or None when its weights are installed.
+
+    Training loads the installed copy only and never downloads a base model, so
+    a base that is not installed is refused before any work starts.
+    """
+    key = profile.get("offline_model_key")
+    if not key or train_base_path(profile):
+        return None
+    return (
+        f"{profile.get('name') or key} is not installed. Install it from Manage models on "
+        "the Images page or Settings > Model libraries > Image, then train again. "
+        "Training never downloads a base model on its own."
+    )
+
+
 def lora_compatible_with_inference(base_model_id: str, inference_model: str | None) -> bool:
     """True if a LoRA trained for base_model_id can be applied under inference_model."""
     base = get_profile(base_model_id)
