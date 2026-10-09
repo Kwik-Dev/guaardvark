@@ -161,6 +161,50 @@ def test_estimate_sd_family_default(gen):
     assert gen._vram_estimate_mb("SG161222/Realistic_Vision_V5.1_noVAE") == 4000
 
 
+def test_sana_family_and_prices(gen):
+    # Its own family, not the SD fallback every unmatched id used to land in.
+    for ref in ("sana-sprint", "sana-sprint-0.6b",
+                "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers"):
+        assert gen._model_family(ref) == "sana"
+    spec = oig._image_limits_for("sana")
+    assert gen._vram_estimate_mb("sana-sprint") == spec["vram_mb"]
+    assert gen._ram_estimate_gb("sana-sprint") == spec["ram_gb"]
+    assert gen.supports_img2img("sana-sprint") is False
+
+
+def test_sana_small_model_has_its_own_price(gen):
+    # The 0.6B row's measured price, not the 1.6B family figure: priced as the
+    # family it could never pass admission on an idle 8 GB card.
+    from backend.services.media_model_registry import IMAGE_MODEL_LIMITS
+    row = IMAGE_MODEL_LIMITS["sana-sprint-0.6b"]
+    for ref in ("sana-sprint-0.6b", "Efficient-Large-Model/Sana_Sprint_0.6B_1024px_diffusers"):
+        assert gen._vram_estimate_mb(ref) == row["vram_mb"]
+        assert gen._ram_estimate_gb(ref) == row["ram_gb"]
+    assert row["vram_mb"] < oig._image_limits_for("sana")["vram_mb"]
+
+
+def test_soft_clamp_sana_takes_its_default_for_a_runaway_count(gen):
+    # The Discord bot sends 9 steps unmarked; Sana Sprint samples in 1-4.
+    from backend.services.offline_image_generator import ImageGenerationRequest
+    req = ImageGenerationRequest(
+        prompt="test", model="sana-sprint", num_inference_steps=9, guidance_scale=0.0
+    )
+    gen._soft_clamp_family_sampling(req, "sana")
+    spec = oig._image_limits_for("sana")
+    assert req.num_inference_steps == spec["default_steps"]
+    assert req.guidance_scale == spec["cfg_when_unset"]
+
+
+def test_apply_family_sampling_sana(gen):
+    from backend.services.offline_image_generator import ImageGenerationRequest
+    req = ImageGenerationRequest(
+        prompt="test", model="sana-sprint", num_inference_steps=25, guidance_scale=7.0
+    )
+    gen._apply_family_sampling(req, "sana")
+    assert req.num_inference_steps == 2
+    assert req.guidance_scale == 4.5
+
+
 def test_ram_estimate_zimage(gen):
     # The base is the family constant, not a number copied into the test:
     # 2f0f522 lowered it 24 -> 21 (measured after the ladder/unload leak fixes)

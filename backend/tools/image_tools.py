@@ -278,7 +278,8 @@ class ImageGeneratorTool(BaseTool):
                 "own LoRA. A named model must be one every character has a LoRA for, or the "
                 "render is refused. "
                 "Only override when the user names a specific model: 'krea2-turbo', 'zimage-turbo', "
-                "'sd-xl', 'sdxl-turbo', 'realistic-vision', 'epic-realism'. A model that is not "
+                "'sd-xl', 'sdxl-turbo', 'realistic-vision', 'epic-realism', 'sana-sprint', "
+                "'sana-sprint-0.6b'. A model that is not "
                 "installed is refused with where to install it; nothing is downloaded."
             ),
             required=False,

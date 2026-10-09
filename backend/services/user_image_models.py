@@ -59,6 +59,7 @@ _FAMILY_MARKERS = {
     "krea2": ("krea",),
     "sdxl": ("xl",),
     "flux": ("flux",),
+    "sana": ("sana",),
 }
 ROLES = ("generation", "lora")
 

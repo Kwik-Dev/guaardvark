@@ -222,6 +222,22 @@ IMAGE_FAMILY_SPECS: dict[str, dict[str, Any]] = {
         "vram_mb": 8000, "ram_gb": 10.0, "vram_slope_mb_per_mp": 1500, "ram_slope_gb_per_mp": 1.0,
         "offload_below_vram_gb": 10.0, "vram_mb_offload": 5700,
     },
+    # Sana Sprint: 1-4 step DiT on a 32x DC-AE; the pipeline renders the nearest
+    # ~1 MP aspect bin and resizes to the canvas asked, so the area stays at 1 MP.
+    # Guidance is an embedded scale (one forward per step), not CFG. Measured
+    # 2026-10-08 on an 8 GB GTX 1080 (torch 2.7.1, diffusers 0.41), 1024^2, model
+    # CPU offload, fp32 transformer/VAE with a bf16 Gemma encoder. 1.6B (this row):
+    # 10.8 s at 2 steps (1 step 10.9, 4 steps 13.3), peak 6429 MB standalone and
+    # 6280 MB through the generator, peak RSS 18.9 GB. 2 steps was the cleanest of
+    # 1/2/4 on three prompts; embedded guidance 2.5-8.0 all rendered clean (8.0
+    # slightly flat). With the 1 GB admission margin the 1.6B just fits an idle
+    # 8 GB card (~7.5 GB free); the 0.6B row carries its own, smaller price.
+    "sana": {
+        "max_side": 2048, "max_pixel_area": 1024 * 1024, "min_side": 512, "dimension_alignment": 32,
+        "width": 1024, "height": 1024, "default_steps": 2, "cfg_when_unset": 4.5,
+        "prompt_style": "tags", "engine": "offline",
+        "vram_mb": 6450, "ram_gb": 19.0,
+    },
     "sd": {
         "max_side": 768, "max_pixel_area": 768 * 768, "min_side": 256, "dimension_alignment": 16,
         "width": 512, "height": 512, "default_steps": 20, "cfg_when_unset": 7.5,
@@ -255,6 +271,17 @@ IMAGE_MODEL_LIMITS: dict[str, dict[str, Any]] = {
     "sdxl-turbo": {"family": "sdxl", "starts_from_family": True, "default_steps": 4, "cfg_when_unset": 0.0,
                    "steps_range": (1, 4), "cfg_range": (0.0, 1.0), "min_dimensions": (768, 768),
                    "distilled": True},
+    # distilled: samples with its own SCM scheduler inside this row. Out-of-range
+    # steps are warned about, not clamped, so an unset or runaway count (the
+    # Discord bot sends 9) takes the default instead of the range's top.
+    "sana-sprint": {"family": "sana", "steps_range": (1, 4), "cfg_range": (2.5, 8.0),
+                    "min_dimensions": (512, 512), "hard_clamp": False, "distilled": True},
+    # The 0.6B's own price (vram_mb/ram_gb override the family's 1.6B figures):
+    # peak allocated 5096 MB, the Gemma encoder's stage; peak RSS 15.3 GB. That
+    # plus the 1 GB admission margin fits an idle 8 GB card; the 1.6B does not.
+    "sana-sprint-0.6b": {"family": "sana", "steps_range": (1, 4), "cfg_range": (2.5, 8.0),
+                         "min_dimensions": (512, 512), "hard_clamp": False, "distilled": True,
+                         "vram_mb": 5100, "ram_gb": 15.5},
     "sd-1.5": {"family": "sd", "steps_range": (10, 50), "cfg_range": (1.0, 15.0),
                "min_dimensions": (512, 512)},
     # SD 1.5 fine-tunes, portrait-first canvases.

@@ -141,6 +141,13 @@ except Exception:
     Krea2Pipeline = None
     krea2_available = False
 
+# Sana Sprint (NVIDIA): 0.6B/1.6B DiT with a Gemma-2 encoder, 1-4 step sampling.
+# Ships in diffusers >= 0.33.
+try:
+    from diffusers import SanaSprintPipeline
+except Exception:
+    SanaSprintPipeline = None
+
 try:
     from backend.config import CACHE_DIR
     config_available = True
@@ -338,6 +345,8 @@ class OfflineImageGenerator:
             "sdxl-turbo": "stabilityai/sdxl-turbo",
             "realistic-vision": "SG161222/Realistic_Vision_V5.1_noVAE",
             "epic-realism": "emilianJR/epiCRealism",
+            "sana-sprint": "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers",
+            "sana-sprint-0.6b": "Efficient-Large-Model/Sana_Sprint_0.6B_1024px_diffusers",
         }
         # Models resolvable internally but NOT shown in menus / list_available_models.
         # Empty since the sd-1.5 hidden fallback was removed; the mechanism stays because
@@ -363,6 +372,8 @@ class OfflineImageGenerator:
             "sdxl-turbo": {"label": "SDXL Turbo (Fast)", "description": "Fast 1024 previews, few steps.", "recommended": False, "order": 5},
             "realistic-vision": {"label": "Realistic Vision", "description": "Top photoreal faces & portraits.", "recommended": False, "order": 6},
             "epic-realism": {"label": "Epic Realism", "description": "Cinematic photorealism.", "recommended": False, "order": 7},
+            "sana-sprint": {"label": "Sana Sprint 1.6B (Fast)", "description": "1024 stills in 2 steps; sharper than the 0.6B.", "recommended": False, "order": 8},
+            "sana-sprint-0.6b": {"label": "Sana Sprint 0.6B (Fastest)", "description": "The quickest 1024 stills; runs on 8 GB cards.", "recommended": False, "order": 9},
         }
 
         self.anatomy_negative = "deformed body, distorted anatomy, extra limbs, missing limbs, extra arms, missing arms, extra legs, missing legs, fused limbs, disconnected limbs, floating limbs, asymmetrical body, disproportionate limbs, twisted torso, broken spine, impossible pose, malformed body, mutated anatomy, gross proportions, extra heads, conjoined, siamese, bad anatomy, cropped body, out of frame body, duplicate person, clone"
@@ -903,6 +914,8 @@ class OfflineImageGenerator:
             return "zimage"
         if "flux" in mid or key.startswith("flux"):
             return "flux"
+        if "sana" in mid or key.startswith("sana"):
+            return "sana"
         if "xl" in mid or "sdxl" in mid:
             return "sdxl"
         return "sd"
@@ -1050,6 +1063,8 @@ class OfflineImageGenerator:
                 base = self._KREA2_SEQUENTIAL_VRAM_MB
             elif family == "sdxl" and self._sdxl_offloads():
                 base = int(_image_limits_for("sdxl")["vram_mb_offload"])
+            elif self._limits_row(model_id).get("vram_mb"):
+                base = int(self._limits_row(model_id)["vram_mb"])
             else:
                 base = self._FAMILY_VRAM_MB.get(family, 4000)
         extra_mp = self._extra_megapixels(width, height)
@@ -1070,6 +1085,8 @@ class OfflineImageGenerator:
             family = self._model_family(model_id)
             if family == "flux":
                 base = float(_image_limits_for("flux")["ram_gb"])
+            elif self._limits_row(model_id).get("ram_gb"):
+                base = float(self._limits_row(model_id)["ram_gb"])
             else:
                 base = self._FAMILY_RAM_GB.get(family, 6.0)
         extra_mp = self._extra_megapixels(width, height)
@@ -1215,7 +1232,7 @@ class OfflineImageGenerator:
         its metadata still said 960x544).
         """
         if (
-            family in ("sdxl", "zimage", "krea2")
+            family in ("sdxl", "zimage", "krea2", "sana")
             and width <= cls._LEGACY_CANVAS
             and height <= cls._LEGACY_CANVAS
         ):
@@ -1311,6 +1328,8 @@ class OfflineImageGenerator:
             candidates = ["krea2-turbo", "zimage-turbo", "sd-xl", "realistic-vision"]
         elif failed_family == "zimage":
             candidates = ["sd-xl", "realistic-vision"]
+        elif failed_family == "sana":
+            candidates = ["sana-sprint-0.6b", "sd-xl", "realistic-vision"]
         else:
             candidates = ["sd-xl", "realistic-vision"]
         failed_resolved = self._resolve_model_ref(failed_key)
@@ -1358,6 +1377,11 @@ class OfflineImageGenerator:
             # Official HF recipe (9 steps → 8 DiT forwards, CFG distilled → 0.0)
             request.num_inference_steps = 9
             request.guidance_scale = 0.0
+        elif family == "sana":
+            # Embedded guidance, not CFG; values from the sana family row.
+            lim = _image_limits_for("sana")
+            request.num_inference_steps = int(lim["default_steps"])
+            request.guidance_scale = float(lim["cfg_when_unset"])
         elif family == "sdxl":
             if request.guidance_scale > 9.0:
                 request.guidance_scale = 7.5
@@ -1504,7 +1528,11 @@ class OfflineImageGenerator:
             # Large DiT pipelines (Krea2, Z-Image): snapshot only — do not instantiate
             # during download. from_pretrained() loads weights into RAM and fails on
             # Krea2 with transformers<5.2 (tokenizer vocab + Qwen3-VL rope_parameters).
-            if family in ('krea2', 'zimage'):
+            if family in ('krea2', 'zimage', 'sana'):
+                if family == 'sana' and SanaSprintPipeline is None:
+                    msg = "Sana Sprint requested but SanaSprintPipeline unavailable (upgrade diffusers >= 0.33)"
+                    logger.error(msg)
+                    return False, msg
                 if family == 'krea2' and Krea2Pipeline is None:
                     msg = "Krea 2 requested but Krea2Pipeline unavailable (upgrade diffusers >= 0.39)"
                     logger.error(msg)
@@ -1665,6 +1693,11 @@ class OfflineImageGenerator:
                 pipeline_class = Krea2Pipeline
             elif family == 'zimage':
                 pipeline_class = ZImagePipeline
+            elif family == 'sana':
+                if SanaSprintPipeline is None:
+                    logger.error("Sana Sprint requested but SanaSprintPipeline unavailable (upgrade diffusers >= 0.33)")
+                    return False
+                pipeline_class = SanaSprintPipeline
             elif family == 'sdxl':
                 pipeline_class = StableDiffusionXLPipeline
             else:
@@ -1691,6 +1724,18 @@ class OfflineImageGenerator:
                 "torch_dtype": gpu_dtype,
             }
 
+            # Sana on a card without native bf16 (Pascal, Turing): the transformer
+            # and VAE run in fp32 and only the Gemma encoder in bf16. In fp16 the
+            # 1.6B transformer renders black frames (GTX 1080, 2026-10-08). The
+            # encoder loads straight to bf16: an fp32 copy first is 10 GB of RAM.
+            if (
+                family == 'sana'
+                and self._device == "cuda"
+                and not torch.cuda.is_bf16_supported(including_emulation=False)
+            ):
+                load_kwargs["torch_dtype"] = {"text_encoder": torch.bfloat16, "default": torch.float32}
+                logger.info("sana: float32 transformer/VAE, bfloat16 text encoder (no native bf16)")
+
             if family == 'sd':
                 load_kwargs["safety_checker"] = None
                 load_kwargs["requires_safety_checker"] = False
@@ -1710,7 +1755,7 @@ class OfflineImageGenerator:
 
             # Flow-matching DiTs ship their own scheduler — don't force DPM (SD/SDXL only).
             # Distilled models (row "distilled") keep theirs too.
-            if family not in ('zimage', 'krea2') and not self._limits_row(model_id).get("distilled"):
+            if family not in ('zimage', 'krea2', 'sana') and not self._limits_row(model_id).get("distilled"):
                 sched_cfg = self._pipeline.scheduler.config
                 # A DEIS config (Realistic Vision 5.1) carries algorithm_type "deis",
                 # which DPMSolver rejects with its default final_sigmas_type.
@@ -1757,6 +1802,17 @@ class OfflineImageGenerator:
                         logger.warning(f"{family} CPU offload unavailable ({e}); loading fully on GPU")
                         self._pipeline = self._pipeline.to(self._device)
                         offload_mode = "full"
+            elif family == 'sana' and self._device == "cuda":
+                # One component on the card at a time: the Gemma encoder (5.2 GB)
+                # and the transformer never sit there together.
+                try:
+                    self._pipeline.enable_model_cpu_offload()
+                    offload_mode = "model"
+                    logger.info("sana: enabled model CPU offload")
+                except Exception as e:
+                    logger.warning(f"sana CPU offload unavailable ({e}); loading fully on GPU")
+                    self._pipeline = self._pipeline.to(self._device)
+                    offload_mode = "full"
             elif family == 'sdxl' and self._device == "cuda" and self._sdxl_offloads():
                 try:
                     self._pipeline.enable_model_cpu_offload()
@@ -2335,7 +2391,7 @@ class OfflineImageGenerator:
             return prompt
         fam = (family or "").lower()
         # Long-context text encoders: pass through; the tokenizer handles real limits.
-        if fam in ("zimage", "krea2"):
+        if fam in ("zimage", "krea2", "sana"):
             return prompt
         # SDXL dual-CLIP still ~77 tokens/encoder, but detailed prompts routinely
         # exceed 75 *words*. Soft-cap higher so tails survive; encoder truncates
@@ -2812,6 +2868,32 @@ Negative Prompt: {negative_prompt}""",
 
                 def _call_pipeline(pos_prompt: str, neg_prompt: Optional[str]):
                     """Single forward; raises on OOM / compile failure for recovery."""
+                    if family == 'sana':
+                        # No negative prompt; dtypes were set at load, so no autocast.
+                        # The pipeline's intermediate timestep is valid at 2 steps only.
+                        sana_kwargs = (
+                            {} if request.num_inference_steps == 2
+                            else {"intermediate_timesteps": None}
+                        )
+                        # cuDNN's autotune cache is per thread and every batch runs on a
+                        # new one, so benchmark mode re-tuned the DC-AE convolutions on
+                        # each render: 37 s instead of 9 s for the 0.6B on a GTX 1080,
+                        # and 1.9 GB more peak memory (2026-10-08).
+                        bench = torch.backends.cudnn.benchmark
+                        torch.backends.cudnn.benchmark = False
+                        try:
+                            return self._pipeline(
+                                prompt=pos_prompt,
+                                width=request.width,
+                                height=request.height,
+                                num_inference_steps=request.num_inference_steps,
+                                guidance_scale=request.guidance_scale,
+                                generator=generator,
+                                **sana_kwargs,
+                                **_watchdog_kwargs,
+                            )
+                        finally:
+                            torch.backends.cudnn.benchmark = bench
                     if family in ('zimage', 'krea2'):
                         self._ensure_flow_scheduler(family)
                         return self._pipeline(

@@ -19,6 +19,8 @@ describe('modelFamily', () => {
     expect(modelFamily('sd-xl')).toBe('sdxl');
     expect(modelFamily('sdxl-turbo')).toBe('sdxl-turbo');
     expect(modelFamily('realistic-vision')).toBe('sd');
+    expect(modelFamily('sana-sprint')).toBe('sana');
+    expect(modelFamily('sana-sprint-0.6b')).toBe('sana');
   });
 
   it('does not treat auto as Z-Image (the router may pick SDXL)', () => {
@@ -31,6 +33,10 @@ describe('ignoresNegativeAndAnatomy', () => {
   it('is true on the guidance-0 path (Z-Image, Krea 2 Turbo)', () => {
     expect(ignoresNegativeAndAnatomy('zimage-turbo')).toBe(true);
     expect(ignoresNegativeAndAnatomy('krea2-turbo')).toBe(true);
+  });
+
+  it('is true for Sana Sprint, whose pipeline takes no negative prompt', () => {
+    expect(ignoresNegativeAndAnatomy('sana-sprint')).toBe(true);
   });
 
   it('is false for Krea Raw, auto, and CFG families', () => {
@@ -62,7 +68,7 @@ describe('quality presets', () => {
   });
 
   it('every family default exists in its own list', () => {
-    for (const model of ['auto', 'zimage-turbo', 'flux-dev', 'krea2-turbo', 'krea2-raw', 'sd-xl', 'sdxl-turbo', 'realistic-vision']) {
+    for (const model of ['auto', 'zimage-turbo', 'flux-dev', 'krea2-turbo', 'krea2-raw', 'sd-xl', 'sdxl-turbo', 'realistic-vision', 'sana-sprint']) {
       const def = resolveQualityPreset(model, 'not-a-preset');
       expect(qualityPresetsForModel(model).map((p) => p.value)).toContain(def);
     }
