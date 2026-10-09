@@ -61,15 +61,15 @@ Other ways in: [Docker](INSTALL.md#alternative-docker-linux-core-stack-only) · 
 - **Chat with your own files.** Local RAG on pgvector: keyword and vector search fused per query, cross-encoder reranking, source citations, and retrieval that shows the chunks and scores behind an answer. Autoresearch tunes retrieval overnight. [▶ Ep 3](https://www.youtube.com/watch?v=pT_J93qTCL0)
 - **Agents on a real desktop.** Screen agents get an Ubuntu desktop of their own, see it with a vision model, click with closed-loop targeting, and work in a real browser while you watch from any page. [▶ Ep 4](https://www.youtube.com/watch?v=3VfHrJmqYos)
 - **Parallel coding agents.** A swarm of coding agents, each in its own git worktree, merged back in dependency order. Runs on Claude Code or fully locally through Ollama.
-- **MCP, both ways.** An MCP server that plugs into Claude Code, Cursor, Codex, Gemini CLI, Zed and more with one command, and an MCP client so chat can use tools from other servers. [▶ Ep 16](https://www.youtube.com/watch?v=1qc6GZBLy5k)
-- **Video generation.** 13 local video models across five families (Wan 2.2, LTX, HunyuanVideo, CogVideoX, and MiniMax H3 with its own soundtrack), a batch queue, frame interpolation, and one click into ComfyUI. [▶ Ep 6](https://www.youtube.com/watch?v=9rae9IJhXow)
+- **MCP, both ways.** An MCP server that plugs into Claude Code, Cursor, Codex, Gemini CLI, Zed and more with one command, and an MCP client so chat can use tools from other servers. [▶ Ep 21](https://www.youtube.com/watch?v=VScsEFn6ZoY) · [▶ Ep 16](https://www.youtube.com/watch?v=1qc6GZBLy5k)
+- **Video generation.** 13 local video models across five families (Wan 2.2, LTX, HunyuanVideo, CogVideoX, and MiniMax H3 with its own soundtrack), video LoRAs, a batch queue, frame interpolation, and one click into ComfyUI. [▶ Ep 6](https://www.youtube.com/watch?v=9rae9IJhXow)
+- **LoRA training and consistent characters.** Train character, environment and prop LoRAs from a few reference photos on your own GPU, import LoRAs trained elsewhere, and keep the same character across images, video, music videos and Film Crew productions. [Details](#lora-training-and-consistent-characters)
 - **Images.** Z-Image, FLUX.1, Krea 2 and SDXL generation, photo edits by instruction, inpainting and outpainting, and 4K/8K upscaling. [▶ Ep 5](https://www.youtube.com/watch?v=s9I_0gD9Iko)
 - **Music and voice.** Full songs with vocals, sound effects, three neural text-to-speech engines, consent-gated voice cloning, and hands-free voice chat. [▶ Ep 7](https://www.youtube.com/watch?v=BXlm7p-SxtU)
 - **Directors.** A beat-synced music-video director, a five-role Film Crew that turns a logline into a finished video, and a built-in video editor. [▶ Ep 8](https://www.youtube.com/watch?v=l2LqKA9GQDc) · [▶ Ep 9](https://www.youtube.com/watch?v=sq104u9N4Qg)
-- **Cast Library.** Consistent characters, environments and props: train LoRAs from reference photos on your own GPU and cast them into images, video and Film Crew.
 - **Self-improvement.** Guaardvark tests itself, drafts fixes and stages them for your review behind a codebase lock; the System Map draws the whole codebase from its real imports. [▶ Ep 11](https://www.youtube.com/watch?v=7kHvi_2vT6U) · [▶ Ep 14](https://www.youtube.com/watch?v=yEy1tVKxsF0)
 - **Command center.** A GPU orchestrator, a plugin manager with a live VRAM budget, jobs and scheduling, schema-aware backups, and a multi-machine Interconnector. [▶ Ep 12](https://www.youtube.com/watch?v=A1-_ykcHOhQ)
-- **Terminal and API.** The `guaardvark` [CLI](#cli) with an interactive REPL, plus REST, GraphQL and Socket.IO.
+- **Terminal and API.** The `guaardvark` [CLI](#cli) with an interactive REPL, plus REST, GraphQL and Socket.IO. [▶ Ep 20](https://www.youtube.com/watch?v=Z3nXVtfdlSI)
 
 The complete, enumerated list of models, tools, plugins and pages is in **[CAPABILITIES.md](CAPABILITIES.md)**.
 
@@ -140,7 +140,7 @@ Film Crew runs on the same orchestrator (see [Directors](#directors-film-crew-mu
 
 ## MCP server, agent skills and the Claude Code plugin
 
-Guaardvark speaks the Model Context Protocol both ways: it exposes its tools to any MCP client, and it can call tools on other MCP servers.
+Guaardvark speaks the Model Context Protocol both ways: it exposes its tools to any MCP client, and it can call tools on other MCP servers. [Episode 21](https://www.youtube.com/watch?v=VScsEFn6ZoY) shows five coding agents (opencode on a local model, Codex, Cursor, Grok and Antigravity) making pictures, clips, songs and voices through it.
 
 - **One-command setup.** `python -m backend.mcp install` finds the agent clients on your machine (Claude Code, Codex, Cursor, Grok, Antigravity, opencode, Claude Desktop, Zed, Gemini CLI) and writes the `guaardvark` server entry into their configs, backing up existing files and leaving other entries alone. `python -m backend.mcp doctor` diagnoses a broken setup with a server self-test, a real stdio handshake, and a scan for stale client configs.
 - **Claude Code plugin.** `/plugin marketplace add guaardvark/guaardvark`, then `/plugin install guaardvark@guaardvark`. It asks for the path of your Guaardvark checkout, starts the MCP server from there, and loads every skill as `/guaardvark:<skill>`.
@@ -180,6 +180,16 @@ MiniMax H3 also comes as unpruned Int8 and BF16 builds for 24 GB and 48 GB cards
 - **MiniMax H3** generates picture and sound in one pass. Guaardvark compiles your prompt into the model's structured format (numbered shots with cut times, speaker ids, tagged dialogue), and the Film Crew renders each scene as one spoken window on it. It is licensed under the MiniMax H3 Community License, which names the EU, UK, South Korea and USA as territories that need MiniMax's application form; the Video Models dialog shows the license and the link, and posts carrying H3 clips add a "Generated with MiniMax H3" line.
 - Video generation needs a 16 GB-class card; see [docs/HARDWARE.md](docs/HARDWARE.md).
 
+### LoRA training and consistent characters
+
+Train your own LoRAs on your own GPU and keep the same character, place or object across everything Guaardvark makes.
+
+- **Character, environment and prop LoRAs from a few photos.** In the Cast Library, add reference photos, approve the generated samples, and train. The LoRA Trainer uses Z-Image Turbo as its default base (SDXL for older setups) and trains in bf16. A character LoRA trained from 5 photos at 512 px for 400 steps (rank 16) is about 33 MB.
+- **Consistent characters.** Pick a Cast member on the Images, Video Generator or Music Video pages, or let Film Crew's Casting role assign one. Stills and keyframes are rendered with that character's LoRA, and video models animate those keyframes, so every shot starts from a frame made with the same character LoRA.
+- **Import LoRAs trained elsewhere.** Attach a `.safetensors` LoRA from Ostris AI-Toolkit, kohya or diffusers/PEFT to a Cast member; Z-Image Turbo and FLUX.1 Dev layouts are accepted, and the key layout is checked before it is stored.
+- **Video LoRAs.** Add a video LoRA from its Hugging Face URL for the model it was trained on and pick it in the Video Generator; it loads into the Wan 2.2, LTX, HunyuanVideo or MiniMax H3 workflow in ComfyUI. Speed LoRAs are in the catalog: 8- and 4-step turbo profiles for MiniMax H3 and an experimental 4-step Lightning profile for Wan 2.2 14B.
+- **Image LoRAs** from Hugging Face are added the same way and offered only for the models they fit.
+
 ### Images and upscaling
 
 - **Image generation** with Z-Image, FLUX.1, Krea 2, SDXL and Stable Diffusion 1.5 fine-tunes, batch runs from a prompt list or CSV, and anatomy controls.
@@ -214,10 +224,6 @@ The Audio Foundry plugin runs three audio backends with shared GPU arbitration, 
 
 **Video editor.** Drop clips into the bin, pick a song, and press Plan: the Art Director arranges the cut, you adjust it with director's notes, and Render writes an MLT project and an MP4, with undo and keyboard shortcuts. A separate text-overlay tool places captions in nine positions with `ffmpeg drawtext`.
 
-### Cast Library and LoRA training
-
-Keep the same face, place or object across images, videos, music videos and Film Crew productions. Add reference photos, approve samples, and train a character, environment or prop LoRA on your own GPU (bf16, about 46 MB per LoRA); Casting picks it up automatically. LoRAs trained elsewhere can be imported too.
-
 ## Self-improvement, System Map and code intelligence
 
 - **Self-improvement.** Guaardvark runs its own tests, sends a code agent to read the failure and the source, drafts a fix, verifies it, and stages it as a pending fix for your review; applying fixes on its own stays off unless you turn it on. Three modes: scheduled (every six hours), reactive (after repeated server errors) and directed (tasks you give it). A codebase lock stops all changes, and what it learns can be shared with your other machines over the Interconnector ([Episode 11](https://www.youtube.com/watch?v=7kHvi_2vT6U)).
@@ -231,7 +237,11 @@ Keep the same face, place or object across images, videos, music videos and Film
 - **Approvals.** Publishes, outreach drafts and held code changes wait on the Approvals page, each in its own tab.
 - **MCP default-deny.** Desktop, agent control, shell, browser and test tools are hidden from MCP clients unless you allowlist them.
 - **Inbound guard.** [`scripts/check_inbound.py`](scripts/check_inbound.py) reads code before it lands, in pull requests and inside the product, and in Enforce mode holds risky changes for a person to read.
-- **Uncle Claude**, an optional reviewer that uses Anthropic's API, is off unless you add a key and turn it on.
+- **Uncle Claude** is an optional second opinion and code reviewer that calls Anthropic's API. Without an `ANTHROPIC_API_KEY` in the environment it sends nothing. With a key, it runs only when you start it, unless you change one of two settings:
+  - **When you start it:** `/claude …` in chat sends that message and the last 10 messages; Test connection sends a fixed test line; advice you ask for sends your GPU memory figures; a code change the agent makes at your request is sent for review as a file excerpt (up to 3,000 characters) and the diff.
+  - **Escalation: Always** (Settings, off by default): every chat message and the last 10 turns go to Anthropic, and Claude's answer replaces the local one.
+  - **Scheduled sends** (Settings → Uncle Claude, off by default): advice twice a day (the time, node id, GPU name and memory) and reviews of changes the self-improvement loop makes on its own (a source excerpt and the diff).
+  - A review never applies anything; staged fixes still wait for you. Usage is counted against a monthly token budget.
 
 See [SECURITY.md](SECURITY.md) to report a vulnerability.
 
@@ -253,7 +263,7 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
 3. **Draft.** Your local model writes a reply grounded in the thread and in citations from your indexed documents, shaped by one configurable persona (voice, expertise, citation style, what never to say).
 4. **Grade.** Every draft is scored against a relevance and quality rubric; anything below the threshold is dropped. Generic "great post!" replies don't survive.
 5. **Review.** Drafts land in a queue. In supervised mode (the default) nothing posts without your approval.
-6. **Post.** Approved drafts post through the logged-in browser session (Reddit, YouTube) or the Discord API, cadence-gated. `/outreach …` in chat or `guaardvark outreach "…"` runs recon and drafting; posting still needs approval while supervised. Twitter and Facebook drafting works; posting there is not wired.
+6. **Post.** Approved drafts post through the logged-in browser session (Reddit, YouTube) or the Discord API, cadence-gated. `/outreach …` in chat or `guaardvark outreach "…"` runs recon and drafting; posting still needs approval while supervised.
 
 Safety: a system-wide kill switch stops every pipeline mid-flight; supervised mode is the default; at most one post per 30 minutes per platform (configurable); every scout, draft, grade, approval, rejection, post and failure is recorded in a JSONL audit trail. Manual draft mode and on-demand passes for one platform or subreddit are available from the UI.
 
@@ -283,30 +293,30 @@ If you need one slice, use the excellent specialist: a chat UI like Open WebUI, 
 | **Where your data lives** | Their servers | Your machine |
 | **Per-token or per-minute fees** | Always on the meter | None. Generate all night if you want. |
 | **Content policy** | Their rules | Your rules |
-| **Custom models and LoRAs** | Whatever they expose | Any GGUF, any LoRA, any embedding model |
+| **Custom models and LoRAs** | Whatever they expose | Ollama models including your own GGUF files, LoRAs you train or add from Hugging Face, a choice of embedding models |
 | **Works offline** | No | Yes, once models are downloaded |
 | **Agents drive a real desktop** | Sandboxed browsers | Real Ubuntu/XFCE on your hardware |
 | **Swarms of parallel agents** | Per-task billing | Up to 20 in parallel; the only cost is power |
 | **Multi-machine clusters** | "Talk to sales" | Built in: master/client with approval gates |
 
 <details>
-<summary>Agent-driven media tools, side by side (checked 2026-09-11)</summary>
+<summary>Agent-driven media tools, side by side (as of October 2026)</summary>
 
-A newer category: the coding agent runs the studio. Facts checked 2026-09-11 from each project's repository.
+A newer category: the coding agent runs the studio. As of October 2026, from each project's own repository or site.
 
-| | OpenMontage | Nomi | Maestro | Comfy MCP | Promptus / LocalForge / SimpliGen | **Guaardvark** |
+| | [OpenMontage](https://github.com/calesthio/OpenMontage) | [Nomi](https://github.com/aqm857886159/Nomi) | [Maestro](https://github.com/Blizaine/Maestro) | [Comfy MCP](https://github.com/Comfy-Org/comfy-mcp) | [Promptus](https://promptus.ai) / [LocalForge](https://offlinecreator.com) / [SimpliGen](https://www.simpligen.io) | **Guaardvark** |
 |---|---|---|---|---|---|---|
-| What it is | 12 video pipelines driven by Claude Code, Cursor, Codex | Desktop video workbench with 25 MCP tools | Local video, image, music, voice with a director mode | Official MCP for ComfyUI | One-click local image + video apps, $30–$97 one-time | The whole studio, driven by your agent or the Studio UI |
-| Generation runs | mostly cloud APIs, local models optional | your ComfyUI or cloud providers | local (a Wan2GP fork) | your ComfyUI, or Comfy Cloud on subscription | local | local |
-| Agent driving it | yes (skills + CLI) | yes (MCP) | no (in-app planner) | yes (generation only) | no | yes (MCP + skills) and the built-in agent brain |
-| Music, voice, voice clone | via cloud TTS/Suno | — | music + voice | audio nodes | — | ACE-Step songs, three TTS engines, consent-gated clone |
-| Film crew, music-video director | pipelines, storyboard board | storyboard + timeline | director mode | — | — | 5-role Film Crew, beat-synced director, video editor |
-| Coding swarm, screen agents, outreach, RAG | — | — | — | — | — | core |
-| LoRA training, upscaling, add any HF model by URL | — | — | LoRA browser | — | model manager | core, in the Studio |
-| OS | mac, Linux, Windows | mac, Windows | NVIDIA via Pinokio | any | Windows, mac (LocalForge: Linux too) | Linux; Apple Silicon partial (Metal); WSL2 in verification |
-| License | AGPL-3.0 | AGPL-3.0 | WanGP non-commercial | open source | proprietary | MIT |
+| What it is | Agentic video production system: 12 pipelines and 100+ tools driven by your coding assistant | Desktop AI video workbench with 24 MCP tools | Local video, image, music and voice studio with a Director mode and a timeline editor | Comfy Org's official MCP servers: local (beta, 40 tools) and Comfy Cloud | One-click image and video apps, about $32–$97 one-time | The whole studio, driven by your agent, the CLI or the Studio UI |
+| Generation runs | Cloud APIs, or local models (Wan, Hunyuan, LTX, Stable Diffusion) with no API keys | Your local ComfyUI or cloud providers | Local (built on WanGP) | Your ComfyUI, or Comfy Cloud on subscription | Local; Promptus and SimpliGen also sell cloud credits | Local |
+| Agent driving it | Skills, instruction files and a CLI (Claude Code, Cursor, Codex, Copilot, Windsurf) | MCP (Claude Code, Codex, Cursor) | In-app local LLM planner | MCP: runs workflows, installs nodes, downloads models, manages ComfyUI | — | MCP (more than 50 tools), 15 skills, a CLI, and the built-in agent brain |
+| Music, voice, voice clone | Music through cloud services; speech local (Piper) or cloud | Speech dubbing through OpenAI-compatible or cloud endpoints | Music (ACE-Step, MiniMax-Music3, YuE2), speech, voice cloning | Through ComfyUI nodes (ACE-Step music; speech through partner or community nodes) | Promptus lists music for its upcoming local app | ACE-Step songs, Stable Audio Open effects, three TTS engines, consent-gated voice cloning |
+| Film crew, director, storyboard | Pipelines, a storyboard approval gate, a live board, director skills | Storyboard, a 3D director for posing characters and cameras, a timeline | Director mode, multi-track editor | Workflow templates | — | Five-role Film Crew, beat-synced music-video director, video editor |
+| Coding swarm, screen agents, outreach, RAG | — | — | — | — | — | Built in |
+| LoRA, upscaling, Hugging Face models | Real-ESRGAN upscaling | ComfyUI LoRA picker, upscale inputs | CivitAI LoRA browser, music-style training, upscaling, Hugging Face downloads | Downloads models and LoRAs from Hugging Face or CivitAI URLs; upscale workflows | — | LoRA training (character, environment, prop) and import, video and image LoRAs, upscaling, models and LoRAs from Hugging Face URLs |
+| OS | macOS, Linux, Windows | macOS, Windows | Windows, Linux; NVIDIA; via Pinokio | macOS, Linux, Windows | Windows (all three), macOS (Promptus, LocalForge), Linux (LocalForge) | Linux; Apple Silicon partial (Metal); WSL2 being verified |
+| License | AGPL-3.0 | AGPL-3.0 | WanGP Non-Commercial | AGPL-3.0 or commercial | Proprietary | MIT |
 
-*Every cell is a claim you can check in that project's repository; corrections welcome in an issue.*
+*"—" means the project's own docs don't list it. Every cell can be checked at the linked repository or site; corrections are welcome in an issue.*
 
 </details>
 
@@ -316,6 +326,8 @@ Short screen recordings of the real system doing real work, narrated by its own 
 
 | Episode | What it shows |
 |---|---|
+| [**21 · Five coding agents, one studio**](https://www.youtube.com/watch?v=VScsEFn6ZoY) (2:45) | opencode on a local model, Codex, Cursor, Grok and Antigravity each use Guaardvark's MCP tools; every picture, clip, song and voice is made on the local machine |
+| [**20 · The whole studio from the command line**](https://www.youtube.com/watch?v=Z3nXVtfdlSI) (4:14) | One command for everything: requests in plain words, engines started on request, answers from your own files, search with real scores, images in the terminal, batches from a file, video, speech, a song, and 53 tools handed to other AI agents |
 | [**19 · Everything new in 2.9**](https://www.youtube.com/watch?v=RSFDHY39lwI) (3:50) | A thumbs up that teaches, web pages read for you, MCP tools from chat, photo edits in chat, video with its own voice |
 | [**16 · MCP for any client**](https://www.youtube.com/watch?v=1qc6GZBLy5k) | Plug Guaardvark into any MCP client |
 | [**14 · A map of everything**](https://www.youtube.com/watch?v=yEy1tVKxsF0) | Every module drawn from its real imports; findings that carry their own fix |
@@ -416,7 +428,7 @@ Chat and agent latency depend on a few settings, all in **Settings** unless note
 pip install guaardvark
 ```
 
-The package is the `guaardvark` command, built with Typer, Rich and prompt_toolkit. It talks to a running backend on the configured port, or starts one with `start.sh` from a checkout it finds through `GUAARDVARK_ROOT` or the current directory; with no checkout it stops with "Guaardvark installation not found". An MCP client can start the server with `guaardvark mcp serve` from a pip install plus a checkout.
+The package is the `guaardvark` command, built with Typer, Rich and prompt_toolkit ([Episode 20](https://www.youtube.com/watch?v=Z3nXVtfdlSI) walks through it). It talks to a running backend on the configured port, or starts one with `start.sh` from a checkout it finds through `GUAARDVARK_ROOT` or the current directory; with no checkout it stops with "Guaardvark installation not found". An MCP client can start the server with `guaardvark mcp serve` from a pip install plus a checkout.
 
 ```bash
 guaardvark                              # Interactive REPL
@@ -499,17 +511,16 @@ More: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [agent mental model](docs/
 ## Roadmap
 
 **Near term**
-- Posting for supervised outreach on X and Facebook.
-- Stronger tier-gated memory and conversation context.
-- Continued video and music pipeline unification and Film Crew robustness.
-- Plugin GPU auto-orchestration (intent-driven start and stop based on route and VRAM).
-- More repository-intelligence surfaces and AST-precise agent tools.
+- A hand-editable timeline in the video editor: drag to reorder, a transition per cut, and text overlays in the plan.
+- Every pipeline starting its own services (music video, Film Crew, images, audio, upscaling), the way video renders already start ComfyUI.
+- Memory and context budgets sized to the model, and semantic memory recall with embeddings.
+- Outreach posting on X and Facebook, verified end to end.
+- Sending a song from Audio Studio straight to the Music Video page.
 
 **Longer term**
+- A cluster dashboard for multi-machine setups: fleet, routing and live node state.
+- AST-level code tools for JavaScript and TypeScript.
 - Singing voice cloning with consent and watermarking.
-- Cluster metrics and a better multi-node UI bridge.
-- Multi-clip video editing and an advanced timeline.
-- Embeddings-backed semantic memory recall.
 
 **Not on the roadmap:** cloud-by-default or a SaaS-hosted primary experience. Local-first is the product.
 
