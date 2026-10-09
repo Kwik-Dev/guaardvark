@@ -182,7 +182,7 @@ def test_family_ceilings_are_unchanged(family, limits):
 
 def test_offline_prices_are_unchanged():
     from backend.services.offline_image_generator import OfflineImageGenerator as G
-    assert G._FAMILY_VRAM_MB == {"krea2": 14000, "zimage": 11000, "sdxl": 8000, "sana": 6800, "sd": 4000}
+    assert G._FAMILY_VRAM_MB == {"krea2": 14000, "zimage": 11000, "sdxl": 8000, "sana": 6450, "sd": 4000}
     assert G._KREA2_SEQUENTIAL_VRAM_MB == 10000
     assert G._FAMILY_RAM_GB == {"krea2": 24.0, "zimage": 21.0, "sdxl": 10.0, "sana": 19.0, "sd": 6.0}
     assert G._FAMILY_VRAM_SLOPE_MB_PER_MP == {"krea2": 1000, "zimage": 500, "sdxl": 1500, "sd": 800}

@@ -372,7 +372,7 @@ class OfflineImageGenerator:
             "sdxl-turbo": {"label": "SDXL Turbo (Fast)", "description": "Fast 1024 previews, few steps.", "recommended": False, "order": 5},
             "realistic-vision": {"label": "Realistic Vision", "description": "Top photoreal faces & portraits.", "recommended": False, "order": 6},
             "epic-realism": {"label": "Epic Realism", "description": "Cinematic photorealism.", "recommended": False, "order": 7},
-            "sana-sprint": {"label": "Sana Sprint 1.6B (Fast)", "description": "1024 stills in 2 steps; for 10 GB cards and up.", "recommended": False, "order": 8},
+            "sana-sprint": {"label": "Sana Sprint 1.6B (Fast)", "description": "1024 stills in 2 steps; sharper than the 0.6B.", "recommended": False, "order": 8},
             "sana-sprint-0.6b": {"label": "Sana Sprint 0.6B (Fastest)", "description": "The quickest 1024 stills; runs on 8 GB cards.", "recommended": False, "order": 9},
         }
 
