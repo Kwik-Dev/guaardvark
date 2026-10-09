@@ -215,10 +215,11 @@ def _do_load(cmd: dict) -> dict:
     try:
         # Stay on CPU at load — full Z-Image (~20GB weights) cannot fit a 16GB card.
         # Train stages VAE → TE → transformer onto CUDA one at a time.
+        # Installed copies only: a base that is not on disk is refused, never fetched.
         _pipeline = ZImagePipeline.from_pretrained(
             path,
             torch_dtype=dtype,
-            local_files_only=Path(path).is_dir(),
+            local_files_only=True,
         )
         try:
             torch.cuda.empty_cache()

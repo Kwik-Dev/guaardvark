@@ -43,8 +43,9 @@ def _do_load(cmd):
         
     try:
         from diffusers import StableDiffusionXLPipeline
+        # Installed copies only: a base that is not on disk is refused, never fetched.
         _pipeline = StableDiffusionXLPipeline.from_pretrained(
-            model_id, torch_dtype=torch.bfloat16, use_safetensors=True,
+            model_id, torch_dtype=torch.bfloat16, use_safetensors=True, local_files_only=True,
         ).to(_dev())
         _eprint(f"[run_trainer] {model_id} loaded")
     except Exception as e:

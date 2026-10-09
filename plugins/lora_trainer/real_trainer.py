@@ -170,13 +170,26 @@ class RealLoraTrainer:
                 )
             if not self._ZIMAGE_RUNNER.exists():
                 raise RuntimeError(f"Z-Image trainer script missing: {self._ZIMAGE_RUNNER}")
-            return py, self._ZIMAGE_RUNNER, "Tongyi-MAI/Z-Image-Turbo"
+            return py, self._ZIMAGE_RUNNER, self._installed_base("zimage-turbo")
         # default SDXL
         if not self._VENV_PYTHON.exists():
             raise RuntimeError(f"venv-torch not found at {self._VENV_PYTHON}")
         if not self._RUNNER_SCRIPT.exists():
             raise RuntimeError(f"Trainer script missing at {self._RUNNER_SCRIPT}")
-        return self._VENV_PYTHON, self._RUNNER_SCRIPT, "stabilityai/stable-diffusion-xl-base-1.0"
+        return self._VENV_PYTHON, self._RUNNER_SCRIPT, self._installed_base("sdxl-legacy")
+
+    @staticmethod
+    def _installed_base(registry_id: str) -> str:
+        """The installed base model's folder; raises with where to install it otherwise.
+        Training never downloads a base model."""
+        from backend.services.media_model_registry import (
+            get_profile, train_base_missing_message, train_base_path,
+        )
+        profile = get_profile(registry_id) or {}
+        missing = train_base_missing_message(profile)
+        if missing:
+            raise RuntimeError(missing)
+        return train_base_path(profile)
 
     def _ensure_proc(self, backend: str = "sdxl") -> None:
         """Start (or reuse) the daemon for the requested backend. Switches kill the old one."""
