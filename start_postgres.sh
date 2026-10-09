@@ -350,6 +350,17 @@ if [ "$(uname -s)" = "Darwin" ]; then
     fi
   fi
 
+  # Homebrew's postgresql@N is keg-only: pg_isready, psql and pg_ctl live in
+  # $(brew --prefix)/opt/<formula>/bin and are NOT symlinked into /opt/homebrew/bin
+  # unless the user ran `brew link --force postgresql@N`. A bare `pg_isready` is then
+  # command-not-found, which the readiness check below reads as "PostgreSQL did not
+  # come up" even while it is serving. Put the keg's bin on PATH first.
+  _pg_prefix="$(brew --prefix "$PG_FORMULA" 2>/dev/null)"
+  if [ -n "$_pg_prefix" ] && [ -d "$_pg_prefix/bin" ]; then
+    PATH="$_pg_prefix/bin:$PATH"
+    export PATH
+  fi
+
   # Start via brew services (launchd) and wait for the socket. Idempotent.
   if ! pg_isready -h "$PG_HOST" -p "$PG_PORT" >/dev/null 2>&1; then
     vader_info "Starting PostgreSQL via brew services ($PG_FORMULA)..."
