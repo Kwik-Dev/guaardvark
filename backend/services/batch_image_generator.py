@@ -102,8 +102,8 @@ class BatchImageRequest:
     user_treatment: Optional[str] = None
     ui_config: Optional[Dict[str, Any]] = None
     retry_data: Optional[Dict[str, Any]] = None
-    # The Studio page's picker announces "downloads ~N GB on first use" for a
-    # model that is not installed; only then may a batch download it.
+    # Lets the run download a model that is not installed. No page sets it:
+    # models install from Install in Manage models, never from Generate.
     allow_model_download: bool = False
 
 
@@ -481,18 +481,13 @@ class BatchImageGenerator:
         except Exception as e:  # noqa: BLE001
             logger.debug("drop_booking(image_batch:%s) failed: %s", batch_id, e)
 
-    def _resolve_batch_model_key(self, model_key: str) -> str:
+    def _resolve_batch_model_key(self, model_key: str, prompt_text: str = "") -> str:
         """Map a batch prompt model key to a catalog key for resource estimates."""
         if not model_key or model_key in ("auto", ""):
             gen = self.image_generator
-            if gen:
-                # Match offline auto-router: zimage first on consumer cards
-                for preferred in ("zimage-turbo", "krea2-turbo", "sd-xl"):
-                    if gen.available_models.get(preferred):
-                        if gen._is_model_downloaded(gen.available_models[preferred]):
-                            return preferred
-                return "zimage-turbo"
-            return "zimage-turbo"
+            # Price the model the offline auto-router will render with.
+            picked = gen._auto_select_model(prompt_text or "") if gen else None
+            return picked or "zimage-turbo"
         return model_key
 
     @staticmethod
@@ -535,7 +530,7 @@ class BatchImageGenerator:
         elif self._zimage_via_comfyui_enabled() and self._is_zimage_model(prompt.model):
             return None
         else:
-            model_key = self._resolve_batch_model_key(prompt.model)
+            model_key = self._resolve_batch_model_key(prompt.model, prompt.prompt)
         if self._is_comfy_flux_model(model_key):
             return None
         return gen.available_models.get(model_key, model_key)
@@ -569,7 +564,7 @@ class BatchImageGenerator:
             if prompt.loras or getattr(prompt, "subject_ids", None):
                 model_key = self._character_model_key(prompt)
             else:
-                model_key = self._resolve_batch_model_key(prompt.model)
+                model_key = self._resolve_batch_model_key(prompt.model, prompt.prompt)
             if self._is_comfy_flux_model(model_key):
                 # Full FLUX-dev fp8 stills: ~12GB+ with T5; serialize workers elsewhere
                 vram_mb = max(vram_mb, 12000)

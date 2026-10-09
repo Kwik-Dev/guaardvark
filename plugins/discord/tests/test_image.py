@@ -118,6 +118,30 @@ class TestImagineCommand:
         assert kwargs.get("steps") == 9
         assert kwargs.get("width") == 1024
         assert kwargs.get("height") == 1024
+        assert kwargs.get("model") is None
+
+    @pytest.mark.asyncio
+    async def test_imagine_sends_the_configured_model(
+        self, image_cog, mock_interaction, mock_api_client
+    ):
+        image_cog.config["image"]["model"] = "sana-sprint"
+        with patch("commands.image.asyncio.sleep", new_callable=AsyncMock):
+            await image_cog._handle_imagine(mock_interaction, "a cute cat")
+
+        assert mock_api_client.generate_image.await_args.kwargs.get("model") == "sana-sprint"
+
+    @pytest.mark.asyncio
+    async def test_imagine_keeps_auto_for_a_cast_character(
+        self, image_cog, mock_interaction, mock_api_client
+    ):
+        """A character renders on its LoRA's base model, not the configured one."""
+        image_cog.config["image"]["model"] = "sana-sprint"
+        with patch("commands.image.asyncio.sleep", new_callable=AsyncMock):
+            await image_cog._handle_imagine(
+                mock_interaction, "walking through Gotham rain", character="26"
+            )
+
+        assert mock_api_client.generate_image.await_args.kwargs.get("model") is None
 
 
 class TestEnhancePromptCommand:

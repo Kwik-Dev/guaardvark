@@ -162,6 +162,37 @@ def test_batch_upscale_without_usable_files_is_rejected(client):
     assert resp.status_code == 400
 
 
+_REFUSAL = (
+    "Upscaling model 'HAT-L_SRx4' is not installed. Install it from the Upscaling "
+    "page (Manage Upscaling Models), then try again."
+)
+
+
+def test_video_submit_relays_the_plugins_refusal(client, monkeypatch):
+    """FastAPI puts the refusal under ``detail``; the caller must still read it."""
+    c, _ = client
+    monkeypatch.setattr(m, "_proxy_post", lambda path, payload, timeout=None: ({"detail": _REFUSAL}, 409))
+
+    resp = c.post("/api/upscaling/upscale/video", json={"input_path": "/videos/clip.mp4"})
+
+    assert resp.status_code == 409
+    assert resp.get_json()["error"]["message"] == _REFUSAL
+
+
+def test_video_upload_relays_the_plugins_refusal(client, monkeypatch):
+    c, _ = client
+    monkeypatch.setattr(m, "_proxy_post", lambda path, payload, timeout=None: ({"detail": _REFUSAL}, 409))
+
+    resp = c.post(
+        "/api/upscaling/upload",
+        data={"file": (io.BytesIO(b"\x00\x00\x00\x18ftypmp42"), "clip.mp4")},
+        content_type="multipart/form-data",
+    )
+
+    assert resp.status_code == 409
+    assert resp.get_json()["error"]["message"] == _REFUSAL
+
+
 def test_serve_image_output_is_contained(client):
     c, root = client
     out = root / "output" / "images"

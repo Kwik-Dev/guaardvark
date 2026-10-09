@@ -56,7 +56,10 @@ _REDDIT_COOKIE_TTL_S = 120.0
 
 def _bidi_scroll_to_composer() -> tuple[bool, str, Optional[tuple[int, int]]]:
     """Use BiDi to scroll Reddit's 'Join the conversation' composer into
-    view. Returns (success, info_message, (cx, cy) center coords or None).
+    view. Returns (success, info_message, (x, y) of its centre in screen
+    pixels, or None). The page reports positions inside the browser's
+    viewport; the toolbars above it (about 110 px on the agent display) are
+    added back, or the click lands above the box.
 
     Why BiDi instead of xdotool wheel-click: on Xvfb, scroll-wheel events
     via `xdotool click 5` don't reliably propagate to the page body
@@ -100,7 +103,6 @@ def _bidi_scroll_to_composer() -> tuple[bool, str, Optional[tuple[int, int]]]:
           // non-zero dimensions. Also accept elements whose own rect is
           // 0x0 but whose parent shreddit-composer has a real rect.
           let found = null;
-          let foundRect = null;
           const candidates = [];
           const visit = (root) => {
             const els = root.querySelectorAll('faceplate-textarea, faceplate-textarea-input, textarea, div[contenteditable], shreddit-composer');
@@ -118,15 +120,17 @@ def _bidi_scroll_to_composer() -> tuple[bool, str, Optional[tuple[int, int]]]:
             }
           };
           visit(document);
-          // Pick the first candidate (or its closest ancestor) that has
-          // a non-zero rect.
-          for (const c of candidates) {
+          // A candidate that is itself on screen wins: the hidden copies
+          // Reddit keeps earlier in the page climb to a parent that holds
+          // the vote and share row, not the box.
+          const sized = (el) => { const r = el.getBoundingClientRect(); return r.width >= 30 && r.height >= 20; };
+          found = candidates.find(sized) || null;
+          // Otherwise the first candidate's closest ancestor with a size.
+          for (const c of (found ? [] : candidates)) {
             let probe = c;
             while (probe) {
-              const r = probe.getBoundingClientRect();
-              if (r.width >= 30 && r.height >= 20) {
+              if (sized(probe)) {
                 found = probe;
-                foundRect = r;
                 break;
               }
               probe = probe.parentElement;
@@ -135,15 +139,16 @@ def _bidi_scroll_to_composer() -> tuple[bool, str, Optional[tuple[int, int]]]:
           }
           if (!found) return JSON.stringify({found:false, candidates: candidates.length});
           found.scrollIntoView({block:'center', behavior:'instant'});
-          // Re-read rect after scroll so we report post-scroll viewport coords.
+          // Re-read rect after scroll; report the centre in screen pixels.
           const r = found.getBoundingClientRect();
+          const dpr = window.devicePixelRatio || 1;
           return JSON.stringify({
             found: true,
             tag: found.tagName.toLowerCase(),
             x: Math.round(r.x), y: Math.round(r.y),
             w: Math.round(r.width), h: Math.round(r.height),
-            cx: Math.round(r.x + r.width/2),
-            cy: Math.round(r.y + r.height/2),
+            cx: Math.round((window.mozInnerScreenX + r.x + r.width/2) * dpr),
+            cy: Math.round((window.mozInnerScreenY + r.y + r.height/2) * dpr),
             candidates: candidates.length
           });
         })()
@@ -775,6 +780,16 @@ def post_comment_via_servo(
     focused, why = _wait_for_composer_focus()
     if not focused:
         return False, why
+    # Reddit restores an unsent comment from an earlier visit into the box,
+    # so it is emptied before the approved text goes in.
+    held = _focused_editable()
+    if held is not None and (held.get("text") or "").strip():
+        screen.hotkey("ctrl", "a")
+        screen.hotkey("BackSpace")
+        time.sleep(0.3)
+        held = _focused_editable()
+        if held is None or (held.get("text") or "").strip():
+            return False, "composer_not_empty: nothing was posted; the comment box held earlier text"
     _human_pause(0.5, 1.0)
 
     logger.warning("typing comment (%s chars)", len(comment_text))

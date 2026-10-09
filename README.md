@@ -263,7 +263,7 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
 3. **Draft.** Your local model writes a reply grounded in the thread and in citations from your indexed documents, shaped by one configurable persona (voice, expertise, citation style, what never to say).
 4. **Grade.** Every draft is scored against a relevance and quality rubric; anything below the threshold is dropped. Generic "great post!" replies don't survive.
 5. **Review.** Drafts land in a queue. In supervised mode (the default) nothing posts without your approval.
-6. **Post.** Approved drafts post through the logged-in browser session (Reddit, YouTube) or the Discord API, cadence-gated. `/outreach …` in chat or `guaardvark outreach "…"` runs recon and drafting; posting still needs approval while supervised.
+6. **Post.** Approved drafts post through the logged-in browser session (Reddit comments and link posts, Facebook comments, YouTube) or the Discord API, cadence-gated. The Reddit and Facebook posters read the page at every step: they check the browser is still on the approved post, read the text back out of the box before submitting, and count a post only once it shows on the page. `/outreach …` in chat or `guaardvark outreach "…"` runs recon and drafting; posting still needs approval while supervised.
 
 Safety: a system-wide kill switch stops every pipeline mid-flight; supervised mode is the default; at most one post per 30 minutes per platform (configurable); every scout, draft, grade, approval, rejection, post and failure is recorded in a JSONL audit trail. Manual draft mode and on-demand passes for one platform or subreddit are available from the UI.
 
@@ -514,7 +514,7 @@ More: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [agent mental model](docs/
 - A hand-editable timeline in the video editor: drag to reorder, a transition per cut, and text overlays in the plan.
 - Every pipeline starting its own services (music video, Film Crew, images, audio, upscaling), the way video renders already start ComfyUI.
 - Memory and context budgets sized to the model, and semantic memory recall with embeddings.
-- Outreach posting on X and Facebook, verified end to end.
+- Outreach posting on X, verified end to end.
 - Sending a song from Audio Studio straight to the Music Video page.
 
 **Longer term**

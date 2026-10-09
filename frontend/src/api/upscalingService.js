@@ -99,7 +99,12 @@ export const previewImage = async (blob, options = {}) => {
     let error;
     try {
       const data = await response.json();
-      error = data.error || data.message || "Failed to generate preview";
+      // The backend nests the text: {"error": {"code", "message"}}.
+      error =
+        data.error?.message ||
+        (typeof data.error === "string" && data.error) ||
+        data.message ||
+        "Failed to generate preview";
     } catch {
       error = response.statusText;
     }

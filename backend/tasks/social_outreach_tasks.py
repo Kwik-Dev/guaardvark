@@ -247,9 +247,9 @@ def tick_self_share(self) -> dict:
 
 
 # What the approved-drafts tick can post, by action. Comments go to the
-# calibrated BiDi posters (Reddit, YouTube) or the general agent loop
-# (X/Twitter, Facebook); only YouTube has a reply poster; a share is a Reddit
-# link post. Platforms are compared lowercased.
+# BiDi posters (Reddit, YouTube, Facebook) or the general agent loop
+# (X/Twitter); only YouTube has a reply poster; a share is a Reddit link post.
+# Platforms are compared lowercased.
 _POSTABLE_PLATFORMS = {
     "comment": ("reddit", "youtube", "x", "twitter", "facebook"),
     "reply": ("youtube",),
@@ -294,9 +294,8 @@ def tick_process_approved_drafts(self) -> dict:
         from backend.services.social_outreach.reddit_outreach import backend_url
         from backend.services.social_outreach.reddit_outreach import REDDIT_BASE
 
-        # Reddit/YouTube keep their calibrated BiDi posters; x/twitter/facebook
-        # post through the general agent loop (general_poster). Widened from
-        # reddit+youtube so approved X/FB rows are fetched instead of ignored.
+        # Reddit/YouTube/Facebook have BiDi posters; x/twitter post through
+        # the general agent loop (general_poster).
         rows = (
             SocialOutreachLog.query
             .filter(SocialOutreachLog.status == "approved")
@@ -386,10 +385,9 @@ def tick_process_approved_drafts(self) -> dict:
                 # silently drop the tags Content already applied.
                 comment_text = row.posted_text or row.draft_text
 
-                # Branch on platform. Reddit/YouTube use their calibrated BiDi
-                # posters; everything else (X/Twitter, Facebook, …) posts through
-                # the general NL agent loop — no per-platform code, driven by the
-                # grounded eye. "Adding a platform" is now "be logged into it".
+                # Branch on platform. Reddit, YouTube and Facebook use their BiDi
+                # posters; everything else (X/Twitter, …) posts through the
+                # general NL agent loop, driven by the grounded eye.
                 if platform == "reddit":
                     success, reason = reddit_post_comment(
                         row.target_url, comment_text, before_submit=before_submit,
@@ -397,6 +395,11 @@ def tick_process_approved_drafts(self) -> dict:
                 elif platform == "youtube":
                     success, reason = post_youtube_comment_via_servo(
                         row.target_url, comment_text, row.task_id, before_submit=before_submit,
+                    )
+                elif platform == "facebook":
+                    from backend.services.social_outreach.facebook_outreach import post_comment_via_bidi
+                    success, reason = post_comment_via_bidi(
+                        row.target_url, comment_text, before_submit=before_submit,
                     )
                 else:
                     from backend.services.social_outreach.general_poster import post_via_agent_loop

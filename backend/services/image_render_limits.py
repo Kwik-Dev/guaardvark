@@ -51,6 +51,8 @@ def family_of(model: Optional[str]) -> str:
         return "krea2"
     if key.startswith("flux") or "flux" in key:
         return "flux"
+    if "sana" in key:
+        return "sana"
     if "xl" in key or "sdxl" in key or key in ("sd-xl", "sdxl-turbo", "sdxl-legacy"):
         return "sdxl"
     return "sd"
@@ -66,6 +68,8 @@ def model_key(model: Optional[str]) -> Optional[str]:
     if family_of(key) == "zimage":
         # Every Z-Image build (HF id, user entry) samples like the Turbo catalog row.
         return "zimage-turbo"
+    if family_of(key) == "sana":
+        return "sana-sprint-0.6b" if "0.6b" in key else "sana-sprint"
     return None
 
 

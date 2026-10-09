@@ -3,8 +3,10 @@ import {
   buildFinalPrompts,
   clampQuantity,
   ignoresNegativeAndAnatomy,
+  imageModelOption,
   isZimageModel,
   modelFamily,
+  modelInstallNeed,
   qualityPresetsForModel,
   resolveQualityPreset,
 } from './batchImageSettings';
@@ -19,6 +21,8 @@ describe('modelFamily', () => {
     expect(modelFamily('sd-xl')).toBe('sdxl');
     expect(modelFamily('sdxl-turbo')).toBe('sdxl-turbo');
     expect(modelFamily('realistic-vision')).toBe('sd');
+    expect(modelFamily('sana-sprint')).toBe('sana');
+    expect(modelFamily('sana-sprint-0.6b')).toBe('sana');
   });
 
   it('does not treat auto as Z-Image (the router may pick SDXL)', () => {
@@ -31,6 +35,10 @@ describe('ignoresNegativeAndAnatomy', () => {
   it('is true on the guidance-0 path (Z-Image, Krea 2 Turbo)', () => {
     expect(ignoresNegativeAndAnatomy('zimage-turbo')).toBe(true);
     expect(ignoresNegativeAndAnatomy('krea2-turbo')).toBe(true);
+  });
+
+  it('is true for Sana Sprint, whose pipeline takes no negative prompt', () => {
+    expect(ignoresNegativeAndAnatomy('sana-sprint')).toBe(true);
   });
 
   it('is false for Krea Raw, auto, and CFG families', () => {
@@ -62,7 +70,7 @@ describe('quality presets', () => {
   });
 
   it('every family default exists in its own list', () => {
-    for (const model of ['auto', 'zimage-turbo', 'flux-dev', 'krea2-turbo', 'krea2-raw', 'sd-xl', 'sdxl-turbo', 'realistic-vision']) {
+    for (const model of ['auto', 'zimage-turbo', 'flux-dev', 'krea2-turbo', 'krea2-raw', 'sd-xl', 'sdxl-turbo', 'realistic-vision', 'sana-sprint']) {
       const def = resolveQualityPreset(model, 'not-a-preset');
       expect(qualityPresetsForModel(model).map((p) => p.value)).toContain(def);
     }
@@ -94,5 +102,38 @@ describe('buildFinalPrompts', () => {
   it('returns [] for empty input so callers can refuse to start', () => {
     expect(buildFinalPrompts({ inputMode: 'single', batchItems: '  ', lookAndFeel: 'x', quantity: 3 })).toEqual([]);
     expect(buildFinalPrompts({ inputMode: 'bulk', batchItems: '\n\n', lookAndFeel: '', quantity: 1 })).toEqual([]);
+  });
+});
+
+describe('model install state', () => {
+  const row = (id, extra) => ({ id, label: id, name: id, size_gb: 16, ...extra });
+  const AUTO = { value: 'auto', label: 'Auto' };
+
+  it('describes a missing model as needing Install, not as a first-use download', () => {
+    const opt = imageModelOption(row('zimage-turbo', { is_downloaded: false, availability: 'downloadable' }));
+    expect(opt.installed).toBe(false);
+    expect(opt.description).toContain('not installed');
+    expect(opt.description).toContain('Install downloads ~16 GB');
+    expect(opt.description).not.toContain('first use');
+    expect(imageModelOption(row('sd-xl', { is_downloaded: true })).installed).toBe(true);
+  });
+
+  it('blocks Generate for a picked model that is not installed', () => {
+    const options = [AUTO, imageModelOption(row('krea2-turbo', { is_downloaded: false }))];
+    const need = modelInstallNeed(options, 'krea2-turbo');
+    expect(need.blocks).toBe(true);
+    expect(need.option.value).toBe('krea2-turbo');
+  });
+
+  it('never blocks Auto, and points it at the recommended model when nothing is installed', () => {
+    const none = [
+      AUTO,
+      imageModelOption(row('sd-xl', { is_downloaded: false })),
+      imageModelOption(row('zimage-turbo', { is_downloaded: false, recommended: true })),
+    ];
+    expect(modelInstallNeed(none, 'auto')).toEqual({ option: none[2], blocks: false });
+    const some = [AUTO, imageModelOption(row('sd-xl', { is_downloaded: true }))];
+    expect(modelInstallNeed(some, 'auto')).toBeNull();
+    expect(modelInstallNeed(some, 'sd-xl')).toBeNull();
   });
 });

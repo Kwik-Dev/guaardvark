@@ -115,6 +115,21 @@ def _dir_bytes(d: Path) -> int:
     return total
 
 
+def _hf_cache_repo_dir(repo_id: str) -> Optional[Path]:
+    """The Hugging Face hub cache folder for a repo id, or None for non-repo ids.
+
+    SD and SDXL installs go through from_pretrained, which fills this folder and
+    only writes the install folder at the end (save_pretrained).
+    """
+    if not repo_id or "/" not in repo_id or repo_id.startswith("comfy:"):
+        return None
+    try:
+        from huggingface_hub import constants
+        return Path(constants.HF_HUB_CACHE) / ("models--" + repo_id.replace("/", "--"))
+    except Exception:
+        return None
+
+
 def _image_download_dest(img, catalog_key: str, hf_model_id: str) -> Path:
     """Directory whose growth is the download — Comfy unet/loras, or the snapshot path."""
     from backend.services.user_image_models import user_download_dir
@@ -171,6 +186,8 @@ IMAGE_MODEL_SIZES = {
     "stabilityai/sdxl-turbo": 6.9,
     "SG161222/Realistic_Vision_V5.1_noVAE": 2.1,
     "emilianJR/epiCRealism": 2.1,
+    "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers": 9.7,
+    "Efficient-Large-Model/Sana_Sprint_0.6B_1024px_diffusers": 7.7,
 }
 
 # Why a model is missing from the picker, phrased for the person reading it.
@@ -605,8 +622,9 @@ def _parse_generation_params(data: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict
 
     # Transparent-background (rembg post-process) — RGBA PNG for icons/clip-art/logos
     params['remove_background'] = _as_bool(data.get('remove_background'), False)
-    # Sent by the Studio page only, whose model picker says what a missing model
-    # would download. Any other caller is refused a model that is not installed.
+    # No page sends this: models install from Install (Manage models, the
+    # /models/download route), and a run whose model is not installed is
+    # refused with where to install it.
     params['allow_model_download'] = _as_bool(data.get('allow_model_download'), False)
 
     # User context
@@ -825,7 +843,9 @@ def _start_image_model_download(model_path: str):
             _start_time = time.time()
             total_bytes = int(total_gb * 1024**3) if total_gb else 1
             dest = _image_download_dest(generator.image_generator, catalog_key, hf_model_id)
-            baseline = _dir_bytes(dest)
+            hf_cache = _hf_cache_repo_dir(hf_model_id)
+            watched = [d for d in (dest, hf_cache) if d is not None]
+            baseline = sum(_dir_bytes(d) for d in watched)
             stalled = threading.Event()
 
             try:
@@ -842,7 +862,7 @@ def _start_image_model_download(model_path: str):
                     last_change = time.time()
                     while not stop_monitor.is_set():
                         try:
-                            downloaded = max(0, _dir_bytes(dest) - baseline)
+                            downloaded = max(0, sum(_dir_bytes(d) for d in watched) - baseline)
                             now_m = time.time()
                             if downloaded != last_bytes:
                                 last_bytes = downloaded
@@ -968,7 +988,12 @@ def get_download_status():
                 if not vstatus.get("is_downloading"):
                     _DELEGATED_PACK = None
                 return success_response(vstatus)
-            if str(vstatus.get("current_model") or "").startswith("flux"):
+            # A FLUX run is this modal's only while it is newer than the last
+            # image install; afterwards its error would shadow that install.
+            if (
+                str(vstatus.get("current_model") or "").startswith("flux")
+                and float(vstatus.get("updated_at") or 0) >= float(status.get("updated_at") or 0)
+            ):
                 return success_response(vstatus)
         return success_response(status)
     except Exception as e:

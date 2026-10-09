@@ -27,7 +27,9 @@ import AddImageModelDialog from "./AddImageModelDialog";
 const modelMatchesDownload = (model, currentModel) =>
   !!currentModel && (currentModel === model.path || currentModel === model.id);
 
-const ImageModelsModal = ({ open, onClose, showMessage }) => {
+// installModelId: opened from a page's Install button. That row is brought into
+// view and its install started, as if the person had clicked Install on it.
+const ImageModelsModal = ({ open, onClose, showMessage, installModelId }) => {
   const [models, setModels] = useState([]);
   const [adapters, setAdapters] = useState([]);
   // Chat photo-tool packs (Qwen-Image-Edit, Kontext, PuLID, background removal).
@@ -47,6 +49,10 @@ const ImageModelsModal = ({ open, onClose, showMessage }) => {
   const [error, setError] = useState(null);
   const [unavailable, setUnavailable] = useState([]);
   const [checked, setChecked] = useState(false);
+  // The first download-status read since opening has returned.
+  const [statusRead, setStatusRead] = useState(false);
+  const installStartedRef = useRef(false);
+  const installRowRef = useRef(null);
 
   const showMessageRef = useRef(showMessage);
   useEffect(() => {
@@ -93,6 +99,8 @@ const ImageModelsModal = ({ open, onClose, showMessage }) => {
       }
     } catch (err) {
       console.error("Failed to fetch download status", err);
+    } finally {
+      setStatusRead(true);
     }
   }, [fetchModels]);
 
@@ -103,6 +111,8 @@ const ImageModelsModal = ({ open, onClose, showMessage }) => {
     } else {
       setModels([]);
       setError(null);
+      setStatusRead(false);
+      installStartedRef.current = false;
     }
   }, [open, fetchModels, fetchDownloadStatus]);
 
@@ -141,6 +151,24 @@ const ImageModelsModal = ({ open, onClose, showMessage }) => {
       }
     }
   };
+
+  // Waits for the list and the first status read, so a download that is
+  // already running shows its progress instead of being started twice.
+  useEffect(() => {
+    if (!open || !installModelId || loading || !statusRead || installStartedRef.current) return;
+    const target = models.find((m) => m.id === installModelId);
+    if (!target) return;
+    installStartedRef.current = true;
+    installRowRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (target.is_downloaded) return;
+    if (downloadStatus.is_downloading) {
+      if (!modelMatchesDownload(target, downloadStatus.current_model)) {
+        showMessage?.("A download is already in progress.", "warning");
+      }
+      return;
+    }
+    handleDownload(target);
+  }, [open, installModelId, loading, statusRead, models, downloadStatus]);
 
   const handleRemove = async () => {
     if (!removeTarget) return;
@@ -255,8 +283,17 @@ const ImageModelsModal = ({ open, onClose, showMessage }) => {
         ) : (
           <List disablePadding>
             {models.map((model) => {
+              const isInstallTarget = !!installModelId && model.id === installModelId;
               return (
-                <ListItem key={model.id} divider sx={{ py: 1.5 }}>
+                <ListItem
+                  key={model.id}
+                  divider
+                  ref={isInstallTarget ? installRowRef : undefined}
+                  sx={{
+                    py: 1.5,
+                    ...(isInstallTarget && { border: 2, borderColor: "warning.main", borderRadius: 1 }),
+                  }}
+                >
                   <ListItemIcon>
                     <ImageIcon color={model.is_downloaded ? "primary" : "action"} />
                   </ListItemIcon>

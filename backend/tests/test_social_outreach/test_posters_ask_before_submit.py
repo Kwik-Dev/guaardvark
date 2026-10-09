@@ -15,6 +15,7 @@ import types
 import pytest
 
 from backend.services.social_outreach import (
+    facebook_outreach,
     general_poster,
     reddit_outreach,
     self_share,
@@ -23,6 +24,7 @@ from backend.services.social_outreach import (
 from backend.services.social_outreach.transitions import WITHDRAWN_BEFORE_SUBMIT
 
 YOUTUBE_URL = "https://www.youtube.com/watch?v=abcdefghijk"
+FACEBOOK_URL = "https://www.facebook.com/reel/2412479772578341"
 
 
 @pytest.fixture
@@ -91,6 +93,25 @@ def events(monkeypatch):
     monkeypatch.setattr(general_poster, "_still_on_target", lambda url: (True, url))
     monkeypatch.setattr(reddit_outreach, "bidi_reachable", lambda *a, **k: (True, ""))
     monkeypatch.setattr(self_share, "bidi_reachable", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(self_share, "_bidi_navigate", lambda *a, **k: True)
+    monkeypatch.setattr(self_share, "_read_form", lambda: ({
+        "url": "https://www.reddit.com/r/SideProject/submit/?type=LINK", "kind": "LINK",
+        "title": "a title", "link": "https://guaardvark.com",
+        "button": {"disabled": False, "shown": True, "x": 600, "y": 900}}, ""))
+    monkeypatch.setattr(self_share, "_post_landed", lambda *a, **k: (True, "posted"))
+
+    def facebook_box(*args, **kwargs):
+        box = focused_editable()
+        box["label"] = "Comment as guaardvark"
+        return box
+
+    monkeypatch.delenv(facebook_outreach.POST_AS_ENV, raising=False)
+    monkeypatch.setattr(facebook_outreach, "_location", lambda: FACEBOOK_URL)
+    monkeypatch.setattr(facebook_outreach, "_find_composer", lambda *a, **k: (
+        {"count": 1, "actor": "guaardvark", "x": 40, "y": 50, "text": ""}, ""))
+    monkeypatch.setattr(facebook_outreach, "_composer_focused", facebook_box)
+    monkeypatch.setattr(facebook_outreach, "_wait_for_focus", facebook_box)
+    monkeypatch.setattr(facebook_outreach, "_verify", lambda text, actor: (True, {"mine": True}, ""))
     return log
 
 
@@ -111,6 +132,10 @@ POSTERS = {
             YOUTUBE_URL, "a parent comment long enough", "hello", 7, before_submit=gate),
         "recipe send the comment",
     ),
+    "facebook_comment": (
+        lambda gate: facebook_outreach.post_comment_via_bidi(FACEBOOK_URL, "hello", before_submit=gate),
+        "hotkey Return",
+    ),
     "agent_loop": (
         lambda gate: general_poster.post_via_agent_loop(
             "twitter", "https://x.com/a/status/1", "hello", action="comment", before_submit=gate),
@@ -119,7 +144,7 @@ POSTERS = {
     "reddit_share": (
         lambda gate: self_share._submit_post_via_servo(
             "SideProject", "a title", "https://guaardvark.com", before_submit=gate),
-        "task On the open Reddit submit form, do this. 1) Click the submit button",
+        "click",
     ),
 }
 
