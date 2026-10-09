@@ -172,6 +172,17 @@ def test_sana_family_and_prices(gen):
     assert gen.supports_img2img("sana-sprint") is False
 
 
+def test_sana_small_model_has_its_own_price(gen):
+    # The 0.6B row's measured price, not the 1.6B family figure: priced as the
+    # family it could never pass admission on an idle 8 GB card.
+    from backend.services.media_model_registry import IMAGE_MODEL_LIMITS
+    row = IMAGE_MODEL_LIMITS["sana-sprint-0.6b"]
+    for ref in ("sana-sprint-0.6b", "Efficient-Large-Model/Sana_Sprint_0.6B_1024px_diffusers"):
+        assert gen._vram_estimate_mb(ref) == row["vram_mb"]
+        assert gen._ram_estimate_gb(ref) == row["ram_gb"]
+    assert row["vram_mb"] < oig._image_limits_for("sana")["vram_mb"]
+
+
 def test_soft_clamp_sana_takes_its_default_for_a_runaway_count(gen):
     # The Discord bot sends 9 steps unmarked; Sana Sprint samples in 1-4.
     from backend.services.offline_image_generator import ImageGenerationRequest

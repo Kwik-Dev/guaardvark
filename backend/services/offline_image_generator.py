@@ -372,8 +372,8 @@ class OfflineImageGenerator:
             "sdxl-turbo": {"label": "SDXL Turbo (Fast)", "description": "Fast 1024 previews, few steps.", "recommended": False, "order": 5},
             "realistic-vision": {"label": "Realistic Vision", "description": "Top photoreal faces & portraits.", "recommended": False, "order": 6},
             "epic-realism": {"label": "Epic Realism", "description": "Cinematic photorealism.", "recommended": False, "order": 7},
-            "sana-sprint": {"label": "Sana Sprint 1.6B (Fast)", "description": "1024 stills in 2 steps; runs on 8 GB cards.", "recommended": False, "order": 8},
-            "sana-sprint-0.6b": {"label": "Sana Sprint 0.6B (Fastest)", "description": "Smaller Sana Sprint for the quickest 1024 stills.", "recommended": False, "order": 9},
+            "sana-sprint": {"label": "Sana Sprint 1.6B (Fast)", "description": "1024 stills in 2 steps; for 10 GB cards and up.", "recommended": False, "order": 8},
+            "sana-sprint-0.6b": {"label": "Sana Sprint 0.6B (Fastest)", "description": "The quickest 1024 stills; runs on 8 GB cards.", "recommended": False, "order": 9},
         }
 
         self.anatomy_negative = "deformed body, distorted anatomy, extra limbs, missing limbs, extra arms, missing arms, extra legs, missing legs, fused limbs, disconnected limbs, floating limbs, asymmetrical body, disproportionate limbs, twisted torso, broken spine, impossible pose, malformed body, mutated anatomy, gross proportions, extra heads, conjoined, siamese, bad anatomy, cropped body, out of frame body, duplicate person, clone"
@@ -1063,6 +1063,8 @@ class OfflineImageGenerator:
                 base = self._KREA2_SEQUENTIAL_VRAM_MB
             elif family == "sdxl" and self._sdxl_offloads():
                 base = int(_image_limits_for("sdxl")["vram_mb_offload"])
+            elif self._limits_row(model_id).get("vram_mb"):
+                base = int(self._limits_row(model_id)["vram_mb"])
             else:
                 base = self._FAMILY_VRAM_MB.get(family, 4000)
         extra_mp = self._extra_megapixels(width, height)
@@ -1083,6 +1085,8 @@ class OfflineImageGenerator:
             family = self._model_family(model_id)
             if family == "flux":
                 base = float(_image_limits_for("flux")["ram_gb"])
+            elif self._limits_row(model_id).get("ram_gb"):
+                base = float(self._limits_row(model_id)["ram_gb"])
             else:
                 base = self._FAMILY_RAM_GB.get(family, 6.0)
         extra_mp = self._extra_megapixels(width, height)
