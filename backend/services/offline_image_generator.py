@@ -2875,16 +2875,25 @@ Negative Prompt: {negative_prompt}""",
                             {} if request.num_inference_steps == 2
                             else {"intermediate_timesteps": None}
                         )
-                        return self._pipeline(
-                            prompt=pos_prompt,
-                            width=request.width,
-                            height=request.height,
-                            num_inference_steps=request.num_inference_steps,
-                            guidance_scale=request.guidance_scale,
-                            generator=generator,
-                            **sana_kwargs,
-                            **_watchdog_kwargs,
-                        )
+                        # cuDNN's autotune cache is per thread and every batch runs on a
+                        # new one, so benchmark mode re-tuned the DC-AE convolutions on
+                        # each render: 37 s instead of 9 s for the 0.6B on a GTX 1080,
+                        # and 1.9 GB more peak memory (2026-10-08).
+                        bench = torch.backends.cudnn.benchmark
+                        torch.backends.cudnn.benchmark = False
+                        try:
+                            return self._pipeline(
+                                prompt=pos_prompt,
+                                width=request.width,
+                                height=request.height,
+                                num_inference_steps=request.num_inference_steps,
+                                guidance_scale=request.guidance_scale,
+                                generator=generator,
+                                **sana_kwargs,
+                                **_watchdog_kwargs,
+                            )
+                        finally:
+                            torch.backends.cudnn.benchmark = bench
                     if family in ('zimage', 'krea2'):
                         self._ensure_flow_scheduler(family)
                         return self._pipeline(
