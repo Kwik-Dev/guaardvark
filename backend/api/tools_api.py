@@ -59,6 +59,52 @@ def _extract_and_save_screenshots(result):
     return screenshot_urls
 
 
+def _tool_summary(tool) -> Dict[str, Any]:
+    """The fields the Tools page shows for one tool.
+
+    requires_approval is the gate chat honours with an approval card; the
+    page shows it because POST /execute runs such a tool without that card.
+    """
+    return {
+        "name": tool.name,
+        "description": tool.description,
+        "requires_approval": bool(getattr(tool, "requires_approval", False)),
+        "parameters": {
+            name: {
+                "type": param.type,
+                "required": param.required,
+                "description": param.description,
+                "default": param.default
+            }
+            for name, param in (tool.parameters or {}).items()
+        },
+    }
+
+
+def _registry_categories() -> Dict[str, str]:
+    """The category each tool was registered under (tool name -> category).
+
+    Read without triggering registration, so a stand-in registry in tests
+    sees an empty map and falls back to the name guess.
+    """
+    try:
+        from backend.tools.tool_registry_init import _tool_categories
+        return dict(_tool_categories)
+    except (ImportError, AttributeError):
+        return {}
+
+
+def _guess_category(tool_name: str) -> str:
+    """Fallback for a tool registered without a category."""
+    if "wordpress" in tool_name or "content" in tool_name:
+        return "content"
+    if "csv" in tool_name or "file" in tool_name or "bulk" in tool_name:
+        return "generation"
+    if "code" in tool_name or "analyze" in tool_name:
+        return "code"
+    return "other"
+
+
 def _get_tool_registry():
     """Get the tool registry from app or initialize"""
     # Try to get from app instance first
@@ -87,6 +133,7 @@ def list_tools():
             {
                 "name": "generate_wordpress_content",
                 "description": "Generate WordPress CSV content...",
+                "requires_approval": false,
                 "parameters": {...}
             }
         ],
@@ -105,19 +152,7 @@ def list_tools():
         for tool_name in registry.list_tools():
             tool = registry.get_tool(tool_name)
             if tool:
-                tools.append({
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": {
-                        name: {
-                            "type": param.type,
-                            "required": param.required,
-                            "description": param.description,
-                            "default": param.default
-                        }
-                        for name, param in tool.parameters.items()
-                    }
-                })
+                tools.append(_tool_summary(tool))
 
         return jsonify({
             "success": True,
@@ -168,17 +203,7 @@ def get_tool_schema(tool_name: str):
         return jsonify({
             "success": True,
             "tool": {
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": {
-                    name: {
-                        "type": param.type,
-                        "required": param.required,
-                        "description": param.description,
-                        "default": param.default
-                    }
-                    for name, param in tool.parameters.items()
-                },
+                **_tool_summary(tool),
                 "xml_schema": tool.get_schema(),
                 "json_schema": tool.get_json_schema()
             }
@@ -624,7 +649,8 @@ def serve_screenshot(filename):
 @tools_bp.route("/categories", methods=["GET"])
 def get_tool_categories():
     """
-    Get tools organized by category.
+    Get tools organized by the category each was registered under
+    (backend/tools/tool_registry_init.py), e.g. "media" or "outreach".
 
     Response:
     {
@@ -632,7 +658,8 @@ def get_tool_categories():
         "categories": {
             "content": ["generate_wordpress_content", ...],
             "generation": ["generate_bulk_csv", ...],
-            "code": ["codegen", ...]
+            "code": ["codegen", ...],
+            "media": ["media_play", ...]
         }
     }
     """
@@ -644,26 +671,13 @@ def get_tool_categories():
                 "error": "Tool registry not initialized"
             }), 500
 
-        # Categorize tools based on naming patterns
-        categories = {
-            "content": [],
-            "generation": [],
-            "code": [],
-            "other": []
-        }
-
+        # The category each tool was registered under; a name guess only for
+        # a tool that registered without one.
+        registered = _registry_categories()
+        categories: Dict[str, list] = {}
         for tool_name in registry.list_tools():
-            if "wordpress" in tool_name or "content" in tool_name:
-                categories["content"].append(tool_name)
-            elif "csv" in tool_name or "file" in tool_name or "bulk" in tool_name:
-                categories["generation"].append(tool_name)
-            elif "code" in tool_name or "analyze" in tool_name:
-                categories["code"].append(tool_name)
-            else:
-                categories["other"].append(tool_name)
-
-        # Remove empty categories
-        categories = {k: v for k, v in categories.items() if v}
+            category = registered.get(tool_name) or _guess_category(tool_name)
+            categories.setdefault(category, []).append(tool_name)
 
         return jsonify({
             "success": True,
