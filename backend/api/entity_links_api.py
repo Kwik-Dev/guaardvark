@@ -6,6 +6,7 @@ import logging
 from flask import Blueprint, request, jsonify, current_app
 from sqlalchemy.exc import SQLAlchemyError
 from backend.models import db, Document, Task, Client, Project
+from backend.tools.knowledge_tools import _contains
 
 logger = logging.getLogger(__name__)
 
@@ -216,17 +217,19 @@ def get_linkable_entities(entity_type):
         
         model = ENTITY_MODELS[entity_type]
         
-        # Apply filters if provided
+        # Apply filters if provided. The term is matched literally: '%', '_'
+        # and '\' in it are escaped, not LIKE wildcards.
         search_term = request.args.get("search", "").strip()
         query = db.session.query(model)
-        
+
         if search_term:
+            pattern = _contains(search_term)
             if entity_type == "document":
-                query = query.filter(model.filename.ilike(f"%{search_term}%"))
+                query = query.filter(model.filename.ilike(pattern, escape="\\"))
             elif entity_type in ["task", "project"]:
-                query = query.filter(model.name.ilike(f"%{search_term}%"))
+                query = query.filter(model.name.ilike(pattern, escape="\\"))
             elif entity_type == "client":
-                query = query.filter(model.name.ilike(f"%{search_term}%"))
+                query = query.filter(model.name.ilike(pattern, escape="\\"))
         
         entities = query.limit(100).all()  # Limit results for performance
         
