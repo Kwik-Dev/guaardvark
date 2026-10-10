@@ -1885,7 +1885,8 @@ def start_bulk_import():
         client_id = data.get("client_id")
         website_id = data.get("website_id")
         reindex_missing = data.get("reindex_missing", True)
-        force_copy = data.get("force_copy", False)
+        # Copy unless the caller asks to move; a move empties the source folder.
+        force_copy = data.get("force_copy", True)
         dry_run = data.get("dry_run", False)
 
         # Submit to background task via Celery

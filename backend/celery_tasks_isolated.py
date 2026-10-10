@@ -669,7 +669,7 @@ def _skipped_summary(skipped):
 
 def bulk_import_documents_task(job_id, source_path, target_folder, project_id=None, 
                                client_id=None, website_id=None, reindex_missing=True, 
-                               force_copy=False, dry_run=False):
+                               force_copy=True, dry_run=False):
     """
     Bulk import documents from a source directory without Flask dependencies.
     
@@ -681,7 +681,7 @@ def bulk_import_documents_task(job_id, source_path, target_folder, project_id=No
         client_id: Optional client ID
         website_id: Optional website ID
         reindex_missing: Whether to reindex documents that aren't indexed
-        force_copy: Whether to copy files (vs move)
+        force_copy: Copy files (default) rather than move them out of the source
         dry_run: If True, don't actually import, just report what would be done
     
     Returns:

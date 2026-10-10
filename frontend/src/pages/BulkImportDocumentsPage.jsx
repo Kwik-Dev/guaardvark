@@ -62,7 +62,7 @@ const initialForm = {
   clientId: null,
   websiteId: null,
   reindexMissing: true,
-  forceCopy: false,
+  forceCopy: true,
   dryRun: false,
 };
 
@@ -454,7 +454,7 @@ const BulkImportDocumentsPage = () => {
             />
             <Typography variant="caption" color="text.secondary" sx={{ pl: 4 }}>
               {form.forceCopy
-                ? "Each file is copied into Documents; the source folder is left as it is."
+                ? "Each file is copied into Documents; the source folder is left as it is (the files take disk space twice)."
                 : "Each file is moved out of the source folder into Documents. Tick to copy and leave the source folder as it is."}
             </Typography>
             <FormControlLabel

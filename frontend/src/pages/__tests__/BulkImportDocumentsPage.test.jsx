@@ -47,24 +47,24 @@ afterEach(() => {
 });
 
 describe("BulkImportDocumentsPage options", () => {
-  it("says files are moved unless copying is ticked, on the form and in the confirmation", async () => {
+  it("copies by default and says so; unticked, it says files are moved", async () => {
     renderPage();
     const copyBox = screen.getByLabelText("Copy files instead of moving them");
-    expect(copyBox).not.toBeChecked();
-    expect(screen.getByText(/moved out of the source folder into Documents/)).toBeInTheDocument();
+    expect(copyBox).toBeChecked();
+    expect(screen.getByText(/the source folder is left as it is \(the files take disk space twice\)/)).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText(/Source Directory/), { target: { value: "/data/in" } });
-    fireEvent.click(screen.getByRole("button", { name: "Start Import" }));
-    expect(await screen.findByText("Files are moved out of the source folder.")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-
-    fireEvent.click(copyBox);
-    expect(copyBox).toBeChecked();
-    expect(screen.getByText(/the source folder is left as it is\.$/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Start Import" }));
     expect(
       await screen.findByText("Files are copied; the source folder is left as it is."),
     ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    fireEvent.click(copyBox);
+    expect(copyBox).not.toBeChecked();
+    expect(screen.getByText(/moved out of the source folder into Documents/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Start Import" }));
+    expect(await screen.findByText("Files are moved out of the source folder.")).toBeInTheDocument();
   });
 });
 

@@ -279,3 +279,11 @@ def test_source_inside_guaardvark_data_is_refused_except_uploads(tmp_path, monke
 
     allowed = harness.run(FakeSession(), source_path=str(data / "uploads" / "old"), dry_run=True)
     assert allowed["files"] == ["a.txt"]
+
+
+def test_copy_is_the_default_on_the_task_and_the_route():
+    import inspect
+    assert inspect.signature(cti.bulk_import_documents_task).parameters["force_copy"].default is True
+    from backend.api import files_api
+    src = inspect.getsource(files_api.start_bulk_import)
+    assert 'data.get("force_copy", True)' in src
