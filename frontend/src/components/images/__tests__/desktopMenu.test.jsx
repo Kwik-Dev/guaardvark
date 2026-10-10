@@ -31,3 +31,25 @@ describe("Media Library desktop menu", () => {
     expect(onArrangeWindows).toHaveBeenCalled();
   });
 });
+
+describe("Media Library folder menu", () => {
+  it("names the colour swatches in plain words and still stores the hex", () => {
+    const onColorChange = vi.fn();
+    render(
+      <ImagesContextMenu
+        anchorPosition={{ top: 5, left: 5 }}
+        onClose={() => {}}
+        onColorChange={onColorChange}
+        contextType="folder"
+        folderColor="#A5D6A7"
+      />,
+    );
+    for (const name of ["Blue", "Green", "Orange", "Red", "Purple", "Cyan", "Coral", "Grey"]) {
+      expect(screen.getByLabelText(name)).toBeTruthy();
+    }
+    expect(screen.queryByLabelText("#90CAF9")).toBeNull();
+
+    fireEvent.click(screen.getByLabelText("Blue"));
+    expect(onColorChange).toHaveBeenCalledWith("#90CAF9");
+  });
+});
