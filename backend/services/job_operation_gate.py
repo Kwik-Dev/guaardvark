@@ -72,17 +72,33 @@ class SystemLoadBusyError(GpuBusyError):
         self.detail = detail
 
 
-# How a queue panel names the job holding the GPU. Batch ids carry their kind as a
-# prefix (output_registration.BATES_PREFIXES, the blueprint/upload image batches);
-# any other holder is named by the JobKind the gate recorded.
+# How a queue panel names the job holding the GPU. VIDEO_RENDER is the general
+# GPU-exclusive kind (stills, edits, songs and storyboards claim it too), so the
+# kind alone does not say what is rendering; the native id does. Batch ids carry
+# their kind as a prefix (output_registration.BATES_PREFIXES, the blueprint/upload
+# image batches); the other prefixes are the ids each caller passes to
+# gpu_session. An id no prefix matches is named by the kind, and VIDEO_RENDER
+# only as "another job". Mirrored by describeGpuHolder in useJobsGate.js.
 _HOLDER_ID_LABELS = (
     ("VideoBatch", "Video Gen"),
     ("ImageBatch", "Image Gen"),
     ("blueprint_", "Image Gen"),
     ("upload_", "Image Gen"),
+    ("stills_", "a picture"),            # stills_pipeline (chat, CLI, MCP, batch)
+    ("gen_", "a picture"),               # offline_image_generator direct
+    ("chat_edit_", "a picture edit"),    # image_tools / comfyui_image_generator
+    ("chat_anim_", "an animation"),      # image_tools
+    ("infographic_", "an infographic"),  # infographic_generator
+    ("char_", "character pictures"),     # character_generation_tasks
+    ("storyboard_", "storyboard pictures"),  # production_swarm_tasks
+    ("prod_", "a Film Crew render"),         # production_swarm_tasks
+    ("mv_", "a music video"),            # music_video_tasks / music_video_api
+    ("video:music3:", "a song"),         # comfyui_music_generator
+    ("editor_", "a video render"),       # video_render_tasks
+    ("router:", "a video render"),       # video_generation_router
 )
 _HOLDER_KIND_LABELS = {
-    "video_render": "a video render",
+    "video_render": "another job",
     "training": "model training",
     "lora_train": "LoRA training",
 }
