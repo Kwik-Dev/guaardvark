@@ -2532,7 +2532,7 @@ const ChatPage = () => {
       )}
       {showBudget && (
         <Box sx={{ p: 1, bgcolor: 'warning.light', fontSize: '0.8em', border: '1px solid #ff9800' }}>
-          [Phase 2.1] Agent Budget Surface: {budgetTelemetry.remaining || '?'} / {budgetTelemetry.total || 20} remaining (from TierTelemetry) — using ENTITY patterns from queryClassifier for richer context to tighten budget awareness.
+          Agent mode is on: each message is a task the assistant carries out with its tools, up to {budgetTelemetry.total || 20} steps per message; the last task had {budgetTelemetry.remaining ?? '?'} steps left.
         </Box>
       )}
       <ChatInput
