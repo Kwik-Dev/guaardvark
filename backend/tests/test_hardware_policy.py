@@ -13,8 +13,8 @@ def test_torch_channel_hopper_is_cu128():
     assert hp.torch_channel({"vendor": "nvidia", "compute_cap": "9.0"}) == "cu128"
 
 
-def test_torch_channel_ampere_ada_is_cu121():
-    assert hp.torch_channel({"vendor": "nvidia", "compute_cap": "8.9"}) == "cu121"
+def test_torch_channel_ampere_ada_is_cu124():
+    assert hp.torch_channel({"vendor": "nvidia", "compute_cap": "8.9"}) == "cu124"
 
 
 def test_torch_channel_turing_is_cu118():
