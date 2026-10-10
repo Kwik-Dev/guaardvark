@@ -538,22 +538,35 @@ class PluginManager:
             self.__dict__.setdefault('_instance_problems', {}).pop(plugin_id, None)
 
     _WARNING_LINE = re.compile(r"^\s*warning:\s*(.+?)\s*$", re.IGNORECASE)
+    # A warning that still holds once the start completed says what will not
+    # work. Anything else the script went on to verify or retry: "returned
+    # non-zero (continuing to verify)", "backend not reachable (bot will start
+    # anyway)", the health wait the manager repeats itself.
+    _LASTING_WARNING = re.compile(
+        r"will (fail|return error|be unavailable)|unavailable|until .*installed",
+        re.IGNORECASE,
+    )
 
     def _note_start_warnings(self, plugin_id: str, stdout: str) -> None:
         """Keep what a start script warned about, for the card.
 
         A start script reports a missing optional tool as a ``Warning:`` line
         and exits 0 (video_editor: melt, auto-editor), so the plugin runs and
-        the page said Running with nothing more. Lines about the health
-        endpoint are skipped: the manager waits on it itself, with the
-        manifest's own timeout.
+        the page said Running with nothing more. Only lasting warnings are
+        kept (see _LASTING_WARNING), and a path in one is shown in display
+        form, never absolute.
         """
+        from backend.utils.display_paths import display_text
+
         warnings: List[str] = []
         for line in (stdout or "").splitlines():
             match = self._WARNING_LINE.match(line)
             if not match or "health" in line.lower():
                 continue
-            warnings.append(match.group(1))
+            text = match.group(1)
+            if not self._LASTING_WARNING.search(text):
+                continue
+            warnings.append(display_text(text))
         store = self.__dict__.setdefault('_start_warnings', {})
         if warnings:
             store[plugin_id] = " ".join(warnings)

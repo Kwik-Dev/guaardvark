@@ -24,12 +24,20 @@ START_OUTPUT = (
     "Starting Video Editor...\n"
     "Warning: Health endpoint not responsive after 30s\n"
 )
+# Warnings a start script resolves or retries before it exits 0, as
+# audio_foundry/start.sh and discord/start.sh print them.
+TRANSIENT_OUTPUT = (
+    "Warning: install_pytorch.sh returned non-zero (continuing to verify)\n"
+    "Warning: {root}/scripts/install_pytorch.sh missing — cannot repair torch/CUDA mismatch\n"
+    "Warning: Backend not reachable at localhost:5000 (bot will start anyway)\n"
+)
 
 
 @pytest.fixture
 def plugins_dir(tmp_path, monkeypatch):
     monkeypatch.delenv("GUAARDVARK_PROFILE_PLUGIN_DEFAULTS", raising=False)
     monkeypatch.setenv("GUAARDVARK_SKIP_DEP_RECONCILER", "1")
+    monkeypatch.setenv("GUAARDVARK_ROOT", str(tmp_path))
     import backend.extensions as _ext
     monkeypatch.setattr(_ext, "plugin_dirs", lambda *_a, **_k: [])
     root = tmp_path / "plugins"
@@ -76,6 +84,30 @@ def test_missing_tool_warning_is_the_status_message(plugins_dir, service):
     assert "Health endpoint" not in message
     assert "Resolved melt" not in message
     assert manager.get_plugin_info(PLUGIN_ID)["status_message"] == message
+
+
+def test_warnings_the_script_went_on_to_resolve_are_dropped(plugins_dir, service, tmp_path):
+    service["stdout"] = TRANSIENT_OUTPUT.format(root=tmp_path) + "Starting...\n"
+    manager = PluginManager(registry=PluginRegistry(plugins_dir=plugins_dir))
+
+    manager.start_plugin(PLUGIN_ID)
+
+    assert "status_message" not in _listing(manager)
+
+
+def test_a_lasting_warning_keeps_no_absolute_path(plugins_dir, service, tmp_path):
+    service["stdout"] = (
+        f"Warning: venv-music torch import failed — ACE-Step music gen will be unavailable\n"
+        f"Warning: melt not found at {tmp_path}/plugins/video_editor/melt — render-to-MP4 endpoint will return error until installed.\n"
+    )
+    manager = PluginManager(registry=PluginRegistry(plugins_dir=plugins_dir))
+
+    manager.start_plugin(PLUGIN_ID)
+
+    message = _listing(manager)["status_message"]
+    assert "ACE-Step music gen will be unavailable" in message
+    assert "./plugins/video_editor/melt" in message
+    assert str(tmp_path) not in message
 
 
 def test_a_clean_start_has_no_message(plugins_dir, service):
