@@ -236,15 +236,19 @@ def _capture_memory(app, message: str, session_id: str, project_id=None) -> None
 
     The engine runs memory_capture right after it saves the user message; a
     brain path that saves the turn itself runs the same capture, so a fact
-    the person asked to be remembered is kept whichever tier answered. Best
-    effort, like _persist_turn: a failure is logged and the reply goes on.
+    the person asked to be remembered is kept whichever tier answered. Only
+    the explicit forms ("remember that", "from now on", "for future
+    reference"): these paths carry task requests, and "my goal is to …" is
+    not a fact to file. Best effort, like _persist_turn: a failure is logged
+    and the reply goes on.
     """
     if not app or not message:
         return
     try:
         from backend.services.memory_capture import capture_from_message
         with app.app_context():
-            capture_from_message(message, session_id=session_id, project_id=project_id)
+            capture_from_message(message, session_id=session_id, project_id=project_id,
+                                 explicit_only=True)
     except Exception:
         logger.exception("Chat memory auto-capture failed for session %s", session_id)
 
@@ -706,6 +710,11 @@ class AgentBrain:
                         db.session.commit()
                     except Exception:
                         logger.exception("Failed to persist user message in gemma4_direct")
+                # The same memory capture the engine runs after its save, so a
+                # "remember that …" spoken with the agent screen open is kept.
+                if (options or {}).get("persist", True) is not False \
+                        and not (options or {}).get("skip_memory_capture"):
+                    _capture_memory(app, message, session_id, project_id=project_id)
 
             # Delegate straight to the robust execute_task loop
             # Pass the explicit budget (gemma direct counts against the cross-tier cap).

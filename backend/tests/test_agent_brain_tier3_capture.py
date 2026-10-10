@@ -6,7 +6,7 @@ only one the other tiers have. No model, tools or database: the executor
 and the row writer are stand-ins.
 """
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 from flask import Flask
 
@@ -50,7 +50,7 @@ def test_tier3_captures_the_remembered_fact_after_saving_the_turn():
     result, capture, saved = _deliberate({}, project_id=7)
     assert result["tier"] == 3 and result["success"]
     assert saved[0] == ("user", MESSAGE), "the question is saved before the run"
-    capture.assert_called_once_with(MESSAGE, session_id="sess-3", project_id=7)
+    capture.assert_called_once_with(MESSAGE, session_id="sess-3", project_id=7, explicit_only=True)
 
 
 def test_an_unsaved_turn_is_not_captured_either():
@@ -63,6 +63,33 @@ def test_skip_memory_capture_is_honoured_like_the_engine():
     _, capture, saved = _deliberate({"skip_memory_capture": True})
     assert saved[0] == ("user", MESSAGE)
     capture.assert_not_called()
+
+
+def test_screen_direct_runs_the_same_capture_after_its_save():
+    """With the agent screen open the brain saves the turn itself too."""
+    from backend.services.step_budget import StepBudget
+    brain = _brain()
+    fake_acs = MagicMock()
+    fake_acs.execute_task.return_value = SimpleNamespace(reason="completed", success=True, steps=[], run_id="r")
+    captured = MagicMock()
+    with patch("backend.services.local_screen_backend.LocalScreenBackend", MagicMock()), \
+            patch("backend.services.agent_control_service.get_agent_control_service", return_value=fake_acs), \
+            patch.object(AgentBrain, "_narrate_agent_outcome", return_value="ok"), \
+            patch("backend.api.memory_api.get_memories_for_context", return_value=[]), \
+            patch("backend.services.agent_brain._persist_turn"), \
+            patch("backend.services.agent_brain._capture_memory", captured):
+        brain._screen_direct("s1", MESSAGE, {}, lambda *a, **k: None, Flask(__name__),
+                             budget=StepBudget(total=20), project_id=7)
+    captured.assert_called_once_with(ANY, MESSAGE, "s1", project_id=7)
+
+
+def test_only_the_explicit_forms_are_captured_on_the_brain_paths():
+    """"My goal is to …" is a task request on these paths, not a fact to file."""
+    from backend.services.agent_brain import _capture_memory
+    capture = MagicMock()
+    with patch("backend.services.memory_capture.capture_from_message", capture):
+        _capture_memory(Flask(__name__), "my goal is to research local models", "s1")
+    assert capture.call_args.kwargs["explicit_only"] is True
 
 
 def test_a_capture_failure_never_stops_the_answer():

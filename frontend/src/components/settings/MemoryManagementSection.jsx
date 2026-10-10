@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   Box,
   Typography,
@@ -84,6 +84,10 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
   // The API's count of matching rows; null until the first page answers.
   const [total, setTotal] = useState(null);
   const [loadingMore, setLoadingMore] = useState(false);
+  // The search, filters and sort the list on screen was fetched with. Load
+  // more reuses these, not the controls' current values, which only Apply
+  // Filters or Search put into effect.
+  const appliedRef = useRef(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -166,31 +170,35 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
     }
   };
 
-  const memoryUrl = (query, offset, limit) => {
+  const memoryUrl = (applied, limit) => {
     const url = new URL(`${BASE_URL}/memory`, window.location.origin);
-    if (query) url.searchParams.append("search", query);
-    if (filterType) url.searchParams.append("type", filterType);
-    if (filterSource) url.searchParams.append("source", filterSource);
+    if (applied.search) url.searchParams.append("search", applied.search);
+    if (applied.type) url.searchParams.append("type", applied.type);
+    if (applied.source) url.searchParams.append("source", applied.source);
     // "all" asks for every status; without it the API leaves out rows
     // marked wrong.
-    if (filterStatus) url.searchParams.append("status", filterStatus);
-    if (sortMode) url.searchParams.append("sort", sortMode);
+    if (applied.status) url.searchParams.append("status", applied.status);
+    if (applied.sort) url.searchParams.append("sort", applied.sort);
     url.searchParams.append("limit", limit);
-    if (offset) url.searchParams.append("offset", offset);
     return url;
   };
 
-  // Reload from the top, keeping as many rows loaded as were shown so a save
-  // after Load more does not drop the rows the person scrolled to.
-  const fetchMemories = async (query = "", keep = 0) => {
-    setLoading(true);
+  // Always from the top, `rows` rows at most (rounded up to whole pages).
+  // Fetching the whole shown range again, rather than the next offset, is
+  // what keeps a page from skipping a row: an Archive or Wrong click keeps
+  // its row on screen while the server's status filter no longer returns
+  // it, so an offset of the on-screen count would start one row late.
+  const loadRows = async (applied, rows, { quiet = false } = {}) => {
+    if (quiet) setLoadingMore(true);
+    else setLoading(true);
     setError(null);
     try {
-      const limit = Math.max(PAGE_SIZE, Math.ceil(keep / PAGE_SIZE) * PAGE_SIZE);
-      const res = await fetch(memoryUrl(query, 0, limit));
+      const limit = Math.max(PAGE_SIZE, Math.ceil(rows / PAGE_SIZE) * PAGE_SIZE);
+      const res = await fetch(memoryUrl(applied, limit));
       const data = await res.json();
 
       if (data.success) {
+        appliedRef.current = applied;
         setMemories(data.memories);
         setTotal(typeof data.total === "number" ? data.total : data.memories.length);
       } else {
@@ -199,30 +207,29 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
     } catch (err) {
       setError(err.message);
     } finally {
-      setLoading(false);
+      if (quiet) setLoadingMore(false);
+      else setLoading(false);
     }
   };
 
-  const loadMore = async () => {
-    setLoadingMore(true);
-    try {
-      const res = await fetch(memoryUrl(searchQuery, memories.length, PAGE_SIZE));
-      const data = await res.json();
-      if (data.success) {
-        setMemories((prev) => {
-          const seen = new Set(prev.map((m) => m.id));
-          return [...prev, ...data.memories.filter((m) => !seen.has(m.id))];
-        });
-        if (typeof data.total === "number") setTotal(data.total);
-      } else {
-        setError(data.error || "Failed to load more memories");
-      }
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoadingMore(false);
-    }
-  };
+  // Put the controls' values into effect (Search, Apply Filters, mount), and
+  // reload: `keep` rows at least, so a save after Load more does not drop the
+  // rows the person scrolled to.
+  const fetchMemories = (query = "", keep = 0) =>
+    loadRows(
+      { search: query, type: filterType, source: filterSource, status: filterStatus, sort: sortMode },
+      keep,
+    );
+
+  const applied = () =>
+    appliedRef.current || { search: "", type: "", source: "", status: filterStatus, sort: sortMode };
+
+  // One page more than is on screen, with what the list was fetched with.
+  const loadMore = () => loadRows(applied(), memories.length + PAGE_SIZE, { quiet: true });
+
+  // After a save: the shown range again (`extra` rows more), same query, so
+  // the total is current and a new row has a place to appear.
+  const reload = (extra = 0) => loadRows(applied(), memories.length + extra);
 
   useEffect(() => {
     fetchMemories();
@@ -358,7 +365,7 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
         setOpenAdd(false);
         setNewContent("");
         setNewTags("");
-        fetchMemories(searchQuery, memories.length + 1); // refresh list
+        reload(1); // refresh list and total
       } else {
         alert(data.error || "Failed to add memory");
       }
@@ -801,7 +808,7 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
           if (updated?.id) {
             setMemories((prev) => prev.map((m) => (m.id === updated.id ? updated : m)));
           } else {
-            fetchMemories(searchQuery, memories.length);
+            reload();
           }
         }}
       />

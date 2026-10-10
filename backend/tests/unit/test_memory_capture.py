@@ -273,3 +273,23 @@ def test_engine_call_site_is_exception_safe(monkeypatch):
 
     engine_call_site("remember that the sky is blue")
     assert logged["hit"] is True
+
+
+@pytest.mark.parametrize(
+    "message, stored",
+    [
+        ("remember that the sky is blue", True),
+        ("from now on use dark mode", True),
+        ("for future reference the API lives in settings", True),
+        ("note that the build takes ten minutes", False),
+        ("my goal is to research local models", False),
+        ("our problem is the build keeps failing", False),
+    ],
+)
+def test_explicit_only_keeps_just_the_asked_for_forms(app, message, stored):
+    """The brain paths (Tier 3, screen-direct) carry task requests, so they
+    pass explicit_only and "my X is Y" / "note that" are left alone there."""
+    mem_id = capture_from_message(message, session_id="s1", explicit_only=True)
+    assert (mem_id is not None) is stored
+    with app.app_context():
+        assert (AgentMemory.query.count() == 1) is stored
