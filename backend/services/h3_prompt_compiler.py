@@ -476,6 +476,53 @@ CLIP_ROLES = {
     "continue": ("fully_preserved", "video continuation", "the new video picks up where it ends"),
 }
 AUDIO_ROLES = ("voice", "music", "sound")
+# A quoted line after a speech verb (or a colon) is dialogue. The model speaks
+# a line it reads as <d>[Language] ...</d> under a speaker id; a bare quotation
+# in the description came out as speech-like gibberish in the voice before the
+# line itself (2026-10-09/10 reference renders).
+_SPEECH_VERBS = (r"says|said|say|asks|asked|replies|replied|answers|answered|shouts|shouted|"
+                 r"whispers|whispered|exclaims|exclaimed|announces|announced|calls out|sings|adds")
+_QUOTED_LINE = re.compile(
+    r"(?P<lead>,?\s*(?:and\s+|then\s+)*\b(?:" + _SPEECH_VERBS + r")\b\s*[:,]?\s*|:\s*)"
+    r"[\"“](?P<text>[^\"”]+)[\"”]",
+    re.IGNORECASE,
+)
+
+
+def _split_dialogue(prompt: str, names: list, voices: list = ()) -> tuple:
+    """(description without the spoken lines, [(speaker, text)]).
+
+    Only a quote right after a speech verb or a colon is a spoken line; a sign
+    that "reads" a word stays in the description. The speaker is the nearest
+    name in the same sentence before the line, a name with a voice reference
+    first ("Inside the cabin, the chef sets the apple down and says: ..." is
+    the chef's line), else the only voice reference's speaker."""
+    voice_keys = {v.lower() for v in voices if v}
+    lines, pieces, pos = [], [], 0
+    for m in _QUOTED_LINE.finditer(prompt):
+        before = prompt[:m.start()]
+        sentence = re.split(r"[.!?][\"”']?(?:\s|$)", before)[-1].lower()
+        hits = []
+        for name in names:
+            found = [h.start() for h in re.finditer(rf"\b{re.escape(name.lower())}\b", sentence)]
+            if found:
+                hits.append((name.lower() in voice_keys, max(found), name))
+        if hits:
+            speaker = max(hits)[2]
+        else:
+            speaker = next(iter(voices), "") if len(voice_keys) == 1 else ""
+        lines.append((speaker, m.group("text").strip()))
+        # The tagged line names its speaker, so a clause that was only the
+        # name ("Tom replies, ...") goes with it.
+        clause = re.split(r"[.!?,;][\"”']?(?:\s|$)", before)[-1]
+        cut = m.start() - len(clause) if speaker and clause.strip().lower() == speaker.lower() else m.start()
+        pieces.append(prompt[pos:cut])
+        pos = m.end()
+    pieces.append(prompt[pos:])
+    desc = re.sub(r"\s{2,}", " ", "".join(pieces)).strip()
+    desc = re.sub(r"\s+([.,;])", r"\1", desc)
+    desc = re.sub(r"(?:,|\band\b|\bthen\b|\s)+$", "", desc).strip()
+    return desc, lines
 
 
 def intent_from_references(prompt: str, duration_s: float, refs: dict, *, style: Optional[str] = None,
@@ -538,29 +585,42 @@ def intent_from_references(prompt: str, duration_s: float, refs: dict, *, style:
             audio_refs.append(H3AudioRef(index=len(audio_refs) + 1, role="reference",
                                          description=f"the soundtrack of <Video {k}>"))
 
+    # Spoken lines leave the description and become tagged dialogue; a voice
+    # reference then names its speaker's id, as Film Crew's scenes do.
+    voices = [(a.get("speaker") or "").strip() for a in audios if a.get("role") == "voice"]
+    named = [subj.description for subj in by_name.values()]
+    description, spoken = _split_dialogue(prompt or "", named, voices)
+    speaker_ids: dict = {}
+    for speaker, _ in spoken:
+        speaker_ids.setdefault(speaker.lower(), f"(S{len(speaker_ids) + 1})")
+
     music = "N/A"
     for aud in audios:
         index = len(audio_refs) + 1
         role = aud.get("role") if aud.get("role") in AUDIO_ROLES else "sound"
-        description = (aud.get("description") or "").strip()
+        description_a = (aud.get("description") or "").strip()
         if role == "voice":
             speaker = (aud.get("speaker") or "").strip()
             subj = by_name.get(speaker.lower()) if speaker else None
-            audio_refs.append(H3AudioRef(index=index, role="reference", description=description,
-                                         speaker=f"<Subject {subj.id}>" if subj else (speaker or "the speaker")))
+            sid = speaker_ids.get(speaker.lower()) if speaker else None
+            who = f"<Subject {subj.id}>" if subj else (speaker or "the speaker")
+            audio_refs.append(H3AudioRef(index=index, role="reference", description=description_a,
+                                         speaker=f"{who} {sid}" if sid else who))
             task_types.append("audio reference")
         elif role == "music":
             audio_refs.append(H3AudioRef(index=index, role="fully_copy",
-                                         description=description or "the music, used as is"))
+                                         description=description_a or "the music, used as is"))
             music = f"<Audio {index}> is reused as the complete score."
             task_types.append("audio reuse")
         else:
             audio_refs.append(H3AudioRef(index=index, role="reference",
-                                         description=description or "the sound the scene should match"))
+                                         description=description_a or "the sound the scene should match"))
             task_types.append("audio reference")
 
     opening = STYLE_OPENINGS.get((style or "").lower(), "") if style and style != "none" else ""
-    shot = H3Shot(description=(prompt or "").strip(), camera=_camera_from_motion(motion_strength))
+    shot = H3Shot(description=description, camera=_camera_from_motion(motion_strength),
+                  dialogue=[H3Dialogue(speaker=speaker or "the character", text=text, lang=normalize_language(language))
+                            for speaker, text in spoken])
     for subj in by_name.values():
         shot.description = re.sub(rf"\b{re.escape(subj.description)}\b", f"<Subject {subj.id}>",
                                   shot.description, flags=re.IGNORECASE)
