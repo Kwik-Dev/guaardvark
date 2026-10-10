@@ -45,6 +45,7 @@ import { getLanguageFromFilename } from "../../utils/languageDetector";
 import { revealEditorLine } from "./codeEditorNav";
 import { createAiHoverProvider, readAiHoverPreference, writeAiHoverPreference } from "./aiHover";
 import { saveTargetFor } from "./tabOrigin";
+import { bindEditorActions } from "./editorBindings";
 
 // Monaco command behind the lightbulb actions (Fix with AI, Explain, Optimize):
 // each sends the lines under the marker or selection to the chat card.
@@ -130,6 +131,10 @@ const CodeEditorCard = React.forwardRef(
       ? openTabs[activeTabIndex]
       : openTabs && openTabs.length > 0 ? openTabs[0] : null;
     currentTabRef.current = currentTab;
+
+    // Monaco's onMount runs once per editor instance; Ctrl+S reads this ref so
+    // it saves the tab showing now, not the one open when the editor mounted.
+    const handleSaveRef = useRef(null);
 
     // Create preview HTML with theme styles
     const getPreviewContent = useCallback(() => {
@@ -265,14 +270,9 @@ ${currentTab.content}
         tabCompletion: "on",
       });
 
-      // Add keyboard shortcuts
-      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
-        handleSave();
-      });
-
       // Hover provider for AI explanations: only when the tab menu's "AI hover
       // explanations" is on, one request per word (see aiHover.js).
-      monaco.languages.registerHoverProvider(currentTab?.language || 'javascript', {
+      monaco.languages.registerHoverProvider(currentTabRef.current?.language || 'javascript', {
         provideHover: createAiHoverProvider({
           isEnabled: () => aiHoverEnabledRef.current,
           explain: codeIntelligenceService.analyzeCodeIntelligent,
@@ -282,7 +282,7 @@ ${currentTab.content}
       });
 
       // Lightbulb actions: each hands the lines in range to the chat card.
-      monaco.languages.registerCodeActionProvider(currentTab?.language || 'javascript', {
+      monaco.languages.registerCodeActionProvider(currentTabRef.current?.language || 'javascript', {
         provideCodeActions: async (model, range, context) => {
           const actions = [];
           const problems = (context.markers || []).map((m) => m.message);
@@ -311,58 +311,12 @@ ${currentTab.content}
         }
       });
 
-      // Register Chat context menu actions (appear in Monaco's right-click menu)
-      editor.addAction({
-        id: 'chat.ask',
-        label: 'Ask Chat',
-        contextMenuGroupId: '9_chat',
-        contextMenuOrder: 1,
-        precondition: 'editorHasSelection',
-        run: (ed) => {
-          const sel = ed.getSelection();
-          const text = ed.getModel().getValueInRange(sel);
-          if (text && onChatAction) onChatAction('ask', text, currentTab?.filePath);
-        }
-      });
-
-      editor.addAction({
-        id: 'chat.fix',
-        label: 'Fix This',
-        contextMenuGroupId: '9_chat',
-        contextMenuOrder: 2,
-        precondition: 'editorHasSelection',
-        run: (ed) => {
-          const sel = ed.getSelection();
-          const text = ed.getModel().getValueInRange(sel);
-          if (text && onChatAction) onChatAction('fix', text, currentTab?.filePath);
-        }
-      });
-
-      editor.addAction({
-        id: 'chat.explain',
-        label: 'Explain',
-        contextMenuGroupId: '9_chat',
-        contextMenuOrder: 3,
-        keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyE],
-        precondition: 'editorHasSelection',
-        run: (ed) => {
-          const sel = ed.getSelection();
-          const text = ed.getModel().getValueInRange(sel);
-          if (text && onChatAction) onChatAction('explain', text, currentTab?.filePath);
-        }
-      });
-
-      editor.addAction({
-        id: 'chat.addToChat',
-        label: 'Add to Chat',
-        contextMenuGroupId: '9_chat',
-        contextMenuOrder: 4,
-        precondition: 'editorHasSelection',
-        run: (ed) => {
-          const sel = ed.getSelection();
-          const text = ed.getModel().getValueInRange(sel);
-          if (text && onChatAction) onChatAction('add', text, currentTab?.filePath);
-        }
+      // Ctrl+S and the right-click chat actions read the active tab and their
+      // handlers through refs: onMount runs once per editor while tabs change.
+      bindEditorActions(editor, monaco, {
+        getTab: () => currentTabRef.current,
+        save: () => handleSaveRef.current?.(),
+        chatAction: (action, text, filePath) => onChatActionRef.current?.(action, text, filePath),
       });
 
       // Add real-time context tracking listeners
@@ -387,7 +341,7 @@ ${currentTab.content}
           clearTimeout(contextUpdateTimeoutRef.current);
         }
       };
-    }, [currentTab, updateEditorContext, onEditorContextChange]);
+    }, [updateEditorContext, onEditorContextChange]);
 
     // Not bound to a key: the completion it fetches is never shown, so Ctrl+Space
     // stays Monaco's own suggestion list.
@@ -642,6 +596,7 @@ ${currentTab.content}
         errorProcess("save-file", err.message);
       }
     }, [currentTab, activeTabIndex, setOpenTabs, startProcess, completeProcess, errorProcess]);
+    handleSaveRef.current = handleSave;
 
     const handleTabChange = useCallback((event, newValue) => {
       setActiveTabIndex(newValue);
