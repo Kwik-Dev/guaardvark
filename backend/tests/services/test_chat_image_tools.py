@@ -448,3 +448,39 @@ def test_pasted_images_note_for_one_and_several():
         "[The user pasted 3 images. Vision model analysis: "
         "Image 1 of 3: a red barn; Image 3 of 3: a grey cat]"
     )
+
+
+def test_history_returns_every_picture_of_a_multi_picture_turn():
+    """A reload shows all the pictures of a turn, not just the first: the
+    history route flattens ``imageUrls`` out of extra_data like ``imageUrl``."""
+    from flask import Flask
+
+    from backend.api import enhanced_chat_api
+    from backend.models import LLMMessage, LLMSession, db
+
+    urls = ["/api/enhanced-chat/vision/image/a.png", "/api/enhanced-chat/vision/image/b.png"]
+    app = Flask("test_history_multi_picture")
+    app.config.update(TESTING=True, SQLALCHEMY_DATABASE_URI="sqlite:///:memory:",
+                      SQLALCHEMY_TRACK_MODIFICATIONS=False)
+    db.init_app(app)
+    app.register_blueprint(enhanced_chat_api.enhanced_chat_bp)
+    with app.app_context():
+        db.create_all()
+        db.session.add(LLMSession(id="s-pics", user="default"))
+        db.session.flush()
+        db.session.add(LLMMessage(
+            session_id="s-pics", role="user", content="compare these",
+            extra_data={"hasImage": True, "imageUrl": urls[0], "imageUrls": urls,
+                        "messageType": "image_upload"},
+        ))
+        db.session.commit()
+        try:
+            body = app.test_client().get("/api/enhanced-chat/s-pics/history").get_json()
+        finally:
+            db.session.remove()
+            db.drop_all()
+
+    message = body["messages"][0]
+    assert message["imageUrl"] == urls[0]
+    assert message["imageUrls"] == urls
+    assert message["messageType"] == "image_upload"

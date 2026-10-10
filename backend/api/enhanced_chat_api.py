@@ -4861,9 +4861,11 @@ def get_chat_history(session_id: str):
                 "content": msg.content,
                 "timestamp": msg.timestamp.isoformat() if msg.timestamp else None
             }
-            # Flatten extra_data fields into message for frontend rendering
+            # Flatten extra_data fields into message for frontend rendering.
+            # imageUrl is the turn's primary picture; imageUrls lists every
+            # picture of a multi-picture turn, in the order they were attached.
             if msg.extra_data and isinstance(msg.extra_data, dict):
-                for key in ('imageUrl', 'imageFileName', 'messageType',
+                for key in ('imageUrl', 'imageUrls', 'imageFileName', 'messageType',
                             'relatedImageUrl', 'imageAnalysis', 'analysisDetails',
                             'generatedImages', 'agentThinkingSteps',
                             'orchestratorPlan', 'orchestratorPlanId',
