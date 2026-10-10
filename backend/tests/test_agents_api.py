@@ -179,6 +179,34 @@ class TestExecute:
                                                  "context": {"client": "Acme"}})
         assert made[0]["context"] == 'User context: {"client": "Acme"}'
 
+    def test_reply_shows_paths_relative_to_the_install(self, client, monkeypatch, tmp_path):
+        """The Test dialog shows the reply, so a file the agent wrote appears as
+        ./data/outputs/..., not as an absolute path through the home directory."""
+        monkeypatch.setenv("GUAARDVARK_ROOT", str(tmp_path))
+        written = str(tmp_path / "data" / "outputs" / "csv" / "sales.csv")
+
+        class PathyExecutor:
+            def __init__(self, registry, llm, max_iterations=10, agent=None):
+                pass
+
+            def execute(self, message, session_context=""):
+                step = SimpleNamespace(
+                    iteration=1, thoughts="write it",
+                    tool_calls=[{"tool": "generate_csv", "parameters": {"filename": "sales.csv"}}],
+                    observations=[{"tool": "generate_csv", "result": {"output": {"output_path": written}}}],
+                )
+                return SimpleNamespace(final_answer=f"Saved to {written}", iterations=1, success=True,
+                                       error=None, steps=[step])
+
+        monkeypatch.setattr("backend.services.agent_executor.AgentExecutor", PathyExecutor)
+        monkeypatch.setattr("backend.utils.llm_service.get_default_llm", lambda: "active-llm")
+        body = client.post("/api/agents/execute",
+                           json={"agent_id": "research_agent", "message": "make a csv"}).get_json()
+        assert body["result"]["final_answer"] == "Saved to ./data/outputs/csv/sales.csv"
+        observation = body["result"]["steps"][0]["observations"][0]
+        assert observation["result"]["output"]["output_path"] == "./data/outputs/csv/sales.csv"
+        assert str(tmp_path) not in str(body)
+
 
 class TestModelPin:
     """An agent with a model set runs on it at every entry point; unset means the active model."""

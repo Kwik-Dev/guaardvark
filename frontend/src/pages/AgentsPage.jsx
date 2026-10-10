@@ -314,9 +314,14 @@ const AgentsPage = () => {
       <Dialog open={Boolean(testAgent)} onClose={() => setTestAgent(null)} maxWidth="md" fullWidth>
         <DialogTitle>Test {testAgent?.name}</DialogTitle>
         <DialogContent>
-          {isOrchestrator(testAgent) && (
+          {isOrchestrator(testAgent) ? (
             <Alert severity="info" sx={{ mb: 2 }}>
               Shows the plan the orchestrator makes for this message; the steps are not run.
+            </Alert>
+          ) : (
+            <Alert severity="info" sx={{ mb: 2 }}>
+              Run really runs the agent with this message, the same as asking in chat: it uses its tools and may create
+              files in Guaardvark&apos;s outputs folder.
             </Alert>
           )}
           <TextField

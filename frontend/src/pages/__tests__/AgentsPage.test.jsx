@@ -132,6 +132,24 @@ describe("AgentsPage", () => {
     expect(names).toEqual(["Edit", "Test", "Disable", "Copy id", "Reset to default"]);
   });
 
+  it("the Test dialog says a run is real for an agent and plan-only for the orchestrator", async () => {
+    renderPage();
+    await screen.findByText("Web Research Agent");
+    rightClick("research_agent");
+    fireEvent.click(screen.getByRole("menuitem", { name: "Test" }));
+    let dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/really runs the agent/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/may create files/)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    rightClick("orchestrator_agent");
+    fireEvent.click(screen.getByRole("menuitem", { name: "Test" }));
+    dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/the steps are not run/)).toBeInTheDocument();
+    expect(within(dialog).queryByText(/really runs the agent/)).toBeNull();
+  });
+
   it("Disable calls toggleAgent", async () => {
     agentsService.toggleAgent.mockResolvedValue({ success: true, enabled: false,
                                                   agent: { ...AGENTS[0], enabled: false } });
