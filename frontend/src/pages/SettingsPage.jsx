@@ -174,8 +174,11 @@ const SettingsPage = () => {
   const [imageKeepMinutes, setImageKeepMinutes] = useState(0);
   const [imageKeepSaving, setImageKeepSaving] = useState(false);
   // Media stack (stills / cast LoRA train / max quality) — Ollama-picker style
+  // stills_model holds the person's choice, "auto" when nothing was chosen
+  // (the backend's stills_chosen); the picker never shows the filled-in
+  // default as if someone had picked it.
   const [mediaModels, setMediaModelsState] = useState({
-    stills_model: "zimage-turbo",
+    stills_model: "auto",
     cast_train_base: "zimage-turbo",
     max_quality_model: "flux-dev",
     train_profiles: [],
@@ -1239,7 +1242,7 @@ const SettingsPage = () => {
           }
           setMediaModelsState((prev) => ({
             ...prev,
-            stills_model: data.stills_model || prev.stills_model,
+            stills_model: data.stills_chosen || "auto",
             cast_train_base: data.cast_train_base || prev.cast_train_base,
             max_quality_model: data.max_quality_model || prev.max_quality_model,
             character_lora_strength:
@@ -3040,20 +3043,24 @@ const SettingsPage = () => {
             <Select
               labelId="media-stills-label"
               label="Stills"
-              value={mediaModels.stills_model || "zimage-turbo"}
+              value={mediaModels.stills_model || "auto"}
               onChange={(e) =>
                 saveMediaModel("stills_model", e.target.value, "Stills model")
               }
             >
-              {(mediaModels.stills_profiles?.length
-                ? mediaModels.stills_profiles
-                : [
-                    { id: "zimage-turbo", name: "Z-Image Turbo" },
-                    { id: "flux-dev", name: "FLUX.1 Dev" },
-                    { id: "krea2-turbo", name: "Krea 2 Turbo" },
-                    { id: "sdxl-legacy", name: "SDXL (Legacy)" },
-                  ]
-              ).map((p) => (
+              {[
+                // Saves "auto": Auto picks render by card size again, the way
+                // back once a model has been chosen.
+                { id: "auto", name: "Auto (best for this card)" },
+                ...(mediaModels.stills_profiles?.length
+                  ? mediaModels.stills_profiles
+                  : [
+                      { id: "zimage-turbo", name: "Z-Image Turbo" },
+                      { id: "flux-dev", name: "FLUX.1 Dev" },
+                      { id: "krea2-turbo", name: "Krea 2 Turbo" },
+                      { id: "sdxl-legacy", name: "SDXL (Legacy)" },
+                    ]),
+              ].map((p) => (
                 <MenuItem key={p.id} value={p.id}>
                   {p.name || p.id}
                   {p.recommended ? " ★" : ""}

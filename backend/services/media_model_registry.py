@@ -682,6 +682,9 @@ def public_settings_payload() -> dict[str, Any]:
     maxq = get_max_quality_model_setting()
     return {
         "stills_model": stills,
+        # The choice itself, None when nothing was chosen: the Settings picker
+        # shows Auto then, not the filled-in default as if someone picked it.
+        "stills_chosen": configured_stills_default(),
         "cast_train_base": train,
         "max_quality_model": maxq,
         "character_lora_strength": _lora_strength_settings(),
