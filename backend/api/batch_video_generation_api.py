@@ -778,6 +778,19 @@ def get_queue():
         return error_response(str(e), 500)
 
 
+@batch_video_bp.route("/queue/clear-finished", methods=["POST"])
+def clear_finished_queue():
+    """Remove completed, failed and cancelled batches from the queue
+    snapshot for every browser. Output files and history are kept."""
+    try:
+        generator = get_batch_video_generator()
+        removed = generator.clear_finished_queue()
+        return success_response({"removed": removed, "queue": generator.list_queue()})
+    except Exception as e:
+        logger.error(f"Failed to clear finished batches from the queue: {e}")
+        return error_response(str(e), 500)
+
+
 @batch_video_bp.route("/list", methods=["GET"])
 def list_batches():
     try:

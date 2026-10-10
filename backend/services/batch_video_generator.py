@@ -2155,6 +2155,35 @@ class BatchVideoGenerator:
             })
         return snapshot
 
+    _FINISHED_STATUSES = frozenset({"completed", "error", "cancelled"})
+
+    def clear_finished_queue(self) -> List[str]:
+        """Drop finished batches (completed, error, cancelled) from the queue
+        snapshot that ``list_queue`` serves, for every browser at once.
+
+        Only the in-memory bookkeeping goes: the batch folder, its clips and
+        its metadata stay, and the batch keeps showing in ``list_batches``.
+        A batch that is queued or running is never touched. Returns the ids
+        removed, in queue order.
+        """
+        removed: List[str] = []
+        with self.batch_lock:
+            for batch_id in list(self.queue_order):
+                status = self.active_batches.get(batch_id)
+                if status is None:
+                    # Deleted meanwhile; nothing to show for it either way.
+                    self.queue_order.remove(batch_id)
+                    continue
+                if status.status not in self._FINISHED_STATUSES or batch_id == self._running_batch_id:
+                    continue
+                self.queue_order.remove(batch_id)
+                self.active_batches.pop(batch_id, None)
+                self.cancel_events.pop(batch_id, None)
+                removed.append(batch_id)
+        if removed:
+            logger.info("Cleared %d finished batch(es) from the queue view: %s", len(removed), removed)
+        return removed
+
     def _cleanup_stale_batches(self) -> None:
         """Mark batches stuck in running/pending/processing as cancelled.
 
