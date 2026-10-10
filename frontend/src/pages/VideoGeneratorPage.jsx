@@ -81,6 +81,7 @@ import { refusalText } from "../utils/renderFailure";
 import { applicableAdapters as applicableAdapterModels } from "../utils/videoAdapters";
 import { stepsFromProfile, stepsTileNote } from "../utils/videoSteps";
 import { promptControlsState } from "../utils/videoPromptControls";
+import { joinPreviews, previewLabel, promptsToPreview } from "../utils/videoPreviewPrompts";
 import { applyClipRename, applyClipRenameToPlayer, clipFileName } from "../utils/videoRename";
 import VideoGenEffectiveSettings from "../components/videogen/VideoGenEffectiveSettings";
 import LiveLatentPreview from "../components/videogen/LiveLatentPreview";
@@ -189,6 +190,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   const [previewEnhanced, setPreviewEnhanced] = useState("");
   const [previewVerbatim, setPreviewVerbatim] = useState(false);
   const [previewEnhanceOff, setPreviewEnhanceOff] = useState(false);
+  // How many clips the previewed batch sends, and how many were previewed.
+  const [previewCounts, setPreviewCounts] = useState({ shown: 0, total: 0, storyboard: false });
   const [previewLoading, setPreviewLoading] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
   // Settings > Verbatim prompts, as the backend reports it: the render then
@@ -1008,48 +1011,51 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     handleClearCompletedQueue,
   } = useBatchVideo({ setError, setSuccess, computedParams });
 
-  // Fetch enhanced prompt preview from backend (re-uses the same enhance_video_prompt logic + fidelity_mode)
+  // Preview what Add to queue will send: the same enhance_video_prompt path
+  // as the render, once per clip. The route takes one prompt per call and
+  // the enhancer is a pure function, so a batch is previewed line by line.
   const fetchPromptPreview = async () => {
-    // Compute first prompt locally to avoid forward-reference issues with parsedPrompts const
-    const firstLine = (promptsText || "").split("\n").map((p) => p.trim()).filter(Boolean)[0] || "";
-    const basePrompt = inputMode === "text" ? (firstLine || promptsText.trim()) : promptsText.trim();
-    if (!basePrompt) {
+    const { prompts, total } = promptsToPreview({ inputMode, promptsText, lookAndFeel, storyboardMode });
+    if (prompts.length === 0) {
       setPreviewEnhanced("");
       return;
     }
     setPreviewLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/batch-video/enhance-preview`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          prompt: basePrompt,
-          prompt_style: promptStyle,
-          enhance_prompt: enhancePrompt,
-          fidelity_mode: fidelityMode,
-          model,
-          width: (computedParams && computedParams.width) || videoDimensions.width,
-          height: (computedParams && computedParams.height) || videoDimensions.height,
-          ...(inputMode === "references"
-            ? {
-                references: previewBoard(refBoard),
-                duration_frames: computedParams?.duration_frames,
-                fps: computedParams?.fps,
-                motion_strength: computedParams?.motion_strength,
-              }
-            : {}),
-        }),
-      });
-      const data = await res.json();
-      if (data.success && data.data) {
-        setPreviewEnhanced(data.data.enhanced_prompt || "");
-        setPreviewVerbatim(Boolean(data.data.verbatim));
-        setVerbatimPrompts(Boolean(data.data.verbatim));
-        setPreviewEnhanceOff(data.data.enhance_prompt === false);
-        setShowPreview(true);
-      } else {
-        setPreviewEnhanced("");
-      }
+      const previewOne = async (prompt) => {
+        const res = await fetch(`${API_BASE}/batch-video/enhance-preview`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            prompt,
+            prompt_style: promptStyle,
+            enhance_prompt: enhancePrompt,
+            fidelity_mode: fidelityMode,
+            model,
+            width: (computedParams && computedParams.width) || videoDimensions.width,
+            height: (computedParams && computedParams.height) || videoDimensions.height,
+            motion_strength: computedParams?.motion_strength,
+            ...(inputMode === "references"
+              ? {
+                  references: previewBoard(refBoard),
+                  duration_frames: computedParams?.duration_frames,
+                  fps: computedParams?.fps,
+                }
+              : {}),
+          }),
+        });
+        const data = await res.json();
+        if (!data.success || !data.data) throw new Error(data.error || `HTTP ${res.status}`);
+        return data.data;
+      };
+      const results = await Promise.all(prompts.map(previewOne));
+      setPreviewEnhanced(joinPreviews(results.map((r) => r.enhanced_prompt || "")));
+      const verbatim = results.some((r) => Boolean(r.verbatim));
+      setPreviewVerbatim(verbatim);
+      setVerbatimPrompts(verbatim);
+      setPreviewEnhanceOff(results.some((r) => r.enhance_prompt === false));
+      setPreviewCounts({ shown: results.length, total, storyboard: storyboardMode && inputMode === "text" });
+      setShowPreview(true);
     } catch (e) {
       console.error("Prompt preview failed", e);
       setPreviewEnhanced("");
@@ -2163,16 +2169,17 @@ const VideoGeneratorPage = ({ embedded = false }) => {
               </Line>
               {showPreview && previewEnhanced && (
                 <TextField
-                  label={
-                    previewVerbatim
-                      ? "Prompt as typed (Verbatim prompts is on in Settings)"
-                      : previewEnhanceOff
-                        ? "Prompt as typed (Enhance prompt is off)"
-                        : "Enhanced prompt (what will be sent)"
-                  }
+                  label={previewLabel({
+                    shown: previewCounts.shown,
+                    total: previewCounts.total,
+                    verbatim: previewVerbatim,
+                    enhanceOff: previewEnhanceOff,
+                    storyboard: previewCounts.storyboard,
+                  })}
                   value={previewEnhanced}
                   multiline
                   minRows={2}
+                  maxRows={previewCounts.total > 1 ? 16 : undefined}
                   fullWidth
                   size="small"
                   InputProps={{ readOnly: true }}
