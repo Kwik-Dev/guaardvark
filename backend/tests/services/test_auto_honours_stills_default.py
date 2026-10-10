@@ -310,3 +310,42 @@ def test_an_earlier_notice_is_kept_in_front_of_the_resample_note():
     row.metadata["steps_notice"] = "earlier note."
     _batch("flux-dev")._apply_stills_default_to_auto(_request(row))
     assert row.metadata["steps_notice"].startswith("earlier note. Auto renders with")
+
+
+# --- the other Auto paths the router change covers -------------------------
+#
+# generate_animation's first frame, the text-to-video first frame
+# (offline_video_generator builds an ImageGenerationRequest with no model) and
+# the module-level generate_image() all reach the offline router with "auto".
+
+def test_animation_renders_with_the_chosen_model_when_it_can_img2img(monkeypatch):
+    from backend.services.animation_generator import AnimationGenerator, AnimationRequest
+
+    gen = _gen(monkeypatch, downloaded={"zimage-turbo", "sd-xl"}, chosen="sdxl-legacy")
+    monkeypatch.setattr(gen, "_vram_estimate_mb", lambda model_id, w=None, h=None: 8000)
+    monkeypatch.setattr(gen, "supports_img2img", lambda key: key in {"zimage-turbo", "sd-xl"})
+    assert AnimationGenerator._pick_model(gen, AnimationRequest(prompt="a fox")) == ("sd-xl", None)
+
+
+def test_animation_falls_back_to_an_img2img_model_when_the_choice_cannot(monkeypatch):
+    """Krea 2 cannot img2img, so the chosen default is skipped for a downloaded
+    model that can, exactly as an Auto pick without a choice is."""
+    from backend.services.animation_generator import AnimationGenerator, AnimationRequest
+
+    gen = _gen(monkeypatch, downloaded={"zimage-turbo", "krea2-turbo"}, chosen="krea2-turbo")
+    monkeypatch.setattr(gen, "_vram_estimate_mb", lambda model_id, w=None, h=None: 10000)
+    monkeypatch.setattr(gen, "supports_img2img", lambda key: key == "zimage-turbo")
+    assert AnimationGenerator._pick_model(gen, AnimationRequest(prompt="a fox")) == ("zimage-turbo", None)
+
+
+def test_a_request_without_a_model_is_auto_and_the_module_function_sends_one(monkeypatch):
+    assert offline.ImageGenerationRequest(prompt="a fox").model == "auto"
+    seen = {}
+
+    def render(request):
+        seen["model"] = request.model
+        return offline.ImageGenerationResult(success=True, image_path="x.png")
+
+    monkeypatch.setattr(offline, "get_image_generator", lambda: SimpleNamespace(generate_image=render))
+    assert offline.generate_image("a fox").success
+    assert seen["model"] == "auto"
