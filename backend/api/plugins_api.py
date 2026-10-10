@@ -34,6 +34,9 @@ PLUGIN_LOG_CANDIDATES: dict[str, list[str]] = {
     "vision_pipeline": ["vision_pipeline.log"],
     "upscaling": ["upscaling.log"],
     "audio_foundry": ["audio_foundry.log"],
+    # The trainer daemon's stderr (plugins/lora_trainer/real_trainer.py),
+    # then the plain name as a fallback.
+    "lora_trainer": ["lora_trainer_daemon.log", "lora_trainer.log"],
 }
 
 

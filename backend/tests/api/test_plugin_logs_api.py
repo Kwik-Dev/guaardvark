@@ -56,9 +56,27 @@ def test_journal_lines_lose_the_hostname_and_keep_the_time(log_dir, monkeypatch)
     assert text.splitlines()[2] == "-- Boot abc123 --"
 
 
-def test_unknown_plugin_falls_back_to_id_log(log_dir):
+def test_lora_trainer_reads_the_daemon_log_it_writes(log_dir):
+    """real_trainer.py pumps the daemon's stderr into lora_trainer_daemon.log;
+    reading lora_trainer.log showed "(no logs)" on the card forever."""
+    (log_dir / "lora_trainer_daemon.log").write_text("daemon ready\nstep 10/100\n")
+    text, count, source = plugins_api._read_plugin_log_text("lora_trainer", 50)
+    assert "step 10/100" in text
+    assert count == 2
+    assert source.endswith("lora_trainer_daemon.log")
+
+
+def test_lora_trainer_falls_back_to_the_plain_name(log_dir):
     (log_dir / "lora_trainer.log").write_text("training epoch 1\n")
     text, count, source = plugins_api._read_plugin_log_text("lora_trainer", 50)
     assert "training epoch 1" in text
     assert count == 1
     assert source.endswith("lora_trainer.log")
+
+
+def test_unknown_plugin_falls_back_to_id_log(log_dir):
+    (log_dir / "some_tool.log").write_text("hello from some tool\n")
+    text, count, source = plugins_api._read_plugin_log_text("some_tool", 50)
+    assert "hello from some tool" in text
+    assert count == 1
+    assert source.endswith("some_tool.log")
