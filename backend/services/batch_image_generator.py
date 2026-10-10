@@ -481,6 +481,44 @@ class BatchImageGenerator:
         except Exception as e:  # noqa: BLE001
             logger.debug("drop_booking(image_batch:%s) failed: %s", batch_id, e)
 
+    def _apply_stills_default_to_auto(self, request: BatchImageRequest) -> Optional[str]:
+        """Give every Auto prompt in a batch the Stills model chosen in Settings >
+        Generation, when it can run here; returns that key, or None when nothing
+        changed (no choice made, or the choice is not installed, logged by
+        configured_default_for_auto).
+
+        Resolved once at intake so routing (a FLUX default goes to ComfyUI like
+        an explicit flux-dev pick), the resource estimate, and the job record's
+        model_used all name the same model. Cast prompts keep their own routing
+        by LoRA family.
+        """
+        gen = self.image_generator
+        resolver = getattr(gen, "configured_default_for_auto", None)
+        if not callable(resolver):
+            return None
+        auto_prompts = [
+            p for p in (request.prompts or [])
+            if (p.model or "").strip().lower() in ("", "auto")
+            and not getattr(p, "subject_ids", None)
+            and not getattr(p, "loras", None)
+        ]
+        if not auto_prompts:
+            return None
+        try:
+            preferred = resolver()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Stills default not consulted for batch Auto: %s", e)
+            return None
+        if not preferred:
+            return None
+        for p in auto_prompts:
+            p.model = preferred
+        logger.info(
+            "Batch %s: %d Auto prompt(s) render with the Stills default %r from Settings",
+            request.batch_id, len(auto_prompts), preferred,
+        )
+        return preferred
+
     def _resolve_batch_model_key(self, model_key: str, prompt_text: str = "") -> str:
         """Map a batch prompt model key to a catalog key for resource estimates."""
         if not model_key or model_key in ("auto", ""):
@@ -1476,6 +1514,10 @@ class BatchImageGenerator:
                 "ui_config": getattr(request, "ui_config", None),
             }
         }
+
+        # After retry_data, so a retry still says "auto" and follows the Settings
+        # choice current at that time.
+        self._apply_stills_default_to_auto(request)
 
         with self.batch_lock:
             self.active_batches[batch_id] = batch_status

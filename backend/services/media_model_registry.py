@@ -341,6 +341,30 @@ def get_stills_model_setting() -> str:
     return _read_setting(SETTING_STILLS_MODEL, ENV_STILLS, DEFAULT_STILLS_MODEL)
 
 
+def configured_stills_default() -> Optional[str]:
+    """The Stills model a person chose in Settings > Generation (or set through
+    GUAARDVARK_STILLS_MODEL), or None when nothing was chosen.
+
+    get_stills_model_setting() answers "which model" and fills in the product
+    default; this answers "did anyone choose one", which is what an Auto pick
+    needs: a chosen model is honoured, an unchosen one leaves Auto to its own
+    per-card routing. "auto" saved in the picker counts as no choice.
+    """
+    val = _read_setting(SETTING_STILLS_MODEL, ENV_STILLS, "")
+    if not val or val == AUTO:
+        return None
+    return val
+
+
+def stills_default_catalog_key(model_id: str) -> str:
+    """The image catalog key a Stills profile id renders with (sdxl-legacy ->
+    sd-xl, flux-dev -> flux-dev); ids outside the registry pass through."""
+    p = get_profile(model_id)
+    if not p:
+        return (model_id or "").strip().lower()
+    return p.get("offline_model_key") or p.get("comfy_model_tag") or p["id"]
+
+
 def get_cast_train_base_setting() -> str:
     return _read_setting(SETTING_CAST_TRAIN_BASE, ENV_CAST_TRAIN, DEFAULT_CAST_TRAIN_BASE)
 

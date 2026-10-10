@@ -1297,13 +1297,73 @@ class OfflineImageGenerator:
         """Krea2 is aesthetic-first but ~14GB peak; only auto-lead on roomy GPUs."""
         return self._cuda_total_vram_gb() >= 20.0
 
+    def configured_default_for_auto(self) -> Optional[str]:
+        """The Stills model chosen in Settings > Generation, as a catalog key, when
+        an Auto pick can honour it: None when nothing was chosen, or when the chosen
+        model is not installed or will not fit this card (each logged, so a fallback
+        to the per-card routing says why).
+
+        Every surface that renders a picture with the model left on Auto asks this
+        first (stills façade, batch intake, the offline router), so the Settings
+        choice is the default everywhere, as Settings says it is.
+        """
+        try:
+            from backend.services.media_model_registry import (
+                configured_stills_default,
+                stills_default_catalog_key,
+            )
+            chosen = configured_stills_default()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Stills default unreadable, Auto picks by card size: %s", e)
+            return None
+        if not chosen:
+            return None
+        key = stills_default_catalog_key(chosen)
+        model_id = self.available_models.get(key)
+        if not model_id:
+            logger.warning(
+                "Auto: the Stills default %r is not in the image catalog; picking by card size",
+                chosen,
+            )
+            return None
+        if not self._is_model_downloaded(model_id):
+            logger.warning(
+                "Auto: the Stills default %r is not installed; picking by card size", key
+            )
+            return None
+        total_gb = self._cuda_total_vram_gb()
+        if total_gb > 0 and not self.is_comfy_only_model(key):
+            need_mb = self._vram_estimate_mb(model_id)
+            if need_mb > total_gb * 1024:
+                logger.warning(
+                    "Auto: the Stills default %r needs ~%d MB VRAM, this card has %.0f GB; "
+                    "picking by card size",
+                    key, need_mb, total_gb,
+                )
+                return None
+        return key
+
     def _auto_select_model(self, prompt: str, style: str = "realistic") -> str:
         """Pick the best DOWNLOADED model for this prompt (chat auto-router).
 
-        Intent-ordered preferences, best first; always falls through to a model
-        that actually exists on disk. Z-Image-Turbo leads on ≤16–18GB cards —
-        strongest prompt adherence per VRAM. Krea2 leads only on ≥20GB GPUs.
+        A Stills model chosen in Settings comes first (configured_default_for_auto);
+        with none chosen, intent-ordered preferences, best first, always falling
+        through to a model that actually exists on disk. Z-Image-Turbo leads on
+        ≤16–18GB cards — strongest prompt adherence per VRAM. Krea2 leads only on
+        ≥20GB GPUs.
         """
+        preferred = self.configured_default_for_auto()
+        if preferred:
+            if self.is_comfy_only_model(preferred):
+                # The offline router cannot render a ComfyUI model; the façade and
+                # batch intake route that default to ComfyUI before reaching here.
+                logger.info(
+                    "Auto: the Stills default %r renders through ComfyUI; the offline "
+                    "router picks by card size", preferred,
+                )
+            else:
+                logger.info("Auto: using the Stills default %r from Settings", preferred)
+                return preferred
         detection = self.detect_content_type(prompt)
         p = prompt.lower()
         lead = "krea2-turbo" if self._prefer_krea2_for_auto() else "zimage-turbo"

@@ -238,11 +238,12 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   ];
 
   // Model options — fetched from the backend (/batch-image/models) so the list
-  // never drifts from the canonical catalog. "Auto" routes per-prompt.
+  // never drifts from the canonical catalog. "Auto" renders with the Stills model
+  // chosen in Settings > Generation; with none chosen it routes per prompt.
   const AUTO_MODEL_OPTION = {
     value: 'auto',
     label: 'Auto — best per prompt ⭐',
-    description: 'Router picks the best downloaded model for each prompt',
+    description: 'Uses the Stills model chosen in Settings > Generation; with none chosen, the router picks the best downloaded model for each prompt',
   };
   const [modelOptions, setModelOptions] = useState([AUTO_MODEL_OPTION]);
   // User LoRAs from Manage Image Models: rows from the same models call, and the
