@@ -1,5 +1,5 @@
 // WARNING: Visual/UX changes to this file are forbidden without explicit written approval from the project maintainer.
-import React, { useState, useCallback, useEffect } from "react";
+import React, { useState, useCallback, useEffect, useRef } from "react";
 import {
   Box,
   Button,
@@ -26,6 +26,18 @@ import { triggerIndexing } from "../api/indexingService"; // Import directly to 
 import { useStatus } from "../contexts/StatusContext";
 import PageLayout from "../components/layout/PageLayout";
 import { formatTimestamp } from "../utils/fileTypeUtils";
+import useFileDropZone from "../hooks/useFileDropZone";
+
+// Matches the server's ALLOWED_EXTENSIONS roughly; the picker and the drop
+// zone both check against it.
+const ACCEPTED_EXTENSIONS =
+  ".txt,.md,.pdf,.docx,.html,.htm,.json,.csv,.xml,.py,.js,.jsx,.java,.c,.cpp,.h,.cs,.go,.php,.rb,.swift,.kt,.rs,.scala,.zip";
+const ACCEPTED_SET = new Set(ACCEPTED_EXTENSIONS.split(","));
+const acceptsFile = (file) => {
+  const name = String(file?.name || "");
+  const dot = name.lastIndexOf(".");
+  return dot > 0 && ACCEPTED_SET.has(name.slice(dot).toLowerCase());
+};
 
 const IndexStatusChip = ({ status }) => {
   let color = "default";
@@ -69,6 +81,7 @@ const UploadPage = () => {
   const [recentDocs, setRecentDocs] = useState([]);
   const [isLoadingRecent, setIsLoadingRecent] = useState(true);
   const { activeModel, isLoadingModel, modelError } = useStatus();
+  const fileInputRef = useRef(null);
 
   const fetchRecentDocs = useCallback(async () => {
     setIsLoadingRecent(true);
@@ -88,15 +101,35 @@ const UploadPage = () => {
     fetchRecentDocs();
   }, [fetchRecentDocs]);
 
-  const handleFileChange = (event) => {
-    if (event.target.files && event.target.files[0]) {
-      setSelectedFile(event.target.files[0]);
-      setUploadStatus("idle"); // Reset status when new file selected
-      setErrorMessage("");
+  // One path for the picker and the drop zone.
+  const selectFile = useCallback((file) => {
+    if (!file) return;
+    if (!acceptsFile(file)) {
+      setSelectedFile(null);
+      setUploadStatus("error");
+      setErrorMessage(`'${file.name}' is not a supported file type.`);
       setSuccessMessage("");
-      setUploadProgress(0);
+      return;
     }
+    setSelectedFile(file);
+    setUploadStatus("idle"); // Reset status when new file selected
+    setErrorMessage("");
+    setSuccessMessage("");
+    setUploadProgress(0);
+  }, []);
+
+  const handleFileChange = (event) => {
+    const file = event.target.files && event.target.files[0];
+    // Clear the input so picking the same file again still fires onChange.
+    event.target.value = "";
+    selectFile(file);
   };
+
+  const openPicker = useCallback(() => {
+    fileInputRef.current?.click();
+  }, []);
+
+  const drop = useFileDropZone({ onFiles: (files) => selectFile(files[0]) });
 
   const handleUpload = useCallback(async () => {
     if (!selectedFile) {
@@ -191,31 +224,46 @@ const UploadPage = () => {
     >
       <Paper elevation={2} sx={{ p: 3 }}>
         <Box
+          {...drop.dropProps}
+          onClick={openPicker}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              openPicker();
+            }
+          }}
+          role="button"
+          tabIndex={0}
+          aria-label="Select a file to import"
+          data-testid="upload-drop-zone"
           sx={{
             border: "2px dashed",
-            borderColor: "divider",
+            borderColor: drop.isDragActive ? "primary.main" : "divider",
             borderRadius: 1,
             p: 3,
             textAlign: "center",
             mb: 2,
+            cursor: "pointer",
           }}
         >
           <input
-            accept=".txt,.md,.pdf,.docx,.html,.htm,.json,.csv,.xml,.py,.js,.jsx,.java,.c,.cpp,.h,.cs,.go,.php,.rb,.swift,.kt,.rs,.scala,.zip" // Match ALLOWED_EXTENSIONS roughly
+            ref={fileInputRef}
+            accept={ACCEPTED_EXTENSIONS}
             style={{ display: "none" }}
             id="raised-button-file"
             type="file"
             onChange={handleFileChange}
           />
-          <label htmlFor="raised-button-file">
-            <Button
-              variant="outlined"
-              component="span"
-              startIcon={<UploadFileIcon />}
-            >
-              Select File
-            </Button>
-          </label>
+          <Button
+            variant="outlined"
+            startIcon={<UploadFileIcon />}
+            onClick={(event) => {
+              event.stopPropagation();
+              openPicker();
+            }}
+          >
+            Select File
+          </Button>
           {selectedFile && (
             <Typography variant="body1" sx={{ mt: 2 }}>
               Selected: {selectedFile.name} (
