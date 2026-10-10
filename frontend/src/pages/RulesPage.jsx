@@ -128,7 +128,7 @@ const RulesPage = () => {
   const [total, setTotal] = useState(null);
   const [pagesLoaded, setPagesLoaded] = useState(1);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
-  // "all" or "LEARNED": rules the chat added on its own from corrections.
+  // "all" or "LEARNED": rules saved from a correction or shipped in the bundle.
   const [levelFilter, setLevelFilter] = useState("all");
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -506,7 +506,8 @@ const RulesPage = () => {
             color="text.secondary"
             sx={{ display: "block", px: 2, pb: 1 }}
           >
-            Rules the chat added on its own from corrections and preferences.
+            Learned rules: ones the chat saved from a correction (/saverule,
+            with behaviour learning on) and ones shipped in the rule bundle.
             Delete any that are wrong here; Settings can clear all of them at
             once.
           </Typography>
@@ -594,7 +595,7 @@ const RulesPage = () => {
                       }
                       description={
                         levelFilter === "LEARNED"
-                          ? "The chat has not added any rules on its own yet."
+                          ? "Nothing saved from a correction yet, and no learned rule is loaded from the bundle."
                           : "Create a rule to define system prompts and commands"
                       }
                     />

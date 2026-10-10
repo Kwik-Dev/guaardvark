@@ -261,10 +261,14 @@ const RuleActionModal = ({
           description: "Core system prompt",
         };
       case "LEARNED":
+        // /saverule records the chat session in reference_id; a learned rule
+        // without one came from the rule bundle.
         return {
           label: "LEARNED",
           color: theme.palette.info.main,
-          description: "Added by the chat from a correction",
+          description: ruleData?.reference_id
+            ? "Saved by the chat from a correction"
+            : "Learned rule shipped in the rule bundle",
         };
       default:
         return {
