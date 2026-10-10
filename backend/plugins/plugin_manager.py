@@ -46,7 +46,9 @@ PLUGIN_COOLDOWN_S = 3.0           # per-plugin cooldown after release
 PLUGIN_COOLDOWN_GPU_S = 8.0       # longer for GPU plugins (more state to settle)
 GLOBAL_COOLDOWN_S = 2.0           # global cooldown across all plugin ops
 GLOBAL_COOLDOWN_AFTER_GPU_S = 8.0  # global cooldown after a GPU op (CUDA needs to settle)
-GPU_EXCLUSIVE_PLUGIN_IDS = {'ollama', 'comfyui'}  # mirror of frontend constant
+# Served to the Plugins page as each plugin's `gpu_exclusive` flag, so the
+# page and the gate agree on which plugins contend for the GPU.
+GPU_EXCLUSIVE_PLUGIN_IDS = {'ollama', 'comfyui'}
 
 # The Ollama card's "I run Ollama myself: never start or stop it" switch. The
 # settings API writes it to .env; start.sh and stop.sh read it from there.
@@ -1504,6 +1506,7 @@ class PluginManager:
                 plugin_info['status_message'] = self._instance_problems[plugin_id]
             # Round to 1 decimal so the frontend doesn't get noisy fractional updates
             plugin_info['cooldown_remaining'] = round(self._gate.cooldown_remaining(plugin_id), 1)
+            plugin_info['gpu_exclusive'] = plugin_id in GPU_EXCLUSIVE_PLUGIN_IDS
             result.append(plugin_info)
 
         return result

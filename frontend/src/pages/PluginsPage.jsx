@@ -90,15 +90,12 @@ const PLUGIN_COLORS = {
   gpu_embedding: '#ff6d00',
 };
 
-// A plugin is "GPU-heavy" — and thus mutually exclusive with other heavy
-// plugins (only one heavy GPU service at a time on a 16 GB card) — when its
-// manifest VRAM estimate crosses this line. Driven by vram_estimate_mb so new
-// plugins are covered automatically: ollama (8 GB), comfyui (6 GB),
-// audio_foundry (10 GB), lora_trainer (18 GB) qualify; light GPU users
-// (vision ~2 GB, upscaling ~1.5 GB) and CPU-only plugins fall below it and
-// never trigger the swap prompt. Groundwork for the future 3-mode "gear" selector.
-const GPU_HEAVY_THRESHOLD_MB = 3000;
-const isGpuHeavy = (plugin) => (plugin?.vram_estimate_mb || 0) >= GPU_HEAVY_THRESHOLD_MB;
+// A plugin is "GPU-heavy", and so mutually exclusive with the other heavy
+// ones, when the backend says so: `gpu_exclusive` in the listing comes from
+// GPU_EXCLUSIVE_PLUGIN_IDS in backend/plugins/plugin_manager.py, the same set
+// the operation gate and the route orchestrator use. A local copy drifted
+// from it (a VRAM threshold flagged plugins the gate did not).
+const isGpuHeavy = (plugin) => Boolean(plugin?.gpu_exclusive);
 
 // ── VRAM Budget Bar ────────────────────────────────────────────────────
 const VramBudgetBar = ({ plugins, gpuVram }) => {
