@@ -303,6 +303,33 @@ def test_list_reports_prompt_style_per_model_and_for_auto(client, monkeypatch):
     assert payload["data"]["auto_prompt_style"] in ("natural", "tags")
 
 
+def test_list_auto_prompt_style_follows_what_auto_renders_with(client, monkeypatch):
+    # Not the Settings model's family: the model the router would pick for a
+    # neutral prompt on this box (Krea 2 on a roomy card, SDXL when Z-Image is
+    # not installed), or the Settings default when the generator can honour it.
+    from backend.services import user_image_models as uim
+
+    gen = api.get_batch_image_generator().image_generator
+    gen.get_available_models = lambda probe_remote=True: {}
+    monkeypatch.setattr(uim, "catalog_rows", lambda _g: [])
+    monkeypatch.setattr(uim, "family_choices", lambda: [])
+
+    gen._auto_select_model = lambda prompt="", style="realistic": "sd-xl"
+    data = client.get("/api/batch-image/models").get_json()["data"]
+    assert (data["auto_model"], data["auto_prompt_style"]) == ("sd-xl", "tags")
+
+    gen.configured_default_for_auto = lambda: "zimage-turbo"
+    data = client.get("/api/batch-image/models").get_json()["data"]
+    assert (data["auto_model"], data["auto_prompt_style"]) == ("zimage-turbo", "natural")
+
+    # Nothing on disk: the router answers None and the family default stands in.
+    gen.configured_default_for_auto = lambda: None
+    gen._auto_select_model = lambda prompt="", style="realistic": None
+    data = client.get("/api/batch-image/models").get_json()["data"]
+    assert data["auto_model"] is None
+    assert data["auto_prompt_style"] in ("natural", "tags")
+
+
 def test_dir_bytes_counts_dest_including_incomplete(tmp_path):
     dest = tmp_path / "unet"
     dest.mkdir()

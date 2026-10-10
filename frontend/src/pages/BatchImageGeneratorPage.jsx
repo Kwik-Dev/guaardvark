@@ -253,8 +253,10 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     description: 'Router picks the best downloaded model for each prompt',
   };
   const [modelOptions, setModelOptions] = useState([AUTO_MODEL_OPTION]);
-  // 'natural' or 'tags' for what Auto resolves to today (from /batch-image/models).
+  // What Auto renders with today and how that model reads a prompt ('natural'
+  // or 'tags'), from /batch-image/models: the same selection the batch uses.
   const [autoPromptStyle, setAutoPromptStyle] = useState(null);
+  const [autoModel, setAutoModel] = useState(null);
   // User LoRAs from Manage Image Models: rows from the same models call, and the
   // ids switched on for this run. Sent as adapters; the backend resolves files.
   const [userAdapters, setUserAdapters] = useState([]);
@@ -287,6 +289,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         const fetched = data.data.models.map(imageModelOption);
         setModelOptions([AUTO_MODEL_OPTION, ...fetched]);
         if (data.data.auto_prompt_style) setAutoPromptStyle(data.data.auto_prompt_style);
+        setAutoModel(data.data.auto_model || null);
         setUnavailableModels(data.data.unavailable_models || []);
         setUserAdapters((data.data.adapters || []).filter((a) => a.is_downloaded));
       }
@@ -316,6 +319,9 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   // to it (offline_image_generator.enhance_prompt_for_quality, natural branch).
   const prosePrompts = promptStyleFor(params.model, modelOptions, autoPromptStyle) === 'natural';
   const modelLabel = modelOptions.find(m => m.value === params.model)?.label || params.model;
+  const autoModelLabel = autoModel
+    ? (modelOptions.find(m => m.value === autoModel)?.name || autoModel)
+    : null;
   const isModernDit = family === 'auto' || family === 'zimage' || family.startsWith('krea');
   const qualityPresets = qualityPresetsForModel(params.model);
   // A selected character renders with its base model's steps and guidance (the
@@ -1429,7 +1435,9 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                 <Box sx={{ mb: 3 }}>
                   <Hint>
                     {family === 'auto'
-                      ? 'Content Type is not used: Auto picks a model that reads the prompt as plain sentences.'
+                      ? (autoModelLabel
+                        ? `Content Type is not used: Auto renders with ${autoModelLabel}, which reads the prompt as plain sentences.`
+                        : 'Content Type is not used: Auto picks a model that reads the prompt as plain sentences.')
                       : `Content Type is not used by ${modelLabel}: it reads the prompt as plain sentences.`}
                     {' '}Describe the scene in your own words. The content types only shape prompts for tag-style models.
                   </Hint>
