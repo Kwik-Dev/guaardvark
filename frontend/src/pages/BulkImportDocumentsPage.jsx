@@ -171,6 +171,9 @@ const BulkImportDocumentsPage = () => {
 
   const resetForm = () => {
     setForm(initialForm);
+    // Stop the status poll too; the effect below clears its interval when
+    // either of these changes.
+    setPolling(false);
     setJobId(null);
     setJobStatus(null);
   };

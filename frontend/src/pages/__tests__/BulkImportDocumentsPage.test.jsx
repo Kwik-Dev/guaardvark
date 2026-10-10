@@ -100,6 +100,23 @@ describe("BulkImportDocumentsPage job status", () => {
     expect(bulkApi.getBulkImportStatus).toHaveBeenCalledTimes(1);
   });
 
+  it("Reset stops the poll and clears the job", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    await startDryRun();
+    bulkApi.getBulkImportStatus.mockResolvedValue({ job_id: "job-1", status: "processing" });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(bulkApi.getBulkImportStatus).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Reset" }));
+    expect(screen.queryByText("Polling...")).not.toBeInTheDocument();
+    expect(screen.getByText(/No import job running/)).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(9000);
+    });
+    expect(bulkApi.getBulkImportStatus).toHaveBeenCalledTimes(1);
+  });
+
   it("also accepts \"completed\"", async () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     await startDryRun();
