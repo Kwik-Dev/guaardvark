@@ -108,11 +108,14 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate, 
   }, []);
   const isCommand = message.type === "command";
   const isProgress = message.type === "progress";
-  // Every picture the user attached to this turn (several), else empty: the
-  // single-picture case keeps reading imageUrl below.
-  const attachedImageUrls = Array.isArray(message.imageUrls)
-    ? message.imageUrls.filter((u) => typeof u === "string" && u)
+  // Every picture the user attached to this turn (several), by position: an
+  // entry is null where the server could not save that picture, so the file
+  // names stay aligned with the pictures. The single-picture case keeps
+  // reading imageUrl below.
+  const attachedImageUrls = Array.isArray(message.imageUrls) && message.imageUrls.length > 1
+    ? message.imageUrls.map((u) => (typeof u === "string" && u ? u : null))
     : [];
+  const showsSeveralImages = attachedImageUrls.some(Boolean);
   const isAgentLoop = message.isAgentLoop;
   const logo = useAppStore((s) => s.systemLogo);
   const [lightbox, setLightbox] = useState(null);
@@ -496,9 +499,9 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate, 
         )}
         {/* Display the attached pictures if present: all of them when the
             user sent several, else the one (or the related image). */}
-        {(attachedImageUrls.length > 1) ? (
+        {showsSeveralImages ? (
           <Box sx={{ mb: 1, display: "flex", flexWrap: "wrap", gap: 1 }}>
-            {attachedImageUrls.map((url, idx) => (
+            {attachedImageUrls.map((url, idx) => url && (
               <Box key={`${idx}-${url}`}>
                 <CardMedia
                   component="img"

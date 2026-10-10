@@ -282,9 +282,12 @@ def unified_chat():
     # Run in background thread with app context
     app = current_app._get_current_object()
 
-    # Save the attached pictures for chat history. The first one's URL is the
-    # row's ``imageUrl``; all of them are ``imageUrls`` when there are several.
-    image_urls = [url for url in (_save_chat_image(img) for img in attached_images) if url]
+    # Save the attached pictures for chat history, one URL per picture in
+    # attach order, ``None`` where a save failed so the positions stay
+    # aligned with the pictures (and their names). The first one's URL is
+    # the row's ``imageUrl``; all of them are ``imageUrls`` when there are
+    # several.
+    image_urls = [_save_chat_image(img) for img in attached_images]
     image_url = image_urls[0] if image_urls else None
 
     # The server alone decides what the engine sees as attached this turn.
@@ -292,7 +295,7 @@ def unified_chat():
     options.pop("attached_image_urls", None)
     if len(attached_images) > 1:
         options["attached_images"] = attached_images
-        if len(image_urls) == len(attached_images):
+        if any(image_urls):
             options["attached_image_urls"] = image_urls
 
     # Vision pipeline: while a camera streams, its latest frame rides along as

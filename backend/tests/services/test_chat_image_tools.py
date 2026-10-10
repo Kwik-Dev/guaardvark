@@ -544,3 +544,72 @@ def test_every_picture_is_described_when_the_turn_runs_on(monkeypatch):
     out = e._describe_attached_images(["AAAA", "BBBB"], "compare these", "sess-run")
 
     assert out == ["description of AAAA", "description of BBBB"]
+
+
+def test_api_keeps_picture_urls_aligned_when_one_save_fails(monkeypatch):
+    """If the first picture cannot be saved, imageUrl is None, not the second
+    picture's URL; the URL list keeps one slot per picture in attach order."""
+    import threading
+    import types
+    from flask import Flask
+
+    import backend.api.unified_chat_api as api
+    import backend.config as config
+    import backend.services.unified_chat_engine as uce
+    import backend.tools.tool_registry_init as tool_registry_init
+
+    received = []
+
+    class _Engine:
+        def __init__(self, *a, **k):
+            pass
+
+        def chat(self, session_id, message, options, emit_fn, **kwargs):
+            received.append((dict(options), kwargs))
+
+    started = []
+
+    class _Thread(threading.Thread):
+        def start(self):
+            started.append(self)
+            super().start()
+
+    saved = []
+
+    def _save(image_data):
+        saved.append(image_data)
+        return None if image_data == "AAAA" else f"/api/enhanced-chat/vision/image/{image_data}.png"
+
+    monkeypatch.setattr(config, "AGENT_BRAIN_ENABLED", False)
+    monkeypatch.setattr(tool_registry_init, "initialize_all_tools", lambda: object())
+    monkeypatch.setattr(uce, "UnifiedChatEngine", _Engine)
+    monkeypatch.setattr(api, "_save_chat_image", _save)
+    monkeypatch.setattr(api, "_inflight", {})
+    monkeypatch.setattr(api, "threading", types.SimpleNamespace(
+        Thread=_Thread, get_ident=threading.get_ident,
+        current_thread=threading.current_thread, Lock=threading.Lock,
+    ))
+
+    app = Flask("test_picture_urls_api")
+    app.config["LLAMA_INDEX_LLM"] = object()
+    app.register_blueprint(api.unified_chat_bp)
+    response = app.test_client().post("/api/chat/unified", json={
+        "session_id": "sess-pictures-api",
+        "message": "compare these",
+        "images": ["AAAA", "BBBB", "CCCC"],
+    })
+    for thread in started:
+        thread.join(timeout=10)
+
+    assert response.status_code == 200
+    assert saved == ["AAAA", "BBBB", "CCCC"]
+    assert len(received) == 1
+    options, kwargs = received[0]
+    assert kwargs["image_data"] == "AAAA"
+    assert kwargs["image_url"] is None
+    assert options["attached_images"] == ["AAAA", "BBBB", "CCCC"]
+    assert options["attached_image_urls"] == [
+        None,
+        "/api/enhanced-chat/vision/image/BBBB.png",
+        "/api/enhanced-chat/vision/image/CCCC.png",
+    ]
