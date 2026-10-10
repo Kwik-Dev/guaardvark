@@ -184,6 +184,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
 
   // Prompt preview state (calls /enhance-preview)
   const [previewEnhanced, setPreviewEnhanced] = useState("");
+  const [previewVerbatim, setPreviewVerbatim] = useState(false);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
 
@@ -1010,6 +1011,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       const data = await res.json();
       if (data.success && data.data) {
         setPreviewEnhanced(data.data.enhanced_prompt || "");
+        setPreviewVerbatim(Boolean(data.data.verbatim));
         setShowPreview(true);
       } else {
         setPreviewEnhanced("");
@@ -2105,7 +2107,11 @@ const VideoGeneratorPage = ({ embedded = false }) => {
               </Line>
               {showPreview && previewEnhanced && (
                 <TextField
-                  label="Enhanced prompt (what will be sent)"
+                  label={
+                    previewVerbatim
+                      ? "Prompt as typed (Verbatim prompts is on in Settings)"
+                      : "Enhanced prompt (what will be sent)"
+                  }
                   value={previewEnhanced}
                   multiline
                   minRows={2}

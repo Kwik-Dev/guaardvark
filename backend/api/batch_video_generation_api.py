@@ -607,7 +607,13 @@ def enhance_prompt_preview():
             model_family = (VIDEO_MODEL_REGISTRY.get(model) or {}).get("type")
 
         from backend.services import video_render_limits as render_limits
+        from backend.services.media_director import verbatim_prompts_enabled
         from backend.utils.prompt_enhancer import enhance_video_prompt, has_text_intent
+
+        # Settings → Verbatim Prompts: the render skips the enhancer and sends
+        # the typed text (comfyui_video_generator); the reference compiler keeps
+        # the board's roles and drops only the style opening (_reference_prompt).
+        verbatim = bool(verbatim_prompts_enabled())
 
         reference_prompt = None
         if isinstance(data.get("references"), dict) and model:
@@ -627,15 +633,20 @@ def enhance_prompt_preview():
                 "motion_strength": _parse_float(data.get("motion_strength")),
             }, (data.get("language") or "").strip() or "English")
 
-        enhanced = reference_prompt or enhance_video_prompt(
-            prompt,
-            style=style,
-            width=width,
-            height=height,
-            fidelity_mode=fidelity,
-            model_family=model_family,
-            motion_strength=data.get("motion_strength"),
-        )
+        if reference_prompt:
+            enhanced = reference_prompt
+        elif verbatim:
+            enhanced = prompt
+        else:
+            enhanced = enhance_video_prompt(
+                prompt,
+                style=style,
+                width=width,
+                height=height,
+                fidelity_mode=fidelity,
+                model_family=model_family,
+                motion_strength=data.get("motion_strength"),
+            )
 
         # Default negative that the backend would inject if user left it blank
         character = bool(_parse_list(data.get("subject_ids")) or data.get("lora_name") or data.get("adapters"))
@@ -651,6 +662,7 @@ def enhance_prompt_preview():
             "cfg_when_unset": unset_cfg if unset_cfg is not None else render_limits.LEGACY_CFG,
             "reference_defaults": render_limits.reference_defaults_enabled(),
             "fidelity_mode": fidelity,
+            "verbatim": verbatim,
             "has_text_intent": has_text_intent(prompt),
             "model_family": model_family,
             "style": style,

@@ -288,6 +288,20 @@ def test_preview_shows_what_the_render_will_use(api, monkeypatch):
     assert on["enhanced_prompt"] == off["enhanced_prompt"]
 
 
+def test_preview_sends_the_typed_prompt_with_verbatim_on(api, monkeypatch):
+    # Text and image mode: the render skips the enhancer under Verbatim Prompts,
+    # so the preview shows the prompt as typed, no style words added.
+    from backend.services import media_director
+
+    client, _ = api
+    body = {"prompt": "a fox", "model": "wan22-14b", "prompt_style": "3d_animation", "enhance_prompt": True}
+    off = client.post("/api/batch-video/enhance-preview", json=body).get_json()["data"]
+    assert off["verbatim"] is False and off["enhanced_prompt"] != "a fox"
+    monkeypatch.setattr(media_director, "verbatim_prompts_enabled", lambda: True)
+    on = client.post("/api/batch-video/enhance-preview", json=body).get_json()["data"]
+    assert on["verbatim"] is True and on["enhanced_prompt"] == "a fox"
+
+
 def _batch(tmp_path, **params):
     import queue
     import threading
