@@ -64,6 +64,7 @@ import { useLayout, useDashboardWidth } from "../contexts/LayoutContext";
 import { ContextualLoader } from "../components/common/LoadingStates";
 import { opaqueMenuPaperSx } from "../components/common/opaqueMenuPaper";
 import { toHexColor } from "../utils/colorHex";
+import copyText from "../utils/copyText";
 
 const LAYOUT_MODES = ["normal", "compact", "collapsed"];
 const LAYOUT_MODE_LABELS = {
@@ -1342,8 +1343,10 @@ const StickyNotesPage = () => {
     const copied = document.execCommand("copy");
     if (!copied) {
       const text = (hasSelection ? sel.toString() : el.innerText) || "";
-      navigator.clipboard.writeText(text).catch((err) => {
-        setLayoutError(`Could not copy: ${err?.message || "clipboard permission denied"}`);
+      // copyText never throws; it resolves false when neither the Clipboard API
+      // (secure contexts only) nor the execCommand fallback could copy.
+      copyText(text).then((ok) => {
+        if (!ok) setLayoutError("Could not copy: clipboard permission denied");
       });
     }
     setContextMenu(null);

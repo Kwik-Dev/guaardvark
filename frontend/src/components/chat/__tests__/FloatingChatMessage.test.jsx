@@ -173,7 +173,8 @@ describe("FloatingChatMessage", () => {
 
   describe("Fallback copying mechanism", () => {
     it("falls back to document.execCommand if clipboard API throws", async () => {
-      const execCommandMock = vi.fn();
+      // execCommand("copy") returns true when the copy succeeded; copyText reports that.
+      const execCommandMock = vi.fn().mockReturnValue(true);
       document.execCommand = execCommandMock;
 
       // Make navigator.clipboard throw

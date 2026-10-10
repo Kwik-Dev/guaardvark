@@ -27,6 +27,7 @@ import {
 import Editor from "@monaco-editor/react";
 import { getDocumentContent, getRepoFileContent, updateDocument } from "../../api/documentService";
 import { getLanguageFromFilename } from "../../utils/languageDetector";
+import copyText from "../../utils/copyText";
 
 const CodeViewerModal = ({ open, onClose, file, onOpenInCodeEditor }) => {
   const [content, setContent] = useState(null);
@@ -68,9 +69,11 @@ const CodeViewerModal = ({ open, onClose, file, onOpenInCodeEditor }) => {
 
   const handleCopy = async () => {
     if (!content) return;
-    await navigator.clipboard.writeText(content);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    // copyText falls back to execCommand: navigator.clipboard is absent over plain http on the LAN.
+    if (await copyText(content)) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
   };
 
   const handleOpenInEditor = () => {

@@ -38,6 +38,7 @@ import ImageLightbox from "../images/ImageLightbox";
 import NarrateButton from "../common/NarrateButton";
 import EntityContextMenu from "../common/EntityContextMenu";
 import useContextMenu from "../../hooks/useContextMenu";
+import copyText from "../../utils/copyText";
 import { agentNoteCaption } from "./agentNoteCaptions";
 
 
@@ -133,18 +134,8 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate, 
 
   const handleCopy = useCallback(async () => {
     const text = typeof message.content === "string" ? message.content : JSON.stringify(message.content, null, 2);
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // fallback for non-HTTPS contexts
-      const ta = document.createElement("textarea");
-      ta.value = text;
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand("copy");
-      document.body.removeChild(ta);
+    // copyText falls back to execCommand for non-HTTPS contexts.
+    if (await copyText(text)) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     }

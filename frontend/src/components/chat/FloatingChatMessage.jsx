@@ -14,6 +14,7 @@ import CheckIcon from "@mui/icons-material/Check";
 import MicIcon from "@mui/icons-material/Mic";
 import ThinkingCard from "./ThinkingCard";
 import { agentNoteCaption } from "./agentNoteCaptions";
+import copyText from "../../utils/copyText";
 
 /**
  * FloatingChatMessage - Renders an individual message item inside FloatingChatCard.
@@ -51,33 +52,13 @@ const FloatingChatMessage = ({ message, msg, formatTime }) => {
           : "";
       if (!text) return;
 
-      try {
-        if (navigator?.clipboard?.writeText) {
-          await navigator.clipboard.writeText(text);
-          setCopied(true);
-          if (timerRef.current) clearTimeout(timerRef.current);
-          timerRef.current = setTimeout(() => setCopied(false), 1500);
-        } else {
-          throw new Error("Clipboard API not available");
-        }
-      } catch {
-        // Fallback for non-HTTPS or unsupported contexts
-        try {
-          const ta = document.createElement("textarea");
-          ta.value = text;
-          ta.style.position = "fixed";
-          ta.style.opacity = "0";
-          document.body.appendChild(ta);
-          ta.focus();
-          ta.select();
-          document.execCommand("copy");
-          document.body.removeChild(ta);
-          setCopied(true);
-          if (timerRef.current) clearTimeout(timerRef.current);
-          timerRef.current = setTimeout(() => setCopied(false), 1500);
-        } catch (err) {
-          console.error("Copy failed:", err);
-        }
+      // copyText falls back to execCommand for non-HTTPS or unsupported contexts.
+      if (await copyText(text)) {
+        setCopied(true);
+        if (timerRef.current) clearTimeout(timerRef.current);
+        timerRef.current = setTimeout(() => setCopied(false), 1500);
+      } else {
+        console.error("Copy failed");
       }
     },
     [m.content]

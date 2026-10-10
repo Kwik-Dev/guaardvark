@@ -37,6 +37,7 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { a11yDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { BASE_URL } from "../../api/apiClient";
 import { guardedMediaSrc } from "../../utils/assetGuard";
+import copyText from "../../utils/copyText";
 
 // Body height: ~24 lines of 0.7rem code, small enough that one card never
 // fills the chat viewport (the floating chat card is ~600px tall).
@@ -244,11 +245,11 @@ const ArtifactCard = ({ artifact }) => {
 
   const handleCopy = async () => {
     if (!hasContent) return;
-    try {
-      await navigator.clipboard.writeText(artifact.content);
+    // copyText falls back to execCommand: navigator.clipboard is absent over plain http on the LAN.
+    if (await copyText(artifact.content)) {
       setCopied(true);
-    } catch (err) {
-      console.error("Copy failed:", err);
+    } else {
+      console.error("Copy failed");
     }
   };
 
