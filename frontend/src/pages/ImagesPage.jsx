@@ -2311,7 +2311,10 @@ const ImagesPage = () => {
           onPublish={handlePublishFromLightbox}
           onImageEdited={() => {
             setLightbox(null);
+            // A copy lands beside the original, which may be inside an open
+            // folder window; those grids refetch only on their refresh key.
             refreshData();
+            refreshOpenWindows();
           }}
           hasPrev={lightbox.fileIndex > 0}
           hasNext={lightbox.fileIndex < lightbox.fileList.length - 1}
