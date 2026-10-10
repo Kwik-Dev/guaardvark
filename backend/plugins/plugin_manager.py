@@ -380,9 +380,12 @@ class PluginManager:
     def reload(self) -> List[str]:
         """Rescan the plugins directory and re-read every plugin's state.
 
-        The Plugins page's Refresh button. Reads only: no orphan is killed and
-        nothing is started or restored, which is what a boot does (see
-        _init_plugin_status). Returns the discovered plugin ids.
+        The Plugins page's Refresh button. No orphan is killed and nothing is
+        started or restored, which is what a boot does (see
+        _init_plugin_status). The persisted running set only grows here, as
+        in _refresh_status: a plugin that crashed and is refreshed on stays
+        listed, so the next start brings it back. Returns the discovered
+        plugin ids.
         """
         discovered = self.registry.refresh()
         self._seed_enabled_from_prefs()
@@ -391,7 +394,7 @@ class PluginManager:
             if not self.registry.is_registered(plugin_id):
                 self._plugin_status.pop(plugin_id, None)
                 self._instance_problems.pop(plugin_id, None)
-        self._save_running()
+        self._persist_running_additions()
         self._broadcast_plugins_status("refresh")
         return discovered
 
@@ -844,15 +847,22 @@ class PluginManager:
                 # don't leave them UNKNOWN or flap them to STOPPED like a dead server.
                 self._plugin_status[plugin_id] = PluginStatus.RUNNING
         if came_up:
-            try:
-                running = set(self.state_store.get_running())
-                now_running = {pid for pid, st in self._plugin_status.items()
-                               if st == PluginStatus.RUNNING
-                               and getattr(self.registry.get_plugin(pid), 'type', None) == 'service'}
-                if not now_running <= running:
-                    self.state_store.set_running(list(running | now_running))
-            except Exception as e:  # noqa: BLE001 — persistence must never break a listing
-                logger.debug(f"could not persist running set after refresh: {e}")
+            self._persist_running_additions()
+
+    def _persist_running_additions(self) -> None:
+        """Add every answering service to the persisted running set; never
+        remove one. A service that crashed stays listed so the next boot
+        restores it (see _refresh_status); only a stop or a disable takes a
+        plugin off the list, through _save_running."""
+        try:
+            running = set(self.state_store.get_running())
+            now_running = {pid for pid, st in self._plugin_status.items()
+                           if st == PluginStatus.RUNNING
+                           and getattr(self.registry.get_plugin(pid), 'type', None) == 'service'}
+            if not now_running <= running:
+                self.state_store.set_running(list(running | now_running))
+        except Exception as e:  # noqa: BLE001 — persistence must never break a listing
+            logger.debug(f"could not persist running set after refresh: {e}")
     
     def _fail_plugin_start(self, plugin_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         # Core pillars (e.g. ollama — the inference backbone) are exempt from the

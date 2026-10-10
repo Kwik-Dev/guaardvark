@@ -410,9 +410,11 @@ def update_plugin_config(plugin_id):
 def refresh_plugins():
     """Refresh plugin registry by rescanning plugins directory.
 
-    Reads only. The boot-time path (PluginManager._init_plugin_status) also
-    kills processes found on disabled plugins' ports; a refresh the user
-    clicked must never do that.
+    Kills nothing and starts nothing. The boot-time path
+    (PluginManager._init_plugin_status) also kills processes found on
+    disabled plugins' ports and restores the last running set; a refresh the
+    user clicked must do neither. The only write is to the persisted running
+    set, which may gain an answering service and never loses one.
     """
     try:
         manager = get_plugin_manager()

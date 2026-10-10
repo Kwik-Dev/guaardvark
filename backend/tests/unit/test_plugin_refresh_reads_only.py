@@ -88,6 +88,28 @@ def test_reload_picks_up_a_new_plugin_and_drops_a_removed_one(plugins_dir, answe
     assert kills == []
 
 
+def test_reload_keeps_a_crashed_plugin_in_the_saved_running_set(plugins_dir, kills, monkeypatch):
+    """A refresh on a plugin that crashed must not forget it was running:
+    the next boot restores from that list, and nowhere else does the code
+    shrink it on a read."""
+    (plugins_dir / PLUGIN_ID / "plugin.json").write_text(json.dumps({
+        "id": PLUGIN_ID, "name": "Crashed Service", "version": "1.0.0", "type": "service",
+        "port": PORT, "config": {"default_enabled": True, "service_url": f"http://127.0.0.1:{PORT}"},
+        "endpoints": {"health": "/health"},
+    }))
+    up = {"value": True}
+    monkeypatch.setattr(PluginManager, "_check_service_running", lambda self, metadata: up["value"])
+    manager = PluginManager(registry=PluginRegistry(plugins_dir=plugins_dir))
+    assert manager.state_store.get_running() == [PLUGIN_ID]
+
+    up["value"] = False
+    manager.reload()
+
+    assert manager.get_status(PLUGIN_ID) is PluginStatus.STOPPED
+    assert manager.state_store.get_running() == [PLUGIN_ID]
+    assert kills == []
+
+
 def test_refresh_endpoint_calls_reload(monkeypatch):
     from backend.api import plugins_api
 
