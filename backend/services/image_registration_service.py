@@ -190,7 +190,11 @@ def register_batch_images(
 
         # Pull per-image metadata from batch results
         result_meta = result_lookup.get(filename, {})
-        prompt_text = (result_meta.get("metadata") or {}).get("original_prompt", "")
+        image_meta = result_meta.get("metadata") or {}
+        # What the person typed names the document; a chat-model rewrite, when
+        # one replaced it before rendering, rides along for the details view.
+        prompt_text = image_meta.get("original_prompt", "")
+        rewritten_prompt = image_meta.get("rewritten_prompt") or None
 
         doc = DBDocument(
             filename=filename,
@@ -205,6 +209,7 @@ def register_batch_images(
                 "batch_id": batch_id,
                 "has_thumbnail": has_thumbnail,
                 "prompt": prompt_text,
+                **({"rewritten_prompt": rewritten_prompt} if rewritten_prompt else {}),
             }),
             uploaded_at=datetime.now(),
             updated_at=datetime.now(),

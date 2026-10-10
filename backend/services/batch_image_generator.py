@@ -1157,6 +1157,9 @@ class BatchImageGenerator:
             if batch_status and hasattr(batch_status, 'generate_thumbnails') and batch_status.generate_thumbnails:
                 thumbnail_path = self._create_thumbnail(str(target_path), output_dir / "thumbnails")
 
+            prompt_record = self._prompt_record(prompt)
+            typed_prompt = prompt_record["original_prompt"]
+
             if self.progress_system:
                 completed = batch_status.completed_images + 1
                 progress = int((completed / batch_status.total_images) * 100)
@@ -1164,14 +1167,14 @@ class BatchImageGenerator:
                 self.progress_system.update_process(
                     process_id=batch_id,
                     progress=progress,
-                    message=f"Generated image {completed}/{batch_status.total_images}: {prompt.prompt[:50]}...",
+                    message=f"Generated image {completed}/{batch_status.total_images}: {typed_prompt[:50]}...",
                     additional_data={
                         "batch_id": batch_id,
                         "generated_count": completed,
                         "target_count": batch_status.total_images,
                         "completed": completed,
                         "total": batch_status.total_images,
-                        "current_prompt": prompt.prompt[:100]
+                        "current_prompt": typed_prompt[:100]
                     }
                 )
 
@@ -1182,7 +1185,7 @@ class BatchImageGenerator:
                 thumbnail_path=thumbnail_path,
                 generation_time=time.time() - start_time,
                 metadata={
-                    "original_prompt": prompt.prompt,
+                    **prompt_record,
                     "style": prompt.style,
                     "dimensions": actual,
                     **({"dimensions_requested": requested} if actual != requested else {}),
@@ -1263,6 +1266,31 @@ class BatchImageGenerator:
         except Exception as e:
             logger.error(f"Failed to save batch metadata: {e}")
 
+    @staticmethod
+    def _remember_typed_prompt(prompt: BatchPrompt) -> None:
+        """Keep what the person typed before a rewrite replaces ``prompt.prompt``.
+
+        The first rewrite wins: a storyboard pass followed by a director pass
+        still names the image by the typed text."""
+        if prompt.metadata is None:
+            prompt.metadata = {}
+        prompt.metadata.setdefault("typed_prompt", (prompt.prompt or "").strip())
+
+    @staticmethod
+    def _prompt_record(prompt: BatchPrompt) -> Dict[str, Any]:
+        """The prompt keys of an image's metadata.
+
+        ``original_prompt`` is what the person typed, which is what captions,
+        the lightbox title and the registered document show. When a chat-model
+        rewrite replaced it, ``rewritten_prompt`` carries the text that went on
+        to the generator, for the details view."""
+        typed = ((prompt.metadata or {}).get("typed_prompt") or prompt.prompt or "").strip()
+        sent = (prompt.prompt or "").strip()
+        record: Dict[str, Any] = {"original_prompt": typed or sent}
+        if typed and sent and sent != typed:
+            record["rewritten_prompt"] = sent
+        return record
+
     def _apply_director(self, request: BatchImageRequest) -> None:
         """If director_mode or storyboard_concept, rewrite prompts via Media Director.
 
@@ -1310,6 +1338,7 @@ class BatchImageGenerator:
                         if shot != concept and shot != (p.prompt or "").strip():
                             p.auto_enhance = False
                             changed += 1
+                        self._remember_typed_prompt(p)
                         p.prompt = shot
                     if changed:
                         request.auto_enhance = False
@@ -1359,6 +1388,7 @@ class BatchImageGenerator:
                 if (bp.prompt or "").strip() and idx < len(directed):
                     newp = (directed[idx] or "").strip()
                     if newp and newp != (bp.prompt or "").strip():
+                        self._remember_typed_prompt(bp)
                         bp.prompt = newp
                         bp.auto_enhance = False
                         changed += 1

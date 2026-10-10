@@ -112,7 +112,10 @@ const mapBatchResultsToImages = (batchStatus) => {
       thumbnail: r.thumbnail_path,
       imageFilename: getFilenameFromPath(r.image_path),
       thumbnailFilename: getFilenameFromPath(r.thumbnail_path),
+      // original_prompt is what the person typed; rewritten_prompt is the chat
+      // model's version when one replaced it before rendering (details only).
       prompt: r.metadata?.original_prompt || '',
+      rewrittenPrompt: r.metadata?.rewritten_prompt || '',
       metadata: r.metadata,
       batchId: batchStatus.batch_id,
     }));
@@ -1307,6 +1310,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     setLightboxImage({
       url,
       name: img.prompt || img.imageFilename || '',
+      caption: img.rewrittenPrompt ? `Sent to the model: ${img.rewrittenPrompt}` : '',
       fileIndex: index,
     });
   }, [activeBatch?.batch_id, buildBatchImageUrl]);
@@ -2554,6 +2558,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                           />
                           <ImageListItemBar
                             title={image.prompt ? image.prompt.substring(0, 30) + '...' : 'No prompt'}
+                            subtitle={image.rewrittenPrompt ? 'Rewritten before rendering; open to read it' : undefined}
                             actionIcon={
                               <IconButton
                                 sx={{ color: 'rgba(255, 255, 255, 0.54)' }}
@@ -2637,6 +2642,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         <ImageLightbox
           imageUrl={lightboxImage.url}
           imageName={lightboxImage.name}
+          caption={lightboxImage.caption}
           onClose={closeLightbox}
           onPrev={handleLightboxPrev}
           onNext={handleLightboxNext}

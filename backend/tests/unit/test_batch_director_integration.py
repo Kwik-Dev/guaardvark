@@ -204,6 +204,38 @@ def test_image_director_natural_family_fallback_keeps_enhancer(monkeypatch):
     assert req.auto_enhance is True
 
 
+def test_image_director_keeps_the_typed_prompt_for_the_image_name(monkeypatch):
+    # Captions, the lightbox title and the registered document show what the
+    # person typed; the rewrite goes to the generator and into the details.
+    _image_director_stub(monkeypatch, lambda prompts: ["DIR:" + prompts[0]] + prompts[1:])
+    req = _image_req(["a red fox", "a quiet harbour"], director_mode=True)
+
+    BatchImageGenerator._apply_director(SimpleNamespace(), req)
+
+    first, second = req.prompts
+    assert first.prompt == "DIR:a red fox"
+    assert first.metadata["typed_prompt"] == "a red fox"
+    assert "typed_prompt" not in second.metadata
+    assert BatchImageGenerator._prompt_record(first) == {
+        "original_prompt": "a red fox",
+        "rewritten_prompt": "DIR:a red fox",
+    }
+    assert BatchImageGenerator._prompt_record(second) == {"original_prompt": "a quiet harbour"}
+
+
+def test_image_storyboard_keeps_the_typed_prompt_for_the_image_name(monkeypatch):
+    monkeypatch.setattr(md, "storyboard_from_concept",
+                        lambda concept, n, **k: {"treatment": "t",
+                                                 "prompts": ["wide shot of the lighthouse", "the keeper"]})
+    req = _image_req(["placeholder one", "placeholder two"],
+                     storyboard_concept="a lighthouse at dawn")
+
+    BatchImageGenerator._apply_director(SimpleNamespace(), req)
+
+    assert [bp.metadata["typed_prompt"] for bp in req.prompts] == ["placeholder one", "placeholder two"]
+    assert BatchImageGenerator._prompt_record(req.prompts[0])["rewritten_prompt"] == "wide shot of the lighthouse"
+
+
 def test_image_storyboard_concept_fallback_keeps_enhancer(monkeypatch):
     # storyboard_from_concept's failure contract is {"prompts": [concept] * n}.
     monkeypatch.setattr(md, "storyboard_from_concept",
