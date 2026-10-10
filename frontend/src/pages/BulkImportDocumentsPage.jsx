@@ -429,9 +429,9 @@ const BulkImportDocumentsPage = () => {
               label="Index already-imported files that aren't indexed yet"
             />
             <Typography variant="caption" color="text.secondary" sx={{ pl: 4 }}>
-              A file that is already in Documents at the same path is skipped; with this ticked it
-              is queued for indexing if its indexing never finished. Files that are already indexed
-              are not indexed again.
+              A file this import already brought in (same target path) is skipped and its source is
+              left alone; with this ticked it is queued for indexing if its indexing never finished.
+              Files that are already indexed are not indexed again.
             </Typography>
             <FormControlLabel
               control={

@@ -772,97 +772,109 @@ def bulk_import_documents_task(job_id, source_path, target_folder, project_id=No
                 cur_id, cur_path = new_row[0], nxt
             return cur_id, cur_path
 
+        import shutil
+
+        def db_path_for(file_folder_path, name):
+            # document.path is relative to the uploads dir (no leading slash);
+            # only folder.path carries one.
+            if file_folder_path:
+                return f"{file_folder_path}/{name}".lstrip('/')
+            return os.path.join(target_folder or "Imports", name)
+
+        def queue_indexing(doc_id):
+            try:
+                from backend.celery_tasks_isolated import index_document_task
+                index_document_task.apply_async((doc_id,), queue='indexing')
+                return True
+            except Exception as e:
+                logger.warning(f"Could not queue indexing for document {doc_id}: {e}")
+                return False
+
         try:
             for idx, (source_file, rel_path, filename) in enumerate(files_to_import):
                 progress = 30 + int((idx / total_files) * 60)
                 update_job_status("processing", f"Importing {filename} ({idx+1}/{total_files})", progress)
 
+                copied_file = None
                 try:
                     rel_dir = os.path.dirname(rel_path)
                     file_folder_id, file_folder_path = ensure_folder_chain(rel_dir)
-
-                    # Copy or move file, preserving the source subdirectory
                     dest_dir = os.path.join(target_dir, rel_dir) if rel_dir else target_dir
-                    os.makedirs(dest_dir, exist_ok=True)
-                    target_file = os.path.join(dest_dir, filename)
-
-                    # Handle duplicate filenames
-                    counter = 1
-                    base_name, ext = os.path.splitext(filename)
-                    while os.path.exists(target_file):
-                        target_file = os.path.join(dest_dir, f"{base_name}_{counter}{ext}")
-                        counter += 1
-
-                    if force_copy:
-                        import shutil
-                        shutil.copy2(source_file, target_file)
-                    else:
-                        import shutil
-                        shutil.move(source_file, target_file)
-
-                    # Create relative path for database
-                    # Use folder path if available, otherwise use target_folder
-                    if file_folder_path:
-                        # document.path is relative to the uploads dir (no leading
-                        # slash) — only folder.path carries one
-                        db_path = f"{file_folder_path}/{os.path.basename(target_file)}".lstrip('/')
-                    else:
-                        # Fallback: use target_folder name without leading slash
-                        db_path = os.path.join(target_folder or "Imports", os.path.basename(target_file))
-
-                    # Check if document already exists
-                    result = session.execute(text("SELECT id, index_status FROM documents WHERE path = :db_path"),
-                                            {"db_path": db_path})
-                    existing = result.fetchone()
 
                     indexable = (os.path.splitext(filename)[1].lower()
                                  in indexable_extensions
                                  or not os.path.splitext(filename)[1])
 
+                    # A row for this file from an earlier run is looked up by the
+                    # path it would get, before any on-disk rename, so a re-run
+                    # skips it rather than importing a name_1.ext duplicate. The
+                    # source file is not touched.
+                    existing = session.execute(
+                        text("SELECT id, index_status FROM documents WHERE path = :db_path"),
+                        {"db_path": db_path_for(file_folder_path, filename)}).fetchone()
                     if existing:
                         doc_id, index_status = existing
                         if reindex_missing and index_status != 'INDEXED' and indexable:
-                            # Queue for reindexing
-                            try:
-                                from backend.celery_tasks_isolated import index_document_task
-                                index_document_task.apply_async((doc_id,), queue='indexing')
+                            if queue_indexing(doc_id):
                                 indexed_count += 1
-                            except Exception as e:
-                                logger.warning(f"Could not queue reindexing for document {doc_id}: {e}")
                         skipped_count += 1
-                        logger.info(f"Skipped existing document: {filename}")
-                    else:
-                        # Create new document record
-                        file_size = os.path.getsize(target_file)
-                        file_ext = os.path.splitext(filename)[1]
+                        logger.info(f"Skipped already imported document: {filename}")
+                        continue
 
-                        insert_result = session.execute(text("""
-                            INSERT INTO documents (filename, path, type, size, project_id, client_id, website_id, folder_id, index_status, uploaded_at)
-                            VALUES (:filename, :path, :type, :size, :project_id, :client_id, :website_id, :folder_id, :index_status, :uploaded_at)
-                            RETURNING id
-                        """), {"filename": filename, "path": db_path, "type": file_ext, "size": file_size,
-                               "project_id": project_id, "client_id": client_id, "website_id": website_id,
-                               "folder_id": file_folder_id,
-                               "index_status": 'PENDING' if indexable else 'STORED',
-                               "uploaded_at": datetime.datetime.now().isoformat()})
-                        doc_id = insert_result.fetchone()[0]
-                        session.commit()
+                    os.makedirs(dest_dir, exist_ok=True)
+                    target_file = os.path.join(dest_dir, filename)
 
-                        imported_count += 1
-                        logger.info(f"Created document record {doc_id}: {filename}")
+                    # A file on disk without a row (an earlier run that failed
+                    # after copying) keeps its name; this one gets a suffix.
+                    counter = 1
+                    base_name, ext = os.path.splitext(filename)
+                    while os.path.exists(target_file):
+                        target_file = os.path.join(dest_dir, f"{base_name}_{counter}{ext}")
+                        counter += 1
+                    db_path = db_path_for(file_folder_path, os.path.basename(target_file))
 
-                        if indexable:
-                            # Queue for indexing
-                            try:
-                                from backend.celery_tasks_isolated import index_document_task
-                                index_document_task.apply_async((doc_id,), queue='indexing')
-                                indexed_count += 1
-                            except Exception as e:
-                                logger.warning(f"Could not queue indexing for document {doc_id}: {e}")
+                    # Copy first, in both modes. The source leaves the user's
+                    # folder only once its row is committed; a failure below
+                    # removes the copy and leaves the source where it was.
+                    shutil.copy2(source_file, target_file)
+                    copied_file = target_file
+
+                    file_size = os.path.getsize(target_file)
+                    file_ext = os.path.splitext(filename)[1]
+
+                    insert_result = session.execute(text("""
+                        INSERT INTO documents (filename, path, type, size, project_id, client_id, website_id, folder_id, index_status, uploaded_at)
+                        VALUES (:filename, :path, :type, :size, :project_id, :client_id, :website_id, :folder_id, :index_status, :uploaded_at)
+                        RETURNING id
+                    """), {"filename": filename, "path": db_path, "type": file_ext, "size": file_size,
+                           "project_id": project_id, "client_id": client_id, "website_id": website_id,
+                           "folder_id": file_folder_id,
+                           "index_status": 'PENDING' if indexable else 'STORED',
+                           "uploaded_at": datetime.datetime.now().isoformat()})
+                    doc_id = insert_result.fetchone()[0]
+                    session.commit()
+                    copied_file = None  # the copy is now the imported file
+
+                    imported_count += 1
+                    logger.info(f"Created document record {doc_id}: {filename}")
+
+                    if not force_copy:
+                        try:
+                            os.remove(source_file)
+                        except OSError as e:
+                            logger.warning(f"Imported {filename} but could not remove the source {source_file}: {e}")
+
+                    if indexable and queue_indexing(doc_id):
+                        indexed_count += 1
 
                 except Exception as e:
                     session.rollback()
                     error_count += 1
+                    if copied_file and os.path.exists(copied_file):
+                        try:
+                            os.remove(copied_file)
+                        except OSError as cleanup_err:
+                            logger.warning(f"Could not remove partial copy {copied_file}: {cleanup_err}")
                     logger.error(f"Error importing {filename}: {e}", exc_info=True)
 
         finally:
