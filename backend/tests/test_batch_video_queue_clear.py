@@ -51,7 +51,25 @@ def test_finished_batches_leave_the_queue_and_active_ones_stay():
     assert removed == ["done", "failed", "stopped"]
     assert [q["batch_id"] for q in gen.list_queue()] == ["waiting", "busy"]
     assert set(gen.active_batches) == {"waiting", "busy"}
-    assert set(gen.cancel_events) == {"waiting", "busy"}
+    # Events stay: the worker consumes them itself when it dequeues a batch.
+    assert "stopped" in gen.cancel_events
+
+
+def test_a_batch_cancelled_while_waiting_is_still_skipped_after_clear():
+    # Queue A, queue B, cancel B, Clear Completed: B is still in the worker's
+    # input queue and must be skipped when the worker reaches it, not rendered.
+    gen = _generator([("A", "queued"), ("B", "queued")])
+    gen._save_metadata = lambda status: None
+    gen.cancel_events["B"].set()
+    gen.active_batches["B"].status = "cancelled"
+
+    assert gen.clear_finished_queue() == ["B"]
+
+    assert gen._skip_if_cancelled("A", gen.active_batches["A"]) is False
+    b = _status("B", "cancelled")
+    assert gen._skip_if_cancelled("B", b) is True
+    assert b.status == "cancelled"
+    assert "B" not in gen.cancel_events  # consumed by the worker, not by Clear
 
 
 def test_a_batch_still_marked_running_is_never_cleared():
