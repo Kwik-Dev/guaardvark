@@ -82,12 +82,26 @@ fi
 source "$PLUGIN_VENV/bin/activate"
 
 # plugin.json lists auto-editor as a required binary; requirements.txt puts it
-# in this venv. Like melt above, a missing one is reported, not fatal: the
-# beat-sync and compose endpoints work without it. The plugin manager keeps
-# "Warning:" lines from a successful start as the card's status message.
-if ! command -v auto-editor >/dev/null 2>&1; then
-    echo "Warning: auto-editor not found — the silence-trim endpoint (/auto-editor/trim) will fail until it is installed."
-    echo "  Install: $PLUGIN_VENV/bin/pip install -r $PLUGIN_ROOT/requirements.txt"
+# in this venv, and config.yaml's auto_editor.path may name another install.
+# Like melt above, a missing one is reported, not fatal: the beat-sync and
+# compose endpoints work without it. The plugin manager keeps a "Warning:"
+# line that says what will not work ("will fail", "until ... installed") as
+# the card's status message.
+AUTO_EDITOR_BIN="$(python - "$PLUGIN_ROOT/config.yaml" <<'PY' 2>/dev/null || true
+import sys
+try:
+    import yaml
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        config = yaml.safe_load(fh) or {}
+    print((config.get("auto_editor") or {}).get("path") or "auto-editor")
+except Exception:
+    print("auto-editor")
+PY
+)"
+AUTO_EDITOR_BIN="${AUTO_EDITOR_BIN:-auto-editor}"
+if ! command -v "$AUTO_EDITOR_BIN" >/dev/null 2>&1; then
+    echo "Warning: auto-editor not found ($AUTO_EDITOR_BIN) — the silence-trim endpoint (/auto-editor/trim) will fail until it is installed."
+    echo "  Install: $PLUGIN_VENV/bin/pip install -r $PLUGIN_ROOT/requirements.txt, or set auto_editor.path in config.yaml"
 fi
 
 LOG_DIR="$PROJECT_ROOT/logs"
