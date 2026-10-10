@@ -83,6 +83,7 @@ import { stepsFromProfile, stepsTileNote } from "../utils/videoSteps";
 import { promptControlsState } from "../utils/videoPromptControls";
 import { joinPreviews, previewLabel, promptsToPreview } from "../utils/videoPreviewPrompts";
 import { comfyUiLink } from "../utils/comfyUiLink";
+import { formatVideoStamp } from "../utils/videoBatchStamp";
 import { applyClipRename, applyClipRenameToPlayer, clipFileName } from "../utils/videoRename";
 import VideoGenEffectiveSettings from "../components/videogen/VideoGenEffectiveSettings";
 import LiveLatentPreview from "../components/videogen/LiveLatentPreview";
@@ -123,23 +124,6 @@ import lazyWithReload from "../utils/lazyWithReload";
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 
 const stripGlyph = (label) => String(label || "").replace(/^[^\p{L}\p{N}]+/u, "").trim();
-
-const formatVideoDate = (isoStr) => {
-  if (!isoStr) return null;
-  try {
-    const d = new Date(isoStr);
-    const now = new Date();
-    const diffMs = now - d;
-    const diffMin = Math.floor(diffMs / 60000);
-    const diffHr = Math.floor(diffMs / 3600000);
-    const diffDay = Math.floor(diffMs / 86400000);
-    if (diffMin < 1) return "Just now";
-    if (diffMin < 60) return `${diffMin}m ago`;
-    if (diffHr < 24) return `${diffHr}h ago`;
-    if (diffDay < 7) return `${diffDay}d ago`;
-    return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: d.getFullYear() !== now.getFullYear() ? "numeric" : undefined });
-  } catch { return null; }
-};
 
 // Lazy import for VideoModelsModal
 const VideoModelsModal = lazyWithReload(() => import("../components/modals/VideoModelsModal"));
@@ -3080,7 +3064,9 @@ const VideoGeneratorPage = ({ embedded = false }) => {
               <Box sx={{ maxHeight: 520, overflowY: 'auto', pr: 0.5 }}>
               <Grid container spacing={2}>
                 {batches.map((b) => {
-                  const dateStr = formatVideoDate(b.start_time || b.end_time);
+                  // Date and time, as Image Gen's cards show it: cards are named
+                  // after the first prompt, so two runs of one prompt tell apart here.
+                  const dateStr = formatVideoStamp(b.start_time || b.end_time);
                   const videoCount = b.completed_videos ?? 0;
                   const rawName = b.display_name || `Batch ${b.batch_id.slice(0, 8)}`;
                   // Backend trims new names to ~40 chars; legacy batches may hold a
@@ -3198,7 +3184,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                       </Box>
                       {/* Batch label */}
                       <Box sx={{ pt: 0.75, px: 0.5 }}>
-                        <Typography variant="caption" noWrap title={rawName} sx={{ fontWeight: 500, display: 'block' }}>
+                        <Typography variant="caption" noWrap title={dateStr ? `${rawName} · ${dateStr}` : rawName} sx={{ fontWeight: 500, display: 'block' }}>
                           {label}
                         </Typography>
                         <Typography variant="caption" color="text.disabled" sx={{ fontSize: '0.65rem' }}>
