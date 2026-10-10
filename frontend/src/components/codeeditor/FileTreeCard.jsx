@@ -764,6 +764,9 @@ const FileTreeCard = React.forwardRef(
                       <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 'bold' }}>
                         DOCUMENTS
                       </Typography>
+                      <Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>
+                        {projectId ? `project ${projectId}` : 'whole library, every project'}
+                      </Typography>
                     </ListItem>
                     {renderFileTree(documents)}
                   </>
@@ -791,11 +794,12 @@ const FileTreeCard = React.forwardRef(
             </ListItemIcon>
             <ListItemText>New File</ListItemText>
           </MenuItem>
-          <MenuItem onClick={() => handleCreateNew('folder')}>
+          {/* Files here are a flat list (browser storage and the library), so a folder has nowhere to go. */}
+          <MenuItem disabled>
             <ListItemIcon>
               <CreateNewFolder fontSize="small" />
             </ListItemIcon>
-            <ListItemText>New Folder</ListItemText>
+            <ListItemText primary="New Folder" secondary="Not available: this list has no folders" />
           </MenuItem>
 
           {/* Rename option - only for local files, not documents */}

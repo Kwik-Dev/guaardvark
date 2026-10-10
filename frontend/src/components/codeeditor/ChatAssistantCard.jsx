@@ -106,9 +106,11 @@ const ChatAssistantCard = React.forwardRef(
       lastAnalysis: null,
     });
 
-    // Real-time analysis state
+    // Real-time analysis state. Off by default: when on, every pause in typing
+    // sends the file to the model (one chat request per pause) and runs a
+    // syntax check; the switch's tooltip says so.
     const [realTimeAnalysis, setRealTimeAnalysis] = useState({
-      enabled: true,
+      enabled: false,
       errors: [],
       warnings: [],
       suggestions: [],
@@ -299,10 +301,15 @@ const ChatAssistantCard = React.forwardRef(
         ]);
 
         if (analysisResult.success && validationResult.success) {
+          // /validate is a real syntax check; when it could not parse the
+          // language it says so, and that note is shown instead of "no issues".
+          const unchecked = validationResult.mode === "unchecked" && validationResult.validation
+            ? [{ message: validationResult.validation }]
+            : [];
           setRealTimeAnalysis(prev => ({
             ...prev,
             errors: validationResult.errors || [],
-            warnings: validationResult.warnings || [],
+            warnings: [...(validationResult.warnings || []), ...unchecked],
             suggestions: analysisResult.suggestions || [],
             lastUpdate: new Date(),
           }));
@@ -1286,7 +1293,7 @@ Provide a helpful, specific response. Reference actual code when relevant. If mo
                 </Typography>
               </Stack>
               <Stack direction="row" spacing={0.5} alignItems="center">
-                <Tooltip title="Real-time Analysis" arrow>
+                <Tooltip title="Real-time analysis: 2 s after you stop typing, syntax-check the file and send it to the model for suggestions (one model request per pause; files over 5,000 characters are skipped)" arrow>
                   <FormControlLabel
                     control={
                       <Switch

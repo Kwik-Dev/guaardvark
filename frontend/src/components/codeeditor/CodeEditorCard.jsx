@@ -32,8 +32,9 @@ import {
   Preview as PreviewIcon,
   Add as AddIcon,
   Warning as WarningIcon,
+  SmartToy as SmartToyIcon,
 } from "@mui/icons-material";
-import Editor from "@monaco-editor/react";
+import Editor, { useMonaco } from "@monaco-editor/react";
 
 import DashboardCardWrapper from "../dashboard/DashboardCardWrapper";
 import { useUnifiedProgress } from "../../contexts/UnifiedProgressContext";
@@ -41,6 +42,11 @@ import * as codeIntelligenceService from "../../api/codeIntelligenceService";
 import * as fileOperationsService from "../../api/fileOperationsService";
 import { getLanguageFromFilename } from "../../utils/languageDetector";
 import { revealEditorLine } from "./codeEditorNav";
+import { createAiHoverProvider, readAiHoverPreference, writeAiHoverPreference } from "./aiHover";
+
+// Monaco command behind the lightbulb actions (Fix with AI, Explain, Optimize):
+// each sends the lines under the marker or selection to the chat card.
+const CODE_ACTION_COMMAND = "guaardvark.codeAction";
 
 const CodeEditorCard = React.forwardRef(
   (
@@ -72,6 +78,42 @@ const CodeEditorCard = React.forwardRef(
     const [previewDialogOpen, setPreviewDialogOpen] = useState(false);
     const { startProcess, completeProcess, errorProcess } = useUnifiedProgress();
     const theme = useTheme();
+    const monaco = useMonaco();
+
+    // AI hover explanations are opt-in: each one is a model request.
+    const [aiHoverEnabled, setAiHoverEnabled] = useState(readAiHoverPreference);
+    const aiHoverEnabledRef = useRef(aiHoverEnabled);
+    aiHoverEnabledRef.current = aiHoverEnabled;
+    const hoverCacheRef = useRef(new Map());
+    const currentTabRef = useRef(null);
+    const onChatActionRef = useRef(onChatAction);
+    onChatActionRef.current = onChatAction;
+
+    const toggleAiHover = useCallback(() => {
+      setAiHoverEnabled((on) => {
+        writeAiHoverPreference(!on);
+        return !on;
+      });
+      setContextMenu(null);
+    }, []);
+
+    // The lightbulb actions run through one command so they reach the chat
+    // card with the real text instead of inserting a placeholder comment.
+    useEffect(() => {
+      if (!monaco) return undefined;
+      const disposable = monaco.editor.registerCommand(CODE_ACTION_COMMAND, (_accessor, action, model, range, problems) => {
+        if (!model || !range || !onChatActionRef.current) return;
+        const text = model.getValueInRange({
+          startLineNumber: range.startLineNumber,
+          startColumn: 1,
+          endLineNumber: range.endLineNumber,
+          endColumn: model.getLineMaxColumn(range.endLineNumber),
+        });
+        if (!text.trim()) return;
+        onChatActionRef.current(action, text, currentTabRef.current?.filePath, { problems: problems || [] });
+      });
+      return () => disposable.dispose();
+    }, [monaco]);
 
     // Track initialization but don't force create tabs
     const hasInitialized = useRef(false);
@@ -85,6 +127,7 @@ const CodeEditorCard = React.forwardRef(
     const currentTab = openTabs && activeTabIndex >= 0 && activeTabIndex < openTabs.length
       ? openTabs[activeTabIndex]
       : openTabs && openTabs.length > 0 ? openTabs[0] : null;
+    currentTabRef.current = currentTab;
 
     // Create preview HTML with theme styles
     const getPreviewContent = useCallback(() => {
@@ -225,79 +268,41 @@ ${currentTab.content}
         handleSave();
       });
 
-      // Add hover provider for AI explanations
+      // Hover provider for AI explanations: only when the tab menu's "AI hover
+      // explanations" is on, one request per word (see aiHover.js).
       monaco.languages.registerHoverProvider(currentTab?.language || 'javascript', {
-        provideHover: async (model, position) => {
-          const word = model.getWordAtPosition(position);
-          if (!word) return null;
-
-          const line = model.getLineContent(position.lineNumber);
-          const context = {
-            content: line,
-            language: currentTab?.language || 'javascript',
-            filePath: currentTab?.filePath || 'untitled',
-            word: word.word,
-            position: position
-          };
-
-          try {
-            const explanation = await codeIntelligenceService.analyzeCodeIntelligent(context, `Explain this ${currentTab?.language || 'javascript'} code: ${word.word}`);
-            if (explanation.success) {
-              return {
-                range: new monaco.Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn),
-                contents: [
-                  { value: `**${word.word}**` },
-                  { value: explanation.analysis || 'AI explanation not available' }
-                ]
-              };
-            }
-          } catch (error) {
-            console.error('Hover provider error:', error);
-          }
-
-          return null;
-        }
+        provideHover: createAiHoverProvider({
+          isEnabled: () => aiHoverEnabledRef.current,
+          explain: codeIntelligenceService.analyzeCodeIntelligent,
+          getTab: () => currentTabRef.current,
+          cache: hoverCacheRef.current,
+        }),
       });
 
-      // Add code action provider for AI suggestions
+      // Lightbulb actions: each hands the lines in range to the chat card.
       monaco.languages.registerCodeActionProvider(currentTab?.language || 'javascript', {
         provideCodeActions: async (model, range, context) => {
           const actions = [];
+          const problems = (context.markers || []).map((m) => m.message);
 
-          if (context.markers && context.markers.length > 0) {
+          if (problems.length > 0) {
             actions.push({
               title: 'Fix with AI',
               kind: 'quickfix',
-              edit: {
-                edits: [{
-                  resource: model.uri,
-                  edit: {
-                    range: range,
-                    text: '// AI fix would be applied here'
-                  }
-                }]
-              }
+              command: { id: CODE_ACTION_COMMAND, title: 'Fix with AI', arguments: ['fix', model, range, problems] }
             });
           }
 
           actions.push({
             title: 'Explain Code',
             kind: 'refactor',
-            command: {
-              id: 'ai.explain',
-              title: 'Explain Code',
-              arguments: [model, range]
-            }
+            command: { id: CODE_ACTION_COMMAND, title: 'Explain Code', arguments: ['explain', model, range] }
           });
 
           actions.push({
             title: 'Optimize Code',
             kind: 'refactor',
-            command: {
-              id: 'ai.optimize',
-              title: 'Optimize Code',
-              arguments: [model, range]
-            }
+            command: { id: CODE_ACTION_COMMAND, title: 'Optimize Code', arguments: ['optimize', model, range] }
           });
 
           return { actions, dispose: () => {} };
@@ -993,6 +998,15 @@ ${currentTab.content}
               <DriveFileRenameOutline fontSize="small" />
             </ListItemIcon>
             <ListItemText>Rename Tab</ListItemText>
+          </MenuItem>
+          <MenuItem onClick={toggleAiHover}>
+            <ListItemIcon>
+              <SmartToyIcon fontSize="small" color={aiHoverEnabled ? "primary" : "inherit"} />
+            </ListItemIcon>
+            <ListItemText
+              primary={`AI hover explanations: ${aiHoverEnabled ? "on" : "off"}`}
+              secondary="Each hovered word asks the model once"
+            />
           </MenuItem>
         </Menu>
 

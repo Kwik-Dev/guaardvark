@@ -1,7 +1,7 @@
 // frontend/src/components/codeeditor/OutputCard.jsx
-// Problems panel + placeholder for future terminal/output integration
+// Problems panel plus the Output tab where Run, Debug and Build results land
 
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import {
   Box,
   Typography,
@@ -12,6 +12,8 @@ import {
   ListItem,
   ListItemIcon,
   ListItemText,
+  IconButton,
+  Tooltip,
 } from "@mui/material";
 import {
   Error as ErrorIcon,
@@ -19,9 +21,12 @@ import {
   Info as InfoIcon,
   CheckCircle as SuccessIcon,
   Terminal as TerminalIcon,
+  DeleteSweep as ClearIcon,
 } from "@mui/icons-material";
 
 import DashboardCardWrapper from "../dashboard/DashboardCardWrapper";
+
+const OUTPUT_COLORS = { error: "error.light", warning: "warning.light" };
 
 const OutputCard = React.forwardRef(
   (
@@ -33,11 +38,19 @@ const OutputCard = React.forwardRef(
       onCardColorChange,
       _openTabs,
       currentTab,
+      outputEntries,
+      onClearOutput,
       ...props
     },
     ref
   ) => {
     const [activeTab, setActiveTab] = useState(0);
+    const entries = Array.isArray(outputEntries) ? outputEntries : [];
+
+    // A new Run/Debug/Build result brings the Output tab forward.
+    useEffect(() => {
+      if (entries.length > 0) setActiveTab(1);
+    }, [entries.length]);
 
     // Analyze code for problems — debounced via useMemo to avoid re-scanning on every render
     const problems = useMemo(() => {
@@ -123,7 +136,19 @@ const OutputCard = React.forwardRef(
             <Tab
               icon={<TerminalIcon sx={{ fontSize: '0.85rem' }} />}
               iconPosition="start"
-              label="Terminal"
+              label={
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                  Output
+                  {entries.length > 0 && (
+                    <Chip
+                      label={entries.length}
+                      size="small"
+                      color={entries.some((entry) => entry.type === 'error') ? 'error' : 'default'}
+                      sx={{ height: 16, fontSize: '0.6rem', '& .MuiChip-label': { px: 0.5 } }}
+                    />
+                  )}
+                </Box>
+              }
               sx={{ '& .MuiTab-iconWrapper': { mr: 0.5 } }}
             />
           </Tabs>
@@ -181,25 +206,64 @@ const OutputCard = React.forwardRef(
               </Box>
             )}
 
-            {/* Terminal Tab — placeholder for future integration */}
+            {/* Output Tab: what Run, Debug and Build printed, newest last */}
             {activeTab === 1 && (
               <Box
                 sx={{
-                  p: 1,
                   bgcolor: 'grey.900',
-                  color: 'grey.500',
+                  color: 'grey.300',
                   fontFamily: 'monospace',
                   fontSize: '0.7rem',
-                  height: '100%',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  borderRadius: 0
+                  minHeight: '100%',
+                  position: 'relative',
                 }}
               >
-                <Typography variant="body2" sx={{ color: 'grey.500', fontSize: '0.7rem' }}>
-                  Terminal integration coming soon
-                </Typography>
+                {entries.length === 0 ? (
+                  <Box sx={{ p: 1, minHeight: 80, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <Typography variant="body2" sx={{ color: 'grey.500', fontSize: '0.7rem' }}>
+                      Run, Debug and Build print here
+                    </Typography>
+                  </Box>
+                ) : (
+                  <>
+                    {onClearOutput && (
+                      <Tooltip title="Clear output">
+                        <IconButton
+                          size="small"
+                          onClick={onClearOutput}
+                          aria-label="Clear output"
+                          sx={{ position: 'absolute', top: 2, right: 2, color: 'grey.500' }}
+                        >
+                          <ClearIcon sx={{ fontSize: '0.9rem' }} />
+                        </IconButton>
+                      </Tooltip>
+                    )}
+                    {entries.map((entry, index) => (
+                      <Box
+                        key={`${entry.timestamp}-${index}`}
+                        sx={{ px: 1, py: 0.5, borderBottom: '1px solid', borderColor: 'grey.800' }}
+                      >
+                        <Typography component="div" sx={{ fontSize: '0.6rem', color: 'grey.500', fontFamily: 'inherit' }}>
+                          {entry.label || entry.type}
+                          {entry.timestamp ? ` · ${new Date(entry.timestamp).toLocaleTimeString()}` : ''}
+                        </Typography>
+                        <Box
+                          component="pre"
+                          sx={{
+                            m: 0,
+                            whiteSpace: 'pre-wrap',
+                            wordBreak: 'break-word',
+                            fontFamily: 'inherit',
+                            fontSize: 'inherit',
+                            color: OUTPUT_COLORS[entry.type] || 'inherit',
+                          }}
+                        >
+                          {entry.message}
+                        </Box>
+                      </Box>
+                    ))}
+                  </>
+                )}
               </Box>
             )}
           </Box>
@@ -214,6 +278,7 @@ OutputCard.displayName = "OutputCard";
 export default React.memo(OutputCard, (prev, next) => (
   prev.currentTab?.content === next.currentTab?.content &&
   prev.currentTab?.filePath === next.currentTab?.filePath &&
+  prev.outputEntries === next.outputEntries &&
   prev.isMinimized === next.isMinimized &&
   prev.cardColor === next.cardColor
 ));
