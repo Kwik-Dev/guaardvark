@@ -108,6 +108,35 @@ describe("the content field is labelled by the rule's type", () => {
   });
 });
 
+describe("Target Models when the installed model list is unavailable", () => {
+  it("offers only All Models and says why, never a hosted model name", async () => {
+    const api = await import("../../../api");
+    api.getAvailableModels.mockResolvedValueOnce({ error: "Ollama unreachable" });
+    render(
+      <RuleActionModal
+        open
+        ruleData={{ id: 9, name: "r", level: "USER_GLOBAL", type: "PROMPT_TEMPLATE", rule_text: "t", target_models: ["gemma4:12b"] }}
+        onSave={vi.fn()}
+        onClose={() => {}}
+      />,
+    );
+    await screen.findByText(/Could not load the installed model list: Ollama unreachable/);
+    fireEvent.mouseDown(screen.getByLabelText(/Target Models/));
+    const options = screen.getAllByRole("option").map((o) => o.textContent);
+    expect(options).toEqual(["All Models"]);
+    expect(screen.queryByText(/gpt-4|gpt-3\.5|claude-2/)).toBeNull();
+    // The target already stored on the rule is still shown and will be saved.
+    expect(screen.getByText("gemma4:12b")).toBeInTheDocument();
+  });
+
+  it("says so when the list comes back empty", async () => {
+    const api = await import("../../../api");
+    api.getAvailableModels.mockResolvedValueOnce([]);
+    render(<RuleActionModal open ruleData={null} onSave={vi.fn()} onClose={() => {}} />);
+    await screen.findByText(/No installed models were listed/);
+  });
+});
+
 describe("a new rule derives its level and type from the form", () => {
   it("is a USER_GLOBAL prompt template by default", () => {
     expect(effectiveTypeAndLevel({ name: "tone" }, null)).toEqual({

@@ -143,20 +143,24 @@ const RuleActionModal = ({
             );
           }
           const names = Array.isArray(fetchedApiModels)
-            ? fetchedApiModels.map((m) => m.name)
+            ? fetchedApiModels.map((m) => m.name).filter(Boolean)
             : [];
           setModelOptions([ALL_MODELS_VALUE, ...new Set(names)]);
+          if (names.length === 0) {
+            setModelFetchError(
+              "No installed models were listed (is Ollama running?). " +
+                "Only All Models can be chosen; models already set on this rule are kept."
+            );
+          }
         } catch (err) {
           console.error("RuleActionModal: Failed to fetch models:", err);
+          // Local-first: no made-up model names when the local list is
+          // unavailable. The rule's existing targets stay selectable as-is.
           setModelFetchError(
-            `Failed to load models: ${err.message}. Using default list.`
+            `Could not load the installed model list: ${err.message}. ` +
+              "Only All Models can be chosen; models already set on this rule are kept."
           );
-          setModelOptions([
-            ALL_MODELS_VALUE,
-            "gpt-4",
-            "gpt-3.5-turbo",
-            "claude-2",
-          ]);
+          setModelOptions([ALL_MODELS_VALUE]);
         } finally {
           setIsLoadingModels(false);
         }
