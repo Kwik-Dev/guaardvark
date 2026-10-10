@@ -80,6 +80,7 @@ import RenderFailureNote from "../components/videogen/RenderFailureNote";
 import { refusalText } from "../utils/renderFailure";
 import { applicableAdapters as applicableAdapterModels } from "../utils/videoAdapters";
 import { stepsFromProfile, stepsTileNote } from "../utils/videoSteps";
+import { promptControlsState } from "../utils/videoPromptControls";
 import { applyClipRename, applyClipRenameToPlayer, clipFileName } from "../utils/videoRename";
 import VideoGenEffectiveSettings from "../components/videogen/VideoGenEffectiveSettings";
 import LiveLatentPreview from "../components/videogen/LiveLatentPreview";
@@ -190,6 +191,17 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   const [previewEnhanceOff, setPreviewEnhanceOff] = useState(false);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
+  // Settings > Verbatim prompts, as the backend reports it: the render then
+  // skips the enhancer and the Director, so the controls that feed them say so.
+  const [verbatimPrompts, setVerbatimPrompts] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    fetch(`${API_BASE}/settings/verbatim_prompts`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (alive && d?.data) setVerbatimPrompts(Boolean(d.data.enabled)); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
 
   // Batch-wide prompt modifiers (mirror BatchImageGen's "Look & Feel" pattern)
   const [lookAndFeel, setLookAndFeel] = useState("");
@@ -1032,6 +1044,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       if (data.success && data.data) {
         setPreviewEnhanced(data.data.enhanced_prompt || "");
         setPreviewVerbatim(Boolean(data.data.verbatim));
+        setVerbatimPrompts(Boolean(data.data.verbatim));
         setPreviewEnhanceOff(data.data.enhance_prompt === false);
         setShowPreview(true);
       } else {
@@ -1051,6 +1064,12 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       .map((p) => p.trim())
       .filter(Boolean);
   }, [promptsText]);
+
+  // Which prompt controls the render reads right now (Motion chips, Prompt style).
+  const promptControls = useMemo(
+    () => promptControlsState({ enhancePrompt, verbatimPrompts, inputMode, fidelityMode, directorMode, storyboardMode }),
+    [enhancePrompt, verbatimPrompts, inputMode, fidelityMode, directorMode, storyboardMode],
+  );
 
   // End-frame modes the selected model declares (image mode): flf2v with a
   // start image, l2v without one.
@@ -2128,7 +2147,10 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                 <SettingChip
                   label="Enhance prompt"
                   on={enhancePrompt}
-                  tooltip="Adds quality and motion descriptors. Motion chips do nothing when this is off."
+                  note={enhancePrompt && verbatimPrompts && inputMode !== "references" ? "skipped: Verbatim prompts" : undefined}
+                  tooltip={verbatimPrompts && inputMode !== "references"
+                    ? "Verbatim prompts is on in Settings: the prompt is sent as typed and this does nothing."
+                    : "Adds quality and motion descriptors. Motion chips and Prompt style do nothing when this is off."}
                   onToggle={setEnhancePrompt}
                 />
                 <ActionButton
@@ -2361,12 +2383,12 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   }))}
                 />
               </Cluster>
-              <Cluster label="Motion" note={enhancePrompt ? "via prompt enhancer" : "no effect while Enhance is off"}>
+              <Cluster label="Motion" note={promptControls.motion.note}>
                 <ChoiceChips
                   ariaLabel="Motion"
                   value={motionPreset}
                   onChange={setMotionPreset}
-                  disabled={!enhancePrompt}
+                  disabled={!promptControls.motion.active}
                   options={Object.entries(MOTION_PRESETS).map(([key, preset]) => ({
                     value: key,
                     label: stripGlyph(preset.label),
@@ -2577,7 +2599,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                     onChange={(e) => setAdvancedParams({ ...advancedParams, guidance_scale: Number(e.target.value) })}
                     sx={{ width: 120 }}
                   />
-                  <FormControl size="small" sx={{ minWidth: 180 }}>
+                  <FormControl size="small" sx={{ minWidth: 180 }} disabled={!promptControls.style.active}>
                     <InputLabel>Prompt style</InputLabel>
                     <Select value={promptStyle} onChange={(e) => setPromptStyle(e.target.value)} label="Prompt style">
                       {Object.entries(PROMPT_STYLES)
@@ -2600,6 +2622,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                     sx={{ width: 140 }}
                   />
                 </Line>
+                {!promptControls.style.active && <Hint>{promptControls.style.note}.</Hint>}
               </Cluster>
               <VideoGenEffectiveSettings
                 model={model}
