@@ -47,6 +47,7 @@ vi.mock("../../components/common/SnackbarProvider", () => {
 });
 
 import DocumentsPage from "../DocumentsPage";
+import { indexBulk } from "../../api/indexingService";
 
 const REPORTS = { id: 7, name: "Reports", path: "Reports", document_count: 0, subfolder_count: 0 };
 const ARCHIVE = { id: 8, name: "Archive", path: "Archive", document_count: 1, subfolder_count: 0 };
@@ -248,5 +249,23 @@ describe("Files page operating-system drop", () => {
       expect(uploaded).toEqual(["one.txt", "two.txt", "three.txt"]);
     });
     await waitFor(() => expect(messages.at(-1)).toEqual({ text: "Imported 3 file(s) into Files", level: "success" }));
+  });
+});
+
+describe("Files page indexing", () => {
+  const rootReads = () =>
+    axiosMock.get.mock.calls.filter(([url]) => url.startsWith("/api/files/browse?path=/")).length;
+
+  it("re-reads the listing after Index so the status dots update", async () => {
+    indexBulk.mockResolvedValue({ total_documents: 1, skipped: 0, job_id: "job-1" });
+    renderPage();
+    await screen.findByText("notes.txt");
+    const before = rootReads();
+
+    fireEvent.contextMenu(screen.getByText("notes.txt"));
+    fireEvent.click(menuItem("Index"));
+
+    await waitFor(() => expect(indexBulk).toHaveBeenCalledWith([], [31]));
+    await waitFor(() => expect(rootReads()).toBeGreaterThan(before));
   });
 });

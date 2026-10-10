@@ -66,6 +66,13 @@ const ICON_GRID_PAD = 20;
 // avoids spurious re-renders and `.has` on undefined.
 const EMPTY_SELECTION = new Set();
 
+// Statuses the orange dot stands for (see IndexStatusIndicator in fileUtils).
+const INDEX_IN_PROGRESS = new Set(['INDEXING', 'PENDING']);
+// After an Index action the listing is re-read on this cadence while
+// something is still in progress, for at most this many reads.
+const INDEX_POLL_INTERVAL_MS = 3000;
+const INDEX_POLL_MAX_TICKS = 40;
+
 const DocumentsPage = () => {
   const { gridSettings } = useLayout();
   const { RGL_WIDTH_PROP_PX, _CONTAINER_PADDING_PX } = gridSettings;
@@ -380,11 +387,13 @@ const DocumentsPage = () => {
 
         return finalWindows;
       });
+      return { folders, files };
     } catch (err) {
       if (isMountedRef.current) {
         showMessage?.('Failed to refresh', 'error');
       }
     }
+    return null;
   }, [showMessage]);
 
   // Re-fetch every open folder window. Changes made on this page announce
@@ -398,6 +407,42 @@ const DocumentsPage = () => {
       return updated;
     });
   }, []);
+
+  // Index and Index Contents queue Celery work and return at once, so the
+  // status dots only change when the listing is read again. Re-read it now,
+  // then every few seconds while a root file is still INDEXING or PENDING or
+  // an indexed folder still has unindexed documents, until it settles or the
+  // poll has run long enough to call the job stuck.
+  const indexPollRef = useRef(null);
+  const stopIndexPoll = useCallback(() => {
+    if (indexPollRef.current) {
+      clearTimeout(indexPollRef.current);
+      indexPollRef.current = null;
+    }
+  }, []);
+  useEffect(() => stopIndexPoll, [stopIndexPoll]);
+
+  const followIndexing = useCallback(async (folderIds = []) => {
+    stopIndexPoll();
+    const targets = new Set(folderIds);
+    let ticks = 0;
+    const tick = async () => {
+      indexPollRef.current = null;
+      if (!isMountedRef.current) return;
+      const fresh = await refreshData();
+      if (!isMountedRef.current) return;
+      refreshOpenWindows();
+      if (!fresh) return;
+      const fileBusy = fresh.files.some((f) => INDEX_IN_PROGRESS.has(f.index_status));
+      const folderBusy = fresh.folders.some((f) =>
+        targets.has(f.id) && (f.document_count || 0) > (f.indexed_document_count || 0));
+      ticks += 1;
+      if ((fileBusy || folderBusy) && ticks < INDEX_POLL_MAX_TICKS) {
+        indexPollRef.current = setTimeout(tick, INDEX_POLL_INTERVAL_MS);
+      }
+    };
+    await tick();
+  }, [refreshData, refreshOpenWindows, stopIndexPoll]);
 
   // Listen for file/folder changes from any tab/component and refresh in place
   useEffect(() => {
@@ -1697,12 +1742,13 @@ const DocumentsPage = () => {
         result?.message || 'Reindexing triggered successfully. Status will update shortly.',
         'success'
       );
+      followIndexing();
     } catch (err) {
       const errorMsg = err.response?.data?.message || err.message || 'Failed to trigger reindexing';
       showMessage?.(`Reindexing failed: ${errorMsg}`, 'error');
       throw err;
     }
-  }, [showMessage]);
+  }, [showMessage, followIndexing]);
 
   // Handle bulk index from context menu
   const handleIndex = useCallback(async () => {
@@ -1743,11 +1789,12 @@ const DocumentsPage = () => {
       if (result.total_documents) parts.push(`${result.total_documents} document${result.total_documents !== 1 ? 's' : ''}`);
       if (folderIds.length > 0) parts.push(`from ${folderIds.length} folder${folderIds.length !== 1 ? 's' : ''}`);
       showMessage?.(`Indexing ${parts.join(' ')}`, 'success');
+      followIndexing(folderIds);
     } catch (err) {
       const errorMsg = err.message || 'Failed to trigger indexing';
       showMessage?.(`Indexing failed: ${errorMsg}`, 'error');
     }
-  }, [contextMenuItem, contextMenuType, activeSelection, showMessage]);
+  }, [contextMenuItem, contextMenuType, activeSelection, showMessage, followIndexing]);
 
   // Desktop drag-to-select handlers
   const handleDesktopSelectionMouseDown = useCallback((e) => {
