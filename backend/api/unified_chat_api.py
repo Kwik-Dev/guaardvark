@@ -11,7 +11,11 @@ from pathlib import Path
 
 from flask import Blueprint, current_app, request, jsonify
 from backend.services.tool_activity import broadcast_tool_activity
-from backend.socketio_instance import CHAT_ATTACHMENT_MAX_BYTES, chat_attachment_too_large
+from backend.socketio_instance import (
+    CHAT_ATTACHMENT_MAX_BYTES,
+    chat_attachment_too_large,
+    chat_attachments,
+)
 from backend.utils.response_utils import success_response
 
 logger = logging.getLogger(__name__)
@@ -83,6 +87,37 @@ def _merge_session_mode_options(session_id: str, options: dict | None) -> dict:
     return merged
 
 
+def _save_chat_image(image_data) -> str | None:
+    """Write one base64 chat picture under the uploads folder and return its
+    history URL, or ``None`` when it could not be saved (the turn still runs)."""
+    try:
+        import os, base64 as b64mod
+        from backend.config import UPLOAD_DIR
+        img_dir = os.path.join(UPLOAD_DIR, "chat_images")
+        os.makedirs(img_dir, exist_ok=True)
+        raw_bytes = b64mod.b64decode(image_data)
+        # Detect actual image format from magic bytes
+        ext = "png"  # default
+        if raw_bytes[:4] == b"\x89PNG":
+            ext = "png"
+        elif raw_bytes[:3] == b"\xff\xd8\xff":
+            ext = "jpg"
+        elif raw_bytes[:4] == b"RIFF" and raw_bytes[8:12] == b"WEBP":
+            ext = "webp"
+        elif b"ftypavif" in raw_bytes[:32] or b"ftypavis" in raw_bytes[:32]:
+            ext = "avif"
+        elif b"ftypheic" in raw_bytes[:32] or b"ftypheix" in raw_bytes[:32]:
+            ext = "heic"
+        fname = f"chat_image_{uuid.uuid4().hex[:12]}.{ext}"
+        with open(os.path.join(img_dir, fname), "wb") as f:
+            f.write(raw_bytes)
+        logger.info(f"Saved unified chat image: {fname} ({ext})")
+        return f"/api/enhanced-chat/vision/image/{fname}"
+    except Exception as img_err:
+        logger.warning(f"Failed to save chat image: {img_err}")
+        return None
+
+
 @unified_chat_bp.route("", methods=["POST"])
 def unified_chat():
     """
@@ -95,7 +130,11 @@ def unified_chat():
         return jsonify({"success": False, "error": "Invalid JSON body"}), 400
 
     message = data.get("message", "").strip()
-    image_data = data.get("image")  # Optional base64-encoded image
+    # Optional base64-encoded pictures: ``images`` (several) or ``image`` (one).
+    # The first is the turn's primary picture; the rest ride along as
+    # ``attached_images`` for the model to see. Image tools edit the first.
+    attached_images = chat_attachments(data)
+    image_data = attached_images[0] if attached_images else None
     raw_options = data.get("options", {})
     options = raw_options if isinstance(raw_options, dict) else {}
     has_direct_tool = bool(
@@ -106,7 +145,7 @@ def unified_chat():
     if not message and not image_data and not has_direct_tool:
         return jsonify({"success": False, "error": "Message or image is required"}), 400
 
-    too_large = chat_attachment_too_large(image_data)
+    too_large = chat_attachment_too_large(attached_images)
     if too_large:
         return jsonify({
             "success": False,
@@ -117,7 +156,7 @@ def unified_chat():
 
     # If image provided but no message, set a default
     if not message and image_data:
-        message = "Describe this image."
+        message = "Describe these images." if len(attached_images) > 1 else "Describe this image."
     if not message and has_direct_tool:
         slash = (options.get("slash_command") or options.get("direct_tool") or "").strip()
         args = (options.get("slash_args") or "").strip()
@@ -243,34 +282,18 @@ def unified_chat():
     # Run in background thread with app context
     app = current_app._get_current_object()
 
-    # Save image file for chat history if provided
-    image_url = None
-    if image_data:
-        try:
-            import os, base64 as b64mod, imghdr
-            from backend.config import UPLOAD_DIR
-            img_dir = os.path.join(UPLOAD_DIR, "chat_images")
-            os.makedirs(img_dir, exist_ok=True)
-            raw_bytes = b64mod.b64decode(image_data)
-            # Detect actual image format from magic bytes
-            ext = "png"  # default
-            if raw_bytes[:4] == b"\x89PNG":
-                ext = "png"
-            elif raw_bytes[:3] == b"\xff\xd8\xff":
-                ext = "jpg"
-            elif raw_bytes[:4] == b"RIFF" and raw_bytes[8:12] == b"WEBP":
-                ext = "webp"
-            elif b"ftypavif" in raw_bytes[:32] or b"ftypavis" in raw_bytes[:32]:
-                ext = "avif"
-            elif b"ftypheic" in raw_bytes[:32] or b"ftypheix" in raw_bytes[:32]:
-                ext = "heic"
-            fname = f"chat_image_{uuid.uuid4().hex[:12]}.{ext}"
-            with open(os.path.join(img_dir, fname), "wb") as f:
-                f.write(raw_bytes)
-            image_url = f"/api/enhanced-chat/vision/image/{fname}"
-            logger.info(f"Saved unified chat image: {fname} ({ext})")
-        except Exception as img_err:
-            logger.warning(f"Failed to save chat image: {img_err}")
+    # Save the attached pictures for chat history. The first one's URL is the
+    # row's ``imageUrl``; all of them are ``imageUrls`` when there are several.
+    image_urls = [url for url in (_save_chat_image(img) for img in attached_images) if url]
+    image_url = image_urls[0] if image_urls else None
+
+    # The server alone decides what the engine sees as attached this turn.
+    options.pop("attached_images", None)
+    options.pop("attached_image_urls", None)
+    if len(attached_images) > 1:
+        options["attached_images"] = attached_images
+        if len(image_urls) == len(attached_images):
+            options["attached_image_urls"] = image_urls
 
     # Vision pipeline: while a camera streams, its latest frame rides along as
     # camera context, not as the user's picture (which would skip RAG and make

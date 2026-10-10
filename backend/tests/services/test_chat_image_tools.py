@@ -3,6 +3,8 @@ from backend.tools.image_tools import EditImageTool, GenerateIdentityTool
 from backend.services.unified_chat_engine import (
     GPU_HEAVY_TOOLS,
     _pin_image_edit_tools,
+    attached_images_for_turn,
+    pasted_images_note,
     identity_prompt_from_message,
     parse_outpaint_pad,
     user_wants_background_remove,
@@ -417,3 +419,32 @@ def test_api_sends_the_camera_frame_as_context_not_as_the_image(monkeypatch):
     assert options["camera_frame"] == CAMERA_FRAME
     assert kwargs["image_data"] is None
     assert kwargs["image_url"] is None
+
+
+# ---- several pictures on one turn -------------------------------------------
+
+def test_attached_images_default_to_the_primary_picture():
+    assert attached_images_for_turn(None, {}) == []
+    assert attached_images_for_turn("AAAA", {}) == ["AAAA"]
+    assert attached_images_for_turn("AAAA", {"attached_images": "AAAA"}) == ["AAAA"]
+    assert attached_images_for_turn("AAAA", {"attached_images": [None, ""]}) == ["AAAA"]
+
+
+def test_attached_images_keep_order_with_the_primary_first():
+    opts = {"attached_images": ["AAAA", "BBBB", "CCCC"]}
+    assert attached_images_for_turn("AAAA", opts) == ["AAAA", "BBBB", "CCCC"]
+    # A list that does not lead with the primary picture is reordered, not trusted.
+    opts = {"attached_images": ["BBBB", "AAAA", "CCCC"]}
+    assert attached_images_for_turn("AAAA", opts) == ["AAAA", "BBBB", "CCCC"]
+
+
+def test_pasted_images_note_for_one_and_several():
+    assert pasted_images_note([]) is None
+    assert pasted_images_note([None, "  "]) is None
+    assert pasted_images_note(["a red barn"]) == (
+        "[The user pasted an image. Vision model analysis: a red barn]"
+    )
+    assert pasted_images_note(["a red barn", None, "a grey cat"]) == (
+        "[The user pasted 3 images. Vision model analysis: "
+        "Image 1 of 3: a red barn; Image 3 of 3: a grey cat]"
+    )

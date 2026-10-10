@@ -108,6 +108,11 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate, 
   }, []);
   const isCommand = message.type === "command";
   const isProgress = message.type === "progress";
+  // Every picture the user attached to this turn (several), else empty: the
+  // single-picture case keeps reading imageUrl below.
+  const attachedImageUrls = Array.isArray(message.imageUrls)
+    ? message.imageUrls.filter((u) => typeof u === "string" && u)
+    : [];
   const isAgentLoop = message.isAgentLoop;
   const logo = useAppStore((s) => s.systemLogo);
   const [lightbox, setLightbox] = useState(null);
@@ -489,8 +494,40 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate, 
           <Chip label="command" size="small" variant="outlined" color="info"
             sx={{ height: 18, fontSize: "0.65rem", mb: 0.5, fontFamily: "monospace" }} />
         )}
-        {/* Display image if present */}
-        {(message.imageUrl || message.relatedImageUrl) && (
+        {/* Display the attached pictures if present: all of them when the
+            user sent several, else the one (or the related image). */}
+        {(attachedImageUrls.length > 1) ? (
+          <Box sx={{ mb: 1, display: "flex", flexWrap: "wrap", gap: 1 }}>
+            {attachedImageUrls.map((url, idx) => (
+              <Box key={`${idx}-${url}`}>
+                <CardMedia
+                  component="img"
+                  sx={{
+                    maxWidth: 300,
+                    maxHeight: 200,
+                    width: 'auto',
+                    height: 'auto',
+                    borderRadius: 1,
+                    border: '1px solid',
+                    borderColor: 'divider',
+                    objectFit: 'contain'
+                  }}
+                  image={guardedMediaSrc(url)}
+                  alt={message.imageFileNames?.[idx] || `Uploaded image ${idx + 1}`}
+                />
+                {message.imageFileNames?.[idx] && (
+                  <Chip
+                    icon={<ImageIcon />}
+                    label={message.imageFileNames[idx]}
+                    size="small"
+                    variant="outlined"
+                    sx={{ mt: 0.5 }}
+                  />
+                )}
+              </Box>
+            ))}
+          </Box>
+        ) : (message.imageUrl || message.relatedImageUrl) && (
           <Box sx={{ mb: 1 }}>
             <CardMedia
               component="img"
@@ -938,8 +975,10 @@ MessageItem.propTypes = {
     agentLoopStatus: PropTypes.oneOf(["thinking", "complete", "error"]),
     agentResult: PropTypes.object,
     imageUrl: PropTypes.string,
+    imageUrls: PropTypes.arrayOf(PropTypes.string),
     relatedImageUrl: PropTypes.string,
     imageFileName: PropTypes.string,
+    imageFileNames: PropTypes.arrayOf(PropTypes.string),
     isUnifiedChat: PropTypes.bool,
     toolCalls: PropTypes.array,
     generatedImages: PropTypes.array,

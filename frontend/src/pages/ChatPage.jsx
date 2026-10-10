@@ -51,7 +51,7 @@ import { webSearchSend } from "../components/chat/webSearchOffer";
 import { useUnifiedProgress } from "../contexts/UnifiedProgressContext";
 import extractSpeakableText from "../utils/extractSpeakableText";
 import useVoiceSink from "../hooks/useVoiceSink";
-import { chatErrorMessage } from "../utils/chatAttachment";
+import { attachedPictures, chatErrorMessage } from "../utils/chatAttachment";
 
 import { createPlan } from "../api/orchestratorService";
 import { mergeActivePlanIntoMessages, hydrateOrchestratorFields } from "../utils/orchestratorChat";
@@ -776,6 +776,9 @@ const ChatPage = () => {
                   agentThinkingSteps: msg.agentThinkingSteps ?? msg.extra_data?.agentThinkingSteps,
                   agentNote: msg.agentNote ?? msg.extra_data?.agentNote,
                   generatedImages: msg.generatedImages ?? msg.extra_data?.generatedImages,
+                  // The pictures the user attached, saved by the HTTP route.
+                  imageUrl: msg.imageUrl ?? msg.extra_data?.imageUrl,
+                  imageUrls: msg.imageUrls ?? msg.extra_data?.imageUrls,
                   thinking: msg.thinking ?? msg.extra_data?.thinking,
                   truncated: msg.truncated ?? msg.extra_data?.truncated,
                   verified: msg.verified ?? msg.extra_data?.verified,
@@ -1730,11 +1733,20 @@ const ChatPage = () => {
       ) {
         debugLog("Image analysis: routing through unified chat with base64 image");
         // Upgrade existing user message with image data instead of adding a duplicate
-        const imageContent = inputText || `Describe this image: ${voiceOptions.imageFileName}`;
+        const previews = Array.isArray(voiceOptions.imagePreviews) ? voiceOptions.imagePreviews : [];
+        const imageContent = inputText || (previews.length > 1
+          ? `Describe these ${previews.length} images: ${(voiceOptions.imageFileNames || []).join(", ")}`
+          : `Describe this image: ${voiceOptions.imageFileName}`);
+        const imageFields = {
+          imageUrl: voiceOptions.imagePreview,
+          imageFileName: voiceOptions.imageFileName,
+          ...(previews.length > 1 ? { imageUrls: previews, imageFileNames: voiceOptions.imageFileNames } : {}),
+          messageType: "image_upload",
+        };
         if (userMessageTempId) {
           setMessages((prev) => prev.map((m) =>
             m.tempId === userMessageTempId
-              ? { ...m, content: imageContent, imageUrl: voiceOptions.imagePreview, imageFileName: voiceOptions.imageFileName, messageType: "image_upload" }
+              ? { ...m, content: imageContent, ...imageFields }
               : m
           ));
         } else {
@@ -1742,9 +1754,7 @@ const ChatPage = () => {
             id: `user_${Date.now()}`,
             role: "user",
             content: imageContent,
-            imageUrl: voiceOptions.imagePreview,
-            imageFileName: voiceOptions.imageFileName,
-            messageType: "image_upload",
+            ...imageFields,
           }]);
         }
         // Don't return — fall through to unified chat flow which sends imageBase64
@@ -1821,8 +1831,8 @@ const ChatPage = () => {
 
         try {
           const modifiedInputText = inputText;
-          // Pass image data through unified chat if present
-          const imageBase64 = voiceOptions?.imageBase64 || null;
+          // Pass the attached pictures through unified chat if present
+          const imageBase64 = attachedPictures(voiceOptions);
           const isVoice = !!(voiceOptions?.isVoiceMessage);
 
           // Lazily ensure a service wrapper exists so listeners (thinking/tool/stream) get attached
@@ -1957,7 +1967,7 @@ const ChatPage = () => {
           // One more attempt through the unified path.
           try {
             const modifiedInputText = inputText;
-            const imageBase64 = voiceOptions?.imageBase64 || null;
+            const imageBase64 = attachedPictures(voiceOptions);
             const isVoice = !!(voiceOptions?.isVoiceMessage);
 
             debugLog('[ChatPage] AGENT RECOVERY PRE-SEND (CRITICAL): await sendMessage *before* setIsStreamingMessage(true). Agent backend may start emitting chat:thinking (source=agent_loop) immediately after HTTP ack.');
