@@ -1685,6 +1685,7 @@ def edit_image():
                 # Format changed — update document record
                 out_doc.filename = physical_path.stem + target_ext
                 out_doc.path = str(Path(document.path).with_suffix(target_ext))
+                out_doc.type = target_ext
                 # Remove old file after save
                 old_path = physical_path
             else:
@@ -1700,14 +1701,14 @@ def edit_image():
                     break
                 counter += 1
 
-            # Create new document record
+            # Create new document record; size is set once the file is written.
             new_doc_path = str(Path(document.path).parent / new_name)
             out_doc = DBDocument(
                 filename=new_name,
                 path=new_doc_path,
                 folder_id=document.folder_id,
-                file_size=0,
-                file_type=f"image/{target_format}",
+                type=target_ext,
+                index_status="NOT_INDEXED",
                 uploaded_at=utcnow(),
             )
             db.session.add(out_doc)
@@ -1721,7 +1722,7 @@ def edit_image():
         img.save(str(out_path), format=target_format.upper(), **save_kwargs)
 
         # Update file size
-        out_doc.file_size = out_path.stat().st_size
+        out_doc.size = out_path.stat().st_size
 
         # Remove old file if format changed on overwrite
         if save_mode == "overwrite" and old_path and old_path != out_path and old_path.exists():
@@ -1734,7 +1735,7 @@ def edit_image():
             "document_id": out_doc.id,
             "filename": out_doc.filename,
             "path": out_doc.path,
-            "file_size": out_doc.file_size,
+            "file_size": out_doc.size,
             "width": img.width,
             "height": img.height,
         }, "Image saved successfully")
