@@ -1536,7 +1536,7 @@ const ImagesPage = () => {
 
   if (loading && activeTab === MEDIA_LIBRARY_TAB) {
     return (
-      <PageLayout title="Images">
+      <PageLayout title="Media">
         <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 400 }}>
           <ContextualLoader loading message="Loading images..." showProgress={false} inline />
         </Box>
