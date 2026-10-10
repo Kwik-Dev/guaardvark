@@ -302,6 +302,17 @@ def test_preview_sends_the_typed_prompt_with_verbatim_on(api, monkeypatch):
     assert on["verbatim"] is True and on["enhanced_prompt"] == "a fox"
 
 
+def test_preview_sends_the_typed_prompt_with_enhance_off(api):
+    # Enhance prompt off: the render sends the typed prompt (comfyui_video_generator
+    # gates on request.enhance_prompt), so the preview shows it as typed too.
+    client, _ = api
+    body = {"prompt": "a fox", "model": "wan22-14b", "prompt_style": "3d_animation", "enhance_prompt": False}
+    off = client.post("/api/batch-video/enhance-preview", json=body).get_json()["data"]
+    assert off["enhance_prompt"] is False and off["verbatim"] is False and off["enhanced_prompt"] == "a fox"
+    on = client.post("/api/batch-video/enhance-preview", json={**body, "enhance_prompt": True}).get_json()["data"]
+    assert on["enhance_prompt"] is True and on["enhanced_prompt"] != "a fox"
+
+
 def _batch(tmp_path, **params):
     import queue
     import threading

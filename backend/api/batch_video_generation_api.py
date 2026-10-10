@@ -614,9 +614,14 @@ def enhance_prompt_preview():
         # the typed text (comfyui_video_generator); the reference compiler keeps
         # the board's roles and drops only the style opening (_reference_prompt).
         verbatim = bool(verbatim_prompts_enabled())
+        # With Enhance prompt off the render sends the typed prompt on every
+        # path (comfyui_video_generator gates on request.enhance_prompt; the
+        # references route only compiles the board when it is on). Parsed as
+        # _render_params parses it.
+        enhance = str(data.get("enhance_prompt", "true")).lower() != "false"
 
         reference_prompt = None
-        if isinstance(data.get("references"), dict) and model:
+        if enhance and isinstance(data.get("references"), dict) and model:
             # No files are read here: the board's own soundtrack flags stand in
             # for what the render wires.
             board = data["references"]
@@ -635,7 +640,7 @@ def enhance_prompt_preview():
 
         if reference_prompt:
             enhanced = reference_prompt
-        elif verbatim:
+        elif verbatim or not enhance:
             enhanced = prompt
         else:
             enhanced = enhance_video_prompt(
@@ -663,6 +668,7 @@ def enhance_prompt_preview():
             "reference_defaults": render_limits.reference_defaults_enabled(),
             "fidelity_mode": fidelity,
             "verbatim": verbatim,
+            "enhance_prompt": enhance,
             "has_text_intent": has_text_intent(prompt),
             "model_family": model_family,
             "style": style,
