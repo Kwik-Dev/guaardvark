@@ -1860,6 +1860,14 @@ def start_bulk_import():
         if not source_path:
             return error_response("source_path cannot be empty", 400, "INVALID_SOURCE_PATH")
 
+        # The same folders the picker may browse; the task then walks the
+        # resolved path, not the one the request named.
+        source_path, refusal = resolve_import_directory(source_path)
+        if refusal:
+            return error_response(refusal, 403, "PATH_NOT_ALLOWED")
+        if not os.path.isdir(source_path):
+            return error_response("source_path is not a directory", 400, "INVALID_SOURCE_PATH")
+
         # Generate a job ID
         import uuid
         job_id = str(uuid.uuid4())
@@ -1968,48 +1976,99 @@ def get_bulk_import_status_endpoint(job_id):
         return jsonify({"error": "Failed to get job status"}), 500
 
 
+BULK_IMPORT_ROOTS_ENV = "GUAARDVARK_ALLOWED_PATHS"
+
+
+def bulk_import_roots() -> list:
+    """Directories Bulk Import may browse and import from.
+
+    The user's home folder, Guaardvark's data folder (uploads included) and the
+    folders in GUAARDVARK_ALLOWED_PATHS (colon-separated, the same variable the
+    automation tools honour). Anything else on the disk, /etc and / included,
+    is refused: the route serves every LAN browser once network access is on.
+    """
+    from backend import config
+
+    candidates = [os.path.expanduser("~"), getattr(config, "STORAGE_DIR", ""),
+                  getattr(config, "UPLOAD_DIR", "")]
+    candidates += (os.environ.get(BULK_IMPORT_ROOTS_ENV) or "").split(":")
+    roots = []
+    for candidate in candidates:
+        candidate = os.path.expanduser(str(candidate or "").strip())
+        if candidate and candidate not in roots:
+            roots.append(candidate)
+    return roots
+
+
+def _hidden_below_root(path: str, root: str) -> bool:
+    """True when a component of ``path`` below ``root`` starts with a dot
+    (~/.ssh, ~/.gnupg, ~/.config, .git). The root itself may be hidden: a data
+    folder under ~/.local still works."""
+    rel = os.path.relpath(path, root)
+    return any(part.startswith(".") for part in rel.split(os.sep) if part not in ("", "."))
+
+
+def resolve_import_directory(requested: str):
+    """``(resolved_path, None)`` when ``requested`` is a directory Bulk Import
+    may use, else ``(None, reason)``. Symlinks are resolved first, on the path
+    and on the roots, so a link inside the home folder cannot point out of it."""
+    from backend.utils.path_safety import is_within, resolve
+
+    roots = bulk_import_roots()
+    home = roots[0]
+    target = resolve(requested or home, base=home)
+    if not is_within(target, roots):
+        return None, (
+            "Bulk Import can only use folders under " + ", ".join(roots)
+            + f" ({BULK_IMPORT_ROOTS_ENV} adds more)."
+        )
+    for root in roots:
+        root_real = resolve(root)
+        if is_within(target, [root_real]) and _hidden_below_root(target, root_real):
+            return None, "Hidden folders (names starting with a dot) are not imported."
+    return target, None
+
+
 @files_bp.route("/browse-server", methods=["GET"])
 def browse_server_directory():
-    """GET /api/files/browse-server?path=/some/path&include_files=true - Browse server directories for bulk import"""
+    """GET /api/files/browse-server?path=/some/path&include_files=true
+
+    Lists a folder for the Bulk Import page's folder picker. No ``path`` lists
+    the home folder. Only folders under :func:`bulk_import_roots` are listed,
+    never hidden entries, and never credential files (path_safety.is_sensitive).
+    """
     logger.info("API: Browse server directory")
     try:
-        requested_path = request.args.get("path", "/")
+        from backend.utils.path_safety import is_sensitive
+
         include_files = request.args.get("include_files", "false").lower() == "true"
-        show_hidden = request.args.get("show_hidden", "false").lower() == "true"
+        requested_path, refusal = resolve_import_directory(request.args.get("path", ""))
+        if refusal:
+            return jsonify({"error": refusal, "code": "PATH_NOT_ALLOWED"}), 403
 
-        # Security: Prevent directory traversal attacks
-        # Only allow absolute paths and validate they exist
-        import os
-
-        if not os.path.isabs(requested_path):
-            # If relative, assume it's relative to user's home or a safe base
-            requested_path = os.path.abspath(os.path.expanduser(requested_path))
-
-        # Resolve the path to prevent .. tricks
-        requested_path = os.path.realpath(requested_path)
-
-        # Check if path exists and is a directory
         if not os.path.exists(requested_path):
             return jsonify({"error": "Path does not exist"}), 404
 
         if not os.path.isdir(requested_path):
             return jsonify({"error": "Path is not a directory"}), 400
 
-        # List contents of the directory
         try:
             entries = os.listdir(requested_path)
             directories = []
             files = []
 
             for entry in sorted(entries):
-                # Skip hidden entries unless show_hidden is true
-                if entry.startswith('.') and not show_hidden:
+                if entry.startswith('.'):
                     continue
 
                 entry_path = os.path.join(requested_path, entry)
                 try:
                     stat_info = os.stat(entry_path)
                     if os.path.isdir(entry_path):
+                        # A symlink to a folder outside the roots is not
+                        # offered; opening it would only be refused.
+                        if resolve_import_directory(entry_path)[1]:
+                            continue
                         # Count items in directory for preview
                         try:
                             item_count = len([e for e in os.listdir(entry_path) if not e.startswith('.')])
@@ -2021,7 +2080,7 @@ def browse_server_directory():
                             "item_count": item_count,
                             "modified": stat_info.st_mtime
                         })
-                    elif include_files:
+                    elif include_files and not is_sensitive(entry):
                         # Get file extension for type identification
                         _, ext = os.path.splitext(entry)
                         files.append({
@@ -2034,10 +2093,15 @@ def browse_server_directory():
                     # Skip entries we can't access
                     continue
 
+            # The parent is offered only while it is still an allowed folder,
+            # so the picker's Up button stops at a root instead of erroring.
+            parent = os.path.dirname(requested_path)
+            parent_allowed, _ = resolve_import_directory(parent)
             response_data = {
                 "path": requested_path,
                 "directories": directories,
-                "parent_path": os.path.dirname(requested_path) if requested_path != "/" else None
+                "parent_path": parent if parent != requested_path and parent_allowed else None,
+                "roots": bulk_import_roots(),
             }
 
             if include_files:
