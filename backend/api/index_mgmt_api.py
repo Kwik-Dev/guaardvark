@@ -513,6 +513,61 @@ def index_errors():
         return jsonify({"error": str(e)}), 500
 
 
+def _rebuild_candidates():
+    """Rows a rebuild re-indexes: those the ingest pipeline has a text loader
+    for (the set resume_pending_tick uses), not already queued. Generated
+    media (images, audio, video) are registered as documents too; pushing
+    them through here would run vision or a missing transcriber on each and
+    leave them PENDING for good."""
+    from sqlalchemy import func, or_
+    from backend.tasks.index_resume_tasks import _document_extensions
+
+    exts = sorted(_document_extensions())
+    match = [func.lower(Document.type).in_(exts)]
+    match += [Document.path.ilike("%" + e) for e in exts]
+    return (
+        Document.query
+        .filter(Document.index_status != "INDEXING")
+        .filter(or_(*match))
+        .order_by(Document.id)
+        .all()
+    )
+
+
+def _reindex_documents(add_file_to_index, docs, upload_folder_abs):
+    """Run each document through add_file_to_index; (indexed, errors).
+
+    add_file_to_index(file_path, db_document, progress_callback=None) reads
+    the project from the row itself. The old call passed db_doc.project_id
+    as the third positional argument, so the first document with a project
+    raised TypeError (an int is not callable) after the index had already
+    been reset."""
+    indexed_count, error_count = 0, 0
+    for db_doc in docs:
+        full_doc_path = (
+            db_doc.path
+            if os.path.isabs(db_doc.path or "")
+            else os.path.join(upload_folder_abs, db_doc.path or "")
+        )
+        if not db_doc.path or not os.path.exists(full_doc_path):
+            logger.warning(
+                f"Rebuild Index: Skipping doc ID {db_doc.id} ('{db_doc.filename}'), path invalid: {full_doc_path}"
+            )
+            db_doc.index_status, db_doc.error_message = (
+                "ERROR",
+                f"File not found: {full_doc_path}",
+            )
+            error_count += 1
+            continue
+        db_doc.index_status = "PENDING"
+        db.session.commit()
+        if add_file_to_index(full_doc_path, db_doc):
+            indexed_count += 1
+        else:
+            error_count += 1
+    return indexed_count, error_count
+
+
 @index_mgmt_bp.route("/rebuild-index", methods=["POST"])
 def rebuild_index():
     logger.info("API: Received POST /api/meta/rebuild-index request")
@@ -548,39 +603,15 @@ def rebuild_index():
         return jsonify({"error": "LlamaIndex index unavailable after reset."}), 500
 
     try:
-        docs_to_reindex = Document.query.filter(
-            Document.index_status != "INDEXING"
-        ).all()
+        docs_to_reindex = _rebuild_candidates()
         logger.info(
             f"Rebuild Index: Found {len(docs_to_reindex)} documents to re-index."
         )
-        indexed_count, error_count = 0, 0
         upload_folder_abs = current_app.config.get("UPLOAD_FOLDER")
         if not upload_folder_abs:
             return jsonify({"error": "Upload folder not set."}), 500
 
-        for db_doc in docs_to_reindex:
-            full_doc_path = (
-                db_doc.path
-                if os.path.isabs(db_doc.path)
-                else os.path.join(upload_folder_abs, db_doc.path)
-            )
-            if not db_doc.path or not os.path.exists(full_doc_path):
-                logger.warning(
-                    f"Rebuild Index: Skipping doc ID {db_doc.id} ('{db_doc.filename}'), path invalid: {full_doc_path}"
-                )
-                db_doc.index_status, db_doc.error_message = (
-                    "ERROR",
-                    f"File not found: {full_doc_path}",
-                )
-                error_count += 1
-                continue
-            db_doc.index_status = "PENDING"
-            db.session.commit()
-            if add_file_to_index(full_doc_path, db_doc, db_doc.project_id):
-                indexed_count += 1
-            else:
-                error_count += 1
+        indexed_count, error_count = _reindex_documents(add_file_to_index, docs_to_reindex, upload_folder_abs)
         db.session.commit()
         msg = f"Index rebuild attempt: {len(docs_to_reindex)}. Indexed: {indexed_count}, Errors/Skipped: {error_count}."
         logger.info(f"Rebuild Index: {msg}")
