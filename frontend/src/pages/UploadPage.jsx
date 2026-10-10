@@ -33,6 +33,19 @@ import useFileDropZone from "../hooks/useFileDropZone";
 const ACCEPTED_EXTENSIONS =
   ".txt,.md,.pdf,.docx,.html,.htm,.json,.csv,.xml,.py,.js,.jsx,.java,.c,.cpp,.h,.cs,.go,.php,.rb,.swift,.kt,.rs,.scala,.zip";
 const ACCEPTED_SET = new Set(ACCEPTED_EXTENSIONS.split(","));
+
+// Recent Uploads refreshes itself while a row is still being indexed, so a
+// new upload turns INDEXED without a reload. The cap keeps a paused queue
+// (rows stay PENDING) from polling for the rest of the visit.
+const RECENT_REFRESH_MS = 3000;
+const RECENT_REFRESH_MAX_POLLS = 40;
+const SETTLED_STATUSES = new Set(["INDEXED", "ERROR"]);
+const isStillIndexing = (doc, watchedId) => {
+  const status = String(doc?.index_status || "").toUpperCase();
+  if (status === "INDEXING" || status === "PENDING") return true;
+  // The file just uploaded here starts as STORED or PENDING and ends INDEXED.
+  return watchedId != null && doc?.id === watchedId && !SETTLED_STATUSES.has(status);
+};
 const acceptsFile = (file) => {
   const name = String(file?.name || "");
   const dot = name.lastIndexOf(".");
@@ -80,26 +93,45 @@ const UploadPage = () => {
   const [_uploadProgress, setUploadProgress] = useState(0); // Progress state if using XHR
   const [recentDocs, setRecentDocs] = useState([]);
   const [isLoadingRecent, setIsLoadingRecent] = useState(true);
+  const [watchedDocId, setWatchedDocId] = useState(null);
+  const refreshCountRef = useRef(0);
   const { activeModel, isLoadingModel, modelError } = useStatus();
   const fileInputRef = useRef(null);
 
-  const fetchRecentDocs = useCallback(async () => {
-    setIsLoadingRecent(true);
+  // silent: refresh the rows in place without the loading spinner.
+  const fetchRecentDocs = useCallback(async ({ silent = false } = {}) => {
+    if (!silent) setIsLoadingRecent(true);
     try {
       const result = await getDocuments({ page: 1, perPage: 5 });
       if (result && result.error) throw new Error(result.error);
       setRecentDocs(result?.documents || result?.items || []);
     } catch (err) {
       console.error("Failed to fetch recent documents:", err);
-      setRecentDocs([]);
+      if (!silent) setRecentDocs([]);
     } finally {
-      setIsLoadingRecent(false);
+      if (!silent) setIsLoadingRecent(false);
     }
   }, []);
 
   useEffect(() => {
     fetchRecentDocs();
   }, [fetchRecentDocs]);
+
+  // Keep refreshing while any recent row is still indexing; stop when none are.
+  useEffect(() => {
+    const busy = recentDocs.some((doc) => isStillIndexing(doc, watchedDocId));
+    if (!busy) {
+      refreshCountRef.current = 0;
+      if (watchedDocId != null) setWatchedDocId(null);
+      return undefined;
+    }
+    if (refreshCountRef.current >= RECENT_REFRESH_MAX_POLLS) return undefined;
+    const interval = setInterval(() => {
+      refreshCountRef.current += 1;
+      fetchRecentDocs({ silent: true });
+    }, RECENT_REFRESH_MS);
+    return () => clearInterval(interval);
+  }, [recentDocs, watchedDocId, fetchRecentDocs]);
 
   // One path for the picker and the drop zone.
   const selectFile = useCallback((file) => {
@@ -184,6 +216,8 @@ const UploadPage = () => {
           );
           setUploadStatus("success");
         }
+        refreshCountRef.current = 0;
+        setWatchedDocId(uploadResult.document_id);
         fetchRecentDocs();
       } else {
         // Handle unexpected success response format from upload

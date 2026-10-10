@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, act } from "@testing-library/react";
 
 const { api, indexing } = vi.hoisted(() => ({
   api: { uploadFile: vi.fn(), getDocuments: vi.fn() },
@@ -60,5 +60,45 @@ describe("UploadPage drop zone", () => {
     expect(click).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole("button", { name: "Select File" }));
     expect(click).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("UploadPage recent uploads", () => {
+  const tick = async (ms) => {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  };
+
+  it("refreshes while a row is indexing and stops once every row has settled", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const row = (status) => ({ id: 9, filename: "report.pdf", index_status: status, uploaded_at: null });
+    api.getDocuments
+      .mockResolvedValueOnce({ documents: [row("INDEXING")] })
+      .mockResolvedValueOnce({ documents: [row("INDEXING")] })
+      .mockResolvedValue({ documents: [row("INDEXED")] });
+    render(<UploadPage />);
+    expect(await screen.findByText("INDEXING")).toBeInTheDocument();
+    expect(api.getDocuments).toHaveBeenCalledTimes(1);
+
+    await tick(3000);
+    expect(api.getDocuments).toHaveBeenCalledTimes(2);
+    await tick(3000);
+    expect(api.getDocuments).toHaveBeenCalledTimes(3);
+    expect(await screen.findByText("INDEXED")).toBeInTheDocument();
+
+    await tick(9000);
+    expect(api.getDocuments).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not poll when nothing is indexing", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    api.getDocuments.mockResolvedValue({
+      documents: [{ id: 1, filename: "done.txt", index_status: "INDEXED", uploaded_at: null }],
+    });
+    render(<UploadPage />);
+    await screen.findByText("done.txt");
+    await tick(9000);
+    expect(api.getDocuments).toHaveBeenCalledTimes(1);
   });
 });
