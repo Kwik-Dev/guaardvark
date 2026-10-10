@@ -1,8 +1,7 @@
 // frontend/src/components/modals/RuleActionModal.jsx
-// Version 4.0.0: Intelligent auto-detection and simplified UX
-// - Removed Level and Type dropdowns (auto-detected)
-// - Smart detection: COMMAND (has command), SYSTEM (qa_default/global), PROMPT (others)
-// - Cleaner UI with better organization and user experience
+// No Level or Type dropdowns: a new rule's level and type are derived from the
+// form (COMMAND when it has a command label, SYSTEM for the two system prompt
+// names, PROMPT otherwise); an existing rule keeps the pair it was stored with.
 
 import CloseIcon from "@mui/icons-material/Close";
 import LinkIcon from "@mui/icons-material/Link";
@@ -31,27 +30,38 @@ import * as apiService from "../../api";
 
 const ALL_MODELS_VALUE = "__ALL__";
 
-// Auto-detect rule type based on content and name
-const detectRuleType = (formData) => {
-  const name = formData.name?.toLowerCase() || "";
-  const hasCommand = formData.command_label?.trim();
-
-  if (hasCommand) return "COMMAND";
-  if (name === "qa_default" || name === "global_default_chat_system_prompt")
-    return "SYSTEM";
-  return "PROMPT";
+// Database type and level for a NEW rule, derived from the form. An existing
+// rule keeps the level and type it was stored with (see effectiveTypeAndLevel):
+// the chat engine looks rows up by them (qa_default must stay QA_TEMPLATE at
+// SYSTEM, SYSTEM and LEARNED rows must keep their level), so re-deriving them
+// from the name on every save silently broke retrieval.
+const deriveTypeAndLevel = (formData) => {
+  const name = formData.name?.trim().toLowerCase() || "";
+  if (formData.command_label?.trim()) {
+    return { type: "COMMAND_RULE", level: "USER_GLOBAL" };
+  }
+  if (name === "qa_default") {
+    return { type: "QA_TEMPLATE", level: "SYSTEM" };
+  }
+  if (name === "global_default_chat_system_prompt") {
+    return { type: "PROMPT_TEMPLATE", level: "SYSTEM" };
+  }
+  return { type: "PROMPT_TEMPLATE", level: "USER_GLOBAL" };
 };
 
-// Convert display type to database type and level
-const getDbTypeAndLevel = (displayType, _isSystemPrompt = false) => {
-  switch (displayType) {
-    case "COMMAND":
-      return { type: "COMMAND_RULE", level: "USER_GLOBAL" };
-    case "SYSTEM":
-      return { type: "PROMPT_TEMPLATE", level: "SYSTEM" };
-    default:
-      return { type: "PROMPT_TEMPLATE", level: "USER_GLOBAL" };
+export const effectiveTypeAndLevel = (formData, ruleData) => {
+  if (ruleData?.id && ruleData.level && ruleData.type) {
+    return { type: ruleData.type, level: ruleData.level };
   }
+  return deriveTypeAndLevel(formData);
+};
+
+// The badge shown in the dialog: COMMAND, SYSTEM, LEARNED or PROMPT.
+const displayKind = ({ type, level }) => {
+  if (type === "COMMAND_RULE") return "COMMAND";
+  if (level === "SYSTEM") return "SYSTEM";
+  if (level === "LEARNED") return "LEARNED";
+  return "PROMPT";
 };
 
 const RuleActionModal = ({
@@ -83,6 +93,8 @@ const RuleActionModal = ({
       is_active: ruleData?.is_active !== false,
       project_id: ruleData?.project_id || null,
       client_id: ruleData?.client_id || null,
+      level: ruleData?.level || null,
+      type: ruleData?.type || null,
     };
     setFormData(initialData);
   }, [ruleData]);
@@ -148,14 +160,13 @@ const RuleActionModal = ({
 
   const handleSave = () => {
     if (onSave) {
-      const detectedType = detectRuleType(formData);
+      const { type, level } = effectiveTypeAndLevel(formData, ruleData);
 
-      if (detectedType === "COMMAND" && !formData.command_label?.trim()) {
+      if (type === "COMMAND_RULE" && !formData.command_label?.trim()) {
         alert("Command is required for command rules.");
         return;
       }
 
-      const { type, level } = getDbTypeAndLevel(detectedType);
       const dataToSave = {
         ...formData,
         type,
@@ -193,8 +204,15 @@ const RuleActionModal = ({
     }
   };
 
-  // Get current detected type for display
-  const detectedType = detectRuleType(formData);
+  // What this save will store: the stored level/type for an existing rule,
+  // the derived pair for a new one.
+  const effective = effectiveTypeAndLevel(formData, ruleData);
+  const detectedType = displayKind(effective);
+  const commandRequired = effective.type === "COMMAND_RULE";
+  // A label typed into an existing non-command rule is saved, but the rule
+  // keeps its type, so the chat will not run it as a command.
+  const labelWillNotRun =
+    !isNewRule && !commandRequired && !!formData.command_label?.trim();
   const getTypeDisplayInfo = (type) => {
     switch (type) {
       case "COMMAND":
@@ -208,6 +226,12 @@ const RuleActionModal = ({
           label: "SYSTEM",
           color: theme.palette.error.main,
           description: "Core system prompt",
+        };
+      case "LEARNED":
+        return {
+          label: "LEARNED",
+          color: theme.palette.info.main,
+          description: "Added by the chat from a correction",
         };
       default:
         return {
@@ -311,6 +335,8 @@ const RuleActionModal = ({
                   </Typography>
                   <Typography variant="caption" color="text.secondary">
                     {typeInfo.description}
+                    {!isNewRule &&
+                      ` (${effective.level} / ${effective.type}, kept on save)`}
                   </Typography>
                 </Box>
               </Grid>
@@ -324,14 +350,13 @@ const RuleActionModal = ({
                   size="small"
                   placeholder="/your-command"
                   helperText={
-                    detectedType === "COMMAND"
+                    commandRequired
                       ? "Required for command rules"
-                      : "Leave empty for prompt templates"
+                      : labelWillNotRun
+                        ? `Saved, but this rule stays ${effective.type}; create a new rule to add a command`
+                        : "Leave empty for prompt templates"
                   }
-                  error={
-                    detectedType === "COMMAND" &&
-                    !formData.command_label?.trim()
-                  }
+                  error={commandRequired && !formData.command_label?.trim()}
                 />
               </Grid>
             </Grid>
@@ -461,8 +486,7 @@ const RuleActionModal = ({
             isSaving ||
             !formData.name?.trim() ||
             !formData.rule_text?.trim() ||
-            (detectRuleType(formData) === "COMMAND" &&
-              !formData.command_label?.trim())
+            (commandRequired && !formData.command_label?.trim())
           }
         >
           {isSaving ? "Saving..." : isNewRule ? "Create" : "Save"}
