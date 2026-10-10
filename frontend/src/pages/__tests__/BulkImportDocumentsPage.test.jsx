@@ -127,6 +127,25 @@ describe("BulkImportDocumentsPage job status", () => {
     expect(bulkApi.getBulkImportStatus).toHaveBeenCalledTimes(1);
   });
 
+  it("shows a complete job with failed files as finished with errors, not green", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    await startDryRun();
+    bulkApi.getBulkImportStatus.mockResolvedValue({
+      job_id: "job-1",
+      status: "complete",
+      message: "Import complete: 1 imported, 0 skipped, 2 errors",
+      stats: { total_files: 3, imported: 1, skipped: 0, errors: 2, queued_for_indexing: 1 },
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(await screen.findByText("Finished with errors (2 failed)")).toBeInTheDocument();
+    const alert = screen.getByText("Finished with errors (2 failed)").closest(".MuiAlert-root");
+    expect(alert.className).toMatch(/Warning/);
+    expect(alert.className).not.toMatch(/Success/);
+    expect(screen.queryByText("Polling...")).not.toBeInTheDocument();
+  });
+
   it("also accepts \"completed\"", async () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     await startDryRun();

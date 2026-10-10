@@ -250,7 +250,12 @@ const BulkImportDocumentsPage = () => {
       );
     }
 
-    const severity = isSuccessStatus(jobStatus?.status)
+    const failedFiles = Number(jobStatus?.stats?.errors) || 0;
+    const finished = isSuccessStatus(jobStatus?.status);
+    // A job ends "complete" even when files failed; that is not green.
+    const severity = finished && failedFiles > 0
+      ? "warning"
+      : finished
       ? "success"
       : ["error", "failed"].includes(normalizeStatus(jobStatus?.status))
       ? "error"
@@ -258,7 +263,11 @@ const BulkImportDocumentsPage = () => {
 
     return (
       <Alert severity={severity}>
-        <AlertTitle>Job Status</AlertTitle>
+        <AlertTitle>
+          {finished && failedFiles > 0
+            ? `Finished with errors (${failedFiles} failed)`
+            : "Job Status"}
+        </AlertTitle>
         <Typography variant="body2" component="div" sx={{ mt: 1 }}>
           <strong>Job ID:</strong> {jobId}
         </Typography>
