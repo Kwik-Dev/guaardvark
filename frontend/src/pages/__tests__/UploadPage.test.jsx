@@ -102,3 +102,35 @@ describe("UploadPage recent uploads", () => {
     expect(api.getDocuments).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("UploadPage import", () => {
+  it("uploads once and leaves indexing to the upload route", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const row = (status) => ({ id: 42, filename: "notes.txt", index_status: status, uploaded_at: null });
+    api.getDocuments
+      .mockResolvedValueOnce({ documents: [] })
+      .mockResolvedValueOnce({ documents: [row("STORED")] })
+      .mockResolvedValue({ documents: [row("INDEXED")] });
+    api.uploadFile.mockResolvedValue({ document_id: 42, filename: "notes.txt", job_id: "up-1" });
+    render(<UploadPage />);
+    await screen.findByText("No recent uploads.");
+    dropFile(screen.getByTestId("upload-drop-zone"), textFile("notes.txt"));
+    fireEvent.click(screen.getByRole("button", { name: "Import and Index" }));
+
+    expect(await screen.findByText(/uploaded \(ID: 42\); indexing queued/)).toBeInTheDocument();
+    expect(api.uploadFile).toHaveBeenCalledTimes(1);
+    expect(indexing.triggerIndexing).not.toHaveBeenCalled();
+
+    // The just-uploaded row is followed until it settles.
+    expect(await screen.findByText("STORED")).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(await screen.findByText("INDEXED")).toBeInTheDocument();
+    const calls = api.getDocuments.mock.calls.length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(9000);
+    });
+    expect(api.getDocuments).toHaveBeenCalledTimes(calls);
+  });
+});

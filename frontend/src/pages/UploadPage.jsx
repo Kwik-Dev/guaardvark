@@ -18,11 +18,8 @@ import UploadFileIcon from "@mui/icons-material/UploadFile";
 import DescriptionIcon from "@mui/icons-material/Description";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import ErrorIcon from "@mui/icons-material/Error";
-import HourglassTopIcon from "@mui/icons-material/HourglassTop"; // Icon for indexing
 
-// Import both API functions
 import { uploadFile, getDocuments } from "../api";
-import { triggerIndexing } from "../api/indexingService"; // Import directly to avoid static bundling
 import { useStatus } from "../contexts/StatusContext";
 import PageLayout from "../components/layout/PageLayout";
 import { formatTimestamp } from "../utils/fileTypeUtils";
@@ -87,7 +84,7 @@ const IndexStatusChip = ({ status }) => {
 
 const UploadPage = () => {
   const [selectedFile, setSelectedFile] = useState(null);
-  const [uploadStatus, setUploadStatus] = useState("idle"); // idle, uploading, success, indexing, error
+  const [uploadStatus, setUploadStatus] = useState("idle"); // idle, uploading, success, error
   const [errorMessage, setErrorMessage] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
   const [_uploadProgress, setUploadProgress] = useState(0); // Progress state if using XHR
@@ -193,29 +190,14 @@ const UploadPage = () => {
       }
 
       if (uploadResult && uploadResult.document_id) {
+        // /api/docs/upload queues the indexing task itself (auto_index), so
+        // the page does not call /api/index/<id> on top of it: that queued the
+        // same document a second time under a second footer job. Recent
+        // Uploads below follows the row until it is INDEXED.
         setSuccessMessage(
-          `File '${selectedFile.name}' uploaded successfully (ID: ${uploadResult.document_id}). Starting indexing...`,
+          `File '${selectedFile.name}' uploaded (ID: ${uploadResult.document_id}); indexing queued.`,
         );
-        setUploadStatus("indexing"); // Move to indexing status
-        
-        // Progress events now handled by backend SocketIO system
-
-        // --- Call triggerIndexing API ---
-        const indexingResult = await triggerIndexing(uploadResult.document_id);
-
-        if (indexingResult && indexingResult.error) {
-          setErrorMessage(
-            `Upload succeeded, but indexing trigger failed: ${indexingResult.error}`,
-          );
-          setUploadStatus("error");
-          
-          // Error events now handled by backend SocketIO system
-        } else {
-          setSuccessMessage(
-            `File '${selectedFile.name}' uploaded and indexing started.`,
-          );
-          setUploadStatus("success");
-        }
+        setUploadStatus("success");
         refreshCountRef.current = 0;
         setWatchedDocId(uploadResult.document_id);
         fetchRecentDocs();
@@ -314,23 +296,15 @@ const UploadPage = () => {
         <Button
           variant="contained"
           onClick={handleUpload}
-          disabled={
-            !selectedFile ||
-            uploadStatus === "uploading" ||
-            uploadStatus === "indexing"
-          }
+          disabled={!selectedFile || uploadStatus === "uploading"}
           fullWidth
           startIcon={
-            uploadStatus === "uploading" || uploadStatus === "indexing" ? (
+            uploadStatus === "uploading" ? (
               <CircularProgress size={20} color="inherit" />
             ) : null
           }
         >
-          {uploadStatus === "uploading"
-            ? "Importing..."
-            : uploadStatus === "indexing"
-              ? "Indexing..."
-              : "Import and Index"}
+          {uploadStatus === "uploading" ? "Importing..." : "Import and Index"}
         </Button>
 
         {/* Status Messages */}
@@ -343,16 +317,6 @@ const UploadPage = () => {
             {successMessage}
           </Alert>
         )}
-        {uploadStatus === "indexing" &&
-          successMessage && ( // Show intermediate message during indexing trigger
-            <Alert
-              severity="info"
-              sx={{ mt: 2 }}
-              icon={<HourglassTopIcon fontSize="inherit" />}
-            >
-              {successMessage}
-            </Alert>
-          )}
         {uploadStatus === "error" && errorMessage && (
           <Alert
             severity="error"
