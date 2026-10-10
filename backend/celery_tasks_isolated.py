@@ -574,6 +574,99 @@ def generate_bulk_csv_v2_task(rule_id, project_id, target_site, source_site, tar
         
         return {'error': error_msg}
 
+
+def _guaardvark_storage_dirs():
+    """(storage_dir, upload_dir) from the GUAARDVARK_* variables backend.config
+    reads, taken at call time: this module stays free of backend.config, and
+    a worker or a test sees the current values rather than import-time ones."""
+    storage = os.environ.get('GUAARDVARK_STORAGE_DIR', STORAGE_DIR)
+    upload = os.environ.get('GUAARDVARK_UPLOAD_DIR', os.path.join(storage, 'uploads'))
+    return storage, upload
+
+
+def scan_import_source(source_path, supported_extensions, storage_dir, upload_dir, target_dir=None):
+    """Walk ``source_path`` for files a bulk import may take.
+
+    Returns ``(files, skipped)`` where ``files`` is a list of
+    ``(full_path, rel_path, filename)`` and ``skipped`` counts what the walk
+    left alone. The rules, in order:
+
+    - hidden directories (dot-prefixed) are pruned, so os.walk never enters
+      them: .git, .ssh, .aws, .gnupg, .cache, ... (skipped["hidden_dirs"]);
+    - symlinked directories are pruned and symlinked files skipped, so the
+      walk never leaves the source (skipped["symlinks"]);
+    - Guaardvark's own data folder (``storage_dir``, minus ``upload_dir``) and
+      the import's target folder are pruned when they lie under the source,
+      so docstore.json, index_store.json, config/*.json and the internal
+      secret can never be imported or moved (skipped["internal_dirs"]);
+    - hidden files are skipped: .env, .netrc, .gitignore, .bashrc, ...
+      (skipped["hidden_files"]);
+    - credential and secret files named by path_safety.SENSITIVE_PATTERNS are
+      skipped wherever they sit: id_rsa, credentials, *.pem, *.key, ...
+      (skipped["sensitive_files"]);
+    - the extension filter is unchanged, and a plain file with no extension
+      (README, LICENSE, Makefile) is still taken.
+    """
+    from backend.utils.path_safety import is_sensitive, is_within
+
+    skipped = {"hidden_dirs": 0, "hidden_files": 0, "sensitive_files": 0,
+               "symlinks": 0, "internal_dirs": 0}
+    storage_real = os.path.realpath(storage_dir) if storage_dir else None
+    upload_real = os.path.realpath(upload_dir) if upload_dir else None
+    target_real = os.path.realpath(target_dir) if target_dir else None
+
+    def is_internal(path):
+        real = os.path.realpath(path)
+        if target_real and real == target_real:
+            return True
+        if not storage_real or not is_within(real, [storage_real]):
+            return False
+        return not (upload_real and is_within(real, [upload_real]))
+
+    files_found = []
+    for root, dirs, files in os.walk(source_path):
+        kept = []
+        for d in sorted(dirs):
+            full = os.path.join(root, d)
+            if d.startswith('.'):
+                skipped["hidden_dirs"] += 1
+            elif os.path.islink(full):
+                skipped["symlinks"] += 1
+            elif is_internal(full):
+                skipped["internal_dirs"] += 1
+            else:
+                kept.append(d)
+        dirs[:] = kept  # in place: this is what os.walk descends into
+        for file in sorted(files):
+            full_path = os.path.join(root, file)
+            if file.startswith('.'):
+                skipped["hidden_files"] += 1
+                continue
+            if is_sensitive(file):
+                skipped["sensitive_files"] += 1
+                continue
+            if os.path.islink(full_path):
+                skipped["symlinks"] += 1
+                continue
+            file_ext = os.path.splitext(file)[1].lower()
+            if file_ext in supported_extensions or not file_ext:  # Include files without extensions
+                rel_path = os.path.relpath(full_path, source_path)
+                files_found.append((full_path, rel_path, file))
+    return files_found, skipped
+
+
+def _skipped_summary(skipped):
+    """One clause for the status message, or '' when nothing was skipped."""
+    files = skipped["hidden_files"] + skipped["sensitive_files"] + skipped["symlinks"]
+    dirs = skipped["hidden_dirs"] + skipped["internal_dirs"]
+    parts = []
+    if dirs:
+        parts.append(f"{dirs} hidden or internal folder{'s' if dirs != 1 else ''}")
+    if files:
+        parts.append(f"{files} hidden or private file{'s' if files != 1 else ''}")
+    return f"; skipped {' and '.join(parts)}" if parts else ""
+
+
 def bulk_import_documents_task(job_id, source_path, target_folder, project_id=None, 
                                client_id=None, website_id=None, reindex_missing=True, 
                                force_copy=False, dry_run=False):
@@ -629,9 +722,18 @@ def bulk_import_documents_task(job_id, source_path, target_folder, project_id=No
             logger.error(error_msg)
             update_job_status("error", error_msg, 0)
             return {'error': error_msg, 'job_id': job_id}
-        
-        # Get upload directory
-        upload_dir = os.environ.get('GUAARDVARK_UPLOAD_DIR', os.path.join(STORAGE_DIR, 'uploads'))
+
+        # Guaardvark's own data folder is never a source (docstore, index
+        # store, config, the internal secret); its uploads folder is the one
+        # exception, so already-imported files can be reorganised.
+        storage_dir, upload_dir = _guaardvark_storage_dirs()
+        from backend.utils.path_safety import is_within
+        if (is_within(source_path, [storage_dir]) and not is_within(source_path, [upload_dir])):
+            error_msg = ("Source path is inside Guaardvark's own data folder; "
+                         "only its uploads folder can be imported from")
+            logger.error(f"{error_msg}: {source_path}")
+            update_job_status("error", error_msg, 0)
+            return {'error': error_msg, 'job_id': job_id}
         
         # Find or create Folder record in database
         folder_id = None
@@ -706,24 +808,22 @@ def bulk_import_documents_task(job_id, source_path, target_folder, project_id=No
                             '.pdf', '.doc', '.docx'}
         supported_extensions = text_extensions | media_extensions | indexable_extensions
         
-        files_to_import = []
-        for root, dirs, files in os.walk(source_path):
-            for file in files:
-                file_ext = os.path.splitext(file)[1].lower()
-                if file_ext in supported_extensions or not file_ext:  # Include files without extensions
-                    full_path = os.path.join(root, file)
-                    rel_path = os.path.relpath(full_path, source_path)
-                    files_to_import.append((full_path, rel_path, file))
-        
+        files_to_import, skipped = scan_import_source(
+            source_path, supported_extensions, storage_dir, upload_dir, target_dir)
+        skipped_note = _skipped_summary(skipped)
+
         total_files = len(files_to_import)
-        logger.info(f"Found {total_files} files to import")
-        update_job_status("processing", f"Found {total_files} files to import", 30)
-        
+        logger.info(f"Found {total_files} files to import{skipped_note}")
+        update_job_status("processing", f"Found {total_files} files to import{skipped_note}", 30)
+
         if dry_run:
-            update_job_status("complete", f"Dry run: Would import {total_files} files", 100, 
-                            {"total_files": total_files, "files": [f[2] for f in files_to_import]})
-            return {'job_id': job_id, 'status': 'complete', 'dry_run': True, 
-                   'total_files': total_files, 'files': [f[2] for f in files_to_import]}
+            dry_stats = {"total_files": total_files, "files": [f[2] for f in files_to_import],
+                         "skipped_private": skipped}
+            update_job_status("complete", f"Dry run: Would import {total_files} files{skipped_note}", 100,
+                              dry_stats)
+            return {'job_id': job_id, 'status': 'complete', 'dry_run': True,
+                    'total_files': total_files, 'files': [f[2] for f in files_to_import],
+                    'skipped_private': skipped}
         
         # Process files
         imported_count = 0
@@ -886,11 +986,14 @@ def bulk_import_documents_task(job_id, source_path, target_folder, project_id=No
             "imported": imported_count,
             "skipped": skipped_count,
             "errors": error_count,
-            "queued_for_indexing": indexed_count
+            "queued_for_indexing": indexed_count,
+            "skipped_private": skipped,
         }
-        
-        update_job_status("complete", f"Import complete: {imported_count} imported, {skipped_count} skipped, {error_count} errors", 
-                         100, stats)
+
+        update_job_status("complete",
+                          f"Import complete: {imported_count} imported, {skipped_count} skipped, "
+                          f"{error_count} errors{skipped_note}",
+                          100, stats)
         
         logger.info(f"Bulk import {job_id} completed: {stats}")
         return {
