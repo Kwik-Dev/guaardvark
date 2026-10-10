@@ -32,7 +32,8 @@ vi.mock("../../../utils/chatAttachment", async (importOriginal) => ({
   downscaleChatAttachment: async (file) => ({
     file,
     preview: "data:image/png;base64,AAAA",
-    byteLength: 4,
+    // A test may pin the size a picture has after resize.
+    byteLength: file.__bytes ?? 4,
     mimeType: "image/png",
   }),
 }));
@@ -154,19 +155,38 @@ describe("Chat page drop", () => {
     expect(await screen.findByAltText("photo.png")).toBeInTheDocument();
     expect(uploadFile).not.toHaveBeenCalled();
     expect(send).not.toHaveBeenCalled();
-    expect(screen.queryByText(/Only the first image is sent/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/only the first image is sent/i)).not.toBeInTheDocument();
   });
 
-  it("says so when more than one image is attached, and sends only the first", async () => {
+  it("sends every attached image, the first as the primary one", async () => {
     const send = vi.fn();
     render(<ChatSurface onSendMessage={send} />);
     drop(screen.getByTestId("message-list"), [png("a.png"), png("b.png")]);
     expect(await screen.findByAltText("b.png")).toBeInTheDocument();
-    expect(screen.getByText(/Only the first image is sent to the model/)).toBeInTheDocument();
+    expect(screen.queryByText(/only the first image is sent/i)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Analyze image" }));
     await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
-    const [, , options] = send.mock.calls[0];
+    const [text, , options] = send.mock.calls[0];
+    expect(text).toBe("Describe these 2 images: a.png, b.png");
+    expect(options.isImageAnalysis).toBe(true);
     expect(options.imageFileName).toBe("a.png");
+    expect(options.imageFileNames).toEqual(["a.png", "b.png"]);
+    expect(options.imagesBase64).toEqual(["AAAA", "AAAA"]);
+    expect(options.imageBase64).toBe("AAAA");
+    expect(options.imagePreviews).toHaveLength(2);
+  });
+
+  it("refuses several images whose total is over the limit, naming the total", async () => {
+    const send = vi.fn();
+    render(<ChatSurface onSendMessage={send} />);
+    // Each picture is 5 MB after resize: one fits the 8 MB limit, two do not.
+    const big = (name) => Object.assign(png(name), { __bytes: 5 * 1024 * 1024 });
+    drop(screen.getByTestId("message-list"), [big("a.png"), big("b.png")]);
+    expect(await screen.findByAltText("b.png")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Analyze image" }));
+    expect(await screen.findByText(/These 2 images total 10\.0 MB after resize/)).toBeInTheDocument();
+    expect(send).not.toHaveBeenCalled();
   });
 });

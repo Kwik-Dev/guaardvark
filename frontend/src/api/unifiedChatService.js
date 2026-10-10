@@ -39,6 +39,7 @@ class UnifiedChatService {
    * Send a message via HTTP. Response arrives via Socket.IO events.
    */
   async sendMessage(sessionId, message, options = {}, imageBase64 = null, isVoiceMessage = false) {
+    // imageBase64: one base64 string, or an array of them when several pictures are attached.
     debugLog('[UnifiedChatService] sendMessage START for session', sessionId, 'options=', options);
     // The backend gates Gemma4 direct path and screen tools on this flag.
     // Trigger when EITHER the screen viewer is open (user is watching live)
@@ -72,8 +73,12 @@ class UnifiedChatService {
       project_root: options.project_root || options.projectRoot,
       is_voice_message: isVoiceMessage,
     };
-    if (imageBase64) {
-      body.image = imageBase64;
+    // One picture goes as ``image``; several go as ``images`` (primary first)
+    // with ``image`` still set to the first for older readers.
+    const pictures = Array.isArray(imageBase64) ? imageBase64.filter(Boolean) : (imageBase64 ? [imageBase64] : []);
+    if (pictures.length) {
+      body.image = pictures[0];
+      if (pictures.length > 1) body.images = pictures;
     }
     debugLog('[UnifiedChatService] sendMessage POST /unified (agent_screen_active=', agentScreenActive, ', inAgentMode=', inAgentMode, ')');
     const response = await fetch(`${API_BASE}/api/chat/unified`, {

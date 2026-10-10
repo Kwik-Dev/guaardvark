@@ -38,6 +38,7 @@ import {
   fetchAttachmentMaxBytes,
   formatAttachmentSize,
   refuseAttachmentMessage,
+  refuseAttachmentsTotalMessage,
 } from "../../utils/chatAttachment";
 import {
   CHAT_ATTACH_ACCEPT,
@@ -210,9 +211,11 @@ const ChatInput = forwardRef(
       error: null,
     });
 
-    // Image upload and paste state (supports multiple images).
-    // Each entry is already downscaled (see handleImageUpload); byteLength is
-    // the payload that will ride on chat:send.
+    // Image upload and paste state (supports multiple images). Every attached
+    // picture is sent with the message; the first is the primary one that
+    // image tools edit. Each entry is already downscaled (see
+    // handleImageUpload); byteLength is the payload that will ride on
+    // chat:send, and the pictures share one size limit.
     const MAX_IMAGES = 4;
     const [imageState, setImageState] = useState({
       images: [],        // Array of { file, preview, id, byteLength, mimeType }
@@ -220,6 +223,9 @@ const ChatInput = forwardRef(
       error: null,
     });
     const [attachmentMaxBytes, setAttachmentMaxBytes] = useState(null);
+    // The legacy /vision/analyze endpoint (opt-in) takes one picture; the
+    // unified path (default) sends every attached picture.
+    const legacyVisionPath = localStorage.getItem("use_unified_chat") === "false";
 
     useEffect(() => {
       let cancelled = false;
@@ -377,15 +383,25 @@ const ChatInput = forwardRef(
     const analyzeImage = async () => {
       if (imageState.images.length === 0) return;
 
-      const primaryImage = imageState.images[0];
+      const images = imageState.images;
+      const primaryImage = images[0];
       const maxBytes = attachmentMaxBytes;
-      const over = imageState.images.find((img) =>
+      const over = images.find((img) =>
         attachmentExceedsLimit(img.byteLength, maxBytes),
       );
       if (over) {
         setImageState((prev) => ({
           ...prev,
           error: refuseAttachmentMessage(over.byteLength, maxBytes),
+        }));
+        return;
+      }
+      // The server counts the pictures of one turn together.
+      const totalBytes = images.reduce((sum, img) => sum + (Number(img.byteLength) || 0), 0);
+      if (images.length > 1 && attachmentExceedsLimit(totalBytes, maxBytes)) {
+        setImageState((prev) => ({
+          ...prev,
+          error: refuseAttachmentsTotalMessage(images.length, totalBytes, maxBytes),
         }));
         return;
       }
@@ -396,21 +412,29 @@ const ChatInput = forwardRef(
 
       try {
         if (useUnified) {
-          // Unified chat path: send base64 image through the ReACT loop
-          const base64 = primaryImage.preview.split(",")[1];
+          // Unified chat path: every attached picture rides on the message
+          // (imagesBase64, primary first); imageBase64 stays for single-image readers.
+          const base64s = images.map((img) => img.preview.split(",")[1]);
+          const names = images.map((img) => img.file.name);
           const messageText =
-            inputText || `Describe this image: ${primaryImage.file.name}`;
+            inputText ||
+            (images.length > 1
+              ? `Describe these ${images.length} images: ${names.join(", ")}`
+              : `Describe this image: ${primaryImage.file.name}`);
           onSendMessage(messageText, null, {
             isImageAnalysis: true,
-            imageBase64: base64,
+            imageBase64: base64s[0],
+            imagesBase64: base64s,
             imageFileName: primaryImage.file.name,
+            imageFileNames: names,
             imagePreview: primaryImage.preview,
+            imagePreviews: images.map((img) => img.preview),
           });
 
           clearImage();
           setInputText("");
         } else {
-          // Legacy vision endpoint path (single image only)
+          // Legacy vision endpoint path (single image only): the first picture goes.
           const formData = new FormData();
           formData.append("image", primaryImage.file);
           formData.append("session_id", sessionId);
@@ -694,9 +718,9 @@ Please try a different image or check if the vision model is properly loaded.`;
                 </Box>
               ))}
             </Box>
-            {imageState.images.length > 1 && (
+            {imageState.images.length > 1 && legacyVisionPath && (
               <Alert severity="info" sx={{ mt: 1, py: 0 }}>
-                Only the first image is sent to the model. Remove it to send another one.
+                The legacy vision endpoint takes one picture: only the first image is sent. Remove it to send another one.
               </Alert>
             )}
             <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mt: 1 }}>
@@ -724,7 +748,7 @@ Please try a different image or check if the vision model is properly loaded.`;
                     mt: 0.5,
                   }}
                 >
-                  Analyzing image...
+                  {imageState.images.length > 1 ? "Analyzing images..." : "Analyzing image..."}
                 </Box>
               </Box>
             )}

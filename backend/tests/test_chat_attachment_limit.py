@@ -16,6 +16,7 @@ from backend.socketio_instance import (
     SOCKET_MAX_HTTP_BUFFER_SIZE,
     chat_attachment_size_bytes,
     chat_attachment_too_large,
+    chat_attachments,
     socketio,
 )
 
@@ -42,6 +43,30 @@ def test_size_accepts_data_url_and_wrapped_lines():
 def test_non_attachments_count_as_zero(value):
     assert chat_attachment_size_bytes(value) == 0
     assert chat_attachment_too_large(value) is None
+
+
+def test_several_pictures_count_together_and_share_the_limit():
+    two = [_b64_of(1000), _b64_of(2000)]
+    assert chat_attachment_size_bytes(two) == 3000
+    assert chat_attachment_too_large(two) is None
+    half = CHAT_ATTACHMENT_MAX_BYTES // 2
+    assert chat_attachment_too_large([_b64_of(half), _b64_of(half)]) is None
+    reason = chat_attachment_too_large([_b64_of(half), _b64_of(half + 3)])
+    assert reason.startswith("The 2 attached images total 16.0 MB; the limit is 16 MB.")
+
+
+@pytest.mark.parametrize("payload, expected", [
+    ({"image": "AAAA"}, ["AAAA"]),
+    ({"images": ["AAAA", "BBBB"]}, ["AAAA", "BBBB"]),
+    ({"images": ["AAAA", "BBBB"], "image": "AAAA"}, ["AAAA", "BBBB"]),
+    ({"images": ["", None, 7]}, []),
+    ({"images": [], "image": "CCCC"}, ["CCCC"]),
+    ({"images": "AAAA"}, []),
+    ({}, []),
+    ("not a dict", []),
+])
+def test_chat_attachments_reads_images_then_image(payload, expected):
+    assert chat_attachments(payload) == expected
 
 
 def test_limit_is_inclusive_and_the_message_names_both_sizes():
@@ -95,6 +120,23 @@ def test_chat_send_passes_a_fitting_image_through():
     mock_emit.assert_not_called()
 
 
+def test_chat_send_gates_the_total_of_several_images():
+    from backend import socketio_events
+
+    half = CHAT_ATTACHMENT_MAX_BYTES // 2
+    payload = {"session_id": "s-4", "message": "compare", "images": [_b64_of(half), _b64_of(half + 3)]}
+    with patch.object(socketio_events, "emit") as mock_emit, \
+         patch.object(socketio_events, "_handle_chat_send_local") as mock_local:
+        socketio_events.handle_chat_send(payload)
+
+    mock_local.assert_not_called()
+    mock_emit.assert_called_once()
+    event, data = mock_emit.call_args[0]
+    assert event == "chat:error"
+    assert data["code"] == "attachment_too_large"
+    assert "2 attached images" in data["error"]
+
+
 # ---- the HTTP route and the config route -----------------------------------
 
 @pytest.fixture
@@ -116,6 +158,17 @@ def test_http_route_returns_413_for_oversized_image(client):
     assert body["success"] is False
     assert body["code"] == "attachment_too_large"
     assert body["attachment_max_bytes"] == CHAT_ATTACHMENT_MAX_BYTES
+
+
+def test_http_route_returns_413_when_several_images_total_over_the_limit(client):
+    half = CHAT_ATTACHMENT_MAX_BYTES // 2
+    res = client.post("/api/chat/unified", json={
+        "session_id": "s-5", "message": "compare", "images": [_b64_of(half), _b64_of(half + 3)],
+    })
+    assert res.status_code == 413
+    body = res.get_json()
+    assert body["code"] == "attachment_too_large"
+    assert "2 attached images" in body["error"]
 
 
 def test_config_route_exposes_the_declared_limit(client):

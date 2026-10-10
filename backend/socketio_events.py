@@ -525,14 +525,24 @@ def _handle_chat_send_local(payload):
         return
     session_id = payload.get("session_id") or str(uuid.uuid4())
     message = (payload.get("message") or "").strip()
-    image_data = payload.get("image")
+    from backend.socketio_instance import chat_attachments
+    attached_images = chat_attachments(payload)
+    image_data = attached_images[0] if attached_images else None
     if not message and not image_data:
         return
 
     if not message and image_data:
-        message = "Describe this image."
+        message = "Describe these images." if len(attached_images) > 1 else "Describe this image."
 
     options = payload.get("options", {})
+    if not isinstance(options, dict):
+        options = {}
+    # The server alone decides what the engine sees as attached this turn:
+    # the first picture is the primary one, the rest ride along for the model.
+    options.pop("attached_images", None)
+    options.pop("attached_image_urls", None)
+    if len(attached_images) > 1:
+        options["attached_images"] = attached_images
     is_voice_message = bool(payload.get("is_voice_message", False))
     project_id = payload.get("project_id")
     if project_id is not None:
@@ -655,8 +665,8 @@ def handle_chat_send(payload):
     # decoded. Packets over the Socket.IO buffer never get this far (see
     # SOCKET_MAX_HTTP_BUFFER_SIZE), which is why the buffer is sized above it.
     if isinstance(payload, dict):
-        from backend.socketio_instance import chat_attachment_too_large
-        reason = chat_attachment_too_large(payload.get("image"))
+        from backend.socketio_instance import chat_attachment_too_large, chat_attachments
+        reason = chat_attachment_too_large(chat_attachments(payload))
         if reason:
             emit("chat:error", {
                 "error": reason,

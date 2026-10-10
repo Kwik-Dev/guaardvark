@@ -1256,6 +1256,48 @@ def _pin_workstation_tools(message: str, selected: List[str], all_tool_names: Li
     return pinned + list(selected) if pinned else selected
 
 
+def attached_images_for_turn(image_data, options) -> List[str]:
+    """The base64 pictures the model sees this turn, primary picture first.
+
+    ``image_data`` is the primary picture (the one image tools edit). When the
+    user attached several, the HTTP route or the socket handler lists them all
+    under ``options["attached_images"]``; that list is used as-is when it
+    starts with the primary picture, otherwise the primary one leads it.
+    """
+    if not image_data:
+        return []
+    many = (options or {}).get("attached_images")
+    if not isinstance(many, (list, tuple)):
+        return [image_data]
+    images = [img for img in many if isinstance(img, (str, bytes)) and img]
+    if not images:
+        return [image_data]
+    if images[0] != image_data:
+        images = [image_data] + [img for img in images if img != image_data]
+    return images
+
+
+def pasted_images_note(descriptions) -> Optional[str]:
+    """The text a blind chat model gets in place of the pictures it cannot see.
+
+    ``descriptions`` holds one guide-dog description per attached picture, in
+    order, ``None`` or empty where the vision model produced nothing. Returns
+    ``None`` when none of them were described, so the caller can fall back to
+    attaching the raw pictures.
+    """
+    described = [
+        (i, (d or "").strip()) for i, d in enumerate(descriptions or [], start=1)
+    ]
+    described = [(i, d) for i, d in described if d]
+    if not described:
+        return None
+    total = len(descriptions)
+    if total == 1:
+        return f"[The user pasted an image. Vision model analysis: {described[0][1]}]"
+    parts = "; ".join(f"Image {i} of {total}: {d}" for i, d in described)
+    return f"[The user pasted {total} images. Vision model analysis: {parts}]"
+
+
 def _pin_image_edit_tools(has_image: bool, selected: List[str], all_tool_names: List[str]) -> List[str]:
     """Force image-from-photo tools into the toolset whenever the user attached an image.
 
@@ -2689,6 +2731,9 @@ class UnifiedChatEngine:
 
         user_msg = {"role": "user", "content": user_content}
         if self._image_data:
+            # Every picture attached this turn (the primary one first); Ollama's
+            # chat API takes them as one ``images`` list on the user message.
+            attached = attached_images_for_turn(self._image_data, options)
             # Guide-dog gate (capability-driven): a vision-capable chat model SEES
             # the image directly — attach the raw image, no degraded detour. A
             # text-only model can't see, so a vision model describes the image (the
@@ -2698,17 +2743,15 @@ class UnifiedChatEngine:
             # that could see for itself to a moondream paragraph about the image.
             from backend.utils.chat_utils import is_vision_model
             if is_vision_model(model_name):
-                user_msg["images"] = [self._image_data]
+                user_msg["images"] = attached
             else:
-                vision_description = self._analyze_pasted_image(self._image_data, message)
-                if vision_description:
-                    user_msg["content"] = (
-                        f"[The user pasted an image. Vision model analysis: {vision_description}]\n\n"
-                        f"{user_msg['content']}"
-                    )
+                descriptions = [self._analyze_pasted_image(img, message) for img in attached]
+                note = pasted_images_note(descriptions)
+                if note:
+                    user_msg["content"] = f"{note}\n\n{user_msg['content']}"
                 else:
-                    # Last-ditch: attach raw image (multimodal) if the guide dog failed.
-                    user_msg["images"] = [self._image_data]
+                    # Last-ditch: attach raw images (multimodal) if the guide dog failed.
+                    user_msg["images"] = attached
         elif options.get("camera_frame"):
             # The live camera frame is context for a model that can see. It is
             # not self._image_data, so RAG still runs and no edit intercept
@@ -2728,6 +2771,9 @@ class UnifiedChatEngine:
                 "imageUrl": self._image_url,
                 "messageType": "image_upload",
             }
+            image_urls = options.get("attached_image_urls")
+            if isinstance(image_urls, list) and len(image_urls) > 1:
+                extra["imageUrls"] = list(image_urls)
         persist = options.get("persist", True)
         if persist:
             self._save_message(session_id, "user", message, extra_data=extra)

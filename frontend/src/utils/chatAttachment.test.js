@@ -3,12 +3,14 @@ import {
   CHAT_ATTACHMENT_JPEG_QUALITY,
   CHAT_ATTACHMENT_MAX_BYTES_FALLBACK,
   CHAT_ATTACHMENT_MAX_EDGE,
+  attachedPictures,
   attachmentExceedsLimit,
   chatErrorMessage,
   downscaleChatAttachment,
   fetchAttachmentMaxBytes,
   formatAttachmentSize,
   refuseAttachmentMessage,
+  refuseAttachmentsTotalMessage,
   resetAttachmentMaxBytesCache,
   resolveAttachmentMaxBytes,
 } from "./chatAttachment";
@@ -122,6 +124,34 @@ describe("formatAttachmentSize and refuse message", () => {
     expect(refuseAttachmentMessage(9 * 1024 * 1024, 8 * 1024 * 1024)).toBe(
       "This image is 9.0 MB after resize; the limit is 8.0 MB. Choose a smaller image.",
     );
+  });
+});
+
+describe("refuseAttachmentsTotalMessage", () => {
+  it("names the count and the total for several pictures", () => {
+    const msg = refuseAttachmentsTotalMessage(3, 12 * 1024 * 1024, 8 * 1024 * 1024);
+    expect(msg).toBe(
+      "These 3 images total 12.0 MB after resize; the limit is 8.0 MB. Remove one or choose smaller images.",
+    );
+  });
+
+  it("falls back to the single-picture copy for one", () => {
+    expect(refuseAttachmentsTotalMessage(1, 9 * 1024 * 1024, 8 * 1024 * 1024)).toBe(
+      refuseAttachmentMessage(9 * 1024 * 1024, 8 * 1024 * 1024),
+    );
+  });
+});
+
+describe("attachedPictures", () => {
+  it("returns the list when several pictures were attached, primary first", () => {
+    expect(attachedPictures({ imageBase64: "A", imagesBase64: ["A", "B"] })).toEqual(["A", "B"]);
+  });
+
+  it("returns the one string for a single picture and null for none", () => {
+    expect(attachedPictures({ imageBase64: "A", imagesBase64: ["A"] })).toBe("A");
+    expect(attachedPictures({ imageBase64: "A" })).toBe("A");
+    expect(attachedPictures({ imagesBase64: ["", null] })).toBe(null);
+    expect(attachedPictures(undefined)).toBe(null);
   });
 });
 
