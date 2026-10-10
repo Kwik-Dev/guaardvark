@@ -261,6 +261,7 @@ class OutreachDraftPostTool(BaseTool):
         "platform": ToolParameter(
             name="platform", type="string", required=True,
             description=f"One of: {', '.join(_KNOWN_PLATFORMS)}",
+            enum=list(_KNOWN_PLATFORMS),
         ),
         "mode": ToolParameter(
             name="mode", type="string", required=False,
@@ -288,7 +289,8 @@ class OutreachDraftPostTool(BaseTool):
         ),
         "tone": ToolParameter(
             name="tone", type="string", required=False,
-            description="Optional tone preset: default, engaging, technical, casual, formal, humorous",
+            description=f"Optional tone preset: {', '.join(persona.TONE_GUIDES)}",
+            enum=list(persona.TONE_GUIDES),
         ),
         "feature_hint": ToolParameter(
             name="feature_hint", type="string", required=False,
