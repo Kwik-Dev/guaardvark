@@ -316,5 +316,8 @@ def init_cors(app, cors=None) -> list[str]:
         always_send=False,
         allow_headers=CORS_HEADERS,
         methods=CORS_METHODS,
+        # Paged list routes (GET /api/rules) put the real row count in these;
+        # a page served from another of this install's origins must see them.
+        expose_headers=["X-Total-Count", "X-Page", "X-Per-Page"],
     )
     return allowed_origins()

@@ -23,7 +23,10 @@ def get_rules():
         per_page: Optional page size capped at 100, defaulting to 50.
 
     Returns:
-        A JSON array of rule objects ordered by most recent update.
+        A JSON array of rule objects ordered by most recent update, one page
+        of them. The real count of matching rows is in the X-Total-Count
+        header, with X-Page and X-Per-Page, so a caller can tell a full list
+        from a first page without changing the array body other callers read.
     """
     try:
         project_id_filter = request.args.get("project_id", type=int)
@@ -56,7 +59,11 @@ def get_rules():
             page=page, per_page=per_page, error_out=False
         )
         items = [rule.to_dict() for rule in rules.items]
-        return jsonify(items), 200
+        response = jsonify(items)
+        response.headers["X-Total-Count"] = str(rules.total)
+        response.headers["X-Page"] = str(page)
+        response.headers["X-Per-Page"] = str(per_page)
+        return response, 200
     except SQLAlchemyError as e:
         db.session.rollback()
         return error_response(str(e), 500, "DATABASE_ERROR")

@@ -45,6 +45,21 @@ import { useStatus } from "../contexts/StatusContext";
 
 const logger = console;
 
+// The API serves at most 100 rules per call; "All" loads pages of this size
+// and the footer shows the API's real count with a Load more button.
+const PAGE_SIZE = 100;
+
+const normalizeRule = (item) => ({
+  ...item,
+  target_models:
+    Array.isArray(item.target_models) && item.target_models.length > 0
+      ? item.target_models
+      : ["__ALL__"],
+  description: item.description || "",
+  rule_text: item.rule_text || "",
+  command_label: item.command_label || "",
+});
+
 const AlertSnackbar = React.forwardRef(function Alert(props, ref) {
   return <MuiAlert elevation={6} ref={ref} variant="filled" {...props} />;
 });
@@ -109,6 +124,10 @@ const RulesPage = () => {
   const { activeModel } = useStatus();
 
   const [rules, setRules] = useState([]);
+  // The API's count of matching rules; null until the first page answers.
+  const [total, setTotal] = useState(null);
+  const [pagesLoaded, setPagesLoaded] = useState(1);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
   // "all" or "LEARNED": rules the chat added on its own from corrections.
   const [levelFilter, setLevelFilter] = useState("all");
   const [isLoading, setIsLoading] = useState(true);
@@ -162,42 +181,82 @@ const RulesPage = () => {
     }
   }, []);
 
-  const loadRules = useCallback(async () => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      const allItems = await apiService.getRules(
-        levelFilter === "LEARNED" ? { level: "LEARNED", per_page: 100 } : {},
-      );
-      if (allItems.error) throw new Error(allItems.error);
+  const fetchPage = useCallback(
+    async (page) => {
+      const result = await apiService.getRulesPage({
+        ...(levelFilter === "LEARNED" ? { level: "LEARNED" } : {}),
+        page,
+        per_page: PAGE_SIZE,
+      });
+      if (result.error) throw new Error(result.error);
+      return result;
+    },
+    [levelFilter],
+  );
 
-      const processedItems = allItems.map((item) => ({
-        ...item,
-        target_models:
-          Array.isArray(item.target_models) && item.target_models.length > 0
-            ? item.target_models
-            : ["__ALL__"],
-        description: item.description || "",
-        rule_text: item.rule_text || "",
-        command_label: item.command_label || "",
-      }));
-      setRules(processedItems);
+  // Reload every page shown so far (after a save, delete or link change the
+  // rows the user already scrolled to stay visible), then the real total.
+  const loadRules = useCallback(
+    async (pages = pagesLoaded) => {
+      setIsLoading(true);
+      setError(null);
+      try {
+        const items = [];
+        let count = 0;
+        for (let page = 1; page <= Math.max(1, pages); page += 1) {
+          const result = await fetchPage(page);
+          items.push(...result.items.map(normalizeRule));
+          count = result.total;
+          if (items.length >= count) break;
+        }
+        setRules(items);
+        setTotal(count);
+        setPagesLoaded(Math.max(1, Math.ceil(items.length / PAGE_SIZE)));
+      } catch (e) {
+        logger.error("Failed to load rules:", e);
+        setError(e.message || "Failed to load rules");
+        setFeedback({
+          open: true,
+          message: e.message || "Failed to load rules",
+          severity: "error",
+        });
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [fetchPage, pagesLoaded],
+  );
+
+  const loadMore = useCallback(async () => {
+    setIsLoadingMore(true);
+    try {
+      const result = await fetchPage(pagesLoaded + 1);
+      setRules((prev) => {
+        const seen = new Set(prev.map((r) => r.id));
+        return [
+          ...prev,
+          ...result.items.filter((r) => !seen.has(r.id)).map(normalizeRule),
+        ];
+      });
+      setTotal(result.total);
+      setPagesLoaded(pagesLoaded + 1);
     } catch (e) {
-      logger.error("Failed to load rules:", e);
-      setError(e.message || "Failed to load rules");
+      logger.error("Failed to load more rules:", e);
       setFeedback({
         open: true,
-        message: e.message || "Failed to load rules",
+        message: e.message || "Failed to load more rules",
         severity: "error",
       });
     } finally {
-      setIsLoading(false);
+      setIsLoadingMore(false);
     }
-  }, [levelFilter]);
+  }, [fetchPage, pagesLoaded]);
 
+  // Mount and a filter change start over at page 1 (not on every change of
+  // loadRules, which also changes when a page is added).
   useEffect(() => {
-    loadRules();
-  }, [loadRules]);
+    loadRules(1);
+  }, [levelFilter]);
 
   const handleOpenActionModal = (ruleItem = null) => {
     setSelectedRuleForModal(ruleItem);
@@ -810,7 +869,22 @@ const RulesPage = () => {
               borderColor: "divider",
             }}
           >
-            Total Rules: {rules.length}
+            Total Rules: {total ?? rules.length}
+            {total != null && rules.length < total && (
+              <>
+                {" "}
+                (showing {rules.length})
+                <Button
+                  size="small"
+                  variant="text"
+                  onClick={loadMore}
+                  disabled={isLoadingMore}
+                  sx={{ ml: 1, py: 0, minWidth: 0, textTransform: "none" }}
+                >
+                  {isLoadingMore ? "Loading…" : "Load more"}
+                </Button>
+              </>
+            )}
           </Typography>
         )}
       </Paper>
