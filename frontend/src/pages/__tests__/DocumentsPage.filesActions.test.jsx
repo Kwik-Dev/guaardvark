@@ -298,3 +298,43 @@ describe("Files page index message", () => {
     }));
   });
 });
+
+describe("Files page keyboard and the read-only code mount", () => {
+  const CODE_MOUNT = {
+    id: "repo:.",
+    name: "Guaardvark Code",
+    path: "/__repo__",
+    source_type: "live_repo",
+    document_count: 0,
+    subfolder_count: 0,
+  };
+
+  beforeEach(() => {
+    axiosMock.get.mockImplementation(async (url) => {
+      if (url.startsWith("/api/files/browse")) {
+        return { data: { data: { folders: [CODE_MOUNT, REPORTS, ARCHIVE], documents: [NOTES] } } };
+      }
+      throw new Error(`unexpected GET ${url}`);
+    });
+  });
+
+  it("Ctrl+A then Delete counts only what the server can delete", async () => {
+    renderPage();
+    await screen.findByText("Guaardvark Code");
+
+    fireEvent.keyDown(window, { key: "a", ctrlKey: true });
+    fireEvent.keyDown(window, { key: "Delete" });
+
+    expect(await screen.findByText("Delete 3 items? This action cannot be undone.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => expect(posts()).toContainEqual({
+      url: "/api/files/bulk-delete",
+      body: { items: [
+        { type: "folder", id: 7 },
+        { type: "folder", id: 8 },
+        { type: "document", id: 31 },
+      ] },
+    }));
+  });
+});

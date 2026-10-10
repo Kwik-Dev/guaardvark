@@ -75,6 +75,14 @@ const INDEX_POLL_MAX_TICKS = 40;
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
+// The live repository mount and everything under it is read-only: the
+// server lists them with source_type "live_repo" and string ids ("repo:…"),
+// and delete, rename and index take integer ids. The context menu hides
+// those actions for such an item; the keyboard paths filter the keys.
+const isLiveRepoItem = (item) => item?.source_type === 'live_repo';
+const isLiveRepoKey = (key) => /^(folder|file)-repo:/.test(String(key));
+const writableKeys = (keys) => Array.from(keys).filter((key) => !isLiveRepoKey(key));
+
 // What the bulk index call did, from its queued and skipped counts. The
 // server skips a document whose content hash has not changed since it was
 // indexed, so "everything skipped" is the already-indexed case.
@@ -1376,11 +1384,18 @@ const DocumentsPage = () => {
     refreshOpenWindows();
   }, [clipboard, showMessage, contextMenuType, contextMenuItem, refreshData, refreshOpenWindows, folderIdForPath]);
 
+  // The keys in the selection that the server can delete.
+  const deletableSelection = useMemo(() => writableKeys(activeSelection), [activeSelection]);
+
   const handleDelete = useCallback(() => {
     setContextMenu(null);
     if (activeSelection.size === 0) return;
+    if (deletableSelection.length === 0) {
+      showMessage?.('The live code mount is read-only', 'info');
+      return;
+    }
     setDeleteConfirmOpen(true);
-  }, [activeSelection]);
+  }, [activeSelection, deletableSelection, showMessage]);
 
   // Optimistically remove items from visible UI state immediately (for instant feel).
   // Only affects desktop root lists if deleting from desktop context.
@@ -1438,7 +1453,7 @@ const DocumentsPage = () => {
 
   const handleDeleteConfirm = useCallback(() => {
     setDeleteConfirmOpen(false);
-    const keysToDelete = Array.from(activeSelection);
+    const keysToDelete = deletableSelection;
     if (keysToDelete.length === 0) return;
 
     // INSTANT: remove from UI now (optimistic). This is the key UX fix.
@@ -1477,7 +1492,7 @@ const DocumentsPage = () => {
       }
     };
     doDeletes();
-  }, [activeSelection, showMessage, refreshData, applyOptimisticDeletions]);
+  }, [deletableSelection, showMessage, refreshData, applyOptimisticDeletions]);
 
   const handleRename = useCallback(async () => {
     setContextMenu(null);
@@ -1784,6 +1799,7 @@ const DocumentsPage = () => {
       itemKeys = Array.from(activeSelection);
     }
 
+    itemKeys = writableKeys(itemKeys);
     if (itemKeys.length === 0) return;
 
     // Split into folder IDs and document IDs
@@ -1902,8 +1918,8 @@ const DocumentsPage = () => {
         if (activeContext.type === 'desktop') {
           e.preventDefault();
           const allKeys = new Set([
-            ...foldedWindows.map(f => `folder-${f.folderId}`),
-            ...rootFiles.map(file => getItemKey(file, 'file')),
+            ...foldedWindows.filter(f => !isLiveRepoItem(f.folder)).map(f => `folder-${f.folderId}`),
+            ...rootFiles.filter(file => !isLiveRepoItem(file)).map(file => getItemKey(file, 'file')),
           ]);
           handleSelectionChange('desktop', allKeys);
         }
@@ -2631,7 +2647,7 @@ const DocumentsPage = () => {
         <DialogTitle>Confirm Delete</DialogTitle>
         <DialogContent>
           <Typography>
-            Delete {activeSelection.size} item{activeSelection.size !== 1 ? 's' : ''}? This action cannot be undone.
+            Delete {deletableSelection.length} item{deletableSelection.length !== 1 ? 's' : ''}? This action cannot be undone.
           </Typography>
         </DialogContent>
         <DialogActions>
