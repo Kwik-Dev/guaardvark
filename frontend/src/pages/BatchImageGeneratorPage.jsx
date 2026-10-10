@@ -1130,7 +1130,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         setSuccess(
           inputMode === 'blueprint'
             ? (data.data?.message || 'Blueprint batch queued. Results appear as generation completes.')
-            : 'Batch queued. Worker drains one batch at a time — keep stacking them.',
+            : 'Batch queued. Batches render one after another; you can queue more while this one runs.',
         );
         // Free the form so the next job can be composed immediately (like Video Gen).
         if (inputMode === 'single' || inputMode === 'bulk') {
