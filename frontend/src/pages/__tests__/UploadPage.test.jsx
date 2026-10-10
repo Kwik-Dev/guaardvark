@@ -104,10 +104,21 @@ describe("UploadPage recent uploads", () => {
 });
 
 describe("UploadPage import", () => {
-  it("uploads once and leaves indexing to the upload route", async () => {
+  const tick = async (ms) => {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  };
+  const row = (status, extra = {}) => ({
+    id: 42, filename: "notes.txt", index_status: status, uploaded_at: null, ...extra,
+  });
+
+  it("uploads once, shows Indexing... until the row settles, and never calls /api/index", async () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
-    const row = (status) => ({ id: 42, filename: "notes.txt", index_status: status, uploaded_at: null });
+    // The list the page already holds comes back first without the new row
+    // (delayed mock); then the row appears STORED, then INDEXED.
     api.getDocuments
+      .mockResolvedValueOnce({ documents: [] })
       .mockResolvedValueOnce({ documents: [] })
       .mockResolvedValueOnce({ documents: [row("STORED")] })
       .mockResolvedValue({ documents: [row("INDEXED")] });
@@ -118,19 +129,54 @@ describe("UploadPage import", () => {
     fireEvent.click(screen.getByRole("button", { name: "Import and Index" }));
 
     expect(await screen.findByText(/uploaded \(ID: 42\); indexing queued/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Indexing..." })).toBeDisabled();
     expect(api.uploadFile).toHaveBeenCalledTimes(1);
     expect(indexing.triggerIndexing).not.toHaveBeenCalled();
 
-    // The just-uploaded row is followed until it settles.
+    // Old list without the row: still watching.
+    await tick(3000);
     expect(await screen.findByText("STORED")).toBeInTheDocument();
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(3000);
-    });
+    expect(screen.getByRole("button", { name: "Indexing..." })).toBeInTheDocument();
+    await tick(3000);
     expect(await screen.findByText("INDEXED")).toBeInTheDocument();
+    expect(screen.getByText(/uploaded and indexed\./)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Import and Index" })).toBeInTheDocument();
+
     const calls = api.getDocuments.mock.calls.length;
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(9000);
-    });
+    await tick(9000);
+    expect(api.getDocuments).toHaveBeenCalledTimes(calls);
+  });
+
+  it("reports an indexing error on the uploaded row", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    api.getDocuments
+      .mockResolvedValueOnce({ documents: [] })
+      .mockResolvedValueOnce({ documents: [] })
+      .mockResolvedValue({ documents: [row("ERROR", { error_message: "no loader" })] });
+    api.uploadFile.mockResolvedValue({ document_id: 42 });
+    render(<UploadPage />);
+    await screen.findByText("No recent uploads.");
+    dropFile(screen.getByTestId("upload-drop-zone"), textFile("notes.txt"));
+    fireEvent.click(screen.getByRole("button", { name: "Import and Index" }));
+    await screen.findByText(/indexing queued/);
+    await tick(3000);
+    expect(await screen.findByText(/uploaded, but indexing failed: no loader/)).toBeInTheDocument();
+  });
+
+  it("stops polling after the cap even when every poll fails", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    api.getDocuments.mockResolvedValueOnce({ documents: [] }).mockRejectedValue(new Error("down"));
+    api.uploadFile.mockResolvedValue({ document_id: 42 });
+    render(<UploadPage />);
+    await screen.findByText("No recent uploads.");
+    dropFile(screen.getByTestId("upload-drop-zone"), textFile("notes.txt"));
+    fireEvent.click(screen.getByRole("button", { name: "Import and Index" }));
+    await screen.findByText(/indexing queued/);
+    await tick(3000 * 41);
+    expect(await screen.findByText(/indexing is still running/)).toBeInTheDocument();
+    const calls = api.getDocuments.mock.calls.length;
+    expect(calls).toBeLessThanOrEqual(42);
+    await tick(3000 * 5);
     expect(api.getDocuments).toHaveBeenCalledTimes(calls);
   });
 });
