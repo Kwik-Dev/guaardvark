@@ -31,10 +31,21 @@ reindex to classify.
 
 import logging
 import os
+from datetime import datetime, timedelta
 
 from celery import shared_task
 
 logger = logging.getLogger(__name__)
+
+# A row left INDEXING with nothing indexing it never moves on its own: this
+# task works from PENDING and STORED. Rows get there when a worker dies
+# mid-document, and every row saved under the old model default (INDEXING)
+# by a path that queued nothing is there too. reconcile_stuck_indexing runs
+# at startup; rows younger than this are left alone unless Celery reports
+# no indexing task anywhere.
+STUCK_INDEXING_AFTER = timedelta(hours=2)
+STUCK_INDEXING_NOTE = "Reset at startup: no indexing task was running this document"
+_INDEX_TASK_NAME = "index_document_task"
 
 # Small enough that a tick cannot monopolise the GPU, and frequent enough that an
 # interrupted run finishes on its own within hours rather than never.
@@ -110,10 +121,100 @@ def _defer(doc, db, note: str) -> None:
     retried every tick — the starvation the ordering exists to prevent, reached
     without having to declare the document broken.
     """
-    from datetime import datetime
     doc.error_message = note[:500]
     doc.updated_at = datetime.now()
     db.session.commit()
+
+
+def _celery_has_live_indexing():
+    """True if a worker reports an index_document_task active, False if
+    inspect succeeded and none is, None if inspect failed (then a maybe-live
+    row is not clobbered). Same probe as the self-improvement stale-run
+    recovery."""
+    try:
+        from backend.celery_app import celery
+        insp = celery.control.inspect(timeout=1.0)
+        if insp is None:
+            return None
+        active = insp.active()
+        if active is None:
+            return None
+        for _worker, tasks in (active or {}).items():
+            for t in tasks or []:
+                if _INDEX_TASK_NAME in (t.get("name") or ""):
+                    return True
+        return False
+    except Exception:
+        return None
+
+
+def _job_is_live(job_id) -> bool:
+    """Whether the unified progress system still tracks this indexing job as
+    running. Finished jobs drop out of it about a minute after they end."""
+    if not job_id:
+        return False
+    try:
+        from backend.utils.unified_progress_system import get_unified_progress
+        info = get_unified_progress().get_job_status(job_id)
+    except Exception:
+        return False
+    if not info:
+        return False
+    return not info.get("is_complete") and info.get("status") not in ("complete", "error", "cancelled")
+
+
+def _is_indexable(doc, exts: set) -> bool:
+    candidates = {(doc.type or "").lower(), os.path.splitext(doc.path or doc.filename or "")[1].lower()}
+    return bool(candidates & exts)
+
+
+def reconcile_stuck_indexing(probe_workers: bool = True) -> dict:
+    """Move INDEXING rows that nothing is indexing to where they belong.
+
+    A row whose indexing_job_id is still live is left alone. Otherwise: when
+    Celery reports no indexing task anywhere, every INDEXING row is dead;
+    when a task is live (it cannot say which row it owns) or inspect is
+    unavailable, only rows older than STUCK_INDEXING_AFTER are reset. A
+    format this task has a loader for becomes PENDING, so resume_pending_tick
+    picks it up; anything else (generated media registered under the old
+    default) becomes NOT_INDEXED, since PENDING would promise an indexing
+    that never comes. Returns the counts. Never raises.
+    """
+    try:
+        from backend.models import db, Document as DBDocument
+        rows = DBDocument.query.filter(DBDocument.index_status == "INDEXING").all()
+        if not rows:
+            return {"pending": 0, "not_indexed": 0}
+        live = _celery_has_live_indexing() if probe_workers else None
+        cutoff = datetime.now() - STUCK_INDEXING_AFTER
+        exts = _document_extensions()
+        pending = not_indexed = 0
+        for doc in rows:
+            if _job_is_live(doc.indexing_job_id):
+                continue
+            stamp = doc.updated_at or doc.uploaded_at
+            if live is not False and not (stamp and stamp < cutoff):
+                continue
+            if _is_indexable(doc, exts):
+                doc.index_status = "PENDING"
+                pending += 1
+            else:
+                doc.index_status = "NOT_INDEXED"
+                not_indexed += 1
+            doc.error_message = STUCK_INDEXING_NOTE
+        if pending or not_indexed:
+            db.session.commit()
+            logger.warning("index reconcile: %d stuck INDEXING row(s) reset: %d to PENDING, %d to NOT_INDEXED",
+                           pending + not_indexed, pending, not_indexed)
+        return {"pending": pending, "not_indexed": not_indexed}
+    except Exception as e:
+        logger.error("index reconcile: could not reset stuck INDEXING rows: %s", e)
+        try:
+            from backend.models import db
+            db.session.rollback()
+        except Exception:
+            pass
+        return {"pending": 0, "not_indexed": 0, "error": str(e)[:200]}
 
 
 @shared_task(name="indexing.resume_pending_tick")
