@@ -250,3 +250,63 @@ def test_a_flux_choice_routes_batch_rows_to_comfy_like_an_explicit_pick():
     bg._apply_stills_default_to_auto(_request(plain))
     assert plain.model == "flux-dev"
     assert bg._should_use_comfy_stills(plain) is True
+
+
+# --- batch intake re-resolves sampling sent for Auto's family --------------
+#
+# The page sends Z-Image's recipe for Auto (9 steps, guidance 0). Under a chosen
+# model of another family that is a bad knob, so an untyped step count takes the
+# chosen family's default and an out-of-range guidance its default; a typed step
+# count and an in-range guidance stand.
+
+def _auto_row(**kw):
+    meta = {"steps_explicit": kw.pop("steps_explicit", False)}
+    return BatchPrompt(id="p1", prompt="a key", model="auto", steps=kw.pop("steps", 9),
+                       guidance=kw.pop("guidance", 0.0), metadata=meta)
+
+
+def test_a_flux_default_gets_flux_sampling_not_zimages_recipe():
+    row = _auto_row()
+    req = _request(row)
+    req.max_workers = 2
+    _batch("flux-dev")._apply_stills_default_to_auto(req)
+    assert (row.model, row.steps, row.guidance) == ("flux-dev", 28, 3.5)
+    assert "FLUX" in row.metadata["steps_notice"] and "steps 9 → 28" in row.metadata["steps_notice"]
+    assert req.max_workers == 1          # FLUX renders one image at a time
+
+
+def test_an_sdxl_default_gets_sdxl_sampling():
+    row = _auto_row()
+    _batch("sd-xl")._apply_stills_default_to_auto(_request(row))
+    assert (row.model, row.steps, row.guidance) == ("sd-xl", 25, 7.0)
+
+
+def test_a_typed_step_count_and_an_in_range_guidance_stand():
+    row = _auto_row(steps=12, steps_explicit=True, guidance=5.0)
+    _batch("flux-dev")._apply_stills_default_to_auto(_request(row))
+    assert (row.steps, row.guidance) == (12, 5.0)
+    assert "steps_notice" not in row.metadata
+
+
+def test_a_typed_step_count_keeps_but_a_zero_guidance_still_moves_for_flux():
+    row = _auto_row(steps=12, steps_explicit=True, guidance=0.0)
+    _batch("flux-dev")._apply_stills_default_to_auto(_request(row))
+    assert (row.steps, row.guidance) == (12, 3.5)
+    assert "guidance 0.0 → 3.5" in row.metadata["steps_notice"]
+
+
+def test_a_zimage_default_leaves_the_pages_zimage_presets_alone():
+    row = _auto_row(steps=6)          # the page's "Fast" preset for Auto
+    req = _request(row)
+    req.max_workers = 2
+    _batch("zimage-turbo")._apply_stills_default_to_auto(req)
+    assert (row.model, row.steps, row.guidance) == ("zimage-turbo", 6, 0.0)
+    assert "steps_notice" not in row.metadata
+    assert req.max_workers == 2
+
+
+def test_an_earlier_notice_is_kept_in_front_of_the_resample_note():
+    row = _auto_row()
+    row.metadata["steps_notice"] = "earlier note."
+    _batch("flux-dev")._apply_stills_default_to_auto(_request(row))
+    assert row.metadata["steps_notice"].startswith("earlier note. Auto renders with")

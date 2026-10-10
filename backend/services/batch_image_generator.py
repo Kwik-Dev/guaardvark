@@ -513,11 +513,57 @@ class BatchImageGenerator:
             return None
         for p in auto_prompts:
             p.model = preferred
+            note = self._resample_for_stills_default(p, preferred)
+            if note:
+                logger.info("Batch %s prompt %s: %s", request.batch_id, p.id, note)
+        # The API serialises FLUX (force_max_workers) only for an explicit model
+        # name; a substituted one needs the same.
+        try:
+            from backend.services.image_render_limits import limits_for
+            force_w = limits_for(preferred).get("force_max_workers")
+        except Exception:  # noqa: BLE001
+            force_w = None
+        if force_w and int(getattr(request, "max_workers", 0) or 0) > int(force_w):
+            request.max_workers = int(force_w)
         logger.info(
             "Batch %s: %d Auto prompt(s) render with the Stills default %r from Settings",
             request.batch_id, len(auto_prompts), preferred,
         )
         return preferred
+
+    @staticmethod
+    def _resample_for_stills_default(p: BatchPrompt, key: str) -> Optional[str]:
+        """Sampling sent for an Auto row is the product default family's recipe
+        (the page mirrors Z-Image's presets for Auto: 9 steps, guidance 0). Under
+        a chosen model of another family that recipe is a bad knob (FLUX.1 Dev at
+        9 steps with guidance 0 badly under-resolves), so an untyped step count
+        takes the chosen family's default and a guidance outside the model's
+        range takes its default. A typed step count and an in-range guidance
+        stand. Returns the note recorded on the prompt, or None when nothing
+        changed (same family, or values the model can use).
+        """
+        from backend.services.image_render_limits import envelope_cfg
+        from backend.services.media_model_registry import DEFAULT_STILLS_MODEL, get_profile
+        from backend.services.stills_defaults import model_family, resolve_stills_defaults
+
+        if model_family(key) == model_family(DEFAULT_STILLS_MODEL):
+            return None
+        own = resolve_stills_defaults(key)
+        changes: List[str] = []
+        if not p.metadata.get("steps_explicit") and int(p.steps or 0) != int(own["steps"]):
+            changes.append(f"steps {p.steps} → {int(own['steps'])}")
+            p.steps = int(own["steps"])
+        guidance = envelope_cfg(key, p.guidance)
+        if p.guidance is None or abs(float(p.guidance) - guidance) > 1e-6:
+            changes.append(f"guidance {p.guidance} → {guidance:g}")
+            p.guidance = guidance
+        if not changes:
+            return None
+        label = (get_profile(key) or {}).get("name") or key
+        note = f"Auto renders with {label} (Settings > Stills): " + ", ".join(changes) + "."
+        prior = p.metadata.get("steps_notice")
+        p.metadata["steps_notice"] = f"{prior} {note}" if prior else note
+        return note
 
     def _resolve_batch_model_key(self, model_key: str, prompt_text: str = "") -> str:
         """Map a batch prompt model key to a catalog key for resource estimates."""
