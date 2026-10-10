@@ -53,6 +53,11 @@ const formatTimestamp = (iso) => {
 // silently broke every memory save when the backend happened to land on :5000.
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || "/api";
 
+// Rows per request. The API answers one page and the real count of matching
+// rows (total); the footer shows that count with a Load more button while
+// rows remain.
+const PAGE_SIZE = 100;
+
 // Parse a lesson_summary memory's JSON content. Returns null if the content
 // isn't valid JSON — caller falls back to generic rendering so malformed
 // lessons are still visible (and editable via the plain text dialog).
@@ -76,6 +81,9 @@ const parseLesson = (memory) => {
 // "Agent Memory", and passes title={null} so the name isn't printed twice.
 const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon /> }) => {
   const [memories, setMemories] = useState([]);
+  // The API's count of matching rows; null until the first page answers.
+  const [total, setTotal] = useState(null);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -158,23 +166,33 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
     }
   };
 
-  const fetchMemories = async (query = "") => {
+  const memoryUrl = (query, offset, limit) => {
+    const url = new URL(`${BASE_URL}/memory`, window.location.origin);
+    if (query) url.searchParams.append("search", query);
+    if (filterType) url.searchParams.append("type", filterType);
+    if (filterSource) url.searchParams.append("source", filterSource);
+    // "all" asks for every status; without it the API leaves out rows
+    // marked wrong.
+    if (filterStatus) url.searchParams.append("status", filterStatus);
+    if (sortMode) url.searchParams.append("sort", sortMode);
+    url.searchParams.append("limit", limit);
+    if (offset) url.searchParams.append("offset", offset);
+    return url;
+  };
+
+  // Reload from the top, keeping as many rows loaded as were shown so a save
+  // after Load more does not drop the rows the person scrolled to.
+  const fetchMemories = async (query = "", keep = 0) => {
     setLoading(true);
     setError(null);
     try {
-      const url = new URL(`${BASE_URL}/memory`, window.location.origin);
-      if (query) url.searchParams.append("search", query);
-      if (filterType) url.searchParams.append("type", filterType);
-      if (filterSource) url.searchParams.append("source", filterSource);
-      if (filterStatus) url.searchParams.append("status", filterStatus);
-      if (sortMode) url.searchParams.append("sort", sortMode);
-      url.searchParams.append("limit", 100);
-      
-      const res = await fetch(url);
+      const limit = Math.max(PAGE_SIZE, Math.ceil(keep / PAGE_SIZE) * PAGE_SIZE);
+      const res = await fetch(memoryUrl(query, 0, limit));
       const data = await res.json();
-      
+
       if (data.success) {
         setMemories(data.memories);
+        setTotal(typeof data.total === "number" ? data.total : data.memories.length);
       } else {
         setError(data.error || "Failed to load memories");
       }
@@ -182,6 +200,27 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
       setError(err.message);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadMore = async () => {
+    setLoadingMore(true);
+    try {
+      const res = await fetch(memoryUrl(searchQuery, memories.length, PAGE_SIZE));
+      const data = await res.json();
+      if (data.success) {
+        setMemories((prev) => {
+          const seen = new Set(prev.map((m) => m.id));
+          return [...prev, ...data.memories.filter((m) => !seen.has(m.id))];
+        });
+        if (typeof data.total === "number") setTotal(data.total);
+      } else {
+        setError(data.error || "Failed to load more memories");
+      }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoadingMore(false);
     }
   };
 
@@ -212,6 +251,7 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
       
       if (data.success) {
         setMemories(memories.filter((m) => m.id !== id));
+        setTotal((prev) => (prev == null ? prev : Math.max(0, prev - 1)));
       } else {
         alert(data.error || "Failed to delete memory");
       }
@@ -288,6 +328,7 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
       
       if (data.success) {
         setMemories([]);
+        setTotal(0);
       } else {
         alert(data.error || "Failed to clear memories");
       }
@@ -317,7 +358,7 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
         setOpenAdd(false);
         setNewContent("");
         setNewTags("");
-        fetchMemories(searchQuery); // refresh list
+        fetchMemories(searchQuery, memories.length + 1); // refresh list
       } else {
         alert(data.error || "Failed to add memory");
       }
@@ -378,7 +419,7 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
           <option value="candidate_recipe">Candidate recipe</option>
         </TextField>
         <TextField select size="small" label="Status" value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} SelectProps={{ native: true }} sx={{ minWidth: 130 }}>
-          <option value="">All status</option>
+          <option value="all">All status</option>
           <option value="active">Active</option>
           <option value="archived">Archived</option>
           <option value="wrong">Wrong</option>
@@ -561,7 +602,25 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
       />
 
       {memories.length > 0 && (
-        <Box sx={{ mt: 2, display: "flex", justifyContent: "flex-end" }}>
+        <Box sx={{ mt: 2, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <Typography variant="caption" color="text.secondary">
+            Total: {total ?? memories.length}
+            {total != null && memories.length < total && (
+              <>
+                {" "}
+                (showing {memories.length})
+                <Button
+                  size="small"
+                  variant="text"
+                  onClick={loadMore}
+                  disabled={loadingMore}
+                  sx={{ ml: 1, py: 0, minWidth: 0, textTransform: "none" }}
+                >
+                  {loadingMore ? "Loading…" : "Load more"}
+                </Button>
+              </>
+            )}
+          </Typography>
           <Button color="error" size="small" onClick={handleClearAll}>
             Clear All Memories
           </Button>
@@ -742,7 +801,7 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
           if (updated?.id) {
             setMemories((prev) => prev.map((m) => (m.id === updated.id ? updated : m)));
           } else {
-            fetchMemories(searchQuery);
+            fetchMemories(searchQuery, memories.length);
           }
         }}
       />

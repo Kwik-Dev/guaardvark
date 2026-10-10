@@ -231,6 +231,24 @@ def _brain_provenance(request_id: str, tier: int, model, thinking_steps, eye=Non
     return prov
 
 
+def _capture_memory(app, message: str, session_id: str, project_id=None) -> None:
+    """Keep a "remember that …" fact from a user turn saved outside the engine.
+
+    The engine runs memory_capture right after it saves the user message; a
+    brain path that saves the turn itself runs the same capture, so a fact
+    the person asked to be remembered is kept whichever tier answered. Best
+    effort, like _persist_turn: a failure is logged and the reply goes on.
+    """
+    if not app or not message:
+        return
+    try:
+        from backend.services.memory_capture import capture_from_message
+        with app.app_context():
+            capture_from_message(message, session_id=session_id, project_id=project_id)
+    except Exception:
+        logger.exception("Chat memory auto-capture failed for session %s", session_id)
+
+
 def _persist_turn(app, session_id: str, role: str, content: str, extra: Optional[Dict[str, Any]],
                   emit_fn: Optional[Callable] = None, request_id: str = "", project_id=None) -> Optional[int]:
     """Write one chat row and, for an assistant row, announce its id.
@@ -1322,9 +1340,13 @@ class AgentBrain:
             from backend.services.agent_executor import AgentExecutor
 
             # Tier 3 bypasses the engine, which saves the question for the other
-            # tiers; save it before the run so it survives a crash or a reload.
+            # tiers; save it before the run so it survives a crash or a reload,
+            # and run the engine's memory capture on it, so "remember that …"
+            # is kept when the message also reads as a task.
             if app and message and (options or {}).get("persist", True) is not False:
                 _persist_turn(app, session_id, "user", message, None, project_id=project_id)
+                if not (options or {}).get("skip_memory_capture"):
+                    _capture_memory(app, message, session_id, project_id=project_id)
 
             if budget is None:
                 budget = StepBudget.from_total(self.TOTAL_STEP_CAP)

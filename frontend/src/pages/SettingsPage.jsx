@@ -3480,7 +3480,7 @@ const SettingsPage = () => {
     <SettingsPanel
       id="settings-sync"
       title="Sync"
-      help="Keep rules, memories and code in step with your other Guaardvark machines."
+      help="Keep code, projects and rules in step with your other Guaardvark machines. Agent memories stay on each machine."
     >
       <Line>
         <SettingChip
@@ -3488,7 +3488,7 @@ const SettingsPage = () => {
           on={interconnectorEnabled}
           onToggle={handleInterconnectorToggle}
           onSettings={() => setInterconnectorModalOpen(true)}
-          tooltip="Sync rules, memories and code with the other machines you have connected."
+          tooltip="Sync code, projects, rules and other records with the machines you have connected. Agent memories are not synced."
         />
         {interconnectorEnabled && interconnectorPendingCount > 0 && (
           <StatusPill
