@@ -1726,7 +1726,7 @@ const StickyNotesPage = () => {
                         onContentChange={(content) =>
                           handleNoteContentChange(noteId, content)
                         }
-                        onDeleteRequest={() => setDeleteConfirm(noteId)}
+                        onDeleteRequest={() => setDeleteConfirm({ noteId, source: "open" })}
                         onFormat={handleFormat}
                         onInsertLink={handleInsertLink}
                         theme={theme}
