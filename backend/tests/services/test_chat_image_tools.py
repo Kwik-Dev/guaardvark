@@ -4,6 +4,7 @@ from backend.services.unified_chat_engine import (
     GPU_HEAVY_TOOLS,
     _pin_image_edit_tools,
     attached_images_for_turn,
+    pasted_image_prompt,
     pasted_images_note,
     identity_prompt_from_message,
     parse_outpaint_pad,
@@ -484,3 +485,62 @@ def test_history_returns_every_picture_of_a_multi_picture_turn():
     assert message["imageUrl"] == urls[0]
     assert message["imageUrls"] == urls
     assert message["messageType"] == "image_upload"
+
+
+def test_pasted_image_prompt_relays_a_question_but_not_the_default_message():
+    assert pasted_image_prompt("what breed is this?") == (
+        "Describe this image in detail. The user asks: what breed is this?"
+    )
+    plain = "Describe this image in detail. What do you see?"
+    # The entry points' default messages for a picture without text, one or
+    # several, carry no question for the guide dog.
+    assert pasted_image_prompt("Describe this image.") == plain
+    assert pasted_image_prompt("Describe these images.") == plain
+    assert pasted_image_prompt("  describe these images.  ") == plain
+    assert pasted_image_prompt("") == plain
+    assert pasted_image_prompt(None) == plain
+
+
+def test_stop_halts_the_descriptions_of_the_remaining_pictures(monkeypatch):
+    """Up to four guide-dog calls run in sequence for a text-only model; Stop
+    between them leaves the rest undescribed instead of running to the end."""
+    import backend.services.unified_chat_engine as uce
+
+    e = uce.UnifiedChatEngine.__new__(uce.UnifiedChatEngine)
+    described = []
+
+    def _describe(image, user_message):
+        described.append(image)
+        return f"description of {image}"
+
+    e._analyze_pasted_image = _describe
+    checks = []
+
+    # Stop arrives once the first picture has been described.
+    def _aborted(session_id):
+        checks.append(session_id)
+        return len(described) >= 1
+
+    monkeypatch.setattr(uce, "is_aborted", _aborted)
+
+    out = e._describe_attached_images(["AAAA", "BBBB", "CCCC"], "compare these", "sess-stop")
+
+    assert described == ["AAAA"]
+    assert out == ["description of AAAA", None, None]
+    assert checks == ["sess-stop", "sess-stop"]
+    # The note names what was described; the ReACT loop stops the turn next.
+    assert uce.pasted_images_note(out) == (
+        "[The user pasted 3 images. Vision model analysis: Image 1 of 3: description of AAAA]"
+    )
+
+
+def test_every_picture_is_described_when_the_turn_runs_on(monkeypatch):
+    import backend.services.unified_chat_engine as uce
+
+    e = uce.UnifiedChatEngine.__new__(uce.UnifiedChatEngine)
+    e._analyze_pasted_image = lambda image, user_message: f"description of {image}"
+    monkeypatch.setattr(uce, "is_aborted", lambda session_id: False)
+
+    out = e._describe_attached_images(["AAAA", "BBBB"], "compare these", "sess-run")
+
+    assert out == ["description of AAAA", "description of BBBB"]

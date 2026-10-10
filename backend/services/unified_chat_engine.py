@@ -1298,6 +1298,24 @@ def pasted_images_note(descriptions) -> Optional[str]:
     return f"[The user pasted {total} images. Vision model analysis: {parts}]"
 
 
+# What the chat entry points put in place of an empty message when pictures
+# are attached; such a message carries no question for the guide dog to relay.
+DEFAULT_PICTURE_MESSAGES = frozenset({"describe this image.", "describe these images."})
+
+
+def pasted_image_prompt(user_message: Optional[str]) -> str:
+    """The guide-dog prompt for one attached picture.
+
+    The user's question rides along when there is one; the default message
+    the entry points set for a picture without text (one or several) is not
+    a question, so the vision model gets the plain description prompt.
+    """
+    text = (user_message or "").strip()
+    if text and text.lower() not in DEFAULT_PICTURE_MESSAGES:
+        return f"Describe this image in detail. The user asks: {user_message}"
+    return "Describe this image in detail. What do you see?"
+
+
 def _pin_image_edit_tools(has_image: bool, selected: List[str], all_tool_names: List[str]) -> List[str]:
     """Force image-from-photo tools into the toolset whenever the user attached an image.
 
@@ -2745,7 +2763,7 @@ class UnifiedChatEngine:
             if is_vision_model(model_name):
                 user_msg["images"] = attached
             else:
-                descriptions = [self._analyze_pasted_image(img, message) for img in attached]
+                descriptions = self._describe_attached_images(attached, message, session_id)
                 note = pasted_images_note(descriptions)
                 if note:
                     user_msg["content"] = f"{note}\n\n{user_msg['content']}"
@@ -5330,6 +5348,27 @@ class UnifiedChatEngine:
             logger.warning(f"Conversation compaction failed: {e}")
             return messages
 
+    def _describe_attached_images(self, attached, user_message: str, session_id: str) -> List[Optional[str]]:
+        """One guide-dog description per attached picture, in order, for a chat
+        model that cannot see.
+
+        Each description is a vision-model call of its own, so the turn's stop
+        flag is read before every call: once the user has pressed Stop, the
+        pictures not yet described stay ``None`` and the ReACT loop reports the
+        stopped turn at its next check instead of after the last picture.
+        """
+        descriptions: List[Optional[str]] = []
+        for index, image in enumerate(attached):
+            if is_aborted(session_id):
+                logger.info(
+                    f"[VISION] Stop requested after {index} of {len(attached)} "
+                    f"attached pictures were described; the rest are skipped"
+                )
+                descriptions.extend([None] * (len(attached) - index))
+                break
+            descriptions.append(self._analyze_pasted_image(image, user_message))
+        return descriptions
+
     def _analyze_pasted_image(self, image_b64: str, user_message: str) -> Optional[str]:
         """Run a pasted image through a vision model (moondream/gemma4) and return a description.
 
@@ -5345,11 +5384,7 @@ class UnifiedChatEngine:
         """
         from backend.utils.vision_analyzer import VisionAnalyzer
 
-        # Build a prompt that incorporates the user's question
-        if user_message and user_message.strip().lower() not in ("describe this image.", ""):
-            prompt = f"Describe this image in detail. The user asks: {user_message}"
-        else:
-            prompt = "Describe this image in detail. What do you see?"
+        prompt = pasted_image_prompt(user_message)
 
         analyzer = VisionAnalyzer()
 
