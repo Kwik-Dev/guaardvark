@@ -130,25 +130,26 @@ export const updateEntityLinks = async (
       }
     );
     
+    const data = await response.json().catch(() => ({}));
+
     if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      throw new Error(
+        data.error || `HTTP ${response.status}: ${response.statusText}`
+      );
     }
-    
-    const data = await response.json();
-    
+
     if (data.success) {
       return {
         success: true,
         message: data.message || `Successfully updated ${linkableEntityType} links`
       };
-    } else {
-      throw new Error(data.error || "Failed to update links");
     }
+    throw new Error(data.error || "Failed to update links");
   } catch (error) {
+    // Rethrow: a caller that gets a value back must be able to trust it.
+    // Returning { success: false } here let the Rules page announce
+    // "Links updated successfully!" on a 400.
     console.error(`updateEntityLinks error for ${primaryEntityType}-${linkableEntityType}:`, error);
-    return {
-      success: false,
-      error: error.message || "Failed to update entity links"
-    };
+    throw error instanceof Error ? error : new Error(String(error));
   }
 };
