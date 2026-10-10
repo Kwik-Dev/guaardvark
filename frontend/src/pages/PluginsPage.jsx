@@ -869,8 +869,12 @@ const PluginsPage = () => {
           ));
         }
 
-        // After stopping ComfyUI, offer to restart Ollama once socket/HTTP state settles.
-        if (action === 'stop' && pluginId === 'comfyui') {
+        // After ComfyUI goes down, offer to bring Ollama back once socket/HTTP
+        // state settles: the route orchestrator stops Ollama to make room for
+        // ComfyUI (plugin_bridge GPU swap), which leaves it enabled but not
+        // running. The switch and the context menu send 'disable' (which stops
+        // the service first); 'stop' is kept for callers that only stop.
+        if ((action === 'stop' || action === 'disable') && pluginId === 'comfyui') {
           setTimeout(async () => {
             const list = (await fetchPlugins()) || plugins;
             const ollamaPlugin = list.find((p) => p.id === 'ollama');
