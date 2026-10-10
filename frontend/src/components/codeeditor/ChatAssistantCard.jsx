@@ -64,6 +64,7 @@ import AICommandPalette from "./AICommandPalette";
 import { extractApplyableCode } from "./applyableCode";
 import * as codeIntelligenceService from "../../api/codeIntelligenceService";
 import * as chatService from "../../api/chatService";
+import { CODE_EDITOR_SESSION_ID } from "../../api/chatService";
 import { useUnifiedProgress } from "../../contexts/UnifiedProgressContext";
 import { buildSmartContext } from "../../utils/smartContextBuilder";
 import { parseCodeStructure, generateStructureSummary } from "../../utils/codeStructureParser";
@@ -511,7 +512,7 @@ USER QUESTION: ${userMessage}
 Please provide a helpful, specific response about the selected code. Analyze the code in context and answer the user's question in detail.`;
 
           updateLoadingProgress(50, "Sending to AI assistant...");
-          const chatResult = await chatService.sendQuery(selectionPrompt, ['coding', 'selection', 'analysis', currentTab?.language || 'javascript'], null, null, rulesCutoffEnabled);
+          const chatResult = await chatService.sendQuery(selectionPrompt, ['coding', 'selection', 'analysis', currentTab?.language || 'javascript'], null, CODE_EDITOR_SESSION_ID, rulesCutoffEnabled);
           updateLoadingProgress(75, "Processing AI response...");
 
           if (!chatResult) {
@@ -761,7 +762,7 @@ USER QUESTION: ${userMessage}
 Provide a helpful, specific response. Reference actual code when relevant. If modifications are requested, generate complete, working code.`;
 
             updateLoadingProgress(60, "Sending to AI assistant...");
-            const chatResult = await chatService.sendQuery(contextPrompt, ['coding', 'assistance', currentTab.language || 'javascript'], null, null, rulesCutoffEnabled);
+            const chatResult = await chatService.sendQuery(contextPrompt, ['coding', 'assistance', currentTab.language || 'javascript'], null, CODE_EDITOR_SESSION_ID, rulesCutoffEnabled);
 
             if (!chatResult) {
               throw new Error('Chat service returned null or undefined response');
@@ -827,7 +828,7 @@ Provide a helpful, specific response. Reference actual code when relevant. If mo
               noFilePrompt = `You are an AI coding assistant. ${userMessage}`;
             }
 
-            const chatResult = await chatService.sendQuery(noFilePrompt, ['coding', 'general'], null, null, rulesCutoffEnabled);
+            const chatResult = await chatService.sendQuery(noFilePrompt, ['coding', 'general'], null, CODE_EDITOR_SESSION_ID, rulesCutoffEnabled);
 
             if (!chatResult) {
               throw new Error('Chat service returned null or undefined response for general conversation');
