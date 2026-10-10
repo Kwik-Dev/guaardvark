@@ -276,6 +276,33 @@ def test_list_includes_undownloaded_user_flux(client, monkeypatch):
     assert "user-flux-fp8" not in [m["id"] for m in payload["data"]["unavailable_models"]]
 
 
+def test_list_reports_prompt_style_per_model_and_for_auto(client, monkeypatch):
+    # The page hides the content-type and anatomy controls for models that
+    # read prompts as prose; the list says which ones those are.
+    from backend.services import user_image_models as uim
+
+    gen = api.get_batch_image_generator().image_generator
+    base = {
+        "downloaded": True, "availability": "installed", "selectable": True,
+        "description": "", "recommended": False, "user": False, "kind": "diffusers",
+    }
+    gen.get_available_models = lambda probe_remote=True: {
+        "zimage-turbo": {**base, "id": "Tongyi-MAI/Z-Image-Turbo", "label": "Z-Image", "family": "zimage", "order": 1},
+        "sd-xl": {**base, "id": "stabilityai/sdxl", "label": "SDXL", "family": "sdxl", "order": 2},
+        "user-krea-thing": {**base, "id": "user:krea", "label": "Krea", "family": None, "order": 3},
+    }
+    monkeypatch.setattr(uim, "catalog_rows", lambda _g: [])
+    monkeypatch.setattr(uim, "family_choices", lambda: [])
+    payload = client.get("/api/batch-image/models").get_json()
+    assert payload["success"], payload
+    styles = {m["id"]: m["prompt_style"] for m in payload["data"]["models"]}
+    assert styles["zimage-turbo"] == "natural"
+    assert styles["sd-xl"] == "tags"
+    # No family on the row: the id decides (Krea 2 is a tags family until A/B'd).
+    assert styles["user-krea-thing"] == "tags"
+    assert payload["data"]["auto_prompt_style"] in ("natural", "tags")
+
+
 def test_dir_bytes_counts_dest_including_incomplete(tmp_path):
     dest = tmp_path / "unet"
     dest.mkdir()

@@ -683,9 +683,11 @@ def list_models():
         # (?check=1, Check access in Manage models), never on page load.
         check = request.args.get("check", "").lower() in ("1", "true", "yes")
         meta = generator.image_generator.get_available_models(probe_remote=check)
+        from backend.services.stills_defaults import prompt_style, prompt_style_for_family
         models = []
         unavailable = []
         for model_id, info in sorted(meta.items(), key=lambda kv: kv[1].get("order", 99)):
+            family = info.get("family")
             row = {
                 "id": model_id,
                 "path": info["id"],
@@ -699,8 +701,13 @@ def list_models():
                 "gated": bool(info.get("gated")),
                 # User catalog rows (Manage Image Models → Add new model).
                 "user": bool(info.get("user")),
-                "family": info.get("family"),
+                "family": family,
                 "kind": info.get("kind"),
+                # "natural": an LLM text encoder that reads prompts as prose, so
+                # the page's content-type tags and anatomy phrasing are not
+                # applied (offline_image_generator.enhance_prompt_for_quality).
+                # "tags": CLIP-era models that take the tag suffixes.
+                "prompt_style": prompt_style_for_family(family) if family else prompt_style(model_id),
             }
             # A model the user cannot actually run must not sit in the picker — that
             # is how a gated Krea 2 got selected and silently produced SD 1.5 output.
@@ -724,6 +731,9 @@ def list_models():
             "models": models,
             "unavailable_models": unavailable,
             "default_model": "auto",
+            # What Auto resolves to today, so the page can say which controls
+            # apply before a model is picked.
+            "auto_prompt_style": prompt_style("auto"),
             # User LoRAs never enter the picker; the page shows them as chips and
             # the modal lists them with Install / Remove.
             "adapters": catalog_rows(generator.image_generator),

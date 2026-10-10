@@ -75,6 +75,7 @@ import {
   isZimageModel,
   modelFamily,
   modelInstallNeed,
+  promptStyleFor,
   qualityPresetsForModel,
   resolveQualityPreset,
   stripCopyCounter,
@@ -249,6 +250,8 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     description: 'Router picks the best downloaded model for each prompt',
   };
   const [modelOptions, setModelOptions] = useState([AUTO_MODEL_OPTION]);
+  // 'natural' or 'tags' for what Auto resolves to today (from /batch-image/models).
+  const [autoPromptStyle, setAutoPromptStyle] = useState(null);
   // User LoRAs from Manage Image Models: rows from the same models call, and the
   // ids switched on for this run. Sent as adapters; the backend resolves files.
   const [userAdapters, setUserAdapters] = useState([]);
@@ -280,6 +283,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       if (data.success && data.data?.models) {
         const fetched = data.data.models.map(imageModelOption);
         setModelOptions([AUTO_MODEL_OPTION, ...fetched]);
+        if (data.data.auto_prompt_style) setAutoPromptStyle(data.data.auto_prompt_style);
         setUnavailableModels(data.data.unavailable_models || []);
         setUserAdapters((data.data.adapters || []).filter((a) => a.is_downloaded));
       }
@@ -304,6 +308,11 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   const isFlux = family === 'flux';
   const isZimage = isZimageModel(params.model);
   const unusedNegAnat = ignoresNegativeAndAnatomy(params.model);
+  // A prose model (Z-Image, and Auto while it resolves to one) reads tag
+  // suffixes as scene content, so the backend never applies the content type
+  // to it (offline_image_generator.enhance_prompt_for_quality, natural branch).
+  const prosePrompts = promptStyleFor(params.model, modelOptions, autoPromptStyle) === 'natural';
+  const modelLabel = modelOptions.find(m => m.value === params.model)?.label || params.model;
   const isModernDit = family === 'auto' || family === 'zimage' || family.startsWith('krea');
   const qualityPresets = qualityPresetsForModel(params.model);
   // A selected character renders with its base model's steps and guidance (the
@@ -1400,7 +1409,18 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                 Generation Settings
               </Typography>
 
-              {/* Content Preset Selector - Primary control for better images */}
+              {/* Content Preset Selector. Only tag-style models take it; a prose
+                  model gets a one-line note instead of a control that does nothing. */}
+              {prosePrompts ? (
+                <Box sx={{ mb: 3 }}>
+                  <Hint>
+                    {family === 'auto'
+                      ? 'Content Type is not used: Auto picks a model that reads the prompt as plain sentences.'
+                      : `Content Type is not used by ${modelLabel}: it reads the prompt as plain sentences.`}
+                    {' '}Describe the scene in your own words. The content types only shape prompts for tag-style models.
+                  </Hint>
+                </Box>
+              ) : (
               <Box sx={{ mb: 3, p: 2, bgcolor: 'primary.50', borderRadius: 2, border: '1px solid', borderColor: 'primary.200' }}>
                 <Typography variant="subtitle2" sx={{ mb: 1.5, fontWeight: 600, color: 'primary.main' }}>
                   Content Type (for better quality)
@@ -1478,6 +1498,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                   </Select>
                 </FormControl>
               </Box>
+              )}
 
               {/* Input Mode Selection */}
               <Box sx={{ mb: 3 }}>
@@ -1825,7 +1846,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                     </Box>
                     <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
                       <Chip
-                        label={`Model: ${modelOptions.find(m => m.value === params.model)?.label || params.model}${installBlocksStart ? ' (not installed)' : ''}`}
+                        label={`Model: ${modelLabel}${installBlocksStart ? ' (not installed)' : ''}`}
                         size="small"
                         variant="outlined"
                         color={installBlocksStart ? 'warning' : 'default'}
