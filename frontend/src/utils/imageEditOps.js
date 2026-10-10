@@ -18,6 +18,17 @@ export function cropRectFromOperations(operations) {
   return rect;
 }
 
+// The backend applies operations in order, so a crop recorded after a rotate
+// or flip is applied to the rotated or flipped image, while the editor draws
+// the crop on the image as loaded. Until the preview follows that order, a
+// crop is offered only while no rotate or flip has been applied.
+export const CROP_AFTER_TRANSFORM_REASON =
+  'Crop before rotating or flipping: undo the rotate or flip, crop, then rotate or flip again.';
+
+export function cropIsAvailable(operations) {
+  return !(operations || []).some((op) => op.type === 'rotate' || op.type === 'flip');
+}
+
 // Display scale that fits a width x height region of natural pixels in the
 // editor canvas without enlarging it: the same limits the uncropped preview
 // gets from CSS (90vw wide, the viewport minus the 52px toolbar high).

@@ -40,7 +40,9 @@ import {
   ArrowBack as BackIcon,
 } from '@mui/icons-material';
 
-import { cropRectFromOperations, fitScale } from '../../utils/imageEditOps';
+import {
+  cropRectFromOperations, cropIsAvailable, fitScale, CROP_AFTER_TRANSFORM_REASON,
+} from '../../utils/imageEditOps';
 import { useSnackbar } from '../common/SnackbarProvider';
 
 const FlipVIcon = () => (
@@ -89,6 +91,17 @@ const ImageEditor = ({
   // The preview shows what the applied crops keep; undoing a crop restores
   // the earlier region because the rectangle is derived from the list.
   const cropRect = useMemo(() => cropRectFromOperations(operations), [operations]);
+  const canCrop = cropIsAvailable(operations);
+
+  // A rotate or flip applied while cropping (R key) would put the crop after
+  // it; leave crop mode instead.
+  useEffect(() => {
+    if (!canCrop && cropMode) {
+      setCropMode(false);
+      setCrop(undefined);
+      setCompletedCrop(null);
+    }
+  }, [canCrop, cropMode]);
 
   // Viewport size, for fitting the cropped preview the way CSS fits the
   // uncropped one.
@@ -143,7 +156,7 @@ const ImageEditor = ({
       else if (e.key === '0') { setZoom(1); setPan({ x: 0, y: 0 }); }
       else if (e.key === 'r' && !e.ctrlKey) handleRotateCW();
       else if (e.key === 'r' && e.ctrlKey) { e.preventDefault(); handleRotateCCW(); }
-      else if (e.key === 'c' && !e.ctrlKey && !e.metaKey) setCropMode(m => !m);
+      else if (e.key === 'c' && !e.ctrlKey && !e.metaKey) { if (canCrop) setCropMode(m => !m); }
       else if ((e.key === 'z' || e.key === 'Z') && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         handleUndo();
@@ -155,7 +168,7 @@ const ImageEditor = ({
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [cropMode, saveDialogOpen, onClose]);
+  }, [cropMode, saveDialogOpen, onClose, canCrop]);
 
   // Mouse wheel zoom
   useEffect(() => {
@@ -230,7 +243,7 @@ const ImageEditor = ({
 
   // Apply crop
   const handleApplyCrop = useCallback(() => {
-    if (!completedCrop || !imgRef.current) return;
+    if (!completedCrop || !imgRef.current || !canCrop) return;
 
     const img = imgRef.current;
     const scaleX = naturalSize.w / img.width;
@@ -249,7 +262,7 @@ const ImageEditor = ({
     setCropMode(false);
     setCrop(undefined);
     setCompletedCrop(null);
-  }, [completedCrop, naturalSize]);
+  }, [completedCrop, naturalSize, canCrop]);
 
   // Save
   const handleSave = useCallback(async () => {
@@ -443,8 +456,10 @@ const ImageEditor = ({
         <Divider orientation="vertical" flexItem sx={{ borderColor: 'rgba(255,255,255,0.15)', mx: 0.5 }} />
 
         {/* Crop */}
-        <Tooltip title={cropMode ? "Cancel crop (Esc)" : "Crop (C)"}>
+        <Tooltip title={!canCrop ? CROP_AFTER_TRANSFORM_REASON : cropMode ? "Cancel crop (Esc)" : "Crop (C)"}>
+          <span>
           <IconButton
+            disabled={!canCrop}
             onClick={() => {
               if (cropMode) {
                 setCropMode(false);
@@ -459,11 +474,12 @@ const ImageEditor = ({
                 setCrop({ unit: '%', x: 10, y: 10, width: 80, height: 80 });
               }
             }}
-            sx={{ color: cropMode ? '#4CAF50' : 'white' }}
+            sx={{ color: !canCrop ? 'rgba(255,255,255,0.3)' : cropMode ? '#4CAF50' : 'white' }}
             size="small"
           >
             <CropIcon fontSize="small" />
           </IconButton>
+          </span>
         </Tooltip>
         {cropMode && completedCrop && completedCrop.width > 0 && (
           <Button

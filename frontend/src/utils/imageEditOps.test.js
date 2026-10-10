@@ -1,5 +1,19 @@
 import { describe, it, expect } from 'vitest';
-import { cropRectFromOperations, fitScale } from './imageEditOps';
+import { cropRectFromOperations, cropIsAvailable, fitScale } from './imageEditOps';
+
+describe('cropIsAvailable', () => {
+  it('is available with no edits or with crops only', () => {
+    expect(cropIsAvailable([])).toBe(true);
+    expect(cropIsAvailable(undefined)).toBe(true);
+    expect(cropIsAvailable([{ type: 'crop', x: 0, y: 0, width: 10, height: 10 }])).toBe(true);
+  });
+
+  it('is not available once a rotate or flip has been applied', () => {
+    expect(cropIsAvailable([{ type: 'rotate', angle: 90 }])).toBe(false);
+    expect(cropIsAvailable([{ type: 'flip', direction: 'vertical' }])).toBe(false);
+    expect(cropIsAvailable([{ type: 'crop', x: 0, y: 0, width: 10, height: 10 }, { type: 'rotate', angle: -90 }])).toBe(false);
+  });
+});
 
 describe('cropRectFromOperations', () => {
   it('is null with no crop applied', () => {
