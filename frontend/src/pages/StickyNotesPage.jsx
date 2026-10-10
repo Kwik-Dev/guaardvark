@@ -58,6 +58,7 @@ import {
 import { useNavigate } from "react-router-dom";
 import PageLayout from "../components/layout/PageLayout";
 import ClosedNotesDrawer from "../components/notes/ClosedNotesDrawer";
+import TextInputDialog from "../components/common/TextInputDialog";
 import { pinnedToTop, pinnedFirst, isEditableTarget } from "../components/notes/notesBoard";
 import { useLayout, useDashboardWidth } from "../contexts/LayoutContext";
 import { ContextualLoader } from "../components/common/LoadingStates";
@@ -575,6 +576,8 @@ const StickyNotesPage = () => {
   const draggingRef = useRef(false);
   const noteRefs = useRef({});
   const editRangeRef = useRef(null);
+  const [linkDialogOpen, setLinkDialogOpen] = useState(false);
+  const linkRangeRef = useRef(null); // the note selection the link dialog applies to
   const saveTimeoutRef = useRef(null);
 
   // Undo history (CTRL+Z)
@@ -1277,16 +1280,37 @@ const StickyNotesPage = () => {
     document.execCommand(command, false, null);
   }, []);
 
+  // The link dialog takes focus off the note, which drops the editor's selection
+  // (the old window.prompt kept it by blocking). The selection is cloned when the
+  // toolbar button is pressed and put back right before createLink runs. The
+  // note's DOM is never re-rendered by React, so the cloned range stays live.
   const handleInsertLink = useCallback(() => {
     const sel = window.getSelection();
-    const range = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
-    const url = window.prompt("Enter URL:");
-    if (url && range) {
+    linkRangeRef.current = sel && sel.rangeCount > 0 ? sel.getRangeAt(0).cloneRange() : null;
+    setLinkDialogOpen(true);
+  }, []);
+
+  const closeLinkDialog = useCallback(() => {
+    setLinkDialogOpen(false);
+    linkRangeRef.current = null;
+  }, []);
+
+  const applyInsertLink = useCallback((url) => {
+    const range = linkRangeRef.current;
+    closeLinkDialog();
+    if (!url || !range) return;
+    // After the dialog has handed focus back, re-select the saved range and link it.
+    requestAnimationFrame(() => {
+      const start = range.startContainer;
+      const node = start.nodeType === Node.ELEMENT_NODE ? start : start.parentElement;
+      const editable = node?.closest?.(".note-content");
+      if (editable) editable.focus();
+      const sel = window.getSelection();
       sel.removeAllRanges();
       sel.addRange(range);
       document.execCommand("createLink", false, url);
-    }
-  }, []);
+    });
+  }, [closeLinkDialog]);
 
   const selectNoteContents = useCallback((el) => {
     const range = document.createRange();
@@ -1901,6 +1925,17 @@ const StickyNotesPage = () => {
           </Button>
         </DialogActions>
       </Dialog>
+
+      <TextInputDialog
+        open={linkDialogOpen}
+        title="Insert Link"
+        label="URL"
+        placeholder="https://"
+        inputType="url"
+        submitLabel="Insert"
+        onSubmit={applyInsertLink}
+        onClose={closeLinkDialog}
+      />
 
       <ClosedNotesDrawer
         open={closedDrawerOpen}
