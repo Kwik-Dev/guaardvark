@@ -2289,6 +2289,7 @@ const ImagesPage = () => {
         onArrangeIcons={handleArrangeIcons}
         onArrangeWindows={handleArrangeWindows}
         hasClipboard={Boolean(clipboard)}
+        hasOpenWindows={activeWindows.length > 0}
         hasSelection={selectedItems.size > 0}
         contextType={contextMenuType}
         selectedItem={contextMenuItem}

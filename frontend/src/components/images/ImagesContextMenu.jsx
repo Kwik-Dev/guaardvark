@@ -45,6 +45,7 @@ const ImagesContextMenu = ({
   onArrangeIcons,
   onArrangeWindows,
   hasClipboard = false,
+  hasOpenWindows = false,
   _hasSelection = false,
   contextType = 'desktop',
   _selectedItem = null,
@@ -93,10 +94,12 @@ const ImagesContextMenu = ({
           <ListItemIcon><ArrangeIcon fontSize="small" /></ListItemIcon>
           <ListItemText>Arrange Icons</ListItemText>
         </MenuItem>,
-        <MenuItem key="arrange-windows" onClick={() => { onArrangeWindows?.(); onClose(); }}>
-          <ListItemIcon><ArrangeIcon fontSize="small" /></ListItemIcon>
-          <ListItemText>Arrange Windows</ListItemText>
-        </MenuItem>,
+        hasOpenWindows && (
+          <MenuItem key="arrange-windows" onClick={() => { onArrangeWindows?.(); onClose(); }}>
+            <ListItemIcon><ArrangeIcon fontSize="small" /></ListItemIcon>
+            <ListItemText>Arrange Windows</ListItemText>
+          </MenuItem>
+        ),
         hasClipboard ? [
           <Divider key="paste-div" />,
           <MenuItem key="paste" onClick={() => { onPaste?.(); onClose(); }}>
