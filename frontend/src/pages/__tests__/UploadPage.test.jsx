@@ -163,6 +163,19 @@ describe("UploadPage import", () => {
     expect(await screen.findByText(/uploaded, but indexing failed: no loader/)).toBeInTheDocument();
   });
 
+  it("says so when the upload route could not queue indexing", async () => {
+    api.uploadFile.mockResolvedValue({
+      document_id: 42, indexing_queued: false, indexing_error: "Indexing could not be queued: Redis down",
+    });
+    render(<UploadPage />);
+    await screen.findByText("No recent uploads.");
+    dropFile(screen.getByTestId("upload-drop-zone"), textFile("notes.txt"));
+    fireEvent.click(screen.getByRole("button", { name: "Import and Index" }));
+    expect(await screen.findByText(/but indexing could not be queued: .*Redis down/)).toBeInTheDocument();
+    expect(screen.queryByText(/indexing queued\./)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Import and Index" })).toBeInTheDocument();
+  });
+
   it("stops polling after the cap even when every poll fails", async () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     api.getDocuments.mockResolvedValueOnce({ documents: [] }).mockRejectedValue(new Error("down"));

@@ -215,6 +215,14 @@ const UploadPage = () => {
         // the page does not call /api/index/<id> on top of it: that queued the
         // same document a second time under a second footer job. Recent
         // Uploads below follows the row until it is INDEXED.
+        if (uploadResult.indexing_queued === false) {
+          setErrorMessage(
+            `File '${selectedFile.name}' uploaded (ID: ${uploadResult.document_id}), but indexing could not be queued${uploadResult.indexing_error ? `: ${uploadResult.indexing_error}` : "."}`,
+          );
+          setUploadStatus("error");
+          fetchRecentDocs();
+          return;
+        }
         setSuccessMessage(
           `File '${selectedFile.name}' uploaded (ID: ${uploadResult.document_id}); indexing queued.`,
         );
