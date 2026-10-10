@@ -36,6 +36,19 @@ export const ProcessType = {
   DIALOG_MANAGEMENT: 'dialog_management'
 };
 
+// The chat send options fields that carry a turn's pictures (base64 and data
+// URLs, megabytes by nature). The queue's text-size cap leaves them out so a
+// picture turn is queued like any other message instead of bypassing the
+// queue as "too large".
+export const PICTURE_OPTION_FIELDS = ['imageBase64', 'imagePreview', 'imagesBase64', 'imagePreviews'];
+
+export function stripPictureFields(sendOptions) {
+  if (!sendOptions || typeof sendOptions !== 'object') return sendOptions;
+  const rest = { ...sendOptions };
+  for (const field of PICTURE_OPTION_FIELDS) delete rest[field];
+  return rest;
+}
+
 // =============================================================================
 // FRONTEND RESOURCE MANAGER
 // =============================================================================
@@ -396,11 +409,12 @@ class FrontendResourceManager {
       delete checkObj.frame;
       delete checkObj.file;  // attachment payload (e.g. a pasted image as base64) — large by nature, not text bloat
       // The chat image attach actually rides in voiceOptions.imageBase64 / imagePreview
-      // (a ~2MB base64 data URL), so it tripped the text-size cap and fell off the queue.
-      // Strip those two fields but keep the rest of voiceOptions (small config).
+      // (a ~2MB base64 data URL) and, since several pictures can ride on one
+      // turn, in imagesBase64 / imagePreviews as well, so it tripped the
+      // text-size cap and fell off the queue. Strip the picture fields but
+      // keep the rest of voiceOptions (small config).
       if (checkObj.voiceOptions && typeof checkObj.voiceOptions === 'object') {
-        const { imageBase64: _unused_imageBase64, imagePreview: _unused_imagePreview, ...voRest } = checkObj.voiceOptions;
-        checkObj.voiceOptions = voRest;
+        checkObj.voiceOptions = stripPictureFields(checkObj.voiceOptions);
       }
       const messageStr = JSON.stringify(checkObj);
       if (messageStr.length > queue.maxLength) {
