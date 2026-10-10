@@ -1,7 +1,7 @@
 // frontend/src/pages/BulkImportDocumentsPage.jsx
 // Bulk Import UI for large document ingestion - Improved UX
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { BASE_URL } from "../api/apiClient";
 import {
   Alert,
@@ -79,11 +79,12 @@ const BulkImportDocumentsPage = () => {
   // user's home); the server also says which parent, if any, is still allowed.
   const [browserOpen, setBrowserOpen] = useState(false);
   const [currentPath, setCurrentPath] = useState("");
+  const [loadedPath, setLoadedPath] = useState(null);
   const [parentPath, setParentPath] = useState(null);
   const [browseRoots, setBrowseRoots] = useState([]);
+  const [browseError, setBrowseError] = useState(null);
   const [directories, setDirectories] = useState([]);
   const [loadingDirs, setLoadingDirs] = useState(false);
-  const loadedPathRef = useRef(null);
 
   // Load entities on mount
   useEffect(() => {
@@ -113,10 +114,10 @@ const BulkImportDocumentsPage = () => {
   // answers with the folder it resolved, so the first (empty) request settles
   // on the home folder without a second fetch.
   useEffect(() => {
-    if (browserOpen && loadedPathRef.current !== currentPath) {
+    if (browserOpen && loadedPath !== currentPath) {
       loadDirectories(currentPath);
     }
-  }, [browserOpen, currentPath]);
+  }, [browserOpen, currentPath, loadedPath]);
 
   const loadDirectories = async (path) => {
     setLoadingDirs(true);
@@ -125,22 +126,32 @@ const BulkImportDocumentsPage = () => {
         `${BASE_URL}/files/browse-server?path=${encodeURIComponent(path)}`
       );
       const data = await response.json();
+      if (Array.isArray(data.roots)) {
+        setBrowseRoots(data.roots);
+      }
       if (response.ok && data.directories) {
-        loadedPathRef.current = data.path;
+        setLoadedPath(data.path);
+        setBrowseError(null);
         setDirectories(data.directories.map((dir) => dir.name));
         setParentPath(data.parent_path || null);
-        setBrowseRoots(Array.isArray(data.roots) ? data.roots : []);
         if (data.path && data.path !== path) {
           setCurrentPath(data.path);
         }
       } else {
-        showMessage(data.error || "Failed to load directories", "error");
+        // A refused or missing folder: the dialog shows why and offers a way
+        // out; the path field alone is read-only.
+        setBrowseError(data.error || "Failed to load directories");
+        setLoadedPath(null);
         setDirectories([]);
+        setParentPath(null);
       }
     } catch (error) {
       console.error("Error loading directories:", error);
       showMessage("Failed to load directories", "error");
+      setBrowseError("Failed to load directories");
+      setLoadedPath(null);
       setDirectories([]);
+      setParentPath(null);
     } finally {
       setLoadingDirs(false);
     }
@@ -503,9 +514,25 @@ const BulkImportDocumentsPage = () => {
               }}
             />
             {browseRoots.length > 0 && (
-              <Typography variant="caption" color="text.secondary">
-                Folders under {browseRoots.join(", ")}; hidden folders are not shown.
-              </Typography>
+              <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap alignItems="center">
+                <Typography variant="caption" color="text.secondary">
+                  Browse:
+                </Typography>
+                {browseRoots.map((root) => (
+                  <Button
+                    key={root}
+                    size="small"
+                    variant={root === currentPath ? "contained" : "outlined"}
+                    onClick={() => handleBrowserNavigate(root)}
+                    sx={{ textTransform: "none" }}
+                  >
+                    {root}
+                  </Button>
+                ))}
+                <Typography variant="caption" color="text.secondary">
+                  Hidden folders are not shown.
+                </Typography>
+              </Stack>
             )}
 
             {loadingDirs ? (
@@ -514,6 +541,17 @@ const BulkImportDocumentsPage = () => {
                   Loading directories...
                 </Typography>
               </Box>
+            ) : browseError ? (
+              <Alert
+                severity="error"
+                action={
+                  <Button color="inherit" size="small" onClick={() => handleBrowserNavigate("")}>
+                    Go to home folder
+                  </Button>
+                }
+              >
+                {browseError}
+              </Alert>
             ) : directories.length === 0 ? (
               <Alert severity="info">
                 No subdirectories found. You can select this directory.
@@ -542,7 +580,11 @@ const BulkImportDocumentsPage = () => {
           <Button onClick={() => setBrowserOpen(false)}>
             Cancel
           </Button>
-          <Button onClick={handleBrowserSelect} variant="contained" disabled={!currentPath}>
+          <Button
+            onClick={handleBrowserSelect}
+            variant="contained"
+            disabled={!currentPath || loadedPath !== currentPath || Boolean(browseError)}
+          >
             Select This Directory
           </Button>
         </DialogActions>
