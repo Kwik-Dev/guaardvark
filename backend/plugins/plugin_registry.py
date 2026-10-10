@@ -7,6 +7,8 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
+from backend.utils.display_paths import display_path
+
 from .plugin_base import PluginMetadata, PluginStatus, PluginType
 from .plugin_config_store import PluginConfigStore
 
@@ -127,6 +129,12 @@ class PluginRegistry:
     def get_plugin_dir(self, plugin_id: str) -> Optional[Path]:
         """Get plugin directory path by ID"""
         return self._plugin_dirs.get(plugin_id)
+
+    def display_plugin_dir(self, plugin_id: str) -> str:
+        """The plugin folder as it is safe to show: ``plugins/ollama`` inside
+        the checkout, ``~/...`` under the home directory, '' when unknown."""
+        plugin_dir = self._plugin_dirs.get(plugin_id)
+        return display_path(plugin_dir) if plugin_dir else ''
     
     def get_all_plugins(self) -> Dict[str, PluginMetadata]:
         """Get all registered plugins"""
@@ -151,7 +159,10 @@ class PluginRegistry:
                 'enabled': metadata.config.enabled,
                 'port': metadata.port,
                 'vram_estimate_mb': metadata.vram_estimate_mb,
-                'plugin_dir': str(self._plugin_dirs.get(plugin_id, '')),
+                # Shown on the card and pushed to every browser in each
+                # snapshot, so never the absolute path: it names the home
+                # folder and the login (demo recordings, screenshots).
+                'plugin_dir': self.display_plugin_dir(plugin_id),
                 'config': metadata.config.to_dict(),
             })
         return result

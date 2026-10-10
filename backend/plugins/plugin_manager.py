@@ -1472,13 +1472,14 @@ class PluginManager:
         if not metadata:
             return {'error': f'Plugin not found: {plugin_id}'}
         
-        plugin_dir = self.registry.get_plugin_dir(plugin_id)
         status = self._plugin_status.get(plugin_id, PluginStatus.UNKNOWN)
-        
+
         info = metadata.to_dict()
         info['status'] = status.value
         info['running'] = status == PluginStatus.RUNNING
-        info['plugin_dir'] = str(plugin_dir) if plugin_dir else None
+        # Display form (plugins/<id>), the same as the listing: this reaches
+        # the browser, the CLI and MCP clients.
+        info['plugin_dir'] = self.registry.display_plugin_dir(plugin_id) or None
         if plugin_id in self._instance_problems:
             info['status_message'] = self._instance_problems[plugin_id]
         
