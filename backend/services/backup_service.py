@@ -2061,9 +2061,11 @@ def _restore_documents(data: list[dict]) -> int:
         # Check if document already exists by path
         doc = models.Document.query.filter_by(path=relative_path).first()
         if not doc:
+            # A restored row is not re-queued for indexing here.
             doc = models.Document(
                 filename=d.get("filename", os.path.basename(relative_path)),
-                path=relative_path
+                path=relative_path,
+                index_status="NOT_INDEXED",
             )
             models.db.session.add(doc)
 

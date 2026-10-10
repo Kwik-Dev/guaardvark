@@ -412,13 +412,16 @@ def upload_file_endpoint():
                             if tags_str:
                                 existing_doc.tags = tags_str
                         else:
+                            # The file lives on the master; nothing here
+                            # queues indexing for it.
                             new_doc = DBDocument(
                                 filename=filename,
                                 path=db_relative_path,
                                 type=file_ext,
                                 size=file_size,
                                 project_id=project_id,
-                                tags=tags_str
+                                tags=tags_str,
+                                index_status="NOT_INDEXED",
                             )
                             db.session.add(new_doc)
                         

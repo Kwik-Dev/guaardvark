@@ -115,3 +115,25 @@ def test_separate_categories_get_separate_folders(app, tmp_path):
     d_story = register_production_output(production=prod, file_path=str(fs), category="storyboard")
     d_clip = register_production_output(production=prod, file_path=str(fc), category="clips")
     assert d_story.folder_id != d_clip.folder_id
+
+
+def test_registered_output_is_not_marked_as_indexing(app, tmp_path):
+    """Registration queues nothing, so the row must not claim indexing is
+    under way (the Files page showed an orange "Indexing..." dot forever)."""
+    prod = _setup_production(project_id=None)
+    f = tmp_path / "shot_9.png"
+    f.write_bytes(b"png")
+
+    doc = register_production_output(production=prod, file_path=str(f), category="storyboard")
+
+    assert doc.index_status == "NOT_INDEXED"
+
+
+def test_document_row_defaults_to_not_indexed(app):
+    """A Document saved without a status is NOT_INDEXED; INDEXING and PENDING
+    are set by the paths that queue a task."""
+    doc = Document(filename="plain.bin", path="plain.bin")
+    db.session.add(doc)
+    db.session.commit()
+
+    assert db.session.get(Document, doc.id).index_status == "NOT_INDEXED"
