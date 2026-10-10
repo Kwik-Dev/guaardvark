@@ -1,6 +1,7 @@
 """Plugin log tail API — maps plugin ids to on-disk log files."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -29,6 +30,30 @@ def test_ollama_reads_serve_log_not_legacy_name(log_dir):
     text, count, _source = plugins_api._read_plugin_log_text("ollama", 50)
     assert "ollama serve listening" in text
     assert count == 1
+
+
+def test_journal_lines_lose_the_hostname_and_keep_the_time(log_dir, monkeypatch):
+    """systemd's Ollama has no ollama_serve.log; the journal names the box on every line."""
+    journal = (
+        "2026-10-10T18:43:33-04:00 somebox ollama[1840771]: [GIN] 2026/10/10 - 18:43:33 | 200 | GET \"/api/tags\"\n"
+        "2026-10-10T18:43:34-04:00 somebox ollama[1840771]: time=2026-10-10T18:43:34 level=INFO msg=\"loaded\"\n"
+        "-- Boot abc123 --\n"
+    )
+
+    def fake_run(argv, **_kw):
+        assert argv[:3] == ["journalctl", "-u", "ollama"]
+        return SimpleNamespace(returncode=0, stdout=journal)
+
+    monkeypatch.setattr(plugins_api.subprocess, "run", fake_run)
+
+    text, count, source = plugins_api._read_plugin_log_text("ollama", 50)
+
+    assert source == "journalctl:ollama"
+    assert count == 3
+    assert "somebox" not in text
+    assert "ollama[1840771]" not in text
+    assert text.splitlines()[0] == "2026-10-10T18:43:33-04:00 [GIN] 2026/10/10 - 18:43:33 | 200 | GET \"/api/tags\""
+    assert text.splitlines()[2] == "-- Boot abc123 --"
 
 
 def test_unknown_plugin_falls_back_to_id_log(log_dir):

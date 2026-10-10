@@ -3,6 +3,7 @@
 
 import collections
 import logging
+import re
 import subprocess
 from pathlib import Path
 
@@ -43,6 +44,18 @@ def _tail_text_file(path: Path, lines: int) -> tuple[str, int]:
     return log_text, len(tail)
 
 
+# journalctl -o short-iso: "<iso time> <hostname> <unit>[<pid>]: <message>".
+# The Logs panel shows every line in the browser, so the hostname goes; the
+# time stays, since Ollama's own lines do not all carry one.
+_JOURNAL_PREFIX = re.compile(r"^(\S+) \S+ \S+?\[\d+\]: ")
+
+
+def _strip_journal_host(text: str) -> str:
+    """``2026-10-10T18:43:33-04:00 box ollama[1840771]: msg`` becomes
+    ``2026-10-10T18:43:33-04:00 msg``; other lines are left as they are."""
+    return "\n".join(_JOURNAL_PREFIX.sub(r"\1 ", line) for line in text.splitlines())
+
+
 def _read_plugin_log_text(plugin_id: str, lines: int) -> tuple[str, int, str]:
     """Return (log_text, line_count, source_label)."""
     from backend.config import LOG_DIR
@@ -71,8 +84,8 @@ def _read_plugin_log_text(plugin_id: str, lines: int) -> tuple[str, int, str]:
                 check=False,
             )
             if result.returncode == 0 and result.stdout.strip():
-                rows = result.stdout.splitlines()
-                return result.stdout, len(rows), "journalctl:ollama"
+                text = _strip_journal_host(result.stdout)
+                return text + "\n", len(text.splitlines()), "journalctl:ollama"
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
             pass
 
