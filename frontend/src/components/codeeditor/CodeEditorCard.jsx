@@ -20,6 +20,7 @@ import {
   DialogActions,
   Button,
   TextField,
+  CircularProgress,
   useTheme,
 } from "@mui/material";
 import {
@@ -44,7 +45,7 @@ import * as documentService from "../../api/documentService";
 import { getLanguageFromFilename } from "../../utils/languageDetector";
 import { revealEditorLine } from "./codeEditorNav";
 import { createAiHoverProvider, readAiHoverPreference, writeAiHoverPreference } from "./aiHover";
-import { saveTargetFor } from "./tabOrigin";
+import { saveTargetFor, saveRefusal, loadedTab, tabDisplayName, TAB_LOAD } from "./tabOrigin";
 import { bindEditorActions } from "./editorBindings";
 
 // Monaco command behind the lightbulb actions (Fix with AI, Explain, Optimize):
@@ -480,6 +481,7 @@ ${currentTab.content}
     const handleContentChange = useCallback((value) => {
       if (!currentTab || activeTabIndex < 0 || activeTabIndex >= openTabs.length) return;
       if (currentTab.readOnly || currentTab.source === 'live_repo') return;
+      if (currentTab.loadState && currentTab.loadState !== TAB_LOAD.LOADED) return;
 
       setOpenTabs(prev => {
         if (activeTabIndex >= 0 && activeTabIndex < prev.length) {
@@ -507,6 +509,17 @@ ${currentTab.content}
         const target = saveTargetFor(currentTab);
         if (target.kind === 'readonly' || target.kind === 'error') {
           throw new Error(target.message);
+        }
+        // A tab that is still loading, failed to load, or holds exactly what
+        // was loaded is never written: that is how a placeholder or an empty
+        // string would replace the stored document.
+        const refusal = saveRefusal(currentTab);
+        if (refusal && refusal.reason === 'clean') {
+          completeProcess(startProcess("save-file", "Saving file...", "file_generation"), refusal.message);
+          return;
+        }
+        if (refusal) {
+          throw new Error(refusal.message);
         }
         const processId = startProcess("save-file", "Saving file...", "file_generation");
 
@@ -585,6 +598,9 @@ ${currentTab.content}
             ? {
                 ...tab,
                 filePath: actualFilePath,
+                savedContent: tab.content,
+                loadState: TAB_LOAD.LOADED,
+                loadError: null,
                 isModified: false,
                 isNew: false,
               }
@@ -647,14 +663,12 @@ ${currentTab.content}
     }, []);
 
     const createNewTab = useCallback(() => {
-      const newTab = {
+      const newTab = loadedTab({
         id: Math.random().toString(36).slice(2, 11),
         filePath: null,
-        content: "",
         language: "javascript",
-        isModified: false,
         isNew: true,
-      };
+      }, "");
       setOpenTabs(prev => {
         const newTabs = [...prev, newTab];
         setActiveTabIndex(newTabs.length - 1);
@@ -887,6 +901,22 @@ ${currentTab.content}
                 </Typography>
               </Box>
             ) : currentTab ? (
+              <>
+              {/* Load state lives beside the editor, never in its text */}
+              {currentTab.loadState === TAB_LOAD.LOADING && (
+                <Box
+                  data-testid="tab-loading"
+                  sx={{ position: 'absolute', inset: 0, zIndex: 2, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1, bgcolor: 'rgba(0,0,0,0.55)' }}
+                >
+                  <CircularProgress size={20} />
+                  <Typography variant="body2">Loading {tabDisplayName(currentTab)}…</Typography>
+                </Box>
+              )}
+              {currentTab.loadState === TAB_LOAD.FAILED && (
+                <Alert severity="error" data-testid="tab-failed" sx={{ position: 'absolute', top: 8, left: 8, right: 8, zIndex: 2 }}>
+                  {tabDisplayName(currentTab)} did not load: {currentTab.loadError}. Nothing will be saved from this tab; close it and open the file again.
+                </Alert>
+              )}
               <Editor
                 height="100%"
                 language={currentTab.language}
@@ -895,7 +925,8 @@ ${currentTab.content}
                 onMount={handleEditorDidMount}
                 theme="vs-dark"
                 options={{
-                  readOnly: currentTab.readOnly || currentTab.source === 'live_repo',
+                  readOnly: currentTab.readOnly || currentTab.source === 'live_repo'
+                    || (Boolean(currentTab.loadState) && currentTab.loadState !== TAB_LOAD.LOADED),
                   fontSize: 14,
                   wordWrap: "on",
                   minimap: { enabled: true },
@@ -908,6 +939,7 @@ ${currentTab.content}
                   setEditorError(error);
                 }}
               />
+              </>
             ) : (
               /* Empty state - no tabs open */
               <Box

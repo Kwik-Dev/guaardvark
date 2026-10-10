@@ -40,6 +40,7 @@ import * as documentService from "../../api/documentService";
 import * as fileOperationsService from "../../api/fileOperationsService";
 import UnifiedUploadModal from "../modals/UnifiedUploadModal";
 import { getLanguageFromFilename } from "../../utils/languageDetector";
+import { loadingTab, loadedTab, failedTab } from "./tabOrigin";
 
 const FileTreeCard = React.forwardRef(
   (
@@ -239,111 +240,59 @@ const FileTreeCard = React.forwardRef(
         return;
       }
 
-      let content = file.content || "";
-
-      // If it's a document from backend, we need to fetch its content
-      if (file.source === 'document' && !content) {
-        try {
-          // Check if it's a code file before loading content
-          const fileName = file.name || file.filename || '';
-          const isCodeFile = fileName.match(/\.(js|jsx|ts|tsx|py|php|java|cpp|c|h|css|html|json|xml|yaml|yml|md|txt|sql|sh|bash|go|rs|rb|swift|kt|dart|scala|r|m|mm|cs|vb|pl|lua|vim|conf|cfg|ini|toml|env)$/i);
-
-          if (!isCodeFile) {
-            content = `// File type not supported in code editor\n// File: ${fileName}\n// Only code files (JS, PY, PHP, etc.) can be opened in the editor\n// Use the download feature to access this file`;
-          } else {
-            // Show loading state immediately
-            content = `// Loading document content...\n// Document: ${fileName}\n// Please wait...`;
-
-            // Create tab with loading content first
-            const loadingTab = {
-              id: Math.random().toString(36).substr(2, 9),
-              filePath: file.path,
-              content: content,
-              language: file.language || getLanguageFromExtension(file.path || file.name || ''),
-              isModified: false,
-              isNew: false,
-              source: file.source || 'document',
-              documentId: file.id || null,
-              document: file.document || null,
-            };
-
-            // Add loading tab immediately for better UX (with duplicate check)
-            setOpenTabs(prev => {
-              // Double-check for duplicates before adding
-              const alreadyExists = prev.some(tab =>
-                (tab.filePath === file.path) ||
-                (file.id && tab.documentId === file.id)
-              );
-              if (alreadyExists) {
-                const existingIdx = prev.findIndex(tab =>
-                  (tab.filePath === file.path) || (file.id && tab.documentId === file.id)
-                );
-                if (existingIdx !== -1) setActiveTabIndex(existingIdx);
-                return prev; // Don't add duplicate
-              }
-              const newTabs = [...prev, loadingTab];
-              setActiveTabIndex(newTabs.length - 1);
-              return newTabs;
-            });
-
-            // Fetch actual content in the background
-            try {
-              const result = await documentService.getDocumentContent(file.id);
-              let actualContent;
-              if (result.error) {
-                actualContent = `// Error loading document content\n// Document: ${fileName}\n// Error: ${result.error}\n// Please try again or contact support`;
-              } else {
-                actualContent = result.content || `// Document appears to be empty\n// Document: ${fileName}`;
-              }
-
-              // Update the tab with actual content
-              setOpenTabs(prev => {
-                const updatedTabs = [...prev];
-                const tabIndex = updatedTabs.findIndex(tab => tab.id === loadingTab.id);
-                if (tabIndex !== -1) {
-                  updatedTabs[tabIndex] = {
-                    ...updatedTabs[tabIndex],
-                    content: actualContent
-                  };
-                }
-                return updatedTabs;
-              });
-            } catch (fetchError) {
-              console.error('Error fetching document content:', fetchError);
-              // Update with error content
-              setOpenTabs(prev => {
-                const updatedTabs = [...prev];
-                const tabIndex = updatedTabs.findIndex(tab => tab.id === loadingTab.id);
-                if (tabIndex !== -1) {
-                  updatedTabs[tabIndex] = {
-                    ...updatedTabs[tabIndex],
-                    content: `// Error fetching document: ${fetchError.message}\n// Document: ${fileName}\n// Please try again`
-                  };
-                }
-                return updatedTabs;
-              });
-            }
-
-            return; // Exit early since we handled tab creation above
-          }
-        } catch (error) {
-          console.error('Error loading document content:', error);
-          content = `// Error loading document: ${error.message}\n// Document: ${file.name}\n// Please try again`;
-        }
-      }
-
-      // Create new tab
-      const newTab = {
+      const baseTab = {
         id: Math.random().toString(36).substr(2, 9),
         filePath: file.path,
-        content: content,
         language: file.language || getLanguageFromExtension(file.path || file.name || ''),
-        isModified: false,
         isNew: false,
         source: file.source || 'local',
         documentId: file.id || null,
         document: file.document || null,
       };
+
+      // A library document is fetched after its tab opens. The tab starts
+      // empty in the loading state; placeholder and error text never become
+      // its content, so a save can never write them over the document.
+      if (file.source === 'document' && !file.content) {
+        const fileName = file.name || file.filename || '';
+        const isCodeFile = fileName.match(/\.(js|jsx|ts|tsx|py|php|java|cpp|c|h|css|html|json|xml|yaml|yml|md|txt|sql|sh|bash|go|rs|rb|swift|kt|dart|scala|r|m|mm|cs|vb|pl|lua|vim|conf|cfg|ini|toml|env)$/i);
+        const pendingTab = isCodeFile
+          ? loadingTab(baseTab)
+          : failedTab(baseTab, `only code files (JS, PY, PHP, ...) open in the editor; download ${fileName} from the Files page instead`);
+
+        setOpenTabs(prev => {
+          const existingIdx = prev.findIndex(tab =>
+            (tab.filePath === file.path) || (file.id && tab.documentId === file.id)
+          );
+          if (existingIdx !== -1) {
+            setActiveTabIndex(existingIdx);
+            return prev; // Don't add duplicate
+          }
+          const newTabs = [...prev, pendingTab];
+          setActiveTabIndex(newTabs.length - 1);
+          return newTabs;
+        });
+        if (!isCodeFile) return;
+
+        const settle = (finished) => {
+          setOpenTabs(prev => prev.map(tab => (tab.id === pendingTab.id ? finished(tab) : tab)));
+        };
+        try {
+          const result = await documentService.getDocumentContent(file.id);
+          if (result.error) {
+            settle(tab => failedTab(tab, result.error));
+          } else {
+            settle(tab => loadedTab(tab, result.content || ''));
+          }
+        } catch (fetchError) {
+          console.error('Error fetching document content:', fetchError);
+          settle(tab => failedTab(tab, fetchError));
+        }
+        return;
+      }
+
+      // Local files and documents handed over with their content are loaded already
+      const newTab = loadedTab(baseTab, file.content || "");
 
       setOpenTabs(prev => {
         // Final duplicate check before adding
