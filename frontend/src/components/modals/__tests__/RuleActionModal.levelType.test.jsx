@@ -43,26 +43,53 @@ describe("RuleActionModal keeps the stored level and type on edit", () => {
     expect(payload).toMatchObject({ level: "LEARNED", type: "PROMPT_TEMPLATE" });
   });
 
-  it("keeps a SYSTEM prompt at SYSTEM even when its name is renamed", async () => {
-    const onSave = vi.fn();
+  it("keeps the level of a row whose type is null and leaves type out of the save", async () => {
+    const payload = await saveFrom({ id: 5, name: "house_style", level: "SYSTEM", type: null, rule_text: "t" });
+    expect(payload.level).toBe("SYSTEM");
+    expect("type" in payload).toBe(false);
+  });
+
+  it.each(["global_default_chat_system_prompt", "enhanced_chat", "qa_default"])(
+    "makes the name of %s read-only because the engine looks it up by name",
+    (name) => {
+      render(
+        <RuleActionModal
+          open
+          ruleData={{ id: 2, name, level: "SYSTEM", type: "PROMPT_TEMPLATE", rule_text: "x" }}
+          onSave={vi.fn()}
+          onClose={() => {}}
+        />,
+      );
+      expect(screen.getByLabelText(/^Name/)).toBeDisabled();
+      expect(screen.getByText(/looks this rule up by name/)).toBeInTheDocument();
+    },
+  );
+
+  it("keeps the type fixed after creation: a prompt rule cannot take a command label", () => {
     render(
       <RuleActionModal
         open
-        ruleData={{
-          id: 2,
-          name: "global_default_chat_system_prompt",
-          level: "SYSTEM",
-          type: "PROMPT_TEMPLATE",
-          rule_text: "You are Guaardvark.",
-        }}
-        onSave={onSave}
+        ruleData={{ id: 7, name: "tone", level: "USER_GLOBAL", type: "PROMPT_TEMPLATE", rule_text: "x" }}
+        onSave={vi.fn()}
         onClose={() => {}}
       />,
     );
-    fireEvent.change(screen.getByLabelText(/^Name/), { target: { name: "name", value: "persona" } });
-    fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
-    await waitFor(() => expect(onSave).toHaveBeenCalled());
-    expect(onSave.mock.calls[0][0]).toMatchObject({ name: "persona", level: "SYSTEM" });
+    expect(screen.getByLabelText(/Command \(optional\)/)).toBeDisabled();
+    expect(screen.getByText(/Type is fixed after creation/)).toBeInTheDocument();
+  });
+
+  it("keeps the type fixed after creation: a command rule must keep a label", () => {
+    render(
+      <RuleActionModal
+        open
+        ruleData={{ id: 8, name: "go", level: "USER_GLOBAL", type: "COMMAND_RULE", command_label: "/go", rule_text: "x" }}
+        onSave={vi.fn()}
+        onClose={() => {}}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText(/Command \(optional\)/), { target: { name: "command_label", value: "" } });
+    expect(screen.getByRole("button", { name: /^Save$/ })).toBeDisabled();
+    expect(screen.getByText(/Required; the type is fixed after creation/)).toBeInTheDocument();
   });
 
   it("shows the stored pair so the user knows what the save keeps", () => {
@@ -159,10 +186,10 @@ describe("a new rule derives its level and type from the form", () => {
     });
   });
 
-  it("creates the global chat prompt at SYSTEM", () => {
-    expect(effectiveTypeAndLevel({ name: "global_default_chat_system_prompt" }, null)).toEqual({
-      type: "PROMPT_TEMPLATE",
-      level: "SYSTEM",
-    });
-  });
+  it.each(["global_default_chat_system_prompt", "enhanced_chat"])(
+    "creates %s at SYSTEM, where the prompt-slot lookup reads it",
+    (name) => {
+      expect(effectiveTypeAndLevel({ name }, null)).toEqual({ type: "PROMPT_TEMPLATE", level: "SYSTEM" });
+    },
+  );
 });

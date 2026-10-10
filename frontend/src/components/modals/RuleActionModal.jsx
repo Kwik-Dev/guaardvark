@@ -43,15 +43,26 @@ const deriveTypeAndLevel = (formData) => {
   if (name === "qa_default") {
     return { type: "QA_TEMPLATE", level: "SYSTEM" };
   }
-  if (name === "global_default_chat_system_prompt") {
+  if (LOOKED_UP_NAMES.includes(name)) {
     return { type: "PROMPT_TEMPLATE", level: "SYSTEM" };
   }
   return { type: "PROMPT_TEMPLATE", level: "USER_GLOBAL" };
 };
 
+// Rules the engine finds by name (rule_utils.PROMPT_SLOT_RULE_NAMES and the
+// QA template): renaming one would leave the lookup empty, so the name of an
+// existing one is read-only here.
+export const LOOKED_UP_NAMES = [
+  "global_default_chat_system_prompt",
+  "enhanced_chat",
+  "qa_default",
+];
+
+// An existing rule keeps its stored level and type; type is nullable, so a
+// null stays null (and is left out of the save) rather than being derived.
 export const effectiveTypeAndLevel = (formData, ruleData) => {
-  if (ruleData?.id && ruleData.level && ruleData.type) {
-    return { type: ruleData.type, level: ruleData.level };
+  if (ruleData?.id && ruleData.level) {
+    return { type: ruleData.type || null, level: ruleData.level };
   }
   return deriveTypeAndLevel(formData);
 };
@@ -205,6 +216,7 @@ const RuleActionModal = ({
         type,
         level,
       };
+      if (type === null) delete dataToSave.type;
 
       if (ruleData?.id) {
         dataToSave.id = ruleData.id;
@@ -242,10 +254,11 @@ const RuleActionModal = ({
   const effective = effectiveTypeAndLevel(formData, ruleData);
   const detectedType = displayKind(effective);
   const commandRequired = effective.type === "COMMAND_RULE";
-  // A label typed into an existing non-command rule is saved, but the rule
-  // keeps its type, so the chat will not run it as a command.
-  const labelWillNotRun =
-    !isNewRule && !commandRequired && !!formData.command_label?.trim();
+  // The type is fixed after creation, so an existing non-command rule cannot
+  // take a command label; a command rule must keep one.
+  const commandLocked = !isNewRule && !commandRequired;
+  const nameLocked =
+    !isNewRule && LOOKED_UP_NAMES.includes(ruleData?.name || "");
   const getTypeDisplayInfo = (type) => {
     switch (type) {
       case "COMMAND":
@@ -322,8 +335,13 @@ const RuleActionModal = ({
                   onChange={handleChange}
                   fullWidth
                   required
-                  autoFocus
-                  helperText="A unique and descriptive name"
+                  autoFocus={!nameLocked}
+                  disabled={nameLocked}
+                  helperText={
+                    nameLocked
+                      ? "The chat engine looks this rule up by name, so the name cannot change"
+                      : "A unique and descriptive name"
+                  }
                 />
               </Grid>
               <Grid
@@ -374,7 +392,7 @@ const RuleActionModal = ({
                   <Typography variant="caption" color="text.secondary">
                     {typeInfo.description}
                     {!isNewRule &&
-                      ` (${effective.level} / ${effective.type}, kept on save)`}
+                      ` (${effective.level} / ${effective.type || "no type"}, kept on save)`}
                   </Typography>
                 </Box>
               </Grid>
@@ -387,12 +405,15 @@ const RuleActionModal = ({
                   fullWidth
                   size="small"
                   placeholder="/your-command"
+                  disabled={commandLocked}
                   helperText={
-                    commandRequired
-                      ? "Required for command rules"
-                      : labelWillNotRun
-                        ? `Saved, but this rule stays ${effective.type}; create a new rule to add a command`
-                        : "Leave empty for prompt templates"
+                    commandLocked
+                      ? "Type is fixed after creation; create a new rule to add a command"
+                      : commandRequired && !isNewRule
+                        ? "Required; the type is fixed after creation"
+                        : commandRequired
+                          ? "Required for command rules"
+                          : "Leave empty for prompt templates"
                   }
                   error={commandRequired && !formData.command_label?.trim()}
                 />
