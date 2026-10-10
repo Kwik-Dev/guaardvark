@@ -110,6 +110,7 @@ import {
 
 import { formatUiError } from "../utils/uiError";
 import EntityContextMenu from "../components/common/EntityContextMenu";
+import TextInputDialog from "../components/common/TextInputDialog";
 import useContextMenu from "../hooks/useContextMenu";
 import lazyWithReload from "../utils/lazyWithReload";
 
@@ -339,6 +340,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [videoPlayer, setVideoPlayer] = useState(null); // { url, title, batchId, results, currentIndex }
+  const [renameDialog, setRenameDialog] = useState(null); // { batchId, videoPath, current }
   const videoPlayerBoxRef = useRef(null);
   const [isPlayerFullscreen, setIsPlayerFullscreen] = useState(false);
 
@@ -1590,15 +1592,22 @@ const VideoGeneratorPage = ({ embedded = false }) => {
 
   // The server answers with the clip's new paths; the page repoints its cards and
   // an open player from them, so Play serves the renamed file without a reload.
-  const handleRenameVideo = async (batchId, videoPath) => {
-    const current = clipFileName(videoPath);
-    const newName = window.prompt("Rename video (the extension stays the same)", current);
-    if (newName === null || !newName.trim() || newName.trim() === current) return;
+  const handleRenameVideo = (batchId, videoPath) => {
+    setRenameDialog({ batchId, videoPath, current: clipFileName(videoPath) });
+  };
+
+  const submitRenameVideo = async (newName) => {
+    const target = renameDialog;
+    setRenameDialog(null);
+    if (!target) return;
+    const { batchId, videoPath, current } = target;
+    const name = newName.trim();
+    if (!name || name === current) return;
     try {
       const res = await fetch(`${API_BASE}/batch-video/video/${batchId}/${encodePathSegments(videoPath)}/rename`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ new_name: newName.trim() }),
+        body: JSON.stringify({ new_name: name }),
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok || !body.success) {
@@ -3389,6 +3398,17 @@ const VideoGeneratorPage = ({ embedded = false }) => {
           }}
         />
       </React.Suspense>
+
+      <TextInputDialog
+        open={Boolean(renameDialog)}
+        title="Rename Video"
+        description="The extension stays the same."
+        label="File name"
+        initialValue={renameDialog?.current || ""}
+        submitLabel="Rename"
+        onSubmit={submitRenameVideo}
+        onClose={() => setRenameDialog(null)}
+      />
 
       {/* Inline Video Player Dialog */}
       <Dialog
