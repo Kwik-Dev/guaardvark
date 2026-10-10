@@ -2,7 +2,7 @@
 // Full-screen image editor with zoom, pan, rotate, flip, crop, and save-as.
 // Uses react-image-crop for crop selection, backend Pillow for actual processing.
 
-import React, { useState, useRef, useCallback, useEffect } from 'react';
+import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import ReactCrop from 'react-image-crop';
 import 'react-image-crop/dist/ReactCrop.css';
 import {
@@ -38,6 +38,8 @@ import {
   FitScreen as FitScreenIcon,
   ArrowBack as BackIcon,
 } from '@mui/icons-material';
+
+import { cropRectFromOperations, fitScale } from '../../utils/imageEditOps';
 
 const FlipVIcon = () => (
   <FlipHIcon sx={{ transform: 'rotate(90deg)' }} />
@@ -77,6 +79,19 @@ const ImageEditor = ({
 
   // Undo stack (stores operations)
   const [operations, setOperations] = useState([]);
+
+  // The preview shows what the applied crops keep; undoing a crop restores
+  // the earlier region because the rectangle is derived from the list.
+  const cropRect = useMemo(() => cropRectFromOperations(operations), [operations]);
+
+  // Viewport size, for fitting the cropped preview the way CSS fits the
+  // uncropped one.
+  const [viewport, setViewport] = useState({ w: window.innerWidth, h: window.innerHeight });
+  useEffect(() => {
+    const onResize = () => setViewport({ w: window.innerWidth, h: window.innerHeight });
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
 
   // Refs
   const imgRef = useRef(null);
@@ -196,9 +211,8 @@ const ImageEditor = ({
       } else if (last.type === 'flip') {
         if (last.direction === 'horizontal') setFlipH(f => !f);
         else setFlipV(f => !f);
-      } else if (last.type === 'crop') {
-        // Can't visually undo crop in preview, but remove from ops list
       }
+      // A crop needs nothing here: the preview's crop rectangle follows the list.
       return ops.slice(0, -1);
     });
   }, []);
@@ -275,6 +289,54 @@ const ImageEditor = ({
   };
 
   if (!imageUrl) return null;
+
+  // The image as the applied operations leave it. With a crop applied, a
+  // clipped box shows only the kept region, scaled as CSS would scale the whole
+  // image. The <img> keeps a layout width of natural width x scale, so
+  // handleApplyCrop's naturalSize / img.width conversion holds in both forms,
+  // and a crop drawn on the clipped box is relative to the cropped image, which
+  // is how the backend applies a second crop.
+  const imageProps = {
+    component: 'img',
+    ref: imgRef,
+    src: imageUrl,
+    alt: imageName,
+    onLoad: handleImageLoad,
+    draggable: false,
+  };
+  let preview;
+  if (cropRect) {
+    const s = fitScale(cropRect.width, cropRect.height, viewport.w, viewport.h);
+    preview = (
+      <Box sx={{ width: cropRect.width * s, height: cropRect.height * s, overflow: 'hidden', position: 'relative' }}>
+        <Box
+          {...imageProps}
+          sx={{
+            position: 'absolute',
+            left: -cropRect.x * s,
+            top: -cropRect.y * s,
+            width: naturalSize.w * s,
+            height: naturalSize.h * s,
+            maxWidth: 'none',
+            maxHeight: 'none',
+            display: 'block',
+          }}
+        />
+      </Box>
+    );
+  } else {
+    preview = (
+      <Box
+        {...imageProps}
+        sx={{
+          maxWidth: '90vw',
+          maxHeight: 'calc(100vh - 52px)',
+          objectFit: 'contain',
+          display: 'block',
+        }}
+      />
+    );
+  }
 
   return (
     <Box
@@ -419,7 +481,7 @@ const ImageEditor = ({
         {/* Image dimensions */}
         {naturalSize.w > 0 && (
           <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.5)', mr: 1 }}>
-            {naturalSize.w} x {naturalSize.h}
+            {cropRect ? `${cropRect.width} x ${cropRect.height}` : `${naturalSize.w} x ${naturalSize.h}`}
           </Typography>
         )}
 
@@ -462,37 +524,11 @@ const ImageEditor = ({
               onChange={(c) => setCrop(c)}
               onComplete={(c) => setCompletedCrop(c)}
             >
-              <Box
-                component="img"
-                ref={imgRef}
-                src={imageUrl}
-                alt={imageName}
-                onLoad={handleImageLoad}
-                draggable={false}
-                sx={{
-                  maxWidth: '90vw',
-                  maxHeight: 'calc(100vh - 52px)',
-                  objectFit: 'contain',
-                  display: 'block',
-                }}
-              />
+              {preview}
             </ReactCrop>
           </Box>
         ) : (
-          <Box
-            component="img"
-            ref={imgRef}
-            src={imageUrl}
-            alt={imageName}
-            onLoad={handleImageLoad}
-            draggable={false}
-            sx={{
-              maxWidth: '90vw',
-              maxHeight: 'calc(100vh - 52px)',
-              objectFit: 'contain',
-              ...transformStyle,
-            }}
-          />
+          <Box sx={transformStyle}>{preview}</Box>
         )}
       </Box>
 
