@@ -7,6 +7,7 @@
 import { useAppStore } from "../stores/useAppStore";
 import { BASE_URL } from "../api/apiClient";
 import { getChatImageModel, setChatImageModel as persistChatImageModel } from "../api/settingsService";
+import { getPlugin } from "../api/pluginsService";
 
 // ============================================================
 // Dispatcher
@@ -106,7 +107,10 @@ function handleHelp(args, { addMessage, allCommands }) {
 // ============================================================
 
 function handleClear(args, { chatState }) {
-  // chatState.clearMessages is expected to be passed by the parent
+  // chatState.clearMessages is passed by the parent. Emptying the screen alone
+  // is not a clear: the session's stored messages come back on reload, so the
+  // Chat page passes its "new chat" action and the floating chat starts a new
+  // session id. The old chat stays listed under All chats.
   if (chatState?.clearMessages) {
     chatState.clearMessages();
   }
@@ -142,10 +146,25 @@ function handleVoice(args, { addMessage, chatState }) {
 // /vision
 // ============================================================
 
-function handleVision(args, { addMessage }) {
+async function handleVision(args, { addMessage }) {
+  // Same plugin record the Plugins page shows (GET /api/plugins/vision_pipeline).
+  let content;
+  try {
+    const res = await getPlugin("vision_pipeline");
+    const info = res?.data || res || {};
+    const name = info.name || "Vision Pipeline";
+    const lines = [`**${name}:** ${info.status || "unknown"}`];
+    if (info.status_message) lines.push(info.status_message);
+    lines.push("Start or stop it from the Plugins page.");
+    content = lines.join("\n\n");
+  } catch (err) {
+    content = err?.status === 404
+      ? "The Vision Pipeline plugin is not installed."
+      : `Could not read the Vision Pipeline status: ${err.message}`;
+  }
   addMessage({
     role: "system",
-    content: "Vision pipeline coming soon. Use the Plugins page to start the Vision Pipeline service.",
+    content,
     tempId: `vision-${Date.now()}`,
     type: "command",
   });
