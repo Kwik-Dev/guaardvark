@@ -849,25 +849,65 @@ async function handleTraining(args, { addMessage }) {
 // DB rule commands
 // ============================================================
 
+/**
+ * The file a Rules-page command writes. /api/generate/from_command requires
+ * output_filename; take output_file="name.ext" from the arguments the way
+ * /createfile does, else <command>_<timestamp>.csv|txt (csv when the command
+ * is a CSV one, which is also how the backend picks its CSV prompt).
+ */
+export function commandOutputFilename(name, args, now = new Date()) {
+  const given = /\boutput_?file\s*=\s*(?:"([^"]+)"|(\S+))/i.exec(args || "");
+  const fromArgs = given && (given[1] || given[2]);
+  if (fromArgs) return fromArgs.trim();
+  const stem =
+    String(name || "")
+      .replace(/^\//, "")
+      .replace(/[^a-z0-9_-]+/gi, "_")
+      .replace(/^_+|_+$/g, "") || "command";
+  const ext = /csv/i.test(name) ? "csv" : "txt";
+  const stamp = now.toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "");
+  return `${stem}_${stamp}.${ext}`;
+}
+
 async function handleDbRule(name, args, { addMessage }) {
-  addMessage({ role: "user", content: `${name} ${args}`, tempId: `rule-user-${Date.now()}` });
+  addMessage({ role: "user", content: `${name} ${args}`.trim(), tempId: `rule-user-${Date.now()}` });
+  const outputFilename = commandOutputFilename(name, args);
   try {
     const res = await fetch("/api/generate/from_command", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         command_label: name,
-        generation_parameters: { args },
+        output_filename: outputFilename,
+        // The rule text's {{args}}, {{USER_INPUT}} and {{filename}} are filled.
+        generation_parameters: { args, USER_INPUT: args, filename: outputFilename },
       }),
     });
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data?.error) {
+      const detail = data?.details ? ` (${data.details})` : "";
+      addMessage({
+        role: "system",
+        content: `${name} failed: ${data?.error || `HTTP ${res.status}`}${detail}`,
+        tempId: `rule-err-${Date.now()}`,
+        type: "command",
+      });
+      return { handled: true };
+    }
+    const file = data.output_file || outputFilename;
+    const size = Number.isFinite(data.file_size) ? ` (${data.file_size} bytes)` : "";
     addMessage({
       role: "assistant",
-      content: data?.data?.content || data?.content || data?.message || "Command executed.",
+      content: `${name} wrote ${file}${size} to the outputs folder.`,
       tempId: `rule-asst-${Date.now()}`,
     });
   } catch (err) {
-    addMessage({ role: "system", content: `Command failed: ${err.message}`, tempId: `rule-err-${Date.now()}` });
+    addMessage({
+      role: "system",
+      content: `${name} failed: ${err.message}`,
+      tempId: `rule-err-${Date.now()}`,
+      type: "command",
+    });
   }
   return { handled: true };
 }
