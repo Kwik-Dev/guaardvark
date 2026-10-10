@@ -1,6 +1,6 @@
 import React, { useRef } from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 
 const { uploadFile } = vi.hoisted(() => ({ uploadFile: vi.fn() }));
 
@@ -29,13 +29,17 @@ vi.mock("../../../stores/useAppStore", () => ({
 vi.mock("../../../utils/chatAttachment", async (importOriginal) => ({
   ...(await importOriginal()),
   fetchAttachmentMaxBytes: async () => 8 * 1024 * 1024,
-  downscaleChatAttachment: async (file) => ({
-    file,
-    preview: "data:image/png;base64,AAAA",
-    // A test may pin the size a picture has after resize.
-    byteLength: file.__bytes ?? 4,
-    mimeType: "image/png",
-  }),
+  downscaleChatAttachment: async (file) => {
+    // A test may make a picture slow to resize.
+    if (file.__delay) await new Promise((r) => setTimeout(r, file.__delay));
+    return {
+      file,
+      preview: "data:image/png;base64,AAAA",
+      // A test may pin the size a picture has after resize.
+      byteLength: file.__bytes ?? 4,
+      mimeType: "image/png",
+    };
+  },
 }));
 
 import ChatInput from "../ChatInput";
@@ -188,5 +192,45 @@ describe("Chat page drop", () => {
     fireEvent.click(screen.getByRole("button", { name: "Analyze image" }));
     expect(await screen.findByText(/These 2 images total 10\.0 MB after resize/)).toBeInTheDocument();
     expect(send).not.toHaveBeenCalled();
+  });
+
+  it("keeps the pictures of one drop in attach order whatever order their resizes finish", async () => {
+    const send = vi.fn();
+    render(<ChatSurface onSendMessage={send} />);
+    // a.png is attached first but resizes last.
+    const slow = Object.assign(png("a.png"), { __delay: 60 });
+    drop(screen.getByTestId("message-list"), [slow, png("b.png")]);
+    expect(await screen.findByAltText("b.png")).toBeInTheDocument();
+    expect(await screen.findByAltText("a.png")).toBeInTheDocument();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Analyze image" }));
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    const [text, , options] = send.mock.calls[0];
+    expect(text).toBe("Describe these 2 images: a.png, b.png");
+    expect(options.imageFileName).toBe("a.png");
+    expect(options.imageFileNames).toEqual(["a.png", "b.png"]);
+  });
+
+  it("holds Send while a dropped picture is still being resized, then sends it too", async () => {
+    const send = vi.fn();
+    render(<ChatSurface onSendMessage={send} />);
+    const slow = Object.assign(png("slow.png"), { __delay: 80 });
+    drop(screen.getByTestId("message-list"), [png("fast.png"), slow]);
+    expect(await screen.findByAltText("fast.png")).toBeInTheDocument();
+    expect(screen.getByLabelText("Preparing slow.png")).toBeInTheDocument();
+
+    // The tooltip's label sits on the wrapper of a disabled button.
+    const sendButton = within(screen.getByLabelText("Preparing image...")).getByRole("button");
+    expect(sendButton).toBeDisabled();
+    fireEvent.click(sendButton);
+    // The composer's placeholder changes once pictures are attached, so the
+    // field is found by its role, not its text.
+    fireEvent.keyPress(screen.getByRole("textbox"), { key: "Enter", code: "Enter", charCode: 13 });
+    expect(send).not.toHaveBeenCalled();
+
+    expect(await screen.findByAltText("slow.png")).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "Analyze image" }));
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    expect(send.mock.calls[0][2].imageFileNames).toEqual(["fast.png", "slow.png"]);
   });
 });

@@ -308,7 +308,11 @@ const ChatInput = forwardRef(
     };
 
     // Image handling functions — downscale through a canvas before the
-    // preview is stored, so chat:send never carries a raw phone photo.
+    // preview is stored, so chat:send never carries a raw phone photo. The
+    // picture takes its slot in the strip at once (a pending entry), so the
+    // pictures of one drop keep the order they were attached in whatever
+    // order their downscales finish, and Send waits for the pending ones
+    // (see analyzeImage) instead of dropping them.
     const handleImageUpload = async (file) => {
       if (!file) return;
 
@@ -320,30 +324,44 @@ const ChatInput = forwardRef(
         return;
       }
 
+      const id = `img_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+      setImageState((prev) => {
+        if (prev.images.length >= MAX_IMAGES) {
+          return { ...prev, error: `Maximum ${MAX_IMAGES} images allowed` };
+        }
+        return {
+          ...prev,
+          images: [
+            ...prev.images,
+            { file, preview: null, byteLength: 0, mimeType: file.type, id, pending: true },
+          ],
+          error: null,
+        };
+      });
+
       try {
         const resized = await downscaleChatAttachment(file);
-        setImageState((prev) => {
-          if (prev.images.length >= MAX_IMAGES) {
-            return { ...prev, error: `Maximum ${MAX_IMAGES} images allowed` };
-          }
-          return {
-            ...prev,
-            images: [
-              ...prev.images,
-              {
-                file: resized.file,
-                preview: resized.preview,
-                byteLength: resized.byteLength,
-                mimeType: resized.mimeType,
-                id: `img_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-              },
-            ],
-            error: null,
-          };
-        });
+        // A slot refused above (over the maximum) or removed meanwhile is
+        // not in the list any more, and the result is discarded.
+        setImageState((prev) => ({
+          ...prev,
+          images: prev.images.map((img) =>
+            img.id === id
+              ? {
+                  ...img,
+                  file: resized.file,
+                  preview: resized.preview,
+                  byteLength: resized.byteLength,
+                  mimeType: resized.mimeType,
+                  pending: false,
+                }
+              : img,
+          ),
+        }));
       } catch (err) {
         setImageState((prev) => ({
           ...prev,
+          images: prev.images.filter((img) => img.id !== id),
           error: err?.message || "Could not prepare this image",
         }));
       }
@@ -380,8 +398,13 @@ const ChatInput = forwardRef(
       }
     };
 
+    // True while a dropped or pasted picture is still being resized: it is
+    // not in the send yet, so Send waits for it instead of dropping it.
+    const preparingImage = imageState.images.some((img) => img.pending);
+
     const analyzeImage = async () => {
       if (imageState.images.length === 0) return;
+      if (preparingImage) return;
 
       const images = imageState.images;
       const primaryImage = images[0];
@@ -675,18 +698,36 @@ Please try a different image or check if the vision model is properly loaded.`;
               {imageState.images.map((img) => (
                 <Box key={img.id} sx={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 0.5 }}>
                   <Box sx={{ position: "relative", width: 80, height: 80 }}>
-                    <CardMedia
-                      component="img"
-                      sx={{
-                        width: 80,
-                        height: 80,
-                        objectFit: "cover",
-                        borderRadius: 1,
-                        border: "1px solid #e0e0e0",
-                      }}
-                      image={img.preview}
-                      alt={img.file.name}
-                    />
+                    {img.pending ? (
+                      <Box
+                        role="img"
+                        aria-label={`Preparing ${img.file.name}`}
+                        sx={{
+                          width: 80,
+                          height: 80,
+                          borderRadius: 1,
+                          border: "1px solid #e0e0e0",
+                          display: "flex",
+                          alignItems: "center",
+                          px: 1,
+                        }}
+                      >
+                        <LinearProgress sx={{ width: "100%" }} />
+                      </Box>
+                    ) : (
+                      <CardMedia
+                        component="img"
+                        sx={{
+                          width: 80,
+                          height: 80,
+                          objectFit: "cover",
+                          borderRadius: 1,
+                          border: "1px solid #e0e0e0",
+                        }}
+                        image={img.preview}
+                        alt={img.file.name}
+                      />
+                    )}
                     <IconButton
                       size="small"
                       onClick={() => clearImage(img.id)}
@@ -706,15 +747,19 @@ Please try a different image or check if the vision model is properly loaded.`;
                       <CloseIcon sx={{ fontSize: 12 }} />
                     </IconButton>
                   </Box>
-                  <StatusPill
-                    label={formatAttachmentSize(img.byteLength)}
-                    tone={attachmentExceedsLimit(img.byteLength, attachmentMaxBytes) ? "error" : "neutral"}
-                    tooltip={
-                      attachmentExceedsLimit(img.byteLength, attachmentMaxBytes)
-                        ? refuseAttachmentMessage(img.byteLength, attachmentMaxBytes)
-                        : "Size after resize, as it will be sent"
-                    }
-                  />
+                  {img.pending ? (
+                    <StatusPill label="Preparing" tone="neutral" tooltip="Resizing before it is sent" />
+                  ) : (
+                    <StatusPill
+                      label={formatAttachmentSize(img.byteLength)}
+                      tone={attachmentExceedsLimit(img.byteLength, attachmentMaxBytes) ? "error" : "neutral"}
+                      tooltip={
+                        attachmentExceedsLimit(img.byteLength, attachmentMaxBytes)
+                          ? refuseAttachmentMessage(img.byteLength, attachmentMaxBytes)
+                          : "Size after resize, as it will be sent"
+                      }
+                    />
+                  )}
                 </Box>
               ))}
             </Box>
@@ -912,18 +957,22 @@ Please try a different image or check if the vision model is properly loaded.`;
                 ? "Stop (Esc)"
                 : imageState.analyzing
                   ? "Analyzing image..."
-                  : imageState.images.length > 0
-                    ? "Analyze image"
-                    : "Send message"
+                  : preparingImage
+                    ? "Preparing image..."
+                    : imageState.images.length > 0
+                      ? "Analyze image"
+                      : "Send message"
             }
           >
-            {imageState.analyzing ? (
+            {imageState.analyzing || (preparingImage && !disabled) ? (
               <span>
                 <IconButton
                   ref={stopButtonRef}
                   color="primary"
                   onClick={disabled ? onStop : handleSend}
-                  disabled={imageState.analyzing} // Disable during analysis
+                  // Disabled during analysis and while a picture is still
+                  // being resized (Stop stays available).
+                  disabled={imageState.analyzing || (preparingImage && !disabled)}
                 >
                   {disabled ? <StopIcon /> : <SendIcon />}
                 </IconButton>
