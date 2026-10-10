@@ -140,6 +140,12 @@ def test_missing_folder_inside_a_root_is_404(client, roots):
     assert r.status_code == 404
 
 
+def test_refusal_names_the_roots(client, roots):
+    body = _browse(client, "/etc").get_json()
+    assert body["roots"] == [str(roots.home), str(roots.data)]
+    assert str(roots.home) in body["error"]
+
+
 def test_roots_under_a_hidden_folder_still_work(client, tmp_path, monkeypatch):
     data = tmp_path / ".local" / "share" / "guaardvark" / "data"
     (data / "uploads").mkdir(parents=True)
@@ -149,16 +155,33 @@ def test_roots_under_a_hidden_folder_still_work(client, tmp_path, monkeypatch):
     assert [d["name"] for d in r.get_json()["directories"]] == ["uploads"]
 
 
-def test_bulk_import_roots_reads_home_data_and_allowed_paths(tmp_path, monkeypatch):
+def test_root_under_a_hidden_folder_inside_home_works_while_the_hidden_folder_does_not(
+    client, tmp_path, monkeypatch,
+):
+    home = tmp_path / "home"
+    uploads = home / ".local" / "share" / "guaardvark" / "uploads"
+    (uploads / "scans").mkdir(parents=True)
+    monkeypatch.setattr(files_api, "bulk_import_roots", lambda: [str(home), str(uploads)])
+    assert _browse(client, str(uploads)).status_code == 200
+    assert _browse(client, str(uploads / "scans")).status_code == 200
+    assert _browse(client, str(home / ".local")).status_code == 403
+    assert _browse(client, str(home / ".local" / "share")).status_code == 403
+
+
+def test_bulk_import_roots_reads_home_uploads_mounts_and_allowed_paths(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "h"))
     monkeypatch.setenv(files_api.BULK_IMPORT_ROOTS_ENV, "/srv/scans:~/extra:")
+    (tmp_path / "media").mkdir()
+    monkeypatch.setattr(files_api, "DRIVE_MOUNT_ROOTS", (str(tmp_path / "media"), str(tmp_path / "no-such-mount")))
     from backend import config
     monkeypatch.setattr(config, "STORAGE_DIR", str(tmp_path / "d"))
     monkeypatch.setattr(config, "UPLOAD_DIR", str(tmp_path / "d" / "uploads"))
-    assert files_api.bulk_import_roots() == [
-        str(tmp_path / "h"), str(tmp_path / "d"), str(tmp_path / "d" / "uploads"),
+    roots = files_api.bulk_import_roots()
+    assert roots == [
+        str(tmp_path / "h"), str(tmp_path / "d" / "uploads"), str(tmp_path / "media"),
         "/srv/scans", str(tmp_path / "h" / "extra"),
     ]
+    assert str(tmp_path / "d") not in roots, "the data folder as a whole is not importable"
 
 
 class _FakeTask:

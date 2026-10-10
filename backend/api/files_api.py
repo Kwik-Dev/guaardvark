@@ -1977,20 +1977,26 @@ def get_bulk_import_status_endpoint(job_id):
 
 
 BULK_IMPORT_ROOTS_ENV = "GUAARDVARK_ALLOWED_PATHS"
+# Where Linux and macOS mount removable and extra drives; each is a root only
+# while it exists on this machine.
+DRIVE_MOUNT_ROOTS = ("/media", "/run/media", "/mnt", "/Volumes")
 
 
 def bulk_import_roots() -> list:
     """Directories Bulk Import may browse and import from.
 
-    The user's home folder, Guaardvark's data folder (uploads included) and the
-    folders in GUAARDVARK_ALLOWED_PATHS (colon-separated, the same variable the
-    automation tools honour). Anything else on the disk, /etc and / included,
+    The user's home folder, Guaardvark's uploads folder, the drive mount
+    points present on this machine (/media, /run/media, /mnt, /Volumes) and
+    the folders in GUAARDVARK_ALLOWED_PATHS (colon-separated, the same
+    variable the automation tools honour). The rest of the data folder is not
+    a root: importing docstore.json, index_store.json or config/ into uploads
+    would break the install. Everything else on the disk, /etc and / included,
     is refused: the route serves every LAN browser once network access is on.
     """
     from backend import config
 
-    candidates = [os.path.expanduser("~"), getattr(config, "STORAGE_DIR", ""),
-                  getattr(config, "UPLOAD_DIR", "")]
+    candidates = [os.path.expanduser("~"), getattr(config, "UPLOAD_DIR", "")]
+    candidates += [mount for mount in DRIVE_MOUNT_ROOTS if os.path.isdir(mount)]
     candidates += (os.environ.get(BULK_IMPORT_ROOTS_ENV) or "").split(":")
     roots = []
     for candidate in candidates:
@@ -2002,30 +2008,43 @@ def bulk_import_roots() -> list:
 
 def _hidden_below_root(path: str, root: str) -> bool:
     """True when a component of ``path`` below ``root`` starts with a dot
-    (~/.ssh, ~/.gnupg, ~/.config, .git). The root itself may be hidden: a data
-    folder under ~/.local still works."""
+    (~/.ssh, ~/.gnupg, ~/.config, .git)."""
     rel = os.path.relpath(path, root)
     return any(part.startswith(".") for part in rel.split(os.sep) if part not in ("", "."))
+
+
+def _containing_root(target: str, roots) -> str:
+    """The deepest resolved root that contains ``target``, or None. The
+    deepest one decides the hidden check, so a root configured under a hidden
+    folder (GUAARDVARK_UPLOAD_DIR=~/.local/share/...) works while ~/.local
+    itself stays refused."""
+    from backend.utils.path_safety import is_within, resolve
+
+    deepest = None
+    for root in roots:
+        root_real = resolve(root)
+        if is_within(target, [root_real]) and (deepest is None or len(root_real) > len(deepest)):
+            deepest = root_real
+    return deepest
 
 
 def resolve_import_directory(requested: str):
     """``(resolved_path, None)`` when ``requested`` is a directory Bulk Import
     may use, else ``(None, reason)``. Symlinks are resolved first, on the path
     and on the roots, so a link inside the home folder cannot point out of it."""
-    from backend.utils.path_safety import is_within, resolve
+    from backend.utils.path_safety import resolve
 
     roots = bulk_import_roots()
     home = roots[0]
     target = resolve(requested or home, base=home)
-    if not is_within(target, roots):
+    root = _containing_root(target, roots)
+    if root is None:
         return None, (
             "Bulk Import can only use folders under " + ", ".join(roots)
             + f" ({BULK_IMPORT_ROOTS_ENV} adds more)."
         )
-    for root in roots:
-        root_real = resolve(root)
-        if is_within(target, [root_real]) and _hidden_below_root(target, root_real):
-            return None, "Hidden folders (names starting with a dot) are not imported."
+    if _hidden_below_root(target, root):
+        return None, "Hidden folders (names starting with a dot) are not imported."
     return target, None
 
 
@@ -2044,7 +2063,9 @@ def browse_server_directory():
         include_files = request.args.get("include_files", "false").lower() == "true"
         requested_path, refusal = resolve_import_directory(request.args.get("path", ""))
         if refusal:
-            return jsonify({"error": refusal, "code": "PATH_NOT_ALLOWED"}), 403
+            # The roots travel with the refusal so the picker can offer them.
+            return jsonify({"error": refusal, "code": "PATH_NOT_ALLOWED",
+                            "roots": bulk_import_roots()}), 403
 
         if not os.path.exists(requested_path):
             return jsonify({"error": "Path does not exist"}), 404
