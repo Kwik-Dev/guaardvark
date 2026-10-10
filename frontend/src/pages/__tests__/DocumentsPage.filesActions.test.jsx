@@ -338,3 +338,20 @@ describe("Files page keyboard and the read-only code mount", () => {
     }));
   });
 });
+
+describe("Files page index poll scope", () => {
+  const listingReads = () =>
+    axiosMock.get.mock.calls
+      .filter(([url, config]) => url === "/api/files/browse" && config?.params?.fields === "light")
+      .map(([, config]) => config.params.path);
+
+  it("reads the indexed folder's own listing, not just the root", async () => {
+    indexBulk.mockResolvedValue({ total_documents: 1, skipped: 0, job_id: "job-4" });
+    renderPage();
+
+    fireEvent.contextMenu(await screen.findByText("Archive"));
+    fireEvent.click(menuItem("Index Contents"));
+
+    await waitFor(() => expect(listingReads()).toContain("Archive"));
+  });
+});

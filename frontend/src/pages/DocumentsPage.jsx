@@ -72,6 +72,9 @@ const INDEX_IN_PROGRESS = new Set(['INDEXING', 'PENDING']);
 // something is still in progress, for at most this many reads.
 const INDEX_POLL_INTERVAL_MS = 3000;
 const INDEX_POLL_MAX_TICKS = 40;
+// Listings read per poll tick: root, the open windows, the indexed folders
+// and their still-unindexed subfolders.
+const INDEX_POLL_MAX_LISTINGS = 12;
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
@@ -435,10 +438,12 @@ const DocumentsPage = () => {
   }, []);
 
   // Index and Index Contents queue Celery work and return at once, so the
-  // status dots only change when the listing is read again. Re-read it now,
-  // then every few seconds while a root file is still INDEXING or PENDING or
-  // an indexed folder still has unindexed documents, until it settles or the
-  // poll has run long enough to call the job stuck.
+  // status dots only change when the listings are read again. Re-read them
+  // now, then every few seconds while any watched document is still INDEXING
+  // or PENDING (INDEXED, ERROR and NOT_INDEXED are final), until it settles or
+  // the poll has run long enough to call the job stuck. Watched: the root,
+  // every open window, each folder that was indexed, and the subfolders of
+  // those whose counts still show unindexed documents.
   const indexPollRef = useRef(null);
   const stopIndexPoll = useCallback(() => {
     if (indexPollRef.current) {
@@ -448,9 +453,18 @@ const DocumentsPage = () => {
   }, []);
   useEffect(() => stopIndexPoll, [stopIndexPoll]);
 
-  const followIndexing = useCallback(async (folderIds = []) => {
+  const readListing = useCallback(async (path) => {
+    const response = await axios.get(`${API_BASE}/browse`, { params: { path, fields: 'light' } });
+    const data = response.data?.data || {};
+    return { folders: data.folders || [], documents: data.documents || [] };
+  }, []);
+
+  const followIndexing = useCallback(async ({ folderIds = [], folderPaths = [] } = {}) => {
     stopIndexPoll();
-    const targets = new Set(folderIds);
+    const targetIds = new Set(folderIds);
+    const targetPaths = new Set(folderPaths.filter(Boolean));
+    const underTarget = (path) =>
+      Array.from(targetPaths).some((t) => path === t || path.startsWith(`${t}/`));
     let ticks = 0;
     const tick = async () => {
       indexPollRef.current = null;
@@ -459,16 +473,45 @@ const DocumentsPage = () => {
       if (!isMountedRef.current) return;
       refreshOpenWindows();
       if (!fresh) return;
-      const fileBusy = fresh.files.some((f) => INDEX_IN_PROGRESS.has(f.index_status));
-      const folderBusy = fresh.folders.some((f) =>
-        targets.has(f.id) && (f.document_count || 0) > (f.indexed_document_count || 0));
+
+      const listings = [{ folders: fresh.folders, documents: fresh.files }];
+      const queue = windowsRef.current
+        .filter((w) => w.state !== 'folded' && w.folder?.path && !isLiveRepoItem(w.folder))
+        .map((w) => w.folder.path);
+      const noteFolders = (listing) => {
+        listing.folders.forEach((f) => {
+          if (!f.path || isLiveRepoItem(f)) return;
+          if (targetIds.has(f.id)) targetPaths.add(f.path);
+          if (underTarget(f.path) && (f.document_count || 0) > (f.indexed_document_count || 0)) {
+            queue.push(f.path);
+          }
+        });
+      };
+      noteFolders(listings[0]);
+      targetPaths.forEach((p) => queue.push(p));
+      const seen = new Set(['/']);
+      while (queue.length > 0 && listings.length < INDEX_POLL_MAX_LISTINGS) {
+        const path = queue.shift();
+        if (seen.has(path)) continue;
+        seen.add(path);
+        try {
+          const listing = await readListing(path);
+          listings.push(listing);
+          noteFolders(listing);
+        } catch (err) {
+          // A window on a folder that is gone; nothing to watch there.
+        }
+      }
+      if (!isMountedRef.current) return;
+
+      const busy = listings.some((l) => l.documents.some((d) => INDEX_IN_PROGRESS.has(d.index_status)));
       ticks += 1;
-      if ((fileBusy || folderBusy) && ticks < INDEX_POLL_MAX_TICKS) {
+      if (busy && ticks < INDEX_POLL_MAX_TICKS) {
         indexPollRef.current = setTimeout(tick, INDEX_POLL_INTERVAL_MS);
       }
     };
     await tick();
-  }, [refreshData, refreshOpenWindows, stopIndexPoll]);
+  }, [refreshData, refreshOpenWindows, stopIndexPoll, readListing]);
 
   // Listen for file/folder changes from any tab/component and refresh in place
   useEffect(() => {
@@ -1824,7 +1867,12 @@ const DocumentsPage = () => {
       const queued = Number(result?.total_documents) || 0;
       const skipped = Number(result?.skipped) || 0;
       showMessage?.(indexingMessage(queued, skipped, folderIds.length), queued > 0 ? 'success' : 'info');
-      if (queued > 0) followIndexing(folderIds);
+      if (queued > 0) {
+        followIndexing({
+          folderIds,
+          folderPaths: contextMenuType === 'folder' && contextMenuItem?.path ? [contextMenuItem.path] : [],
+        });
+      }
     } catch (err) {
       const errorMsg = err.message || 'Failed to trigger indexing';
       showMessage?.(`Indexing failed: ${errorMsg}`, 'error');
