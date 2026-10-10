@@ -289,12 +289,16 @@ def send_notification():
 
 
 # ==================== MCP Endpoints ====================
-# Config writes (/mcp/servers/<name>, /mcp/reload-config) are always behind
-# auth_guard; the rest are unless GUAARDVARK_PROTECT_TOOL_ENDPOINTS=false opens
-# them to other hosts. A caller on this machine (or holding the API key) calling
-# /mcp/execute is the approval for policy-gated tools; any other caller, which
-# only that opt-out lets through, can run only the tools the policy allows.
-# Every call is still subject to denyTools and audited.
+# A server entry names a program the backend starts, with no allow-list, and
+# /mcp/execute's caller stands in for the approval card chat would show. So
+# writing an entry (PUT/DELETE /mcp/servers/<name>), /mcp/reload-config,
+# /mcp/connect and /mcp/execute answer this machine, or the API key, only:
+# neither Settings → Access → Network access nor the
+# GUAARDVARK_PROTECT_TOOL_ENDPOINTS opt-out opens them to another host
+# (auth_guard RUNS_CODE_PATHS and RUNS_CODE_MUTATION_PREFIXES). The other MCP
+# routes are protected like the rest of /api/automation/: this machine or the
+# key, any local device while network access is on, and every host under the
+# opt-out. Every call is still subject to denyTools and audited.
 
 
 def _caller_is_trusted() -> bool:

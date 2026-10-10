@@ -219,9 +219,11 @@ def _guard_checks(debug: bool) -> tuple[list[dict], bool]:
         checks.append(_check(
             "network_access", "Network access", WARN,
             "On. Every device on this machine's local network can run protected actions "
-            "without the API key, except running code (the Code Editor's Run, direct tool "
-            "execution), which still needs this machine or the key. Turn it off in "
-            "Settings → Access on a network you do not trust.",
+            "without the API key, and can use chat, including the tools chat asks approval "
+            "for, since the device that asks is the device that approves. The Code "
+            "Editor's Run, running tools directly, MCP server changes and applying staged "
+            "fixes still need this machine or the key. Turn it off in Settings → Access on "
+            "a network you do not trust.",
         ))
 
     if auth_guard.tool_endpoints_protected():
@@ -233,9 +235,11 @@ def _guard_checks(debug: bool) -> tuple[list[dict], bool]:
     else:
         checks.append(_check(
             "tool_endpoints", "Tool and automation endpoints", WARN,
-            f"Open to every host that reaches the backend ({auth_guard.TOOL_ENDPOINTS_ENV} is "
-            "off). These run commands, read files and drive the browser and desktop without "
-            "the confirmations chat shows.",
+            f"Tool jobs and browser/desktop automation are open to every host that reaches "
+            f"the backend ({auth_guard.TOOL_ENDPOINTS_ENV} is off); they read files and drive "
+            "the browser and desktop without the confirmations chat shows. Running tools "
+            "directly and MCP server changes, connections and tool calls still need this "
+            "machine or the API key.",
         ))
 
     if cors_policy.any_host_allowed():

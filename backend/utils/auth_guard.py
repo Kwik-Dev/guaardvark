@@ -8,8 +8,9 @@ with it (the HttpOnly session cookie of backend/utils/api_session.py, which
 Settings → Access obtains). When unset, requests from this machine pass and
 other hosts are refused. With network access on (GUAARDVARK_NETWORK_ACCESS),
 every device on this machine's local network passes as well, key or not,
-except on the routes that run code a caller supplies (RUNS_CODE_PREFIXES and
-RUNS_CODE_PATHS): those keep the rule above from every other device.
+except on the routes that run a program a caller supplies or names
+(RUNS_CODE_PATHS and RUNS_CODE_MUTATION_PREFIXES): those keep the rule above
+from every other device, whatever GUAARDVARK_PROTECT_TOOL_ENDPOINTS says.
 /api/auth/ reports the state, signs browsers in and out, and manages the key
 and network access.
 
@@ -86,8 +87,8 @@ LOCAL_ONLY_CODE = "local_only"
 # outside_local_network: network access is on, no key, and the caller is not
 # on the local network.
 OUTSIDE_NETWORK_CODE = "outside_local_network"
-# runs_code_key_required: network access is on, no key, and the route runs
-# code, which network access does not open to other devices.
+# runs_code_key_required: network access is on, no key, and the route runs a
+# program, which network access does not open to other devices.
 RUNS_CODE_CODE = "runs_code_key_required"
 API_KEY_CODE = "api_key_required"
 SCREENSHOT_LINK_CODE = "screenshot_link_invalid"
@@ -105,10 +106,10 @@ OUTSIDE_NETWORK_MESSAGE = (
     "it in the X-API-Key header."
 )
 RUNS_CODE_MESSAGE = (
-    "Running code works only on {machine} itself, or with its API key, even "
-    "while Network access is on. Create an API key in Settings → Access on "
-    "{machine} and enter it on this device; command-line and API clients send "
-    "it in the X-API-Key header."
+    "This action runs a program on {machine}, which works only on {machine} "
+    "itself or with its API key, even while Network access is on. Create an "
+    "API key in Settings → Access on {machine} and enter it on this device; "
+    "command-line and API clients send it in the X-API-Key header."
 )
 API_KEY_MESSAGE = (
     "This action needs {machine}'s API key. In the web UI, enter it in "
@@ -129,10 +130,10 @@ def tool_endpoints_protected() -> bool:
 
 
 # Settings → Access → Network access. On (1, true, yes, on), every protected
-# action but running code (RUNS_CODE_* below) is open to this machine and to
-# every device on its local network, with or without the API key; an address
-# outside the local network still needs the key. Off or unset keeps the rules
-# above. Read per request, like GUAARDVARK_API_KEY;
+# action is open to this machine, with or without the API key, and to every
+# device on its local network, except the routes that run a program
+# (RUNS_CODE_* below); an address outside the local network still needs the
+# key. Off or unset keeps the rules above. Read per request, like GUAARDVARK_API_KEY;
 # backend/services/network_access_service.py changes it.
 NETWORK_ACCESS_ENV = "GUAARDVARK_NETWORK_ACCESS"
 
@@ -142,34 +143,59 @@ def network_access_open() -> bool:
     return os.environ.get(NETWORK_ACCESS_ENV, "").strip().lower() in ("1", "true", "yes", "on")
 
 
-# Routes that run code the caller supplies, as the user Guaardvark runs as,
-# with no sandbox: the Code Editor's Run (python, javascript, shell, build), and
-# direct tool execution, where the caller stands in for the approval card chat
-# would show (execute_python and system_command on /api/tools/execute, policy-
-# gated MCP tools on /api/automation/mcp/execute). Network access does not open
-# these to other devices: they answer this machine, and the key once there is
-# one, from any address. The paths are matched whole: GET
-# /api/tools/execute_python is a tool's schema, not a call.
-RUNS_CODE_PREFIXES = (
-    '/api/code-execution/',
-)
+# Routes that run a program the caller supplies or names, as the user
+# Guaardvark runs as, with no sandbox:
+# - the Code Editor's Run (python, javascript, shell, build); format and lint
+#   only run a formatter or linter over the text and stay ordinary protected
+#   routes;
+# - direct tool execution, where the caller stands in for the approval card
+#   chat would show: execute_python and system_command on /api/tools/execute,
+#   policy-gated MCP tools on /api/automation/mcp/execute;
+# - MCP server entries, which name a program the backend starts (any command,
+#   no allow-list), and connecting or reloading them;
+# - approving and applying a staged self-improvement fix, which writes code
+#   into this install that runs at the next restart.
+# Network access does not open these to other devices, and the
+# GUAARDVARK_PROTECT_TOOL_ENDPOINTS opt-out does not open them to other hosts:
+# they answer this machine, and the key once there is one, from any address.
+# The paths are matched whole: GET /api/tools/execute_python is a tool's
+# schema, not a call. The prefixes apply to writes only: GET on a server entry
+# or a staged fix reads it.
 RUNS_CODE_PATHS = (
+    '/api/code-execution/python',
+    '/api/code-execution/javascript',
+    '/api/code-execution/shell',
+    '/api/code-execution/build',
     '/api/tools/execute',
     '/api/automation/mcp/execute',
+    '/api/automation/mcp/connect',
+    '/api/automation/mcp/reload-config',
+)
+RUNS_CODE_MUTATION_PREFIXES = (
+    '/api/automation/mcp/servers/',
+    '/api/self-improvement/pending-fixes/',
 )
 
 
 def request_runs_code() -> bool:
-    """True when the current request targets a route that runs supplied code."""
+    """True when the current request targets a route that runs a supplied or
+    named program (the lists above)."""
     path = request.path
-    return path in RUNS_CODE_PATHS or path.startswith(RUNS_CODE_PREFIXES)
+    if path in RUNS_CODE_PATHS:
+        return True
+    return request.method not in ('GET', 'HEAD', 'OPTIONS') and path.startswith(RUNS_CODE_MUTATION_PREFIXES)
 
 
 def network_access_covers_request() -> bool:
-    """True when network access is on and opens the current request's route to
-    the caller: a local-network address on any protected route but the ones
-    that run code."""
-    return network_access_open() and request_is_from_local_network() and not request_runs_code()
+    """True when network access is on and opens the current request to the
+    caller: this machine on every protected route (as it was before the
+    routes that run code were set apart), and a local-network address on any
+    protected route but those."""
+    if not network_access_open():
+        return False
+    if request_is_from_this_machine():
+        return True
+    return request_is_from_local_network() and not request_runs_code()
 
 
 def machine_name() -> str:
@@ -383,6 +409,9 @@ def _is_protected():
     for prefix in SAFE_EXEMPT_PREFIXES:
         if path.startswith(prefix):
             return False
+    # Before the tool-endpoint opt-out: it never opens a route that runs code.
+    if request_runs_code():
+        return True
     for prefix in PROTECTED_PREFIXES:
         if path.startswith(prefix):
             return True
@@ -493,7 +522,10 @@ def protected_summary() -> list[str]:
             "Automation and MCP servers",
         ]
     else:
-        items.append("Changing the MCP server list")
+        items += [
+            "Running tools directly (Tools page)",
+            "Changing, connecting and running tools on MCP servers",
+        ]
     items += [
         "Code execution",
         "Restarting Guaardvark",
@@ -526,8 +558,8 @@ def check_endpoint_auth():
     - An OPTIONS request Flask answers itself (a CORS preflight) → allow
     - Agent screen captures: a link signed for that path passes, then the rule below
     - If endpoint is not protected → allow
-    - If network access is on → allow this machine and the local network,
-      except on a route that runs code (the rules below apply there)
+    - If network access is on → allow this machine, and the local network
+      except on a route that runs a program (the rules below apply there)
     - If GUAARDVARK_API_KEY is set → require X-API-Key header (any host)
     - If GUAARDVARK_API_KEY is NOT set → allow localhost, block remote
     """

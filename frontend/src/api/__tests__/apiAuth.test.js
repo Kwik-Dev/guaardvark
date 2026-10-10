@@ -145,7 +145,7 @@ describe("handleResponse on a refusal", () => {
       authRefused: "runs_code_key_required",
       message: describeAuthRefusal("runs_code_key_required", false, "studio"),
     });
-    expect(describeAuthRefusal("runs_code_key_required", false, "studio")).toContain("Running code works only on studio");
+    expect(describeAuthRefusal("runs_code_key_required", false, "studio")).toContain("runs a program on studio");
   });
 
   it("words an out-of-date sign-in differently", async () => {

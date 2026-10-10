@@ -110,7 +110,7 @@ export function describeAuthRefusal(code, rejected = false, machine = "the Guaar
     return `This works only on ${machine} and on devices on its local network, and this device is outside it. Create an API key in Settings → Access on ${machine}, then enter it in Settings → Access on this device.`;
   }
   if (code === "runs_code_key_required") {
-    return `Running code works only on ${machine} itself or with its API key, even while Network access is on. Create an API key in Settings → Access on ${machine}, then enter it in Settings → Access on this device.`;
+    return `This runs a program on ${machine}, which works only on ${machine} itself or with its API key, even while Network access is on. Create an API key in Settings → Access on ${machine}, then enter it in Settings → Access on this device.`;
   }
   if (code === "local_only") {
     return rejected

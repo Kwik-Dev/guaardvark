@@ -88,6 +88,34 @@ def app():
     def automation_mcp_execute():
         return {"ok": True, "approved": auth_guard.caller_is_authorized()}
 
+    @test_app.route("/api/code-execution/format", methods=["POST"])
+    def code_execution_format():
+        return {"ok": True}
+
+    @test_app.route("/api/automation/mcp/servers/<name>", methods=["GET", "PUT", "DELETE"])
+    def automation_mcp_server(name):
+        return {"ok": True}
+
+    @test_app.route("/api/automation/mcp/connect", methods=["POST"])
+    def automation_mcp_connect():
+        return {"ok": True}
+
+    @test_app.route("/api/automation/mcp/reload-config", methods=["POST"])
+    def automation_mcp_reload():
+        return {"ok": True}
+
+    @test_app.route("/api/self-improvement/pending-fixes/<int:fix_id>/apply", methods=["POST"])
+    def pending_fix_apply(fix_id):
+        return {"ok": True}
+
+    @test_app.route("/api/self-improvement/pending-fixes/<int:fix_id>", methods=["GET"])
+    def pending_fix_read(fix_id):
+        return {"ok": True}
+
+    @test_app.route("/api/tools/jobs/<job_id>", methods=["GET"])
+    def tools_job(job_id):
+        return {"ok": True}
+
     return test_app
 
 
@@ -422,6 +450,20 @@ RUNS_CODE_REQUESTS = [
     ("POST", "/api/code-execution/python"),
     ("POST", "/api/tools/execute"),
     ("POST", "/api/automation/mcp/execute"),
+    ("PUT", "/api/automation/mcp/servers/evil"),
+    ("DELETE", "/api/automation/mcp/servers/evil"),
+    ("POST", "/api/automation/mcp/connect"),
+    ("POST", "/api/automation/mcp/reload-config"),
+    ("POST", "/api/self-improvement/pending-fixes/7/apply"),
+]
+# Protected routes network access still opens: formatting only runs a
+# formatter over the text, and reading a server entry or a staged fix runs
+# nothing.
+OPENED_BY_NETWORK_ACCESS = [
+    ("POST", "/api/files/write"),
+    ("POST", "/api/code-execution/format"),
+    ("GET", "/api/automation/mcp/servers/evil"),
+    ("GET", "/api/self-improvement/pending-fixes/7"),
 ]
 LAN_DEVICE = "192.168.1.20"
 
@@ -431,13 +473,58 @@ def network_access_on(monkeypatch):
     monkeypatch.setenv("GUAARDVARK_NETWORK_ACCESS", "1")
 
 
-def test_network_access_opens_a_protected_route_to_the_local_network(app, monkeypatch, network_access_on):
+@pytest.mark.parametrize("method,path", OPENED_BY_NETWORK_ACCESS)
+def test_network_access_opens_a_protected_route_to_the_local_network(app, monkeypatch, network_access_on, method, path):
     monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
     client = app.test_client()
 
-    response = client.post("/api/files/write", json={}, environ_base={"REMOTE_ADDR": LAN_DEVICE})
+    response = client.open(path, method=method, json={}, environ_base={"REMOTE_ADDR": LAN_DEVICE})
 
     assert response.status_code == 200
+
+
+@pytest.mark.parametrize("method,path", RUNS_CODE_REQUESTS)
+def test_this_machine_keeps_passing_under_network_access_once_a_key_is_set(app, monkeypatch, network_access_on, method, path):
+    """A browser on the machine itself that never signed in: network access
+    passed it before the code routes were set apart, and still does."""
+    monkeypatch.setenv("GUAARDVARK_API_KEY", "secret")
+    client = app.test_client()
+
+    direct = client.open(path, method=method, json={}, environ_base={"REMOTE_ADDR": "127.0.0.1"})
+    proxied = client.open(
+        path, method=method, json={},
+        headers={"X-Forwarded-For": "127.0.0.1"},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert direct.status_code == 200
+    assert proxied.status_code == 200
+
+
+def test_this_machine_needs_the_key_on_code_routes_while_network_access_is_off(app, monkeypatch):
+    monkeypatch.delenv("GUAARDVARK_NETWORK_ACCESS", raising=False)
+    monkeypatch.setenv("GUAARDVARK_API_KEY", "secret")
+    client = app.test_client()
+
+    response = client.post("/api/code-execution/python", json={}, environ_base={"REMOTE_ADDR": "127.0.0.1"})
+
+    assert response.status_code == 401
+
+
+def test_the_tool_endpoint_opt_out_does_not_open_code_routes_to_other_hosts(app, monkeypatch):
+    monkeypatch.delenv("GUAARDVARK_NETWORK_ACCESS", raising=False)
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    monkeypatch.setenv("GUAARDVARK_PROTECT_TOOL_ENDPOINTS", "false")
+    client = app.test_client()
+
+    for method, path in (("POST", "/api/tools/execute"), ("POST", "/api/automation/mcp/execute"),
+                         ("POST", "/api/automation/mcp/connect")):
+        remote = client.open(path, method=method, json={}, environ_base={"REMOTE_ADDR": LAN_DEVICE})
+        assert remote.status_code == 403, f"{method} {path}"
+        assert remote.get_json()["code"] == auth_guard.LOCAL_ONLY_CODE
+        assert client.open(path, method=method, json={}, environ_base={"REMOTE_ADDR": "127.0.0.1"}).status_code == 200
+    # The opt-out still opens what it opened before: tool jobs.
+    assert client.get("/api/tools/jobs/j1", environ_base={"REMOTE_ADDR": LAN_DEVICE}).status_code == 200
 
 
 @pytest.mark.parametrize("method,path", RUNS_CODE_REQUESTS)
@@ -485,7 +572,8 @@ def test_code_execution_takes_the_key_from_a_lan_device_while_network_access_is_
     assert wrong_key.get_json()["credential_rejected"] is True
     assert send(**{"X-API-Key": "secret"}).status_code == 200
     # The other protected routes stay open to the device, as before.
-    assert client.post("/api/files/write", json={}, environ_base={"REMOTE_ADDR": LAN_DEVICE}).status_code == 200
+    for other_method, other_path in OPENED_BY_NETWORK_ACCESS:
+        assert client.open(other_path, method=other_method, json={}, environ_base={"REMOTE_ADDR": LAN_DEVICE}).status_code == 200
 
 
 def test_code_execution_takes_a_signed_in_browser_on_the_lan(app, monkeypatch, network_access_on):
