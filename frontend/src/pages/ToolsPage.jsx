@@ -216,12 +216,13 @@ const ToolsPage = () => {
     }
   };
 
-  const copyToClipboard = (text) => {
-    navigator.clipboard.writeText(text);
+  const copyToClipboard = async (text) => {
+    // copyText falls back to execCommand: navigator.clipboard is absent over plain http on the LAN.
+    const ok = await copyText(text);
     setSnackbar({
       open: true,
-      message: "Copied to clipboard",
-      severity: "success",
+      message: ok ? "Copied to clipboard" : "Could not copy to the clipboard",
+      severity: ok ? "success" : "error",
     });
   };
 

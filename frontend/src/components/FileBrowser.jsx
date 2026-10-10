@@ -33,6 +33,7 @@ import {
   Info as InfoIcon,
 } from '@mui/icons-material';
 import { BASE_URL, handleResponse } from '../api/apiClient';
+import copyText from '../utils/copyText';
 
 const FileBrowser = ({ onFileSelect, _onClose }) => {
   const [currentPath, setCurrentPath] = useState('');
@@ -104,12 +105,10 @@ const FileBrowser = ({ onFileSelect, _onClose }) => {
 
   // Copy file content to clipboard
   const copyToClipboard = async () => {
-    try {
-      await navigator.clipboard.writeText(fileContent);
-      // Could add a success notification here
-    } catch (err) {
-      console.error('Failed to copy to clipboard:', err);
-    }
+    // copyText falls back to execCommand: navigator.clipboard is absent over plain http on the LAN.
+    const ok = await copyText(fileContent);
+    // Could add a success notification here
+    if (!ok) console.error('Failed to copy to clipboard');
   };
 
   // Handle file selection for LLM

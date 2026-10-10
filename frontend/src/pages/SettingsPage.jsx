@@ -95,6 +95,7 @@ import {
 import { ragAutoresearchService } from "../api/ragAutoresearchService";
 import { getMcpStatus } from "../api/mcpService";
 import { NAV_CHROME } from "../config/navCatalog";
+import copyText from "../utils/copyText";
 
 const debugLog = (...args) => {
   if (import.meta.env.DEV) {
@@ -671,10 +672,10 @@ const SettingsPage = () => {
   };
 
   const copyWhisperCommand = async (command) => {
-    try {
-      await navigator.clipboard.writeText(command);
+    // copyText falls back to execCommand: navigator.clipboard is absent over plain http on the LAN.
+    if (await copyText(command)) {
       showMessage("Command copied to clipboard.", "success");
-    } catch (e) {
+    } else {
       showMessage("Could not copy — select the command and copy it manually.", "warning");
     }
   };
