@@ -25,6 +25,7 @@ from flask import Blueprint, jsonify, request
 from sqlalchemy import or_
 
 from backend.models import db, AgentMemory, AgentMemoryAudit
+from backend.tools.knowledge_tools import _contains
 from backend.services.memory_contract import (
     MAX_PREFILTER_TERMS,
     MEMORY_SOURCES,
@@ -272,12 +273,14 @@ def list_memories():
         if workspace_root:
             query = query.filter((AgentMemory.workspace_root == workspace_root) | (AgentMemory.workspace_root == None))
 
-        # Search by content substring (case-insensitive)
+        # Search by content substring (case-insensitive). The term is matched
+        # literally: '%', '_' and '\' in it are escaped, not LIKE wildcards.
         search = request.args.get("search", "").strip().lower()
         if search:
+            pattern = _contains(search)
             query = query.filter(
-                (AgentMemory.content.ilike(f"%{search}%")) |
-                (AgentMemory.tags.ilike(f"%{search}%"))
+                (AgentMemory.content.ilike(pattern, escape="\\")) |
+                (AgentMemory.tags.ilike(pattern, escape="\\"))
             )
 
         sort_mode = (request.args.get("sort") or "").strip().lower()

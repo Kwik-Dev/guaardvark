@@ -388,3 +388,41 @@ class TestScopedRecallAndToolParity:
             assert memory.source == "agent"
             assert memory.session_id == "s-1"
             assert memory.project_id == 3
+
+
+# ---------------------------------------------------------------------------
+# GET /api/memory?search=   (the Agent Memory page search box)
+# ---------------------------------------------------------------------------
+
+class TestListMemorySearchIsLiteral:
+    """'%', '_' and '\\' in the search term match themselves, not LIKE wildcards."""
+
+    def _contents(self, client, term):
+        resp = client.get("/api/memory", query_string={"search": term})
+        assert resp.status_code == 200, resp.data
+        return sorted(m["content"] for m in resp.get_json()["memories"])
+
+    def test_percent_matches_only_a_literal_percent(self, app, client):
+        _mem(app, "m-pct", "Discount is 50% off")
+        _mem(app, "m-num", "Shipped 500 units")
+
+        assert self._contents(client, "50%") == ["Discount is 50% off"]
+
+    def test_underscore_matches_only_a_literal_underscore(self, app, client):
+        _mem(app, "m-us", "see my_doc for details")
+        _mem(app, "m-no-us", "see myxdoc for details")
+
+        assert self._contents(client, "my_doc") == ["see my_doc for details"]
+
+    def test_backslash_matches_only_a_literal_backslash(self, app, client):
+        _mem(app, "m-bs", "path is C:\\tools")
+        _mem(app, "m-no-bs", "path is C:tools")
+
+        assert self._contents(client, "C:\\tools") == ["path is C:\\tools"]
+
+    def test_tags_are_searched_the_same_way(self, app, client):
+        _mem(app, "m-tag", "untagged words", tags=["q4_plan"])
+        _mem(app, "m-other", "untagged words", tags=["q4xplan"])
+
+        resp = client.get("/api/memory", query_string={"search": "q4_plan"})
+        assert [m["id"] for m in resp.get_json()["memories"]] == ["m-tag"]
