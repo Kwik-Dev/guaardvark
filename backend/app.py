@@ -1536,6 +1536,17 @@ try:
                 except Exception as e:
                     app.logger.warning("[CLUSTER] startup recompute failed: %s", e)
 
+            # ---- Self-improvement runs a dead worker left "running" ----------------
+            try:
+                from backend.services.self_improvement_service import get_self_improvement_service
+                _stale_runs = get_self_improvement_service().recover_stale_runs()
+                if _stale_runs:
+                    app.logger.warning(
+                        "[SELF-IMPROVEMENT] closed %d run(s) left running by a dead worker",
+                        _stale_runs)
+            except Exception as e:
+                app.logger.warning("[SELF-IMPROVEMENT] stale run recovery failed: %s", e)
+
         except OperationalError as op_err:
             app.logger.error(f"Database operation error during create_all: {op_err}")
             app.logger.error("Check database connection and configuration.")
