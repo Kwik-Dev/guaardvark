@@ -949,6 +949,11 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     };
   }, [qualityPreset, durationPreset, motionPreset, model, advancedParams, videoDimensions, lowVramMode, qualityTier, promptStyle, enhancePrompt, directorMode, cinematicKeyframe, directorGuidance, fetaEnabled, fetaWeight, selectedSubjectIds, keyframeModel, postUpscale, highConsistencyMode, modelMeta, modelCaps, activeSpeedProfile, activeProfileSpec, stepsTyped, applicableAdapters, applicableEncoders]);
 
+  // Low VRAM clamps frames, resolution and steps on CogVideoX and Wan only
+  // (computedParams above); on other models the switch leaves the steps alone.
+  const lowVramClampApplies =
+    lowVramMode && (isCogVideoXModel(model, modelMeta[model]) || isWanModel(model, modelMeta[model]));
+
   const qualityChipOptions = useMemo(() => {
     if (isLtxModel(model, modelMeta[model])) return [];
     if (lowVramMode && (isWanModel(model, modelMeta[model]) || isCogVideoXModel(model, modelMeta[model]))) return [];
@@ -1831,7 +1836,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
           label="Steps"
           value={String(computedParams.num_inference_steps)}
           sub={stepsTileNote({
-            lowVramClamp: lowVramMode,
+            lowVramClamp: lowVramClampApplies,
             profile: profileSteps,
             presetLabel: qualityChipOptions.find((o) => o.value === qualityPreset)?.label,
           })}
@@ -1871,8 +1876,10 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                 <SettingChip
                   label="Low VRAM"
                   on={lowVramMode}
-                  note={lowVramMode ? "next job" : undefined}
-                  tooltip="Reduces frames, resolution, and steps on 16GB cards. Default on."
+                  note={lowVramMode ? (lowVramClampApplies ? "next job" : "not for this model") : undefined}
+                  tooltip={lowVramClampApplies || !lowVramMode
+                    ? "Reduces frames, resolution, and steps for CogVideoX and Wan on 16GB cards. Default on."
+                    : "Clamps frames, resolution and steps for CogVideoX and Wan only; this model renders at the settings shown."}
                   onToggle={(next) => {
                     setLowVramMode(next);
                     localStorage.setItem("lowVramMode", next.toString());
