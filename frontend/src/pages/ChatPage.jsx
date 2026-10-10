@@ -1881,6 +1881,9 @@ const ChatPage = () => {
             project_id: projectId,
             ...directToolOptions,
           };
+          // An upload notice only acknowledges the file: no search is possible
+          // on that turn, so the engine's "no search ran" nudge and note stay off.
+          if (voiceOptions?.documentNotice) sendOptions.skip_nudges = true;
           if (fileGenerationState) {
             sendOptions.file_generation = fileGenerationState;
             sendOptions.file_generation_filename = fileDetection.filename || "";
@@ -1994,6 +1997,7 @@ const ChatPage = () => {
               use_rag: true,
               chat_mode: chatMode,
               project_id: projectId,
+              ...(voiceOptions?.documentNotice ? { skip_nudges: true } : {}),
               ...(fileGenerationState
                 ? {
                     file_generation: fileGenerationState,

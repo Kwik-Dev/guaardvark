@@ -396,9 +396,12 @@ const FloatingChatCard = () => {
       try {
         // Page awareness travels as an option so the engine's context providers
         // can render it — keeping the saved message text exactly what was typed.
+        // A document notice only acknowledges the upload: no search is possible
+        // on that turn, so the engine's "no search ran" nudge and note stay off.
         await unifiedChatService.sendMessage(sessionId, content, {
           use_rag: true,
           page_context: pageContext,
+          ...(isNotice ? { skip_nudges: true } : {}),
         }, imageBase64, isVoice);
       } catch (err) {
         console.error("FloatingChat: Unified send failed:", err);
