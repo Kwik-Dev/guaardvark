@@ -56,6 +56,35 @@ export const effectiveTypeAndLevel = (formData, ruleData) => {
   return deriveTypeAndLevel(formData);
 };
 
+// Label and hint of the big text field, by the type this save will store.
+export const contentFieldFor = (type) => {
+  switch (type) {
+    case "PROMPT_TEMPLATE":
+    case "SYSTEM_PROMPT":
+      return {
+        label: "Prompt Template",
+        helperText: "Enter the prompt template with {placeholders} as needed",
+      };
+    case "QA_TEMPLATE":
+      return {
+        label: "QA Template",
+        helperText:
+          "The answer-from-context template; keep {context_str} and {query_str}",
+      };
+    case "COMMAND_RULE":
+      return {
+        label: "Command Prompt",
+        helperText:
+          "The prompt the command runs; {{args}} is replaced by what follows the command",
+      };
+    default:
+      return {
+        label: "Rule Content",
+        helperText: "Define the rule logic or content",
+      };
+  }
+};
+
 // The badge shown in the dialog: COMMAND, SYSTEM, LEARNED or PROMPT.
 const displayKind = ({ type, level }) => {
   if (type === "COMMAND_RULE") return "COMMAND";
@@ -243,6 +272,7 @@ const RuleActionModal = ({
   };
 
   const typeInfo = getTypeDisplayInfo(detectedType);
+  const contentField = contentFieldFor(effective.type);
 
   return (
     <Dialog
@@ -365,11 +395,7 @@ const RuleActionModal = ({
           {/* Content */}
           <Grid item xs={12}>
             <TextField
-              label={
-                formData.type === "PROMPT_TEMPLATE"
-                  ? "Prompt Template"
-                  : "Rule Content"
-              }
+              label={contentField.label}
               name="rule_text"
               value={formData.rule_text || ""}
               onChange={handleChange}
@@ -378,11 +404,7 @@ const RuleActionModal = ({
               maxRows={20}
               fullWidth
               required
-              helperText={
-                formData.type === "PROMPT_TEMPLATE"
-                  ? "Enter the prompt template with {placeholders} as needed"
-                  : "Define the rule logic or content"
-              }
+              helperText={contentField.helperText}
             />
           </Grid>
 

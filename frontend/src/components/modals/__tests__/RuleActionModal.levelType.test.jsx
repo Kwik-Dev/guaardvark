@@ -6,7 +6,7 @@ vi.mock("../../../api", () => ({
   getAvailableModels: vi.fn(async () => [{ name: "gemma4:12b" }]),
 }));
 
-import RuleActionModal, { effectiveTypeAndLevel } from "../RuleActionModal";
+import RuleActionModal, { contentFieldFor, effectiveTypeAndLevel } from "../RuleActionModal";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -75,6 +75,36 @@ describe("RuleActionModal keeps the stored level and type on edit", () => {
       />,
     );
     expect(screen.getByText(/LEARNED \/ PROMPT_TEMPLATE, kept on save/)).toBeInTheDocument();
+  });
+});
+
+describe("the content field is labelled by the rule's type", () => {
+  it("names the field after the type the save will store", () => {
+    expect(contentFieldFor("PROMPT_TEMPLATE").label).toBe("Prompt Template");
+    expect(contentFieldFor("QA_TEMPLATE").label).toBe("QA Template");
+    expect(contentFieldFor("COMMAND_RULE").label).toBe("Command Prompt");
+    expect(contentFieldFor("FILTER_RULE").label).toBe("Rule Content");
+  });
+
+  it("shows Prompt Template for a stored prompt template", () => {
+    render(
+      <RuleActionModal
+        open
+        ruleData={{ id: 2, name: "persona", level: "SYSTEM", type: "PROMPT_TEMPLATE", rule_text: "y" }}
+        onSave={vi.fn()}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByLabelText(/Prompt Template/)).toHaveValue("y");
+  });
+
+  it("switches to Command Prompt while a new rule gets a command label", () => {
+    render(<RuleActionModal open ruleData={null} onSave={vi.fn()} onClose={() => {}} />);
+    expect(screen.getByLabelText(/Prompt Template/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/Command \(optional\)/), {
+      target: { name: "command_label", value: "/brief" },
+    });
+    expect(screen.getByLabelText(/Command Prompt/)).toBeInTheDocument();
   });
 });
 
