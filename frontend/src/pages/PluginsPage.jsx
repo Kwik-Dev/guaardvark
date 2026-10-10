@@ -73,7 +73,6 @@ import { getGpuStatus } from '../api/gpuService';
 import OllamaLifecycleSection from '../components/settings/OllamaLifecycleSection';
 
 // ── Constants ──────────────────────────────────────────────────────────
-const TOTAL_VRAM_MB = 16384; // 16GB
 const STATUS_CONFIG = {
   running: { color: 'success', icon: HealthyIcon, label: 'Running' },
   stopped: { color: 'default', icon: StopIcon, label: 'Stopped' },
@@ -99,10 +98,14 @@ const isGpuHeavy = (plugin) => Boolean(plugin?.gpu_exclusive);
 
 // ── VRAM Budget Bar ────────────────────────────────────────────────────
 const VramBudgetBar = ({ plugins, gpuVram }) => {
-  const totalMb = gpuVram?.total_mb || TOTAL_VRAM_MB;
+  // The GPU query (/api/gpu/memory/status, then gpu:status pushes) is the only
+  // source for these numbers. When it has not answered, or answered without a
+  // total, the card says so instead of assuming a card size.
+  const totalMb = Number(gpuVram?.total_mb) || 0;
+  const vramKnown = totalMb > 0;
   const usedMb = gpuVram?.used_mb || 0;
-  const freeMb = gpuVram?.free_mb ?? (totalMb - usedMb);
-  const usedPct = (usedMb / totalMb) * 100;
+  const freeMb = gpuVram?.free_mb ?? (vramKnown ? totalMb - usedMb : null);
+  const usedPct = vramKnown ? (usedMb / totalMb) * 100 : 0;
 
   const activePlugins = plugins.filter(
     (p) => p.status === 'running' && p.vram_estimate_mb > 0
@@ -127,13 +130,16 @@ const VramBudgetBar = ({ plugins, gpuVram }) => {
               variant="outlined"
             />
           )}
-          <Typography variant="body2" color="text.secondary">
-            {(usedMb / 1024).toFixed(1)} / {(totalMb / 1024).toFixed(1)} GB
+          <Typography variant="body2" color="text.secondary" data-testid="vram-totals">
+            {vramKnown
+              ? `${(usedMb / 1024).toFixed(1)} / ${(totalMb / 1024).toFixed(1)} GB`
+              : 'unknown — no answer from the GPU query'}
           </Typography>
         </Stack>
       </Box>
 
       {/* Live usage bar */}
+      {vramKnown && (
       <Box
         sx={{
           height: 24,
@@ -177,11 +183,12 @@ const VramBudgetBar = ({ plugins, gpuVram }) => {
           })}
         </Box>
       </Box>
+      )}
 
       {/* Legend + free VRAM */}
       <Stack direction="row" spacing={2} sx={{ mt: 1 }} flexWrap="wrap" useFlexGap>
         <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>
-          {(freeMb / 1024).toFixed(1)} GB free
+          {freeMb != null ? `${(freeMb / 1024).toFixed(1)} GB free` : 'free VRAM unknown'}
         </Typography>
         {activePlugins.map((p) => (
           <Box key={p.id} sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
