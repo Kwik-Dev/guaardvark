@@ -73,6 +73,24 @@ const INDEX_IN_PROGRESS = new Set(['INDEXING', 'PENDING']);
 const INDEX_POLL_INTERVAL_MS = 3000;
 const INDEX_POLL_MAX_TICKS = 40;
 
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+// What the bulk index call did, from its queued and skipped counts. The
+// server skips a document whose content hash has not changed since it was
+// indexed, so "everything skipped" is the already-indexed case.
+export const indexingMessage = (queued, skipped, folderCount) => {
+  if (queued === 0) {
+    if (skipped === 0) return 'Nothing to index';
+    return skipped === 1
+      ? 'Already indexed; the file has not changed'
+      : `Everything is already indexed (${skipped} files unchanged)`;
+  }
+  let message = `Indexing ${plural(queued, 'document')}`;
+  if (folderCount > 0) message += ` from ${plural(folderCount, 'folder')}`;
+  if (skipped > 0) message += `, ${skipped} already indexed`;
+  return message;
+};
+
 const DocumentsPage = () => {
   const { gridSettings } = useLayout();
   const { RGL_WIDTH_PROP_PX, _CONTAINER_PADDING_PX } = gridSettings;
@@ -1785,11 +1803,10 @@ const DocumentsPage = () => {
       if (result?.error) {
         throw new Error(result.error);
       }
-      const parts = [];
-      if (result.total_documents) parts.push(`${result.total_documents} document${result.total_documents !== 1 ? 's' : ''}`);
-      if (folderIds.length > 0) parts.push(`from ${folderIds.length} folder${folderIds.length !== 1 ? 's' : ''}`);
-      showMessage?.(`Indexing ${parts.join(' ')}`, 'success');
-      followIndexing(folderIds);
+      const queued = Number(result?.total_documents) || 0;
+      const skipped = Number(result?.skipped) || 0;
+      showMessage?.(indexingMessage(queued, skipped, folderIds.length), queued > 0 ? 'success' : 'info');
+      if (queued > 0) followIndexing(folderIds);
     } catch (err) {
       const errorMsg = err.message || 'Failed to trigger indexing';
       showMessage?.(`Indexing failed: ${errorMsg}`, 'error');

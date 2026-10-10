@@ -269,3 +269,32 @@ describe("Files page indexing", () => {
     await waitFor(() => expect(rootReads()).toBeGreaterThan(before));
   });
 });
+
+describe("Files page index message", () => {
+  it("says everything is already indexed when the server skipped every file", async () => {
+    indexBulk.mockResolvedValue({ total_documents: 0, skipped: 1, job_id: "job-2" });
+    renderPage();
+
+    fireEvent.contextMenu(await screen.findByText("notes.txt"));
+    fireEvent.click(menuItem("Index"));
+
+    await waitFor(() => expect(messages.at(-1)).toEqual({
+      text: "Already indexed; the file has not changed",
+      level: "info",
+    }));
+  });
+
+  it("counts what was queued and what was skipped", async () => {
+    indexBulk.mockResolvedValue({ total_documents: 2, skipped: 3, job_id: "job-3" });
+    renderPage();
+
+    fireEvent.contextMenu(await screen.findByText("Archive"));
+    fireEvent.click(menuItem("Index Contents"));
+
+    await waitFor(() => expect(indexBulk).toHaveBeenCalledWith([8], []));
+    await waitFor(() => expect(messages.at(-1)).toEqual({
+      text: "Indexing 2 documents from 1 folder, 3 already indexed",
+      level: "success",
+    }));
+  });
+});
