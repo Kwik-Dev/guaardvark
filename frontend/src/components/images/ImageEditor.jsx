@@ -24,6 +24,7 @@ import {
   InputLabel,
   CircularProgress,
   Divider,
+  Alert,
 } from '@mui/material';
 import {
   ZoomIn as ZoomInIcon,
@@ -40,6 +41,7 @@ import {
 } from '@mui/icons-material';
 
 import { cropRectFromOperations, fitScale } from '../../utils/imageEditOps';
+import { useSnackbar } from '../common/SnackbarProvider';
 
 const FlipVIcon = () => (
   <FlipHIcon sx={{ transform: 'rotate(90deg)' }} />
@@ -72,6 +74,10 @@ const ImageEditor = ({
   const [saveFormat, setSaveFormat] = useState('');
   const [saveQuality, setSaveQuality] = useState(90);
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState(null);
+  // Null outside the app's provider (component tests); the dialog shows the
+  // error either way.
+  const snackbar = useSnackbar();
 
   // Image info
   const [_imageInfo, setImageInfo] = useState(null);
@@ -249,6 +255,12 @@ const ImageEditor = ({
   const handleSave = useCallback(async () => {
     if (!documentId) return;
     setSaving(true);
+    setSaveError(null);
+    const fail = (reason) => {
+      const message = `Save failed: ${reason}`;
+      setSaveError(message);
+      snackbar?.showMessage?.(message, 'error');
+    };
     try {
       const body = {
         document_id: documentId,
@@ -273,14 +285,14 @@ const ImageEditor = ({
         setFlipV(false);
         onSaved?.(data.data);
       } else {
-        alert(`Save failed: ${data.message || data.error || 'Unknown error'}`);
+        fail(data.message || data.error || 'Unknown error');
       }
     } catch (err) {
-      alert(`Save failed: ${err.message}`);
+      fail(err.message);
     } finally {
       setSaving(false);
     }
-  }, [documentId, operations, saveMode, saveFormat, saveQuality, onSaved]);
+  }, [documentId, operations, saveMode, saveFormat, saveQuality, onSaved, snackbar]);
 
   const hasEdits = operations.length > 0;
   const transformStyle = {
@@ -613,6 +625,12 @@ const ImageEditor = ({
               {operations.length} edit{operations.length !== 1 ? 's' : ''} to apply:
               {' '}{operations.map(op => op.type).join(', ') || 'none'}
             </Typography>
+
+            {saveError && (
+              <Alert severity="error" variant="outlined" onClose={() => setSaveError(null)}>
+                {saveError}
+              </Alert>
+            )}
           </Box>
         </DialogContent>
         <DialogActions>
