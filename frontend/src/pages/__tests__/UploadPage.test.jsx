@@ -43,12 +43,12 @@ describe("UploadPage drop zone", () => {
     expect(screen.getByRole("button", { name: "Import and Index" })).toBeEnabled();
   });
 
-  it("refuses a dropped file of an unsupported type", async () => {
+  it("leaves the type decision to the server: a dropped .pptx is accepted here", async () => {
     render(<UploadPage />);
     await screen.findByText("No recent uploads.");
-    dropFile(screen.getByTestId("upload-drop-zone"), textFile("photo.exe"));
-    expect(screen.getByText(/'photo\.exe' is not a supported file type/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Import and Index" })).toBeDisabled();
+    dropFile(screen.getByTestId("upload-drop-zone"), textFile("deck.pptx"));
+    expect(screen.getByText(/Selected: deck\.pptx/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Import and Index" })).toBeEnabled();
   });
 
   it("opens the picker when the box itself is clicked", async () => {

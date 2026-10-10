@@ -25,11 +25,11 @@ import PageLayout from "../components/layout/PageLayout";
 import { formatTimestamp } from "../utils/fileTypeUtils";
 import useFileDropZone from "../hooks/useFileDropZone";
 
-// Matches the server's ALLOWED_EXTENSIONS roughly; the picker and the drop
-// zone both check against it.
+// The picker's filter only. /api/docs/upload keeps no extension list of its
+// own (the loaders decide what gets indexed), so neither the picker nor the
+// drop zone refuses a file here; the server's answer is shown as it comes.
 const ACCEPTED_EXTENSIONS =
   ".txt,.md,.pdf,.docx,.html,.htm,.json,.csv,.xml,.py,.js,.jsx,.java,.c,.cpp,.h,.cs,.go,.php,.rb,.swift,.kt,.rs,.scala,.zip";
-const ACCEPTED_SET = new Set(ACCEPTED_EXTENSIONS.split(","));
 
 // Recent Uploads refreshes itself while a row is still being indexed, so a
 // new upload turns INDEXED without a reload. The cap keeps a paused queue
@@ -42,11 +42,6 @@ const isStillIndexing = (doc, watchedId) => {
   if (status === "INDEXING" || status === "PENDING") return true;
   // The file just uploaded here starts as STORED or PENDING and ends INDEXED.
   return watchedId != null && doc?.id === watchedId && !SETTLED_STATUSES.has(status);
-};
-const acceptsFile = (file) => {
-  const name = String(file?.name || "");
-  const dot = name.lastIndexOf(".");
-  return dot > 0 && ACCEPTED_SET.has(name.slice(dot).toLowerCase());
 };
 
 const IndexStatusChip = ({ status }) => {
@@ -133,13 +128,6 @@ const UploadPage = () => {
   // One path for the picker and the drop zone.
   const selectFile = useCallback((file) => {
     if (!file) return;
-    if (!acceptsFile(file)) {
-      setSelectedFile(null);
-      setUploadStatus("error");
-      setErrorMessage(`'${file.name}' is not a supported file type.`);
-      setSuccessMessage("");
-      return;
-    }
     setSelectedFile(file);
     setUploadStatus("idle"); // Reset status when new file selected
     setErrorMessage("");
