@@ -288,21 +288,30 @@ class PluginManager:
         # Initialize status for all plugins
         self._init_plugin_status()
     
-    def _init_plugin_status(self):
-        """Initialize plugin status and restore previously running plugins."""
-        # Seed the in-memory `metadata.config.enabled` from the user_enabled
-        # overlay before anything else looks at it. After this point, that
-        # field reflects the EFFECTIVE state (user pref ∨ manifest default)
-        # for the rest of this process's lifetime. enable_plugin/disable_plugin
-        # keep it in sync on subsequent toggles. plugin.json on disk stays
-        # untouched — it's the canonical default for fresh installs.
+    def _seed_enabled_from_prefs(self) -> None:
+        """Seed the in-memory `metadata.config.enabled` from the user_enabled
+        overlay before anything else looks at it. After this point, that
+        field reflects the EFFECTIVE state (user pref ∨ manifest default)
+        for the rest of this process's lifetime. enable_plugin/disable_plugin
+        keep it in sync on subsequent toggles. plugin.json on disk stays
+        untouched — it's the canonical default for fresh installs."""
         prefs = self.state_store.get_user_enabled()
         if prefs:
             for plugin_id, metadata in self.registry.get_all_plugins().items():
                 if plugin_id in prefs:
                     metadata.config.enabled = bool(prefs[plugin_id])
 
-        # First pass: detect what's already running and kill orphans
+    def _probe_plugin_status(self, *, kill_orphans: bool) -> None:
+        """Record what is running now for every registered plugin.
+
+        ``kill_orphans`` is the boot-time cleanup: a disabled plugin whose
+        service still answers is killed, unless it is core, another enabled
+        plugin depends on it, or it sits on the backend's own port. A user-
+        triggered refresh passes False and only reads: a process on a disabled
+        plugin's port may be the user's own (an Ollama they run themselves, a
+        ComfyUI from another checkout) and the Refresh button never promised
+        to stop anything.
+        """
         for plugin_id, metadata in self.registry.get_all_plugins().items():
             if metadata.config.enabled:
                 if self._check_service_running(metadata):
@@ -312,7 +321,7 @@ class PluginManager:
             else:
                 # Plugin is disabled — kill orphans, but never touch core services
                 # or services that other enabled plugins depend on
-                if metadata.type == 'service' and self._check_service_running(metadata):
+                if kill_orphans and metadata.type == 'service' and self._check_service_running(metadata):
                     if metadata.core:
                         logger.info(f"Core plugin '{plugin_id}' is disabled but running on port {metadata.port} — leaving it alone")
                     elif self._has_enabled_dependents(plugin_id):
@@ -328,6 +337,31 @@ class PluginManager:
                         logger.warning(f"Disabled plugin '{plugin_id}' has orphan process on port {metadata.port} — killing it")
                         self._kill_by_port(metadata.port)
                 self._plugin_status[plugin_id] = PluginStatus.DISABLED
+
+    def reload(self) -> List[str]:
+        """Rescan the plugins directory and re-read every plugin's state.
+
+        The Plugins page's Refresh button. Reads only: no orphan is killed and
+        nothing is started or restored, which is what a boot does (see
+        _init_plugin_status). Returns the discovered plugin ids.
+        """
+        discovered = self.registry.refresh()
+        self._seed_enabled_from_prefs()
+        self._probe_plugin_status(kill_orphans=False)
+        for plugin_id in list(self._plugin_status):
+            if not self.registry.is_registered(plugin_id):
+                self._plugin_status.pop(plugin_id, None)
+                self._instance_problems.pop(plugin_id, None)
+        self._save_running()
+        self._broadcast_plugins_status("refresh")
+        return discovered
+
+    def _init_plugin_status(self):
+        """Initialize plugin status and restore previously running plugins."""
+        self._seed_enabled_from_prefs()
+
+        # First pass: detect what's already running and kill orphans
+        self._probe_plugin_status(kill_orphans=True)
 
         # Second pass: start plugins that were running last time.
         # Always dedup the persisted list (defensive; prior races or old bugs could

@@ -392,12 +392,16 @@ def update_plugin_config(plugin_id):
 
 @plugins_bp.route("/refresh", methods=["POST"])
 def refresh_plugins():
-    """Refresh plugin registry by rescanning plugins directory."""
+    """Refresh plugin registry by rescanning plugins directory.
+
+    Reads only. The boot-time path (PluginManager._init_plugin_status) also
+    kills processes found on disabled plugins' ports; a refresh the user
+    clicked must never do that.
+    """
     try:
         manager = get_plugin_manager()
-        discovered = manager.registry.refresh()
-        manager._init_plugin_status()  # Reinitialize status
-        
+        discovered = manager.reload()
+
         return success_response(
             data={
                 "discovered": discovered,
