@@ -1533,6 +1533,17 @@ const StickyNotesPage = () => {
             setDesktopMenu({ x: e.clientX, y: e.clientY });
           }
         }}
+        onMouseDown={(e) => {
+          // A click on the empty board leaves the notes: without this the
+          // browser puts the caret back in the note that holds the text
+          // selection, and Ctrl+Z then undoes that note's text instead of the
+          // board change.
+          if (e.button !== 0 || e.target.closest('[data-card-id]')) return;
+          const active = document.activeElement;
+          if (isEditableTarget(active)) active.blur();
+          window.getSelection()?.removeAllRanges();
+          e.preventDefault();
+        }}
       >
         {layoutError && (
           <MuiAlert
