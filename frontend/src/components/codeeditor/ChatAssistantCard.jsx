@@ -61,6 +61,7 @@ import DashboardCardWrapper from "../dashboard/DashboardCardWrapper";
 import MessageList from "../chat/MessageList";
 import CodeDiffViewer from "./CodeDiffViewer";
 import AICommandPalette from "./AICommandPalette";
+import { extractApplyableCode } from "./applyableCode";
 import * as codeIntelligenceService from "../../api/codeIntelligenceService";
 import * as chatService from "../../api/chatService";
 import { useUnifiedProgress } from "../../contexts/UnifiedProgressContext";
@@ -584,20 +585,31 @@ Please provide a helpful, specific response about the selected code. Analyze the
             const target = codeContext.selectedText || enhancedContext.content;
             const editResult = await codeIntelligenceService.editCodeIntelligent(target, instructions, enhancedContext, rulesCutoffEnabled);
             if (editResult.success) {
-              // Atomic state update to avoid race conditions
-              setPendingCodeEdit({
-                newCode: editResult.editedCode,
-                description: `Smart Edit: ${instructions}`,
-                command: 'edit',
-                targetText: codeContext.selectedText,
-                isSelection: Boolean(codeContext.selectedText),
-                editRange: codeContext.selectionRange // Include selection range for precise editing
-              });
-              response = {
-                message: `Code edited successfully using advanced context. ${codeContext.selectedText ? 'Applied to selected text.' : 'Applied to entire file.'} Click "Apply Changes" to update.`,
-                success: true,
-                type: "edit_ready"
-              };
+              // The reply is prose with code in it; only a fenced block may be
+              // applied. No block means the reply is shown and nothing is offered.
+              const code = extractApplyableCode(editResult.editedCode, currentTab?.language);
+              if (code) {
+                const scope = codeContext.selectedText ? 'the selected text' : 'the whole file';
+                setPendingCodeEdit({
+                  newCode: code,
+                  description: `Edit: ${instructions} (replaces ${scope}; Ctrl+Z in the editor undoes it)`,
+                  command: 'edit',
+                  targetText: codeContext.selectedText,
+                  isSelection: Boolean(codeContext.selectedText),
+                  editRange: codeContext.selectionRange // Include selection range for precise editing
+                });
+                response = {
+                  message: `Edit ready for ${scope}. Preview shows the diff; Apply puts it in the editor.`,
+                  success: true,
+                  type: "edit_ready"
+                };
+              } else {
+                response = {
+                  message: editResult.editedCode || "The assistant returned no reply.",
+                  success: true,
+                  type: "edit_response"
+                };
+              }
             } else {
               response = {
                 message: `Code editing failed: ${editResult.error}`,
@@ -649,17 +661,27 @@ Please provide a helpful, specific response about the selected code. Analyze the
           }
 
           if (commandType !== 'secure' && result) {
-            if (result.success && (result.refactoredCode || result.tests)) {
-              // Atomic state update to avoid race conditions
+            const label = commandType.charAt(0).toUpperCase() + commandType.slice(1);
+            const reply = result.refactoredCode || result.tests || '';
+            // These commands send the whole file and Apply replaces the whole
+            // file, so only a fenced code block from the reply may be applied.
+            const code = result.success ? extractApplyableCode(reply, currentTab?.language) : null;
+            if (code) {
               setPendingCodeEdit({
-                newCode: result.refactoredCode || result.tests,
-                description: `${commandType.charAt(0).toUpperCase() + commandType.slice(1)}: Applied to ${codeContext.selectedText ? 'selected code' : 'entire file'}`,
+                newCode: code,
+                description: `${label}: replaces the whole file (Ctrl+Z in the editor undoes it)`,
                 command: commandType
               });
               response = {
-                message: `${commandType.charAt(0).toUpperCase() + commandType.slice(1)} completed successfully. Click "Apply Changes" to update your code.`,
+                message: `${label} ready. Preview shows the diff; Apply replaces the whole file.`,
                 success: true,
                 type: "command_ready"
+              };
+            } else if (result.success) {
+              response = {
+                message: reply || `${label} returned no reply.`,
+                success: true,
+                type: "command_response"
               };
             } else {
               response = {
