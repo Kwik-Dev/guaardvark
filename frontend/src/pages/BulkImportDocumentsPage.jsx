@@ -47,6 +47,14 @@ import { getWebsites } from "../api/websiteService";
 
 const POLL_INTERVAL_MS = 3000;
 
+// The worker ends a job with "complete"; this page used to wait for
+// "completed" and polled forever. Either spelling ends the job.
+const SUCCESS_STATUSES = ["complete", "completed"];
+const TERMINAL_STATUSES = [...SUCCESS_STATUSES, "error", "failed", "cancelled"];
+const normalizeStatus = (status) => String(status || "").toLowerCase();
+const isSuccessStatus = (status) => SUCCESS_STATUSES.includes(normalizeStatus(status));
+const isTerminalStatus = (status) => TERMINAL_STATUSES.includes(normalizeStatus(status));
+
 const initialForm = {
   sourcePath: "",
   targetFolder: "",
@@ -219,12 +227,7 @@ const BulkImportDocumentsPage = () => {
       try {
         const statusResp = await getBulkImportStatus(jobId);
         setJobStatus(statusResp);
-        if (
-          statusResp?.status &&
-          ["completed", "error", "failed", "cancelled"].includes(
-            statusResp.status.toLowerCase()
-          )
-        ) {
+        if (isTerminalStatus(statusResp?.status)) {
           setPolling(false);
         }
       } catch (err) {
@@ -244,9 +247,9 @@ const BulkImportDocumentsPage = () => {
       );
     }
 
-    const severity = jobStatus?.status === "completed"
+    const severity = isSuccessStatus(jobStatus?.status)
       ? "success"
-      : jobStatus?.status === "error" || jobStatus?.status === "failed"
+      : ["error", "failed"].includes(normalizeStatus(jobStatus?.status))
       ? "error"
       : "info";
 

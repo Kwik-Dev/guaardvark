@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, act } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 const { bulkApi, messages } = vi.hoisted(() => ({
@@ -65,5 +65,49 @@ describe("BulkImportDocumentsPage options", () => {
     expect(
       await screen.findByText("Files are copied; the source folder is left as it is."),
     ).toBeInTheDocument();
+  });
+});
+
+describe("BulkImportDocumentsPage job status", () => {
+  const startDryRun = async () => {
+    bulkApi.startBulkImport.mockResolvedValue({ job_id: "job-1", status: "processing" });
+    renderPage();
+    fireEvent.change(screen.getByLabelText(/Source Directory/), { target: { value: "/data/in" } });
+    fireEvent.click(screen.getByLabelText(/Dry run/));
+    fireEvent.click(screen.getByRole("button", { name: "Preview Import" }));
+    expect(await screen.findByText("Polling...")).toBeInTheDocument();
+  };
+
+  it("stops polling and turns green when the worker reports \"complete\"", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    await startDryRun();
+    bulkApi.getBulkImportStatus.mockResolvedValue({
+      job_id: "job-1",
+      status: "complete",
+      message: "Dry run: Would import 2 files",
+      progress: 100,
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(await screen.findByText("Dry run: Would import 2 files")).toBeInTheDocument();
+    expect(screen.queryByText("Polling...")).not.toBeInTheDocument();
+    const alert = screen.getByText("Job Status").closest(".MuiAlert-root");
+    expect(alert.className).toMatch(/Success/);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+    expect(bulkApi.getBulkImportStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("also accepts \"completed\"", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    await startDryRun();
+    bulkApi.getBulkImportStatus.mockResolvedValue({ job_id: "job-1", status: "completed" });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(await screen.findByText("completed")).toBeInTheDocument();
+    expect(screen.queryByText("Polling...")).not.toBeInTheDocument();
   });
 });
