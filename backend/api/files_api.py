@@ -1677,19 +1677,30 @@ def edit_image():
             bg.paste(img, mask=img.split()[-1] if img.mode == "RGBA" else None)
             img = bg
 
-        # Determine save path
+        # Determine save path. A name is taken when a file or a row has it; a
+        # sibling is never written over.
+        def _name_taken(path: Path, doc_path: str) -> bool:
+            return path.exists() or DBDocument.query.filter_by(path=doc_path).first() is not None
+
+        old_path = None
+        previous = (document.filename, document.path, document.type, document.size)
         if save_mode == "overwrite":
             out_path = physical_path.with_suffix(target_ext)
             out_doc = document
             if out_path != physical_path:
-                # Format changed — update document record
+                # Format changed: the row moves to the new name and the original
+                # file goes once the row is committed.
+                new_doc_path = str(Path(document.path).with_suffix(target_ext))
+                if _name_taken(out_path, new_doc_path):
+                    return error_response(
+                        f"{out_path.name} already exists in this folder. "
+                        "Save as a copy instead, or rename that file first.",
+                        409, "NAME_TAKEN",
+                    )
                 out_doc.filename = physical_path.stem + target_ext
-                out_doc.path = str(Path(document.path).with_suffix(target_ext))
+                out_doc.path = new_doc_path
                 out_doc.type = target_ext
-                # Remove old file after save
                 old_path = physical_path
-            else:
-                old_path = None
         else:
             # Save as copy with _edited suffix
             stem = physical_path.stem
@@ -1697,12 +1708,12 @@ def edit_image():
             while True:
                 new_name = f"{stem}_edited{f'_{counter}' if counter > 1 else ''}{target_ext}"
                 out_path = physical_path.parent / new_name
-                if not out_path.exists():
+                new_doc_path = str(Path(document.path).parent / new_name)
+                if not _name_taken(out_path, new_doc_path):
                     break
                 counter += 1
 
             # Create new document record; size is set once the file is written.
-            new_doc_path = str(Path(document.path).parent / new_name)
             out_doc = DBDocument(
                 filename=new_name,
                 path=new_doc_path,
@@ -1713,22 +1724,35 @@ def edit_image():
             )
             db.session.add(out_doc)
 
-        # Save
+        # Write beside the target, commit the row, then move the file into
+        # place and drop the original, so a failure at any step leaves the
+        # original file and row as they were.
         save_kwargs = {}
         if target_format in ("jpeg", "webp"):
             save_kwargs["quality"] = quality
         if target_format == "png":
             save_kwargs["optimize"] = True
-        img.save(str(out_path), format=target_format.upper(), **save_kwargs)
-
-        # Update file size
-        out_doc.size = out_path.stat().st_size
-
-        # Remove old file if format changed on overwrite
-        if save_mode == "overwrite" and old_path and old_path != out_path and old_path.exists():
+        tmp_path = out_path.with_name(f".{out_path.name}.{os.getpid()}.tmp")
+        try:
+            img.save(str(tmp_path), format=target_format.upper(), **save_kwargs)
+            out_doc.size = tmp_path.stat().st_size
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            tmp_path.unlink(missing_ok=True)
+            raise
+        try:
+            os.replace(tmp_path, out_path)
+        except OSError:
+            tmp_path.unlink(missing_ok=True)
+            if save_mode == "overwrite":
+                out_doc.filename, out_doc.path, out_doc.type, out_doc.size = previous
+            else:
+                db.session.delete(out_doc)
+            db.session.commit()
+            raise
+        if old_path is not None and old_path != out_path and old_path.exists():
             old_path.unlink()
-
-        db.session.commit()
 
         logger.info(f"Image edited: doc={doc_id}, mode={save_mode}, format={target_format}, path={out_path}")
         return success_response({

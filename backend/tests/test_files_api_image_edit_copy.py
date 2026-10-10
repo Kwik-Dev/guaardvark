@@ -116,3 +116,44 @@ def test_overwrite_with_a_new_format_updates_type_and_size(client, photo, upload
     assert row.type == ".jpg"
     assert row.size == (uploads / "Images" / "photo.jpg").stat().st_size > 0
     assert not (uploads / "Images" / "photo.png").exists()
+    assert not [p for p in (uploads / "Images").iterdir() if p.name.endswith(".tmp")]
+
+
+def test_overwrite_with_a_new_format_refuses_to_take_a_siblings_name(client, photo, uploads):
+    """photo.png saved as JPEG would become photo.jpg; a sibling already has
+    that name and row. Nothing may be written over or deleted."""
+    sibling_path = uploads / "Images" / "photo.jpg"
+    Image.new("RGB", (8, 8), (0, 0, 250)).save(sibling_path)
+    sibling_bytes = sibling_path.read_bytes()
+    sibling = DBDocument(filename="photo.jpg", path="Images/photo.jpg", type=".jpg",
+                         folder_id=photo.folder_id, size=len(sibling_bytes), index_status="STORED")
+    db.session.add(sibling)
+    db.session.commit()
+
+    resp = client.post("/api/files/image/edit", json={
+        "document_id": photo.id,
+        "operations": [{"type": "rotate", "angle": 90}],
+        "save_mode": "overwrite",
+        "format": "jpeg",
+    })
+
+    assert resp.status_code == 409, resp.get_json()
+    assert "photo.jpg already exists" in resp.get_json()["message"]
+    assert sibling_path.read_bytes() == sibling_bytes, "the sibling is untouched"
+    assert (uploads / "Images" / "photo.png").exists(), "the original is still there"
+    row = db.session.get(DBDocument, photo.id)
+    assert (row.filename, row.path, row.type) == ("photo.png", "Images/photo.png", ".png")
+    assert not [p for p in (uploads / "Images").iterdir() if p.name.endswith(".tmp")]
+
+
+def test_a_copy_skips_a_name_a_row_holds_even_without_a_file(client, photo, uploads):
+    db.session.add(DBDocument(filename="photo_edited.png", path="Images/photo_edited.png", type=".png",
+                              folder_id=photo.folder_id, index_status="STORED"))
+    db.session.commit()
+
+    resp = client.post("/api/files/image/edit", json={
+        "document_id": photo.id, "operations": [{"type": "rotate", "angle": 90}], "save_mode": "copy",
+    })
+
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()["data"]["filename"] == "photo_edited_2.png"
