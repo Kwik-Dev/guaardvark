@@ -34,8 +34,8 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
     _ext_line=$(grep -E '^GUAARDVARK_OLLAMA_EXTERNAL=' "$SCRIPT_DIR/.env" | tail -1)
     [ -n "$_ext_line" ] && export "$_ext_line"
 fi
-# An external Ollama is never ours to stop.
-[ "${GUAARDVARK_OLLAMA_EXTERNAL:-0}" = 1 ] && KEEP_OLLAMA=1
+# An external Ollama is never ours to stop (1/true/yes/on, as the backend reads it).
+ollama_flag_on "${GUAARDVARK_OLLAMA_EXTERNAL:-}" && KEEP_OLLAMA=1
 
 vader_stop_begin
 
