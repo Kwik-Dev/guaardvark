@@ -1930,7 +1930,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                     inputRef={promptInputRef}
                     placeholder='Maya walks into the cafe, looks at the camera and says "Morning!"'
                     helperText={enhancePrompt
-                      ? "Use the names you gave above, or click a tag to insert it."
+                      ? 'Use the names you gave above, or click a tag to insert it. Write a spoken line as: the chef says: "…"'
                       : "Enhance is off: this is sent as typed, so name references by their tags."}
                     fullWidth
                     size="small"
