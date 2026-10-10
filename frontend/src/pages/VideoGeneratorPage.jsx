@@ -1465,7 +1465,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       setSuccess(
         gpuMsg
           ? `Batch queued. ${gpuMsg}`
-          : "Batch queued. The worker drains one batch at a time — keep stacking 'em."
+          : "Batch queued. Batches render one at a time; you can add more while this one runs."
       );
       startPollingStatus(batchId);
       await fetchBatches();
