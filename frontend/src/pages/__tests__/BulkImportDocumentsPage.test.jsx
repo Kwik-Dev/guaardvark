@@ -68,6 +68,16 @@ describe("BulkImportDocumentsPage options", () => {
   });
 });
 
+describe("BulkImportDocumentsPage reindex option", () => {
+  it("is named for what the worker does: only unindexed existing files are queued", () => {
+    renderPage();
+    const box = screen.getByLabelText("Index already-imported files that aren't indexed yet");
+    expect(box).toBeChecked();
+    expect(screen.getByText(/already indexed are not indexed again/)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/Re-index existing documents/)).not.toBeInTheDocument();
+  });
+});
+
 describe("BulkImportDocumentsPage job status", () => {
   const startDryRun = async () => {
     bulkApi.startBulkImport.mockResolvedValue({ job_id: "job-1", status: "processing" });
