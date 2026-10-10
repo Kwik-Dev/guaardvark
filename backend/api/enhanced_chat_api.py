@@ -5089,6 +5089,10 @@ def list_chat_sessions():
             results.append({
                 "session_id": session.id,
                 "project_id": session.project_id,
+                # The stored session mode ("chat" or "agent"), the same value
+                # GET /api/chat-sessions/<id>/mode serves; the session list
+                # shows it, so it never has to guess from the preview text.
+                "mode": (session.mode or "chat").strip(),
                 "created_at": session.created_at.isoformat() if session.created_at else None,
                 "last_activity": last_msg.isoformat() if last_msg else None,
                 "message_count": msg_count,
