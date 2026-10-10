@@ -63,6 +63,7 @@ import { pinnedToTop, pinnedFirst, isEditableTarget } from "../components/notes/
 import { useLayout, useDashboardWidth } from "../contexts/LayoutContext";
 import { ContextualLoader } from "../components/common/LoadingStates";
 import { opaqueMenuPaperSx } from "../components/common/opaqueMenuPaper";
+import { toHexColor } from "../utils/colorHex";
 
 const LAYOUT_MODES = ["normal", "compact", "collapsed"];
 const LAYOUT_MODE_LABELS = {
@@ -381,7 +382,7 @@ const StickyNote = React.memo(
             <input
               ref={colorInputRef}
               type="color"
-              value={color.startsWith("rgba") ? "#1e1e1e" : color}
+              value={toHexColor(color)}
               onChange={(e) => onColorChange(e.target.value)}
               style={{
                 position: "absolute",
@@ -1726,7 +1727,7 @@ const StickyNotesPage = () => {
                         onContentChange={(content) =>
                           handleNoteContentChange(noteId, content)
                         }
-                        onDeleteRequest={() => setDeleteConfirm(noteId)}
+                        onDeleteRequest={() => setDeleteConfirm({ noteId, source: "open" })}
                         onFormat={handleFormat}
                         onInsertLink={handleInsertLink}
                         theme={theme}
@@ -1838,9 +1839,11 @@ const StickyNotesPage = () => {
       </Menu>
 
       {/* ── Delete confirmation dialog ─────────────────────────────── */}
+      {/* handleDeleteNote pushes an undo snapshot, but the undo stack is a ref
+          on this page: it is gone once the page unmounts or reloads. */}
       <Dialog open={Boolean(deleteConfirm)} onClose={() => setDeleteConfirm(null)} maxWidth="xs">
         <DialogTitle sx={{ fontSize: "0.9rem" }}>
-          {`Delete "${deleteNoteTitle}"? This cannot be undone.`}
+          {`Delete "${deleteNoteTitle}"? Ctrl+Z brings it back until you leave or reload this page.`}
         </DialogTitle>
         <DialogActions>
           <Button onClick={() => setDeleteConfirm(null)} size="small">Cancel</Button>
