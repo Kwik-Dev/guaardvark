@@ -1612,7 +1612,9 @@ const DocumentsPage = () => {
       // Refresh data after rename
       await refreshData();
     } catch (err) {
-      showMessage?.('Rename failed', 'error');
+      // The server says why a name is refused; show that over a bare "failed".
+      const reason = err.response?.data?.message || err.response?.data?.error?.message;
+      showMessage?.(reason ? `Rename failed: ${reason}` : 'Rename failed', 'error');
     }
   }, [renameItem, renameName, showMessage, refreshData]);
 
@@ -2683,6 +2685,11 @@ const DocumentsPage = () => {
             onChange={(e) => setRenameName(e.target.value)}
             onKeyPress={(e) => e.key === 'Enter' && handleRenameSubmit()}
           />
+          {renameItem?.type !== 'folder' && (
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+              Changes the name shown in Guaardvark; the file on disk keeps its name.
+            </Typography>
+          )}
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setRenameDialogOpen(false)}>Cancel</Button>

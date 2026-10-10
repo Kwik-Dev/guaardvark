@@ -9,7 +9,7 @@ import os
 import re
 import shutil
 from typing import Optional
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from flask import Blueprint, current_app, jsonify, request, send_file
 from sqlalchemy.exc import SQLAlchemyError
@@ -128,6 +128,40 @@ _INVALID_NAME_CHARS = frozenset('<>:"/\\|?*')
 
 def has_invalid_name_chars(name: str) -> bool:
     return any(ch in _INVALID_NAME_CHARS or ord(ch) < 32 for ch in name)
+
+
+# Device names Windows reserves whatever the extension (CON.txt is CON).
+_WINDOWS_RESERVED_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
+
+def document_name_problem(name: str):
+    """Why a document may not take this name, or None when it may.
+
+    The name is stored and shown, and may be used as a filename by an export
+    or a sync to another machine, so it must be a valid filename on every
+    platform the product runs on.
+    """
+    if not name:
+        return "Invalid filename"
+    if name in (".", ".."):
+        return 'A filename cannot be "." or ".."'
+    if name.startswith("."):
+        return "A filename cannot start with a dot"
+    if any(ch in _INVALID_NAME_CHARS for ch in name):
+        return 'A filename cannot contain any of < > : " / \\ | ? *'
+    if any(ord(ch) < 32 or ord(ch) == 0x7F for ch in name):
+        return "A filename cannot contain control characters"
+    if name[-1] in ". ":
+        return "A filename cannot end with a dot or a space"
+    if name.split(".", 1)[0].upper() in _WINDOWS_RESERVED_NAMES:
+        return f'"{name.split(".", 1)[0]}" is a reserved device name on Windows'
+    if len(name) > 255:
+        return "Filename too long (255 characters at most)"
+    return None
 
 
 def get_physical_path(relative_path: str) -> Path:
@@ -1064,57 +1098,27 @@ def rename_document(doc_id):
         if not data or "filename" not in data:
             return error_response("New filename required", 400, "MISSING_FILENAME")
         new_filename = data["filename"].strip()
-        if not new_filename:
-            return error_response("Invalid filename", 400, "INVALID_FILENAME")
-        if has_invalid_name_chars(new_filename):
-            return error_response("Filename contains invalid characters", 400, "INVALID_FILENAME")
-        if len(new_filename) > 255:
-            return error_response("Filename too long", 400, "INVALID_FILENAME")
+        problem = document_name_problem(new_filename)
+        if problem:
+            return error_response(problem, 400, "INVALID_FILENAME")
         if new_filename == document.filename:
             return success_response(document.to_dict())
+        sibling = DBDocument.query.filter(
+            DBDocument.id != doc_id,
+            DBDocument.folder_id == document.folder_id,
+            DBDocument.filename == new_filename,
+        ).first()
+        if sibling:
+            return error_response("A file with this name already exists here", 409, "DOCUMENT_EXISTS")
 
-        # Mirror rename_folder: the file on disk, its thumbnail and the
-        # registry path all move with the name, so download, preview and
-        # indexing keep finding the file.
-        old_rel = document.path
-        new_rel = str(PurePosixPath(old_rel).with_name(new_filename))
-        old_physical = get_physical_path(old_rel)
-        new_physical = get_physical_path(new_rel)
-        taken = (
-            DBDocument.query.filter(DBDocument.id != doc_id, DBDocument.path == new_rel).first()
-            or DBDocument.query.filter(
-                DBDocument.id != doc_id,
-                DBDocument.folder_id == document.folder_id,
-                DBDocument.filename == new_filename,
-            ).first()
-            or (new_rel != old_rel and new_physical.exists())
-        )
-        if taken:
-            return error_response("A file with this name already exists", 409, "DOCUMENT_EXISTS")
-
-        moves = []  # (from, to) pairs done on disk, undone in reverse if the commit fails
-        if new_rel != old_rel and old_physical.exists():
-            shutil.move(str(old_physical), str(new_physical))
-            moves.append((old_physical, new_physical))
-            old_thumb = old_physical.parent / "thumbnails" / f"{old_physical.stem}.jpg"
-            if old_thumb.exists():
-                new_thumb = old_thumb.with_name(f"{new_physical.stem}.jpg")
-                shutil.move(str(old_thumb), str(new_thumb))
-                moves.append((old_thumb, new_thumb))
-        try:
-            document.filename = new_filename
-            document.path = new_rel
-            document.updated_at = datetime.datetime.now()
-            db.session.commit()
-        except Exception:
-            db.session.rollback()
-            for src, dst in reversed(moves):
-                try:
-                    shutil.move(str(dst), str(src))
-                except Exception as undo_err:
-                    logger.error(f"Could not move {dst} back to {src} after a failed rename: {undo_err}")
-            raise
-        logger.info(f"Renamed document {doc_id}: {old_rel} -> {new_rel}")
+        # The shown name only. The file on disk and document.path keep their
+        # name: chunk metadata (citations), batch thumbnails and
+        # batch_metadata.json, and files registered from outside the uploads
+        # folder are all keyed by that path.
+        document.filename = new_filename
+        document.updated_at = datetime.datetime.now()
+        db.session.commit()
+        logger.info(f"Renamed document {doc_id} to: {new_filename}")
         return success_response(document.to_dict())
     except SQLAlchemyError as e:
         db.session.rollback()
