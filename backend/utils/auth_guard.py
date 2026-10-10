@@ -7,7 +7,9 @@ require it from every host, this machine included: in the X-API-Key header
 with it (the HttpOnly session cookie of backend/utils/api_session.py, which
 Settings → Access obtains). When unset, requests from this machine pass and
 other hosts are refused. With network access on (GUAARDVARK_NETWORK_ACCESS),
-every device on this machine's local network passes as well, key or not.
+every device on this machine's local network passes as well, key or not,
+except on the routes that run code a caller supplies (RUNS_CODE_PREFIXES and
+RUNS_CODE_PATHS): those keep the rule above from every other device.
 /api/auth/ reports the state, signs browsers in and out, and manages the key
 and network access.
 
@@ -84,6 +86,9 @@ LOCAL_ONLY_CODE = "local_only"
 # outside_local_network: network access is on, no key, and the caller is not
 # on the local network.
 OUTSIDE_NETWORK_CODE = "outside_local_network"
+# runs_code_key_required: network access is on, no key, and the route runs
+# code, which network access does not open to other devices.
+RUNS_CODE_CODE = "runs_code_key_required"
 API_KEY_CODE = "api_key_required"
 SCREENSHOT_LINK_CODE = "screenshot_link_invalid"
 LOCAL_ONLY_MESSAGE = (
@@ -96,6 +101,12 @@ LOCAL_ONLY_MESSAGE = (
 OUTSIDE_NETWORK_MESSAGE = (
     "This action works only on {machine} and on devices on its local network, "
     "and this device is outside it. Create an API key in Settings → Access on "
+    "{machine} and enter it on this device; command-line and API clients send "
+    "it in the X-API-Key header."
+)
+RUNS_CODE_MESSAGE = (
+    "Running code works only on {machine} itself, or with its API key, even "
+    "while Network access is on. Create an API key in Settings → Access on "
     "{machine} and enter it on this device; command-line and API clients send "
     "it in the X-API-Key header."
 )
@@ -118,16 +129,47 @@ def tool_endpoints_protected() -> bool:
 
 
 # Settings → Access → Network access. On (1, true, yes, on), every protected
-# action is open to this machine and to every device on its local network,
-# with or without the API key; an address outside the local network still
-# needs the key. Off or unset keeps the rules above. Read per request, like
-# GUAARDVARK_API_KEY; backend/services/network_access_service.py changes it.
+# action but running code (RUNS_CODE_* below) is open to this machine and to
+# every device on its local network, with or without the API key; an address
+# outside the local network still needs the key. Off or unset keeps the rules
+# above. Read per request, like GUAARDVARK_API_KEY;
+# backend/services/network_access_service.py changes it.
 NETWORK_ACCESS_ENV = "GUAARDVARK_NETWORK_ACCESS"
 
 
 def network_access_open() -> bool:
     """True when network access is on."""
     return os.environ.get(NETWORK_ACCESS_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# Routes that run code the caller supplies, as the user Guaardvark runs as,
+# with no sandbox: the Code Editor's Run (python, javascript, shell, build), and
+# direct tool execution, where the caller stands in for the approval card chat
+# would show (execute_python and system_command on /api/tools/execute, policy-
+# gated MCP tools on /api/automation/mcp/execute). Network access does not open
+# these to other devices: they answer this machine, and the key once there is
+# one, from any address. The paths are matched whole: GET
+# /api/tools/execute_python is a tool's schema, not a call.
+RUNS_CODE_PREFIXES = (
+    '/api/code-execution/',
+)
+RUNS_CODE_PATHS = (
+    '/api/tools/execute',
+    '/api/automation/mcp/execute',
+)
+
+
+def request_runs_code() -> bool:
+    """True when the current request targets a route that runs supplied code."""
+    path = request.path
+    return path in RUNS_CODE_PATHS or path.startswith(RUNS_CODE_PREFIXES)
+
+
+def network_access_covers_request() -> bool:
+    """True when network access is on and opens the current request's route to
+    the caller: a local-network address on any protected route but the ones
+    that run code."""
+    return network_access_open() and request_is_from_local_network() and not request_runs_code()
 
 
 def machine_name() -> str:
@@ -425,9 +467,10 @@ def credential_rejected() -> bool:
 
 def caller_is_authorized() -> bool:
     """The rule every protected route applies: any device on the local network
-    while network access is on; otherwise the key (header or signed-in
-    browser) once one is configured, this machine until then."""
-    if network_access_open() and request_is_from_local_network():
+    while network access is on, except on a route that runs code; otherwise
+    the key (header or signed-in browser) once one is configured, this
+    machine until then."""
+    if network_access_covers_request():
         return True
     if configured_api_key():
         return request_carries_valid_key() or request_has_valid_session()
@@ -483,7 +526,8 @@ def check_endpoint_auth():
     - An OPTIONS request Flask answers itself (a CORS preflight) → allow
     - Agent screen captures: a link signed for that path passes, then the rule below
     - If endpoint is not protected → allow
-    - If network access is on → allow this machine and the local network
+    - If network access is on → allow this machine and the local network,
+      except on a route that runs code (the rules below apply there)
     - If GUAARDVARK_API_KEY is set → require X-API-Key header (any host)
     - If GUAARDVARK_API_KEY is NOT set → allow localhost, block remote
     """
@@ -503,7 +547,7 @@ def check_endpoint_auth():
     if not _is_protected():
         return None
 
-    if network_access_open() and request_is_from_local_network():
+    if network_access_covers_request():
         return None
 
     if not configured_api_key():
@@ -513,6 +557,8 @@ def check_endpoint_auth():
             f"[AUTH] Blocked remote access to {request.path} from {_effective_client_ip()}"
         )
         if network_access_open():
+            if request_runs_code():
+                return _refusal(RUNS_CODE_MESSAGE, RUNS_CODE_CODE, 403)
             return _refusal(OUTSIDE_NETWORK_MESSAGE, OUTSIDE_NETWORK_CODE, 403)
         return _refusal(LOCAL_ONLY_MESSAGE, LOCAL_ONLY_CODE, 403)
 

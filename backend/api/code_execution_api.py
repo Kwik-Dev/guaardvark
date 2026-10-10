@@ -29,6 +29,24 @@ RATE_LIMIT_WINDOW = 60  # seconds
 # Rate limiting state
 _rate_limits = defaultdict(list)
 
+# The backend's environment carries the .env secrets: the API key, the
+# database and broker URLs with their passwords, hub and bot tokens. Code run
+# from the editor has no use for them, so it runs without any variable whose
+# name carries one of these markers (compared upper-case). Everything else
+# (PATH, HOME, the Python and CUDA settings) is passed through.
+SECRET_NAME_MARKERS = (
+    "KEY", "SECRET", "TOKEN", "PASSWORD", "PASSWD", "CREDENTIAL",
+    "DATABASE_URL", "BROKER_URL", "REDIS_URL", "_DSN",
+)
+
+
+def execution_env() -> dict:
+    """The backend's environment without its secrets, for code it runs."""
+    return {
+        name: value for name, value in os.environ.items()
+        if not any(marker in name.upper() for marker in SECRET_NAME_MARKERS)
+    }
+
 
 def _check_rate_limit():
     """Enforce per-IP rate limiting on execution endpoints. Returns error response or None."""
@@ -90,7 +108,7 @@ def execute_command(command, timeout=MAX_EXECUTION_TIME, cwd=None, use_shell=Fal
             text=True,
             timeout=timeout,
             cwd=cwd,
-            env=os.environ.copy()
+            env=execution_env()
         )
 
         execution_time = time.time() - start_time
@@ -146,7 +164,7 @@ def execute_command_with_stdin(command, timeout=MAX_EXECUTION_TIME, stdin_data="
             text=True,
             timeout=timeout,
             cwd=cwd,
-            env=os.environ.copy()
+            env=execution_env()
         )
 
         execution_time = time.time() - start_time

@@ -72,6 +72,22 @@ def app():
     def outreach_status():
         return {"ok": True}
 
+    @test_app.route("/api/code-execution/python", methods=["POST"])
+    def code_execution_python():
+        return {"ok": True}
+
+    @test_app.route("/api/tools/execute", methods=["POST"])
+    def tools_execute():
+        return {"ok": True}
+
+    @test_app.route("/api/tools/execute_python", methods=["GET"])
+    def tools_execute_python_schema():
+        return {"ok": True}
+
+    @test_app.route("/api/automation/mcp/execute", methods=["POST"])
+    def automation_mcp_execute():
+        return {"ok": True, "approved": auth_guard.caller_is_authorized()}
+
     return test_app
 
 
@@ -397,3 +413,136 @@ def test_remote_memory_read_remains_unprotected(app, monkeypatch):
 
     assert response.status_code == 200
     assert response.get_json() == {"ok": True}
+
+
+# Network access (Settings → Access) opens the protected routes to the local
+# network, key or not, except the routes that run code a caller supplies.
+
+RUNS_CODE_REQUESTS = [
+    ("POST", "/api/code-execution/python"),
+    ("POST", "/api/tools/execute"),
+    ("POST", "/api/automation/mcp/execute"),
+]
+LAN_DEVICE = "192.168.1.20"
+
+
+@pytest.fixture
+def network_access_on(monkeypatch):
+    monkeypatch.setenv("GUAARDVARK_NETWORK_ACCESS", "1")
+
+
+def test_network_access_opens_a_protected_route_to_the_local_network(app, monkeypatch, network_access_on):
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    client = app.test_client()
+
+    response = client.post("/api/files/write", json={}, environ_base={"REMOTE_ADDR": LAN_DEVICE})
+
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize("method,path", RUNS_CODE_REQUESTS)
+def test_network_access_does_not_open_code_execution_to_a_lan_device(app, monkeypatch, network_access_on, method, path):
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    client = app.test_client()
+
+    direct = client.open(path, method=method, json={}, environ_base={"REMOTE_ADDR": LAN_DEVICE})
+    proxied = client.open(
+        path, method=method, json={},
+        headers={"X-Forwarded-For": LAN_DEVICE},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    for response in (direct, proxied):
+        assert response.status_code == 403
+        assert response.get_json()["code"] == auth_guard.RUNS_CODE_CODE
+        assert response.get_json()["error"] == auth_guard.RUNS_CODE_MESSAGE.format(machine=auth_guard.machine_name())
+
+
+@pytest.mark.parametrize("method,path", RUNS_CODE_REQUESTS)
+def test_code_execution_answers_this_machine_while_network_access_is_on(app, monkeypatch, network_access_on, method, path):
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    client = app.test_client()
+
+    response = client.open(path, method=method, json={}, environ_base={"REMOTE_ADDR": "127.0.0.1"})
+
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize("method,path", RUNS_CODE_REQUESTS)
+def test_code_execution_takes_the_key_from_a_lan_device_while_network_access_is_on(app, monkeypatch, network_access_on, method, path):
+    monkeypatch.setenv("GUAARDVARK_API_KEY", "secret")
+    client = app.test_client()
+
+    def send(**headers):
+        return client.open(path, method=method, json={}, headers=headers, environ_base={"REMOTE_ADDR": LAN_DEVICE})
+
+    without_key = send()
+    wrong_key = send(**{"X-API-Key": "not-it"})
+
+    assert without_key.status_code == 401
+    assert without_key.get_json()["code"] == auth_guard.API_KEY_CODE
+    assert wrong_key.status_code == 401
+    assert wrong_key.get_json()["credential_rejected"] is True
+    assert send(**{"X-API-Key": "secret"}).status_code == 200
+    # The other protected routes stay open to the device, as before.
+    assert client.post("/api/files/write", json={}, environ_base={"REMOTE_ADDR": LAN_DEVICE}).status_code == 200
+
+
+def test_code_execution_takes_a_signed_in_browser_on_the_lan(app, monkeypatch, network_access_on):
+    monkeypatch.setenv("GUAARDVARK_API_KEY", "secret")
+    monkeypatch.setattr(auth_guard, "request_has_valid_session", lambda: True)
+    client = app.test_client()
+
+    response = client.post("/api/code-execution/python", json={}, environ_base={"REMOTE_ADDR": LAN_DEVICE})
+
+    assert response.status_code == 200
+
+
+def test_a_tool_schema_read_is_not_a_tool_call(app, monkeypatch, network_access_on):
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    client = app.test_client()
+
+    response = client.get("/api/tools/execute_python", environ_base={"REMOTE_ADDR": LAN_DEVICE})
+
+    assert response.status_code == 200
+
+
+def test_code_execution_outside_the_local_network_is_refused_the_same_way(app, monkeypatch, network_access_on):
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    client = app.test_client()
+
+    response = client.post("/api/code-execution/python", json={}, environ_base={"REMOTE_ADDR": "8.8.8.8"})
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == auth_guard.RUNS_CODE_CODE
+
+
+def test_caller_is_authorized_agrees_with_the_hook_on_code_routes(app, monkeypatch, network_access_on):
+    """automation_api passes caller_is_authorized() as the approval for
+    policy-gated MCP tools; it must say what the hook says."""
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    client = app.test_client()
+
+    local = client.post("/api/automation/mcp/execute", json={}, environ_base={"REMOTE_ADDR": "127.0.0.1"})
+    assert local.status_code == 200
+    assert local.get_json()["approved"] is True
+
+    monkeypatch.setenv("GUAARDVARK_API_KEY", "secret")
+    with_key = client.post(
+        "/api/automation/mcp/execute", json={},
+        headers={"X-API-Key": "secret"},
+        environ_base={"REMOTE_ADDR": LAN_DEVICE},
+    )
+    assert with_key.status_code == 200
+    assert with_key.get_json()["approved"] is True
+
+
+def test_network_access_off_keeps_the_local_only_refusal_for_code_routes(app, monkeypatch):
+    monkeypatch.delenv("GUAARDVARK_NETWORK_ACCESS", raising=False)
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    client = app.test_client()
+
+    response = client.post("/api/code-execution/python", json={}, environ_base={"REMOTE_ADDR": LAN_DEVICE})
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == auth_guard.LOCAL_ONLY_CODE

@@ -23,7 +23,12 @@
 export const API_KEY_SETTINGS_PATH = "/settings#settings-api-key";
 export const AUTH_REFUSED_EVENT = "guaardvark:auth-refused";
 export const SESSION_CHANGED_EVENT = "guaardvark:session-changed";
-export const AUTH_REFUSAL_CODES = ["local_only", "outside_local_network", "api_key_required"];
+export const AUTH_REFUSAL_CODES = [
+  "local_only",
+  "outside_local_network",
+  "runs_code_key_required",
+  "api_key_required",
+];
 
 const CHANNEL = "guaardvark-auth";
 // Marks this tab's own channel messages, which it already handled through the
@@ -103,6 +108,9 @@ export function authRefusalCode(body) {
 export function describeAuthRefusal(code, rejected = false, machine = "the Guaardvark machine") {
   if (code === "outside_local_network") {
     return `This works only on ${machine} and on devices on its local network, and this device is outside it. Create an API key in Settings → Access on ${machine}, then enter it in Settings → Access on this device.`;
+  }
+  if (code === "runs_code_key_required") {
+    return `Running code works only on ${machine} itself or with its API key, even while Network access is on. Create an API key in Settings → Access on ${machine}, then enter it in Settings → Access on this device.`;
   }
   if (code === "local_only") {
     return rejected

@@ -219,8 +219,9 @@ def _guard_checks(debug: bool) -> tuple[list[dict], bool]:
         checks.append(_check(
             "network_access", "Network access", WARN,
             "On. Every device on this machine's local network can run protected actions "
-            "without the API key. Turn it off in Settings → Access on a network you do "
-            "not trust.",
+            "without the API key, except running code (the Code Editor's Run, direct tool "
+            "execution), which still needs this machine or the key. Turn it off in "
+            "Settings → Access on a network you do not trust.",
         ))
 
     if auth_guard.tool_endpoints_protected():

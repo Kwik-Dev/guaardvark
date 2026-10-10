@@ -57,7 +57,7 @@ export function describeStatus(status) {
     return {
       tone: "ok",
       label: "network access",
-      text: `Network access is on, so this device can run protected actions on ${machineOf(status)} without the key.`,
+      text: `Network access is on, so this device can run protected actions on ${machineOf(status)} without the key, except running code (the Code Editor's Run and direct tool execution), which needs the key.`,
       ok: true,
     };
   }
@@ -303,7 +303,7 @@ export default function ApiKeySection() {
     >
       <Cluster
         label="Network"
-        help="Network access on: every device on this machine's local network can run protected actions too, with no key. Devices outside the local network still need the key. For a machine on a network you trust."
+        help="Network access on: every device on this machine's local network can run protected actions too, with no key, except running code (the Code Editor's Run and direct tool execution), which always needs this machine or the key. Devices outside the local network still need the key. For a machine on a network you trust."
         note={status ? (status.network_access ? "open to the local network" : "this machine and the key") : undefined}
       >
         <Line>
@@ -314,7 +314,7 @@ export default function ApiKeySection() {
             disabled={!status?.can_manage_network_access || busy === "network"}
             tooltip={
               status?.can_manage_network_access
-                ? "On: everything works from any device on the local network. Off: protected actions need this machine or the API key."
+                ? "On: everything but running code works from any device on the local network. Off: protected actions need this machine or the API key."
                 : status?.network_access_note ||
                   `Change it on ${machineOf(status)} itself, or from a browser signed in with the key.`
             }
