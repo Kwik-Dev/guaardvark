@@ -99,12 +99,13 @@ const isGpuHeavy = (plugin) => Boolean(plugin?.gpu_exclusive);
 // ── VRAM Budget Bar ────────────────────────────────────────────────────
 const VramBudgetBar = ({ plugins, gpuVram }) => {
   // The GPU query (/api/gpu/memory/status, then gpu:status pushes) is the only
-  // source for these numbers. When it has not answered, or answered without a
-  // total, the card says so instead of assuming a card size.
+  // source for these numbers. When it has not answered, or the backend
+  // reports a failed query (null numbers), the card says "unknown" for the
+  // total and for free VRAM instead of assuming a card size or printing 0.
   const totalMb = Number(gpuVram?.total_mb) || 0;
   const vramKnown = totalMb > 0;
   const usedMb = gpuVram?.used_mb || 0;
-  const freeMb = gpuVram?.free_mb ?? (vramKnown ? totalMb - usedMb : null);
+  const freeMb = vramKnown ? (gpuVram?.free_mb ?? totalMb - usedMb) : null;
   const usedPct = vramKnown ? (usedMb / totalMb) * 100 : 0;
 
   const activePlugins = plugins.filter(
@@ -133,7 +134,7 @@ const VramBudgetBar = ({ plugins, gpuVram }) => {
           <Typography variant="body2" color="text.secondary" data-testid="vram-totals">
             {vramKnown
               ? `${(usedMb / 1024).toFixed(1)} / ${(totalMb / 1024).toFixed(1)} GB`
-              : 'unknown — no answer from the GPU query'}
+              : 'total unknown — no answer from the GPU query'}
           </Typography>
         </Stack>
       </Box>

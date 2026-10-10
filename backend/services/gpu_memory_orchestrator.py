@@ -637,13 +637,18 @@ class GPUMemoryOrchestrator:
                 if s.state in (SlotState.LOADED, SlotState.LOADING)
             )
 
+        # A failed query (no GPU, driver down) must not read as an empty card:
+        # the numbers are null, and the pages say "unknown" instead of
+        # "0.0 GB free".
+        queried = bool(vram.get("success"))
         snapshot = {
             "vram": {
-                "total_mb": vram.get("total_mb", 0),
-                "used_mb": vram.get("used_mb", 0),
-                "free_mb": vram.get("available_mb", 0),
-                "gpu_name": vram.get("gpu_name", "Unknown"),
-                "utilization_percent": vram.get("utilization_percent", 0),
+                "total_mb": vram.get("total_mb", 0) if queried else None,
+                "used_mb": vram.get("used_mb", 0) if queried else None,
+                "free_mb": vram.get("available_mb", 0) if queried else None,
+                "gpu_name": vram.get("gpu_name", "Unknown") if queried else None,
+                "utilization_percent": vram.get("utilization_percent", 0) if queried else None,
+                "queried": queried,
             },
             "models": models,
             "tracked_vram_mb": tracked_vram,
