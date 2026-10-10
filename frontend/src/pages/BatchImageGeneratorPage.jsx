@@ -1723,19 +1723,28 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                     sx={{ mt: 2 }}
                   />
                   <Box sx={{ mt: 1.5, display: 'flex', flexDirection: 'column', gap: 0.75 }}>
+                    {/* The backend adds the anatomy phrasing only on the tag path
+                        (offline_image_generator.enhance_prompt_for_quality); a prose
+                        model, and Auto while it resolves to one, skips it. */}
                     <SettingChip
                       label="Enhance anatomy"
                       on={enhanceAnatomy}
-                      disabled={unusedNegAnat}
+                      disabled={prosePrompts}
                       tooltip={
-                        unusedNegAnat
-                          ? 'This model does not use anatomy enhancement.'
+                        prosePrompts
+                          ? 'Not used here: this model reads the prompt as plain sentences, so anatomy tags would be drawn as scene content. Describe the pose in words instead.'
                           : 'Adds anatomy phrasing when the prompt is a person.'
                       }
                       onToggle={setEnhanceAnatomy}
                     />
-                    {unusedNegAnat && (
-                      <Hint>This model does not use a negative prompt or anatomy enhancement.</Hint>
+                    {(prosePrompts || unusedNegAnat) && (
+                      <Hint>
+                        {prosePrompts && unusedNegAnat
+                          ? 'This model does not use a negative prompt or anatomy enhancement.'
+                          : prosePrompts
+                            ? 'This model does not use anatomy enhancement.'
+                            : 'This model does not use a negative prompt.'}
+                      </Hint>
                     )}
                   </Box>
                 </Box>

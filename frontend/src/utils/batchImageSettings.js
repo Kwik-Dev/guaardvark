@@ -27,9 +27,10 @@ export const isZimageModel = (model) => modelFamily(model) === 'zimage';
 
 /**
  * Stills paths with no negative prompt: Z-Image and Krea 2 Turbo (CFG-free)
- * and Sana Sprint (its pipeline takes none). The backend ignores negative
- * prompt and enhance-anatomy on these. Krea Raw still uses both; `auto` may
- * route to SDXL so it stays editable.
+ * and Sana Sprint (its pipeline takes none). Krea Raw still uses one; `auto`
+ * may route to SDXL so it stays editable. Whether anatomy phrasing applies is
+ * a different question, answered by promptStyleFor: the backend skips it for
+ * prose models only, and Krea Turbo and Sana still take it.
  */
 export function ignoresNegativeAndAnatomy(model) {
   const fam = modelFamily(model);
