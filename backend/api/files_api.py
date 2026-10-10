@@ -1481,6 +1481,21 @@ def download_document(doc_id):
         return error_response("Failed to download document", 500, "DOWNLOAD_ERROR")
 
 
+def _thumbnail_dirs(physical: Path) -> list[Path]:
+    """Directories that may hold a cached thumbnail for ``physical``, nearest first.
+
+    Uploads, copies (``_copy_document_into``) and the ffmpeg fallback below keep
+    ``thumbnails/`` beside the file. The batch image and video generators lay a
+    batch out as ``<batch>/images/<file>`` (``<item>/videos/<file>``) with
+    ``<batch>/thumbnails/<stem>.jpg`` one level up, so a file in an ``images/``
+    or ``videos/`` directory is also looked up there.
+    """
+    dirs = [physical.parent / "thumbnails"]
+    if physical.parent.name in ("images", "videos"):
+        dirs.append(physical.parent.parent / "thumbnails")
+    return dirs
+
+
 @files_bp.route("/thumbnail", methods=["GET"])
 def get_thumbnail():
     """GET /api/files/thumbnail - Get thumbnail for a document.
@@ -1494,7 +1509,8 @@ def get_thumbnail():
                                 are reachable too.
 
     Looks for a cached thumbnail in a thumbnails/ subdirectory next to
-    the source. Generates one on the fly for video files via ffmpeg.
+    the source, then in the batch's thumbnails/ one level up (see
+    _thumbnail_dirs). Generates one on the fly for video files via ffmpeg.
     Falls back to serving the original file when nothing else hits.
     """
     doc_id_arg = request.args.get("document_id", "").strip()
@@ -1527,19 +1543,17 @@ def get_thumbnail():
     else:
         return error_response("path or document_id parameter required", 400, "NO_TARGET")
 
-    # Look for thumbnail in thumbnails/ subdirectory
+    # Look for a cached thumbnail, nearest location first.
     parent_dir = doc_physical.parent
     thumb_dir = parent_dir / "thumbnails"
     thumb_name = doc_physical.stem + ".jpg"
     thumb_path = thumb_dir / thumb_name
 
-    if thumb_path.exists():
-        return send_file(str(thumb_path), mimetype="image/jpeg")
-
-    # Try .png thumbnail as fallback
-    thumb_png = thumb_dir / (doc_physical.stem + ".png")
-    if thumb_png.exists():
-        return send_file(str(thumb_png), mimetype="image/png")
+    for candidate_dir in _thumbnail_dirs(doc_physical):
+        for ext, mimetype in ((".jpg", "image/jpeg"), (".png", "image/png")):
+            candidate = candidate_dir / (doc_physical.stem + ext)
+            if candidate.exists():
+                return send_file(str(candidate), mimetype=mimetype)
 
     # For video files, try to generate a thumbnail on the fly via ffmpeg
     video_exts = {'.mp4', '.webm', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.m4v'}
