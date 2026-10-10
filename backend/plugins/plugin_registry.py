@@ -142,13 +142,21 @@ class PluginRegistry:
     
     def list_plugins(self) -> List[Dict[str, Any]]:
         """
-        List all plugins with their basic info.
-        
+        List all plugins with their basic info, in display-name order.
+
+        Discovery order is the directory listing's, which differs between
+        file systems and changed every time a plugin was added; the Plugins
+        page draws the cards in this order.
+
         Returns:
             List of plugin info dictionaries
         """
         result = []
-        for plugin_id, metadata in self._plugins.items():
+        ordered = sorted(
+            self._plugins.items(),
+            key=lambda item: ((item[1].name or item[0]).casefold(), item[0]),
+        )
+        for plugin_id, metadata in ordered:
             result.append({
                 'id': plugin_id,
                 'name': metadata.name,
