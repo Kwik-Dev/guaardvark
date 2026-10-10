@@ -13,6 +13,7 @@ from sqlalchemy.orm import joinedload
 from werkzeug.utils import secure_filename
 from backend.utils.db_utils import ensure_db_session_cleanup
 from backend.utils.response_utils import success_response, error_response
+from backend.utils.path_safety import is_within
 
 try:
     from llama_index.core import VectorStoreIndex
@@ -703,14 +704,34 @@ def manage_document(doc_id):
                 content = data["content"]
                 if not isinstance(content, str):
                     return jsonify({"error": "content must be a string"}), 400
+                # A stored path can be absolute (production and interconnector
+                # rows), and os.path.join then ignores the uploads folder. The
+                # file copy is written only when it resolves inside uploads or
+                # outputs; otherwise nothing changes, in the row or on disk.
+                full_path = None
+                upload_root = current_app.config.get("UPLOAD_FOLDER")
+                if document.path and upload_root:
+                    full_path = os.path.join(upload_root, document.path)
+                    storage_roots = [upload_root, current_app.config.get("OUTPUT_DIR")]
+                    if not is_within(full_path, storage_roots):
+                        logger.warning(
+                            f"Refusing to write document {doc_id}: its path resolves outside uploads and outputs"
+                        )
+                        return (
+                            jsonify(
+                                {
+                                    "error": "This document's file lives outside the uploads and outputs folders; refusing to write it.",
+                                    "code": "PATH_OUTSIDE_STORAGE",
+                                }
+                            ),
+                            400,
+                        )
                 document.content = content
                 document.is_code_file = _is_code_file(document.filename)
                 document.size = len(content.encode("utf-8"))
-                if document.path and current_app.config.get("UPLOAD_FOLDER"):
-                    full_path = os.path.join(current_app.config["UPLOAD_FOLDER"], document.path)
-                    if os.path.exists(full_path):
-                        with open(full_path, "w", encoding="utf-8") as f:
-                            f.write(content)
+                if full_path and os.path.exists(full_path):
+                    with open(full_path, "w", encoding="utf-8") as f:
+                        f.write(content)
 
             document.updated_at = datetime.datetime.now(datetime.UTC)
             db.session.commit()
