@@ -28,7 +28,9 @@ import Editor from "@monaco-editor/react";
 import { getDocumentContent, getRepoFileContent, updateDocument } from "../../api/documentService";
 import { getLanguageFromFilename } from "../../utils/languageDetector";
 
-const CodeViewerModal = ({ open, onClose, file, onOpenInCodeEditor }) => {
+// startEditing opens straight into edit mode (the Files page's Edit action);
+// a live-repo file stays in view mode, as its toggle is disabled.
+const CodeViewerModal = ({ open, onClose, file, onOpenInCodeEditor, startEditing = false }) => {
   const [content, setContent] = useState(null);
   const [originalContent, setOriginalContent] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -49,7 +51,7 @@ const CodeViewerModal = ({ open, onClose, file, onOpenInCodeEditor }) => {
     setError(null);
     setContent(null);
     setOriginalContent(null);
-    setEditing(false);
+    setEditing(Boolean(startEditing) && !isLiveRepoFile);
 
     const loader = isLiveRepoFile
       ? getRepoFileContent(file.relative_path || "")
@@ -64,7 +66,7 @@ const CodeViewerModal = ({ open, onClose, file, onOpenInCodeEditor }) => {
       }
       setLoading(false);
     });
-  }, [open, file?.id, file?.relative_path, isLiveRepoFile]);
+  }, [open, file?.id, file?.relative_path, isLiveRepoFile, startEditing]);
 
   const handleCopy = async () => {
     if (!content) return;

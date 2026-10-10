@@ -1622,7 +1622,9 @@ const DocumentsPage = () => {
       return;
     }
     if (isCodeFile(filename)) {
-      setCodeViewer({ file });
+      // Covers code and plain text (.txt, .md, .csv, .log); Edit opens the
+      // modal's editor, double-click opens it read-only.
+      setCodeViewer({ file, editMode });
       return;
     }
     if (isPdfFile(filename)) {
@@ -1640,7 +1642,7 @@ const DocumentsPage = () => {
     window.open(`${API_BASE}/document/${file.id}/download`, '_blank');
   }, []);
 
-  const handleEditImage = useCallback(() => {
+  const handleEditFile = useCallback(() => {
     setContextMenu(null);
     const item = contextMenuItem;
     if (!item || contextMenuType !== 'file') return;
@@ -2547,7 +2549,7 @@ const DocumentsPage = () => {
         onProperties={contextMenuItem?.source_type === 'live_repo' ? undefined : handleProperties}
         onRename={contextMenuItem?.source_type === 'live_repo' ? undefined : handleRename}
         onDownload={handleDownload}
-        onEdit={handleEditImage}
+        onEdit={handleEditFile}
         onColorChange={handleColorChange}
         onIndex={contextMenuItem?.source_type === 'live_repo' ? undefined : handleIndex}
         onReviewWithAgent={contextMenuItem?.source_type === 'live_repo' ? handleReviewWithAgent : undefined}
@@ -2744,6 +2746,7 @@ const DocumentsPage = () => {
         open={!!codeViewer}
         onClose={() => setCodeViewer(null)}
         file={codeViewer?.file}
+        startEditing={Boolean(codeViewer?.editMode)}
         onOpenInCodeEditor={handleOpenInCodeEditor}
       />
 
