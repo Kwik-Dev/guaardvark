@@ -77,4 +77,11 @@ describe('FloatingChatProvider', () => {
     expect(isFloatingChatHiddenRoute('/studio/jobs', routes)).toBe(false);
     expect(isFloatingChatHiddenRoute('/chat2', routes)).toBe(false);
   });
+
+  it('hides on a project chat by default, where the button would cover Send and Stop', () => {
+    expect(isFloatingChatHiddenRoute('/chat')).toBe(true);
+    expect(isFloatingChatHiddenRoute('/chat/7')).toBe(true);
+    expect(isFloatingChatHiddenRoute('/chat2')).toBe(false);
+    expect(isFloatingChatHiddenRoute('/dashboard')).toBe(false);
+  });
 });
