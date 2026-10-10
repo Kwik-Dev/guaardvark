@@ -58,6 +58,7 @@ import BreadcrumbNav from '../components/filesystem/BreadcrumbNav';
 import ImageThumbnailGrid from '../components/images/ImageThumbnailGrid';
 import ImagesContextMenu from '../components/images/ImagesContextMenu';
 import ImageLightbox from '../components/images/ImageLightbox';
+import { fallbackBatchName } from '../utils/batchNames';
 import PublishModal from '../components/modals/PublishModal';
 import PageLayout from '../components/layout/PageLayout';
 import { MEDIA_TABS, MEDIA_LIBRARY_TAB, mediaTabIndexForPath } from '../constants/mediaTabs';
@@ -516,15 +517,6 @@ const ImagesPage = () => {
         month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
       });
     } catch { return ''; }
-  }, []);
-
-  // Legacy batches predate display_name in metadata — pull a humane label
-  // out of "VideoBatch_MM-DD-YYYY_NNN" instead of slicing it to "VideoBatch_0".
-  const fallbackBatchName = useCallback((batchId) => {
-    if (!batchId) return 'Batch';
-    const m = batchId.match(/^VideoBatch_(\d{2})-(\d{2})-\d{4}_(\d+)$/);
-    if (m) return `${m[1]}/${m[2]} #${m[3]}`;
-    return batchId.replace(/^VideoBatch_/, '');
   }, []);
 
   // ──────────────────── Window State Persistence ────────────────────
