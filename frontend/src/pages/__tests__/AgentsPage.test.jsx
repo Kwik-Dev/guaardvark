@@ -153,6 +153,23 @@ describe("AgentsPage", () => {
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("research_agent"));
   });
 
+  it("Copy id still copies when there is no navigator.clipboard (plain http on the LAN)", async () => {
+    Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
+    const execCommand = vi.fn(() => true);
+    document.execCommand = execCommand;
+    try {
+      renderPage();
+      await screen.findByText("Web Research Agent");
+      rightClick("research_agent");
+      fireEvent.click(screen.getByRole("menuitem", { name: "Copy id" }));
+      await waitFor(() => expect(execCommand).toHaveBeenCalledWith("copy"));
+      expect(await screen.findByText("Copied research_agent")).toBeInTheDocument();
+      expect(screen.queryByText("Could not copy to the clipboard")).toBeNull();
+    } finally {
+      delete document.execCommand;
+    }
+  });
+
   it("Reset is disabled for an unedited agent", async () => {
     renderPage();
     await screen.findByText("Web Research Agent");

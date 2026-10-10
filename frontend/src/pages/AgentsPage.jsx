@@ -27,6 +27,7 @@ import { ActionButton, Cluster } from "../components/settings/ui";
 import AgentTile, { agentEdits } from "../components/agents/AgentTile";
 import AgentEditDialog, { ResetAgentDialog } from "../components/agents/AgentEditDialog";
 import useContextMenu from "../hooks/useContextMenu";
+import copyText from "../utils/copyText";
 import { executeAgent, getAgents, resetAgent, toggleAgent } from "../api/agentsService";
 import { createPlan } from "../api/orchestratorService";
 import { useStatus } from "../contexts/StatusContext";
@@ -161,12 +162,9 @@ const AgentsPage = () => {
 
   const copyId = useCallback(
     async (agent) => {
-      try {
-        await navigator.clipboard.writeText(agent.id);
-        notify(`Copied ${agent.id}`);
-      } catch (_err) {
-        notifyError("Could not copy to the clipboard");
-      }
+      // copyText falls back to execCommand: navigator.clipboard is absent over plain http on the LAN.
+      if (await copyText(agent.id)) notify(`Copied ${agent.id}`);
+      else notifyError("Could not copy to the clipboard");
     },
     [notify, notifyError],
   );
