@@ -215,7 +215,7 @@ const BUILT_IN_COMMANDS = [
   },
   {
     name: "/clear",
-    description: "Clear current chat history",
+    description: "Start a fresh chat (the current one stays under All chats)",
     usage: "/clear",
     category: "utility",
     args: "none",

@@ -106,7 +106,10 @@ function handleHelp(args, { addMessage, allCommands }) {
 // ============================================================
 
 function handleClear(args, { chatState }) {
-  // chatState.clearMessages is expected to be passed by the parent
+  // chatState.clearMessages is passed by the parent. Emptying the screen alone
+  // is not a clear: the session's stored messages come back on reload, so the
+  // Chat page passes its "new chat" action and the floating chat starts a new
+  // session id. The old chat stays listed under All chats.
   if (chatState?.clearMessages) {
     chatState.clearMessages();
   }

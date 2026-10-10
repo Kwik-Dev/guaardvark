@@ -2551,7 +2551,7 @@ const ChatPage = () => {
         onUpdateMessage={(tempId, updates) => setMessages((prev) =>
           prev.map((m) => (m.tempId === tempId || m.id === tempId) ? { ...m, ...updates } : m)
         )}
-        onClearMessages={() => setMessages([])}
+        onClearMessages={handleNewChat}
         onPlanCreated={(plan, planId) => {
           const assistantId = `asst_plan_${planId}`;
           setMessages((prev) => [...prev, {
