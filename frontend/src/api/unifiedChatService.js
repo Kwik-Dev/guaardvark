@@ -73,12 +73,15 @@ class UnifiedChatService {
       project_root: options.project_root || options.projectRoot,
       is_voice_message: isVoiceMessage,
     };
-    // One picture goes as ``image``; several go as ``images`` (primary first)
-    // with ``image`` still set to the first for older readers.
+    // One picture goes as ``image``; several go as ``images`` (primary
+    // first), each sent once. The server reads ``images`` when present and
+    // falls back to ``image`` (backend/socketio_instance.py, chat_attachments),
+    // so a request never carries the first picture twice.
     const pictures = Array.isArray(imageBase64) ? imageBase64.filter(Boolean) : (imageBase64 ? [imageBase64] : []);
-    if (pictures.length) {
+    if (pictures.length > 1) {
+      body.images = pictures;
+    } else if (pictures.length === 1) {
       body.image = pictures[0];
-      if (pictures.length > 1) body.images = pictures;
     }
     debugLog('[UnifiedChatService] sendMessage POST /unified (agent_screen_active=', agentScreenActive, ', inAgentMode=', inAgentMode, ')');
     const response = await fetch(`${API_BASE}/api/chat/unified`, {
