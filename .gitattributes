@@ -1,7 +1,9 @@
 # Scripts that bash runs directly. A CRLF checkout (Windows, or WSL with
 # core.autocrlf on) breaks their shebang line, so they are always LF.
-# Python files are run through the interpreter, which accepts either ending.
+# Python elsewhere runs through the interpreter, which accepts either ending;
+# scripts/*.py are also run by their shebang (start.sh says ./scripts/dep_reconciler.py).
 *.sh text eol=lf
+scripts/*.py text eol=lf
 scripts/pre-commit text eol=lf
 scripts/commit-msg text eol=lf
 scripts/pre-push text eol=lf
