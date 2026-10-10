@@ -4,7 +4,7 @@
 // browser prompt did) each time the dialog opens, and onSubmit only ever gets a
 // non-empty trimmed value; cancelling never calls it.
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   Button,
   Dialog,
@@ -42,6 +42,7 @@ const TextInputDialog = ({
   onClose,
 }) => {
   const [value, setValue] = useState(initialValue);
+  const inputRef = useRef(null);
 
   // A fresh draft every time the dialog opens; a stale one from the last use
   // must not leak into the next.
@@ -64,7 +65,16 @@ const TextInputDialog = ({
   };
 
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="xs" fullWidth>
+    // autoFocus alone loses to a caller that keeps focus in its own editor
+    // (the Notes link button holds the text selection on mouse-down), so the
+    // field takes focus again once the dialog has finished opening.
+    <Dialog
+      open={open}
+      onClose={onClose}
+      maxWidth="xs"
+      fullWidth
+      TransitionProps={{ onEntered: () => inputRef.current?.focus() }}
+    >
       <DialogTitle sx={{ fontSize: "0.9rem" }}>{title}</DialogTitle>
       <DialogContent>
         {description && (
@@ -74,6 +84,7 @@ const TextInputDialog = ({
         )}
         <TextField
           autoFocus
+          inputRef={inputRef}
           fullWidth
           size="small"
           type={inputType}
