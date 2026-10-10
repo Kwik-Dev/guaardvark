@@ -79,6 +79,7 @@ import ClipReviewHold, { ReviewStatePill } from "../components/videogen/ClipRevi
 import RenderFailureNote from "../components/videogen/RenderFailureNote";
 import { refusalText } from "../utils/renderFailure";
 import { applicableAdapters as applicableAdapterModels } from "../utils/videoAdapters";
+import { stepsFromProfile, stepsTileNote } from "../utils/videoSteps";
 import { applyClipRename, applyClipRenameToPlayer, clipFileName } from "../utils/videoRename";
 import VideoGenEffectiveSettings from "../components/videogen/VideoGenEffectiveSettings";
 import LiveLatentPreview from "../components/videogen/LiveLatentPreview";
@@ -581,6 +582,18 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     if (!profiles) return null;
     return profiles[advancedParams.speed_profile] ? advancedParams.speed_profile : "standard";
   }, [modelCaps, advancedParams.speed_profile]);
+  const activeProfileSpec = useMemo(
+    () => (activeSpeedProfile ? modelCaps?.speed_profiles?.[activeSpeedProfile] || null : null),
+    [modelCaps, activeSpeedProfile],
+  );
+  // A step count typed in Advanced wins over presets, floors and profiles.
+  const stepsTyped = advancedParams.num_inference_steps !== null && advancedParams.num_inference_steps !== undefined;
+  // When the model's speed profile fixes the steps, the Steps chips cannot
+  // change the render and say so instead of labelling the tile.
+  const profileSteps = useMemo(
+    () => stepsFromProfile({ profileSpec: activeProfileSpec, stepsTyped }),
+    [activeProfileSpec, stepsTyped],
+  );
 
   // Seed the controls from the registry's per-VRAM-class starting settings
   // once, when the selected model's metadata arrives. Anything can be changed
@@ -779,8 +792,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     //
     // An explicit value in Advanced still wins: the floor exists to stop a preset
     // silently choosing a bad number, not to overrule someone who typed one.
-    const profileSpec = activeSpeedProfile ? modelCaps?.speed_profiles?.[activeSpeedProfile] : null;
-    const stepsTyped = !(advancedParams.num_inference_steps === null || advancedParams.num_inference_steps === undefined);
+    const profileSpec = activeProfileSpec;
     const declaredMin = profileSpec?.min_steps ?? modelConfig.minSteps ?? modelCaps?.min_steps ?? (isCogVideoXModel(model, modelMeta[model]) ? 50 : null);
     if (declaredMin && effectiveSteps < declaredMin && !stepsTyped) {
       effectiveSteps = declaredMin;
@@ -935,7 +947,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
           : {}),
       },
     };
-  }, [qualityPreset, durationPreset, motionPreset, model, advancedParams, videoDimensions, lowVramMode, qualityTier, promptStyle, enhancePrompt, directorMode, cinematicKeyframe, directorGuidance, fetaEnabled, fetaWeight, selectedSubjectIds, keyframeModel, postUpscale, highConsistencyMode, modelMeta, modelCaps, activeSpeedProfile, applicableAdapters, applicableEncoders]);
+  }, [qualityPreset, durationPreset, motionPreset, model, advancedParams, videoDimensions, lowVramMode, qualityTier, promptStyle, enhancePrompt, directorMode, cinematicKeyframe, directorGuidance, fetaEnabled, fetaWeight, selectedSubjectIds, keyframeModel, postUpscale, highConsistencyMode, modelMeta, modelCaps, activeSpeedProfile, activeProfileSpec, stepsTyped, applicableAdapters, applicableEncoders]);
 
   const qualityChipOptions = useMemo(() => {
     if (isLtxModel(model, modelMeta[model])) return [];
@@ -1818,7 +1830,11 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         <DashboardTile
           label="Steps"
           value={String(computedParams.num_inference_steps)}
-          sub={lowVramMode ? "Low VRAM clamp" : qualityChipOptions.find((o) => o.value === qualityPreset)?.label || "preset"}
+          sub={stepsTileNote({
+            lowVramClamp: lowVramMode,
+            profile: profileSteps,
+            presetLabel: qualityChipOptions.find((o) => o.value === qualityPreset)?.label,
+          })}
         />
         <DashboardTile
           label="Queue"
@@ -2311,11 +2327,17 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                 )}
               </Cluster>
               {qualityChipOptions.length > 0 && (
-                <Cluster label="Steps" note="raised to the model floor">
+                <Cluster
+                  label="Steps"
+                  note={profileSteps.fixed
+                    ? `set by the speed profile, ${profileSteps.label}; these chips do not change it`
+                    : "raised to the model floor"}
+                >
                   <ChoiceChips
                     ariaLabel="Quality steps"
                     value={qualityPreset}
                     onChange={setQualityPreset}
+                    disabled={profileSteps.fixed}
                     options={qualityChipOptions}
                   />
                 </Cluster>
