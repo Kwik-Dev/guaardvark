@@ -10,11 +10,25 @@ logger = logging.getLogger(__name__)
 self_improvement_bp = Blueprint("self_improvement", __name__, url_prefix="/api/self-improvement")
 
 
+def _close_stale_runs():
+    """A run whose worker died stays ``running`` until something closes it.
+
+    The status routes are polled every few seconds during a scan, so this is
+    the cheap check (no celery inspect): only rows past STALE_RUN_AFTER.
+    """
+    try:
+        from backend.services.self_improvement_service import get_self_improvement_service
+        get_self_improvement_service().recover_stale_runs(probe_workers=False)
+    except Exception as e:
+        logger.warning(f"Stale self-improvement run check skipped: {e}")
+
+
 @self_improvement_bp.route("/status", methods=["GET"])
 def get_status():
     """Get self-improvement system status."""
     from backend.models import db, SystemSetting, SelfImprovementRun
 
+    _close_stale_runs()
     enabled_setting = db.session.query(SystemSetting).filter_by(key="self_improvement_enabled").first()
     locked_setting = db.session.query(SystemSetting).filter_by(key="codebase_locked").first()
 
@@ -111,6 +125,7 @@ def get_runs():
     limit = request.args.get("limit", 20, type=int)
     offset = request.args.get("offset", 0, type=int)
 
+    _close_stale_runs()
     runs = db.session.query(SelfImprovementRun).order_by(
         SelfImprovementRun.timestamp.desc()
     ).offset(offset).limit(limit).all()
@@ -129,6 +144,7 @@ def get_scan(scan_id):
     events and the ``id`` in /runs). ``status`` is ``running`` or terminal:
     success, failed, unverified, no_change, blocked_by_guardian, cancelled."""
     from backend.models import db, SelfImprovementRun
+    _close_stale_runs()
     run = db.session.get(SelfImprovementRun, scan_id)
     if run is None:
         return error_response(f"Scan {scan_id} not found", 404)

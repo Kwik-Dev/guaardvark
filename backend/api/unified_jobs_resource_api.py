@@ -136,6 +136,12 @@ def _collect_self_improvement(*, since, limit) -> Iterable[Job]:
         from backend.models import SelfImprovementRun, db
     except ImportError:
         return
+    try:
+        # A run whose worker died would otherwise sit in this list as running.
+        from backend.services.self_improvement_service import get_self_improvement_service
+        get_self_improvement_service().recover_stale_runs(probe_workers=False)
+    except Exception as e:
+        logger.warning("Stale self-improvement run check skipped: %s", e)
     q = db.session.query(SelfImprovementRun).order_by(SelfImprovementRun.id.desc())
     if since and hasattr(SelfImprovementRun, "started_at"):
         q = q.filter(SelfImprovementRun.started_at >= since)
