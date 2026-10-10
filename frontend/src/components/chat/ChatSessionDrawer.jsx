@@ -86,16 +86,9 @@ const ChatSessionDrawer = ({
     }
   };
 
-  const isAgentSession = (session) => {
-    const preview = (session.preview || "").toLowerCase();
-    const sid = (session.session_id || "").toLowerCase();
-    return (
-      preview.includes("agent") ||
-      preview.includes("self-test") ||
-      preview.includes("monitor") ||
-      sid.includes("agent")
-    );
-  };
+  // The session's stored mode, as the list route serves it (the value the
+  // /agent and /chat commands set). A list without it is a chat session.
+  const isAgentSession = (session) => (session.mode || "chat") === "agent";
 
   const formatDateTime = (isoString) => {
     if (!isoString) return "";
