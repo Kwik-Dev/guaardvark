@@ -430,8 +430,13 @@ const BulkImportDocumentsPage = () => {
                   disabled={submitting}
                 />
               }
-              label="Force copy files (even if already imported)"
+              label="Copy files instead of moving them"
             />
+            <Typography variant="caption" color="text.secondary" sx={{ pl: 4 }}>
+              {form.forceCopy
+                ? "Each file is copied into Documents; the source folder is left as it is."
+                : "Each file is moved out of the source folder into Documents. Tick to copy and leave the source folder as it is."}
+            </Typography>
             <FormControlLabel
               control={
                 <Checkbox
@@ -543,6 +548,11 @@ const BulkImportDocumentsPage = () => {
           <Box component="ul" sx={{ pl: 2, mt: 1 }}>
             <li>From: <strong>{form.sourcePath || "(not specified)"}</strong></li>
             <li>To: <strong>{form.targetFolder || "root"}</strong></li>
+            <li>
+              {form.forceCopy
+                ? "Files are copied; the source folder is left as it is."
+                : "Files are moved out of the source folder."}
+            </li>
             {form.clientId && <li>Client: <strong>{form.clientId.name}</strong></li>}
             {form.projectId && <li>Project: <strong>{form.projectId.name}</strong></li>}
             {form.websiteId && <li>Website: <strong>{form.websiteId.url}</strong></li>}
