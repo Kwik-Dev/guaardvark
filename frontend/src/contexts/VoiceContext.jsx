@@ -6,8 +6,9 @@ import voiceService, {
   getVoiceStatus,
   playAudio,
 } from "../api/voiceService";
-import { BACKEND_URL } from "../api/apiClient";
+import { BACKEND_URL, handleResponse } from "../api/apiClient";
 import { useHealth } from "./HealthContext";
+import { chunkForSpeech, describeSpeakError, speakInChunks } from "../utils/replySpeech";
 import {
   VOICE_SETTINGS_EVENT,
   VOICE_SETTINGS_KEY,
@@ -31,6 +32,11 @@ export const VoiceProvider = ({ children }) => {
   const [recordingError, setRecordingError] = useState(null);
   const [voiceStatus, setVoiceStatus] = useState(null);
   const [availableVoices, setAvailableVoices] = useState([]);
+  // Which engine /voices says will speak ("kokoro" or "piper-tts") and its default voice.
+  const [voiceEngine, setVoiceEngine] = useState(null);
+  const [defaultVoice, setDefaultVoice] = useState(null);
+  // One plain sentence when the last reply could not be spoken; null otherwise.
+  const [speakError, setSpeakError] = useState(null);
   const [selectedVoice, setSelectedVoice] = useState(() => {
     try {
       const voiceSettings = localStorage.getItem('guaardvark_voiceSettings');
@@ -147,38 +153,63 @@ export const VoiceProvider = ({ children }) => {
       .replace(/([^.!?])\s*$/, '$1.'); // Add period if doesn't end with punctuation
   }, []);
 
+  /**
+   * The audio URL for one chunk of text, from the configured voice.
+   * With `options.stream` the backend answers with WAV bytes when Audio
+   * Foundry speaks, and with the usual JSON (or an error) when Piper does;
+   * both are handled, so a stream request never plays an error as audio.
+   */
+  const synthesizeChunk = useCallback(async (chunk, options) => {
+    const result = await textToSpeech(chunk, selectedVoice, null, options);
+    if (result.stream && result.response) {
+      const response = result.response;
+      const type = response.headers?.get?.("content-type") || "";
+      if (response.ok && type.startsWith("audio/")) {
+        return URL.createObjectURL(await response.blob());
+      }
+      const parsed = await handleResponse(response);
+      return parsed.audio_url ? `${BACKEND_URL}${parsed.audio_url}` : null;
+    }
+    return result.audio_url ? `${BACKEND_URL}${result.audio_url}` : null;
+  }, [selectedVoice]);
+
+  /**
+   * Speak a reply. The text is spoken whole, in short chunks: the next chunk is
+   * synthesized while the current one plays. Resolves to {spoken, total,
+   * cancelled, error}; a failure also sets `speakError`, one plain sentence.
+   */
   const speak = useCallback(async (text, options = {}) => {
-    if (!text || !ttsEnabled) return;
+    if (!text || !ttsEnabled) return { spoken: 0, total: 0, cancelled: false, error: null };
     // A stopPlayback() while the audio is still being made cancels this one too.
     const epoch = voiceService.playbackEpoch;
+    const isCancelled = () => voiceService.playbackEpoch !== epoch;
+    incrementActiveTTS();
     try {
-      incrementActiveTTS();
       const cleanedText = cleanTextForSpeech(text);
+      const chunks = chunkForSpeech(cleanedText);
       debugLog('TTS text prepared', {
         originalLength: text.length,
         cleanedLength: cleanedText.length,
+        chunks: chunks.length,
       });
+      if (isMountedRef.current) setSpeakError(null);
 
-      const result = await textToSpeech(cleanedText, selectedVoice, null, options);
-      if (voiceService.playbackEpoch !== epoch) return;
-      if (result.stream && result.response) {
-        // First-chunk streaming integration (per voice audit + backend /stream support).
-        // Convert incremental response to blob for play (or use reader for true chunked <audio>).
-        // Backend now yields first WAV chunk ASAP for lower perceived latency.
-        const blob = await result.response.blob();
-        const audioUrl = URL.createObjectURL(blob);
-        await playAudio(audioUrl);
-        // Note: for true multi-chunk without full wait, use MediaSource + appendBuffer on reader.
-      } else if (result.audio_url) {
-        const audioUrl = `${BACKEND_URL}${result.audio_url}`;
-        await playAudio(audioUrl);
+      const result = await speakInChunks(chunks, {
+        synthesize: (chunk) => synthesizeChunk(chunk, options),
+        play: playAudio,
+        isCancelled,
+      });
+      if (result.error) {
+        console.error("TTS failed:", result.error);
+        if (isMountedRef.current) setSpeakError(describeSpeakError(result.error, result));
       }
-    } catch (error) {
-      console.error("TTS failed:", error);
+      return result;
     } finally {
       decrementActiveTTS();
     }
-  }, [selectedVoice, ttsEnabled, incrementActiveTTS, decrementActiveTTS, cleanTextForSpeech]);
+  }, [ttsEnabled, incrementActiveTTS, decrementActiveTTS, cleanTextForSpeech, synthesizeChunk]);
+
+  const clearSpeakError = useCallback(() => setSpeakError(null), []);
 
   const clearTranscription = useCallback(() => {
     setTranscribedText("");
@@ -299,16 +330,21 @@ export const VoiceProvider = ({ children }) => {
       const voices = await getAvailableVoices();
       if (!isMountedRef.current) return;
       setAvailableVoices(voices.voices || []);
+      setVoiceEngine(voices.engine || null);
+      setDefaultVoice(voices.default_voice || null);
 
       if (voices.voices && voices.voices.length > 0) {
         if (!isMountedRef.current) return;
 
-        const isCurrentVoiceAvailable = voices.voices.some(v => v.id === selectedVoice);
+        // The saved voice may belong to the other engine (a Piper id while
+        // Kokoro speaks, or the reverse): speak with this engine's default.
+        const isCurrentVoiceAvailable = voices.voices.some(v => v.id === selectedVoice && v.available !== false);
         if (!isCurrentVoiceAvailable) {
-          const defaultVoice = voices.voices.find(v => v.id === "libritts") || voices.voices[0];
-          if (defaultVoice) {
+          const fallback = voices.voices.find(v => v.id === voices.default_voice)
+            || voices.voices.find(v => v.available !== false);
+          if (fallback) {
             if (!isMountedRef.current) return;
-            setSelectedVoice(defaultVoice.id);
+            setSelectedVoice(fallback.id);
           }
         }
       }
@@ -466,17 +502,21 @@ export const VoiceProvider = ({ children }) => {
     
     voiceStatus,
     availableVoices,
+    voiceEngine,
+    defaultVoice,
     selectedVoice,
     ttsEnabled,
     micEnabled,
-    
+    speakError,
+
     micPermissionState,
     micPermissionError,
     isCheckingPermissions,
-    
+
     startRecording,
     stopRecording,
     speak,
+    clearSpeakError,
     clearTranscription,
     setSelectedVoice,
     setTtsEnabled,

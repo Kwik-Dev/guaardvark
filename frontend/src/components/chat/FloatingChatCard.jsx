@@ -112,7 +112,7 @@ const FloatingChatCard = () => {
   const removeVoiceTurn = useFloatingChatStore((s) => s.removeVoiceTurn);
   const voiceSession = useVoiceSession();
   const voiceActive = useVoiceSessionState((s) => Boolean(s.session));
-  const { speak, ttsEnabled } = useVoice() || {};
+  const { speak, ttsEnabled, speakError, clearSpeakError } = useVoice() || {};
   // True while the reply being streamed answers a voice turn: it is spoken.
   const voiceReplyPendingRef = useRef(false);
 
@@ -957,6 +957,29 @@ const FloatingChatCard = () => {
                   value={Math.min(100, Math.max(0, docUpload.progress || 0))}
                   sx={{ height: 3, borderRadius: 2 }}
                 />
+              </Box>
+            )}
+
+            {/* The last reply could not be spoken (no voice installed, engine down) */}
+            {speakError && (
+              <Box
+                sx={{ px: 1.5, pb: 0.5, display: "flex", alignItems: "center", gap: 0.5 }}
+                data-testid="floating-speak-error"
+              >
+                <Typography variant="caption" sx={{ color: "warning.main", fontSize: "0.72rem", flex: 1 }}>
+                  {speakError}
+                </Typography>
+                {clearSpeakError && (
+                  <IconButton
+                    size="small"
+                    className="floating-chat-btn"
+                    onClick={clearSpeakError}
+                    aria-label="Dismiss voice message"
+                    sx={{ p: 0.25 }}
+                  >
+                    <CloseIcon sx={{ fontSize: 14 }} />
+                  </IconButton>
+                )}
               </Box>
             )}
 
