@@ -61,6 +61,7 @@ def test_list_carries_what_a_tile_shows(client):
     assert research["overridden"] == []
     assert research["tools_missing"] == ["analyze_website"]
     assert research["unavailable_reason"] is None
+    assert research["unavailable_detail"] is None
     assert "tools_detail" not in research
 
 

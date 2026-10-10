@@ -98,6 +98,23 @@ describe("AgentsPage", () => {
     expect(container.querySelector(".MuiChip-root")).toBeNull();
   });
 
+  it("keeps the exact setting out of the tile and shows it in the editor", async () => {
+    const desktop = agent({
+      id: "desktop_automation", name: "Desktop Automation", group: "computer", summary: "Drives the desktop",
+      description: "Mouse and keyboard on this computer.", unavailable_reason: "Off by default for safety",
+      unavailable_detail: "Set GUAARDVARK_DESKTOP_AUTOMATION=true in Guaardvark's .env file and restart to turn it on.",
+    });
+    agentsService.getAgents.mockResolvedValue({ success: true, agents: [...AGENTS, desktop] });
+    agentsService.getAgent.mockResolvedValue({ success: true, agent: detail(desktop) });
+    renderPage();
+    const tileEl = await screen.findByTestId("agent-tile-desktop_automation");
+    expect(within(tileEl).getByText("Off by default for safety")).toBeInTheDocument();
+    expect(within(tileEl).queryByText(/GUAARDVARK_DESKTOP_AUTOMATION/)).toBeNull();
+    fireEvent.click(within(tileEl).getByRole("button"));
+    const dialog = await screen.findByRole("dialog");
+    expect(await within(dialog).findByText(/GUAARDVARK_DESKTOP_AUTOMATION=true/)).toBeInTheDocument();
+  });
+
   it("opens the editor on click", async () => {
     renderPage();
     fireEvent.click(within(await screen.findByTestId("agent-tile-research_agent")).getByRole("button"));

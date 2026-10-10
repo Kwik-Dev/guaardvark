@@ -135,8 +135,32 @@ class TestReadiness:
     def test_desktop_switch(self, monkeypatch, manager):
         import backend.config
         monkeypatch.setattr(backend.config, "DESKTOP_AUTOMATION_ENABLED", False)
-        reason = agent_config.agent_readiness(manager.get_agent("desktop_automation"))
-        assert "GUAARDVARK_DESKTOP_AUTOMATION=true" in reason
+        agent = manager.get_agent("desktop_automation")
+        # The tile line is plain words; the variable name goes in the detail.
+        assert agent_config.agent_readiness(agent) == "Off by default for safety"
+        reason, detail = agent_config.agent_unmet_need(agent)
+        assert reason == "Off by default for safety"
+        assert "GUAARDVARK_DESKTOP_AUTOMATION=true" in detail and ".env" in detail
+
+    def test_browser_switch(self, monkeypatch, manager):
+        import backend.config
+        monkeypatch.setattr(backend.config, "BROWSER_AUTOMATION_ENABLED", False)
+        reason, detail = agent_config.agent_unmet_need(manager.get_agent("browser_automation"))
+        assert reason == "Turned off in the .env file"
+        assert "GUAARDVARK_BROWSER_AUTOMATION=true" in detail
+
+    def test_every_reason_fits_a_tile(self, monkeypatch, manager):
+        """A reason shows on one ellipsised line of a tile, so none may be long or name a variable."""
+        import backend.config
+        monkeypatch.setattr(backend.config, "DESKTOP_AUTOMATION_ENABLED", False)
+        monkeypatch.setattr(backend.config, "BROWSER_AUTOMATION_ENABLED", False)
+        monkeypatch.setattr("backend.utils.settings_utils.get_web_access", lambda: False)
+        monkeypatch.setattr("backend.utils.platform.screen_agent_available", lambda: False)
+        monkeypatch.setattr("backend.utils.platform.media_player_available", lambda: False)
+        for need in ("web_access", "browser_automation", "desktop_automation", "screen_agent", "media_player"):
+            reason, _detail = agent_config._need_unmet(need)
+            assert len(reason) <= 32, (need, reason)
+            assert "GUAARDVARK_" not in reason and "=" not in reason, (need, reason)
 
     def test_screen_needs_linux(self, monkeypatch, manager):
         monkeypatch.setattr("backend.utils.platform.screen_agent_available", lambda: False)
@@ -235,7 +259,16 @@ class TestDescribe:
         assert data["editable"] == ["enabled", "max_iterations", "system_prompt", "model"]
         assert data["tools_missing"] == ["web_search", "fetch_url", "analyze_website"]
         assert data["unavailable_reason"] == "None of its tools are available"
+        assert data["unavailable_detail"] is None
         assert "tools_detail" not in data
+
+    def test_unmet_need_carries_its_detail(self, manager, monkeypatch):
+        from backend.services.agent_tools import ToolRegistry
+        import backend.config
+        monkeypatch.setattr(backend.config, "DESKTOP_AUTOMATION_ENABLED", False)
+        data = manager.describe(manager.get_agent("desktop_automation"), ToolRegistry())
+        assert data["unavailable_reason"] == "Off by default for safety"
+        assert "GUAARDVARK_DESKTOP_AUTOMATION=true" in data["unavailable_detail"]
 
     def test_orchestrator_tool_is_not_missing(self, manager):
         from backend.services.agent_tools import ToolRegistry

@@ -194,6 +194,7 @@ const AgentEditDialog = ({ agent, onClose, onSaved, onToggle, onTest, onError })
                   note={agent?.enabled ? undefined : "off"}
                 />
                 {detail.unavailable_reason && <Hint sx={{ color: "warning.main" }}>{detail.unavailable_reason}</Hint>}
+                {detail.unavailable_detail && <Hint>{detail.unavailable_detail}</Hint>}
               </Line>
 
               {(editable.has("model") || editable.has("max_iterations")) && (
