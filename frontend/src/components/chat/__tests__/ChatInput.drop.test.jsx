@@ -223,7 +223,9 @@ describe("Chat page drop", () => {
     const sendButton = within(screen.getByLabelText("Preparing image...")).getByRole("button");
     expect(sendButton).toBeDisabled();
     fireEvent.click(sendButton);
-    fireEvent.keyPress(screen.getByPlaceholderText(/Type your message/), { key: "Enter", code: "Enter", charCode: 13 });
+    // The composer's placeholder changes once pictures are attached, so the
+    // field is found by its role, not its text.
+    fireEvent.keyPress(screen.getByRole("textbox"), { key: "Enter", code: "Enter", charCode: 13 });
     expect(send).not.toHaveBeenCalled();
 
     expect(await screen.findByAltText("slow.png")).toBeInTheDocument();
