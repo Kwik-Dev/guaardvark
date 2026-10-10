@@ -1,5 +1,34 @@
 import { describe, it, expect, vi } from "vitest";
-import { bindEditorActions } from "../editorBindings";
+import { bindEditorActions, modelPathFor, disposeTabModels } from "../editorBindings";
+
+describe("per-tab models", () => {
+  it("gives two tabs showing the same file name different model paths", () => {
+    const a = modelPathFor({ id: "a1", filePath: "app.py" });
+    const b = modelPathFor({ id: "b2", filePath: "other/app.py" });
+    expect(a).not.toBe(b);
+    expect(a).toMatch(/^inmemory:\/\/code-editor\/a1\/app\.py$/);
+    expect(modelPathFor({ id: "n", filePath: null })).toMatch(/\/untitled$/);
+    expect(modelPathFor(null)).toBeUndefined();
+  });
+
+  it("disposes the models of closed tabs and leaves the others alone", () => {
+    const models = new Map();
+    const monaco = {
+      Uri: { parse: (s) => s },
+      editor: { getModel: (uri) => models.get(uri) || null },
+    };
+    const tabs = [{ id: "a", filePath: "a.js" }, { id: "b", filePath: "b.js" }];
+    for (const tab of tabs) {
+      const model = { disposed: false, isDisposed: () => model.disposed, dispose: () => { model.disposed = true; } };
+      models.set(modelPathFor(tab), model);
+    }
+    expect(disposeTabModels(monaco, [tabs[0], { id: "never-opened", filePath: "x" }])).toBe(1);
+    expect(models.get(modelPathFor(tabs[0])).disposed).toBe(true);
+    expect(models.get(modelPathFor(tabs[1])).disposed).toBe(false);
+    expect(disposeTabModels(monaco, [tabs[0]])).toBe(0);
+    expect(disposeTabModels(null, tabs)).toBe(0);
+  });
+});
 
 const fakeMonaco = () => ({
   KeyMod: { CtrlCmd: 2048, Shift: 1024 },

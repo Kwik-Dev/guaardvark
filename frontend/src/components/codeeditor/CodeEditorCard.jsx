@@ -46,7 +46,7 @@ import { getLanguageFromFilename } from "../../utils/languageDetector";
 import { revealEditorLine } from "./codeEditorNav";
 import { createAiHoverProvider, readAiHoverPreference, writeAiHoverPreference } from "./aiHover";
 import { saveTargetFor, saveRefusal, loadedTab, tabDisplayName, TAB_LOAD } from "./tabOrigin";
-import { bindEditorActions } from "./editorBindings";
+import { bindEditorActions, modelPathFor, disposeTabModels } from "./editorBindings";
 
 // Monaco command behind the lightbulb actions (Fix with AI, Explain, Optimize):
 // each sends the lines under the marker or selection to the chat card.
@@ -137,6 +137,20 @@ const CodeEditorCard = React.forwardRef(
     // it saves the tab showing now, not the one open when the editor mounted.
     const handleSaveRef = useRef(null);
 
+    // Each tab has its own Monaco model (the Editor's `path` prop); models of
+    // closed tabs are disposed here, and all of them when the card unmounts.
+    const monacoRef = useRef(null);
+    const knownTabsRef = useRef([]);
+    useEffect(() => {
+      const current = new Set((openTabs || []).map((tab) => tab.id));
+      const gone = knownTabsRef.current.filter((tab) => !current.has(tab.id));
+      knownTabsRef.current = openTabs || [];
+      if (gone.length && monacoRef.current) disposeTabModels(monacoRef.current, gone);
+    }, [openTabs]);
+    useEffect(() => () => {
+      if (monacoRef.current) disposeTabModels(monacoRef.current, knownTabsRef.current);
+    }, []);
+
     // Create preview HTML with theme styles
     const getPreviewContent = useCallback(() => {
       if (!currentTab?.content) return '';
@@ -223,6 +237,7 @@ ${currentTab.content}
 
     const handleEditorDidMount = useCallback((editor, monaco) => {
       editorRef.current = editor;
+      monacoRef.current = monaco;
       setEditorMounts((n) => n + 1);
 
       // Configure editor with AI enhancements
@@ -919,6 +934,7 @@ ${currentTab.content}
               )}
               <Editor
                 height="100%"
+                path={modelPathFor(currentTab)}
                 language={currentTab.language}
                 value={currentTab.content}
                 onChange={currentTab.readOnly || currentTab.source === 'live_repo' ? undefined : handleContentChange}

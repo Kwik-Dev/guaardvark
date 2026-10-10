@@ -4,6 +4,31 @@
 // reads the active tab and its handlers through getters at the moment it
 // fires, never from the closure that mounted the editor.
 
+// Every tab gets its own Monaco model, keyed by this URI, so each keeps its
+// own undo stack: with one shared model, Ctrl+Z right after a tab switch put
+// the previous tab's text into the current one.
+export function modelPathFor(tab) {
+  if (!tab) return undefined;
+  const name = (tab.filePath || "untitled").split("/").pop();
+  return `inmemory://code-editor/${encodeURIComponent(String(tab.id))}/${encodeURIComponent(name)}`;
+}
+
+/** Dispose the models of tabs that are gone, so closed tabs do not pile up in Monaco. */
+export function disposeTabModels(monaco, tabs) {
+  if (!monaco?.editor?.getModel || !monaco.Uri?.parse) return 0;
+  let disposed = 0;
+  for (const tab of tabs || []) {
+    const path = modelPathFor(tab);
+    if (!path) continue;
+    const model = monaco.editor.getModel(monaco.Uri.parse(path));
+    if (model && !model.isDisposed?.()) {
+      model.dispose();
+      disposed += 1;
+    }
+  }
+  return disposed;
+}
+
 const CHAT_ACTIONS = [
   { id: "chat.ask", label: "Ask Chat", action: "ask", order: 1 },
   { id: "chat.fix", label: "Fix This", action: "fix", order: 2 },
