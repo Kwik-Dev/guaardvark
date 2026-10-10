@@ -41,13 +41,19 @@ import ChatInput from "../ChatInput";
 import useFileDropZone from "../../../hooks/useFileDropZone";
 
 // The Chat page's wiring: the whole chat is the drop zone, the composer takes the files.
-function ChatSurface({ onSendMessage, disabled = false }) {
+function ChatSurface({ onSendMessage, disabled = false, codeGenMode = false }) {
   const inputRef = useRef(null);
   const drop = useFileDropZone({ onFiles: (files) => inputRef.current?.addFiles(files) });
   return (
     <div data-testid="chat" {...drop.dropProps}>
       <div data-testid="message-list">earlier messages</div>
-      <ChatInput ref={inputRef} onSendMessage={onSendMessage} sessionId="s1" disabled={disabled} />
+      <ChatInput
+        ref={inputRef}
+        onSendMessage={onSendMessage}
+        sessionId="s1"
+        disabled={disabled}
+        codeGenMode={codeGenMode}
+      />
     </div>
   );
 }
@@ -92,7 +98,32 @@ describe("Chat page drop", () => {
     expect(dropNotice[0]).toContain("**Document Uploaded Successfully**");
     expect(dropNotice[0]).toContain("report.pdf");
     expect(dropNotice[0]).toContain("**Status:** Uploaded and indexed");
+    // The page forwards this flag as the engine's skip_nudges: an upload
+    // acknowledgement must not end with "Note: no search ran for this reply."
+    expect(dropNotice[2]).toEqual({ documentNotice: true });
     expect(viaClip.mock.calls[0]).toEqual(dropNotice);
+  });
+
+  it("sends the codegen request for a dropped code file as a normal turn, not a notice", async () => {
+    const send = vi.fn();
+    render(<ChatSurface onSendMessage={send} codeGenMode />);
+    const script = new File(["print(1)"], "script.py", { type: "text/x-python" });
+    drop(screen.getByTestId("message-list"), [script]);
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    const [text, , options] = send.mock.calls[0];
+    expect(text.startsWith("/codegen")).toBe(true);
+    expect(options).toBeUndefined();
+  });
+
+  it("marks a refused file's notice the same way", async () => {
+    const send = vi.fn();
+    render(<ChatSurface onSendMessage={send} />);
+    const exe = new File(["MZ"], "tool.exe", { type: "application/octet-stream" });
+    drop(screen.getByTestId("message-list"), [exe]);
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    expect(uploadFile).not.toHaveBeenCalled();
+    expect(send.mock.calls[0][0]).toContain("tool.exe");
+    expect(send.mock.calls[0][2]).toEqual({ documentNotice: true });
   });
 
   it("uploads a text file dropped on the composer", async () => {

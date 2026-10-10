@@ -103,11 +103,28 @@ describe("FloatingChatCard drop", () => {
     await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1));
     expect(uploadFile.mock.calls[0][0]).toBe(file);
     expect(uploadFile.mock.calls[0].slice(1, 5)).toEqual([null, "chat-upload,file-upload,float-1", {}, null]);
-    const [sessionId, content, , image] = sendMessage.mock.calls[0];
+    const [sessionId, content, options, image] = sendMessage.mock.calls[0];
     expect(sessionId).toBe("float-1");
     expect(content).toContain("**Document Uploaded Successfully**");
     expect(content).toContain("report.pdf");
+    // An upload acknowledgement must not end with "Note: no search ran for this reply."
+    expect(options.skip_nudges).toBe(true);
     expect(image).toBeNull();
+  });
+
+  it("sends a typed message without the notice flag", async () => {
+    await renderCard();
+    const box = screen.getByPlaceholderText(/Type your message/);
+    await act(async () => {
+      fireEvent.change(box, { target: { value: "find the Q3 report" } });
+    });
+    await act(async () => {
+      fireEvent.keyDown(box, { key: "Enter" });
+    });
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1));
+    const [, content, options] = sendMessage.mock.calls[0];
+    expect(content).toBe("find the Q3 report");
+    expect(options.skip_nudges).toBeUndefined();
   });
 
   it("takes documents from its paperclip too", async () => {

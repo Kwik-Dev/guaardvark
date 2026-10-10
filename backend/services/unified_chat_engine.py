@@ -2909,7 +2909,9 @@ class UnifiedChatEngine:
                         continue
                     final_text = _TOOL_LIST_ECHO_FALLBACK_TEXT
                     emit_fn("chat:token", {"content": final_text, "session_id": session_id})
-                # no tool was even attempted this turn (steps is per turn)
+                # no tool was even attempted this turn (steps is per turn).
+                # skip_nudges also arrives from the chat UI on its document-upload
+                # notice turn, where there is nothing to search for.
                 _claims = not steps and self._claims_unrun_search(final_text, session_id)
                 _unlooked = (not steps and not _skip_tools
                              and bool(_LOOKUP_REQUEST_RE.search(selection_text)))

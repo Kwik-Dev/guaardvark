@@ -233,11 +233,15 @@ const ChatInput = forwardRef(
     const _imagePreview = imageState.images.length > 0 ? imageState.images[0].preview : null;
 
     // A document notice waits here while a reply is streaming: the page drops
-    // messages sent while it is busy.
+    // messages sent while it is busy. Each entry is { text, notice }: a notice
+    // only acknowledges the upload, so the page sends it marked as one (the
+    // engine then skips its search nudges); a codegen request is a normal turn.
     const [pendingNotices, setPendingNotices] = useState([]);
     useEffect(() => {
       if (disabled || pendingNotices.length === 0) return;
-      onSendMessage(pendingNotices.join("\n\n"), null);
+      const text = pendingNotices.map((n) => n.text).join("\n\n");
+      const allNotices = pendingNotices.every((n) => n.notice);
+      onSendMessage(text, null, allNotices ? { documentNotice: true } : undefined);
       setPendingNotices([]);
     }, [disabled, pendingNotices, onSendMessage]);
 
@@ -249,7 +253,7 @@ const ChatInput = forwardRef(
         debugLog("Starting file upload", { fileName: file.name, size: file.size });
         const refusal = chatDocumentRefusal(file);
         if (refusal) {
-          notices.push(refusal);
+          notices.push({ text: refusal, notice: true });
           continue;
         }
         setFileUploadState({ uploading: true, progress: 0, fileName: file.name, error: null });
@@ -266,7 +270,7 @@ const ChatInput = forwardRef(
         if (!result.ok) {
           setFileUploadState({ uploading: false, progress: 0, fileName: null, error: result.error });
         }
-        notices.push(result.message);
+        notices.push({ text: result.message, notice: !result.request });
       }
       if (fileRef.current) fileRef.current.value = "";
       setFileUploadState((prev) => (prev.error ? prev : { uploading: false, progress: 0, fileName: null, error: null }));
