@@ -1301,17 +1301,31 @@ def pasted_images_note(descriptions) -> Optional[str]:
 # What the chat entry points put in place of an empty message when pictures
 # are attached; such a message carries no question for the guide dog to relay.
 DEFAULT_PICTURE_MESSAGES = frozenset({"describe this image.", "describe these images."})
+# The composer's own default names the files instead: "Describe this image:
+# a.png" or "Describe these 2 images: a.png, b.png". The file-name shape
+# (ending in an extension) tells it from a question that starts the same way.
+_COMPOSER_DEFAULT_PICTURE_MESSAGE = re.compile(
+    r"^describe (?:this image|these \d+ images):\s*\S.*\.[a-z0-9]{2,5}$", re.IGNORECASE
+)
+
+
+def is_default_picture_message(user_message: Optional[str]) -> bool:
+    """True for a message an entry point or the composer wrote in place of
+    the user's own words when pictures were attached without text."""
+    text = (user_message or "").strip()
+    if not text:
+        return True
+    return text.lower() in DEFAULT_PICTURE_MESSAGES or bool(_COMPOSER_DEFAULT_PICTURE_MESSAGE.match(text))
 
 
 def pasted_image_prompt(user_message: Optional[str]) -> str:
     """The guide-dog prompt for one attached picture.
 
-    The user's question rides along when there is one; the default message
-    the entry points set for a picture without text (one or several) is not
-    a question, so the vision model gets the plain description prompt.
+    The user's question rides along when there is one; a default message
+    standing in for a picture without text (one or several) is not a
+    question, so the vision model gets the plain description prompt.
     """
-    text = (user_message or "").strip()
-    if text and text.lower() not in DEFAULT_PICTURE_MESSAGES:
+    if not is_default_picture_message(user_message):
         return f"Describe this image in detail. The user asks: {user_message}"
     return "Describe this image in detail. What do you see?"
 

@@ -499,6 +499,16 @@ def test_pasted_image_prompt_relays_a_question_but_not_the_default_message():
     assert pasted_image_prompt("  describe these images.  ") == plain
     assert pasted_image_prompt("") == plain
     assert pasted_image_prompt(None) == plain
+    # The composer's defaults name the files; they are not questions either.
+    assert pasted_image_prompt("Describe this image: photo.png") == plain
+    assert pasted_image_prompt("Describe these 2 images: a.png, b.png") == plain
+    assert pasted_image_prompt("Describe these 10 images: a.png, b.png, c.png") == plain
+    # A user's own words that merely start the same way are still relayed.
+    asked = pasted_image_prompt("Describe this image: is the roof damaged?")
+    assert asked.endswith("The user asks: Describe this image: is the roof damaged?")
+    assert pasted_image_prompt("describe these images in one word").endswith(
+        "The user asks: describe these images in one word"
+    )
 
 
 def test_stop_halts_the_descriptions_of_the_remaining_pictures(monkeypatch):
