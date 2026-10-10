@@ -1838,9 +1838,11 @@ const StickyNotesPage = () => {
       </Menu>
 
       {/* ── Delete confirmation dialog ─────────────────────────────── */}
+      {/* handleDeleteNote pushes an undo snapshot, but the undo stack is a ref
+          on this page: it is gone once the page unmounts or reloads. */}
       <Dialog open={Boolean(deleteConfirm)} onClose={() => setDeleteConfirm(null)} maxWidth="xs">
         <DialogTitle sx={{ fontSize: "0.9rem" }}>
-          {`Delete "${deleteNoteTitle}"? This cannot be undone.`}
+          {`Delete "${deleteNoteTitle}"? Ctrl+Z brings it back until you leave or reload this page.`}
         </DialogTitle>
         <DialogActions>
           <Button onClick={() => setDeleteConfirm(null)} size="small">Cancel</Button>
