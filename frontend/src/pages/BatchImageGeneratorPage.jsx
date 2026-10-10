@@ -1996,8 +1996,10 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
 
                         <Grid item xs={12}>
                           {/* auto_enhance picks the prompt-enhancement rung at render time
-                              (stills_policy.resolve_enhance_mode). It never touches steps,
-                              guidance or size — those come from the model's recipe above. */}
+                              (stills_policy.resolve_enhance_mode): a chat-model prose rewrite
+                              for a natural-language model, tag stuffing for a tag-style one.
+                              It never touches steps, guidance or size — those come from the
+                              model's recipe above. */}
                           <FormControlLabel
                             control={
                               <Switch
@@ -2010,11 +2012,13 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                               <Box>
                                 <Typography variant="body2">Enhance prompts automatically</Typography>
                                 <Typography variant="caption" color="text.secondary">
-                                  {autoEnhance
-                                    ? (unusedNegAnat
-                                      ? 'Adds the content type\u2019s quality phrasing to each prompt. Anatomy tags and negatives are not used by this model. Steps and guidance are not changed.'
-                                      : 'Adds the content type\u2019s quality and anatomy phrasing (and negatives) to each prompt. Steps and guidance are not changed.')
-                                    : 'Off — prompts are sent as written.'}
+                                  {!autoEnhance
+                                    ? 'Off — prompts are sent as written.'
+                                    : prosePrompts
+                                      ? 'Rewrites each prompt into a fuller description with the chat model before rendering. If no chat model answers, the prompt goes as typed. Steps and guidance are not changed.'
+                                      : unusedNegAnat
+                                        ? 'Adds the content type\u2019s quality and anatomy phrasing to each prompt. This model ignores negative prompts. Steps and guidance are not changed.'
+                                        : 'Adds the content type\u2019s quality and anatomy phrasing (and negatives) to each prompt. Steps and guidance are not changed.'}
                                 </Typography>
                               </Box>
                             }
