@@ -101,7 +101,7 @@ const _emptyTimeline = () => ({
 });
 
 const VideoEditorPage = () => {
-  const { gpuBlocked, blockReason } = useJobsGate();
+  const { gpuBlocked, blockReason, blockDetail } = useJobsGate();
   const { timeline, commitTimeline, handleUndo } = useTimelineHistory(_emptyTimeline());
   const videoElRef = useRef(null);
   const [mediaLibrary, setMediaLibrary] = useState([]);
@@ -787,7 +787,7 @@ const VideoEditorPage = () => {
               />
             </Box>
 
-            <GpuGateBanner gpuBlocked={gpuBlocked} blockReason={blockReason} />
+            <GpuGateBanner gpuBlocked={gpuBlocked} blockReason={blockReason} blockDetail={blockDetail} />
 
             {/* Toolbar under the preview — Plan / Render / Open in Shotcut */}
             <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap sx={{ pt: 1, mt: 1, borderTop: 1, borderColor: "divider" }}>

@@ -178,7 +178,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   // Live queue panel (mirrors Video Gen) — stacked batches drain one-at-a-time
   const [queue, setQueue] = useState([]);
   const queueSignatureRef = useRef('');
-  const { gpuBusy, blockReason } = useJobsGate({ submitMode: 'queue' });
+  const { gpuBusy, blockReason, blockDetail } = useJobsGate({ submitMode: 'queue' });
 
   // Director intelligence (new) — expand high-level concept via media_director (same as MV)
   const [directorEnabled, setDirectorEnabled] = useState(false);
@@ -2242,7 +2242,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
 
               {/* Action Buttons — queue mode: never blocked by an in-flight batch */}
               <Box sx={{ mt: 3, display: 'flex', flexDirection: 'column', gap: 1 }}>
-                <GpuGateBanner gpuBusy={gpuBusy} blockReason={blockReason} queueMode />
+                <GpuGateBanner gpuBusy={gpuBusy} blockReason={blockReason} blockDetail={blockDetail} queueMode />
                 {installNeed && (
                   <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
                     <Hint>

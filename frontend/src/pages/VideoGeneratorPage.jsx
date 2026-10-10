@@ -1656,7 +1656,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
           ? promptsText.trim().length > 0 && refBoard.images.length + refBoard.videos.length > 0
           : selectedImages.length > 0 || (lastFrameOnly && promptsText.trim().length > 0)
     );
-  const { gpuBusy, blockReason } = useJobsGate({ submitMode: "queue" });
+  const { gpuBusy, blockReason, blockDetail } = useJobsGate({ submitMode: "queue" });
   const castIdentityLocked = selectedSubjectIds.length > 0;
   const keyframeModelOptions = useMemo(() => {
     // With cast: family is auto from the character LoRA (backend ignores manual model).
@@ -2583,7 +2583,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                 faceRestore={advancedParams.face_restore}
                 freeu={advancedParams.freeu}
               />
-              <GpuGateBanner gpuBusy={gpuBusy} blockReason={blockReason} queueMode />
+              <GpuGateBanner gpuBusy={gpuBusy} blockReason={blockReason} blockDetail={blockDetail} queueMode />
               <ActionButton
                 kind={canQueue ? "primary" : "neutral"}
                 onClick={handleGenerate}
