@@ -9,7 +9,7 @@ import os
 import re
 import shutil
 from typing import Optional
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from flask import Blueprint, current_app, jsonify, request, send_file
 from sqlalchemy.exc import SQLAlchemyError
@@ -117,6 +117,17 @@ def ensure_path_is_safe(path: str) -> bool:
     except Exception as e:
         logger.error(f"Path validation error for {path}: {e}")
         return False
+
+
+# Characters no file or folder name may carry: the ones Windows refuses plus
+# the path separators and control characters. Checked per character; the old
+# string form '<>:"/\\|?*\x00-\x1f' made "-" and "x" invalid too, since a
+# string is a set of characters, not a range.
+_INVALID_NAME_CHARS = frozenset('<>:"/\\|?*')
+
+
+def has_invalid_name_chars(name: str) -> bool:
+    return any(ch in _INVALID_NAME_CHARS or ord(ch) < 32 for ch in name)
 
 
 def get_physical_path(relative_path: str) -> Path:
@@ -443,9 +454,7 @@ def rename_folder(folder_id):
         if not new_name or new_name == folder.name:
             return success_response(folder.to_dict())
         
-        # Basic validation for dangerous characters
-        invalid_chars = '<>:"/\\|?*\x00-\x1f'
-        if any(char in invalid_chars for char in new_name):
+        if has_invalid_name_chars(new_name):
             return error_response("Folder name contains invalid characters", 400, "INVALID_FILENAME")
         
         if len(new_name) > 255:
@@ -1057,18 +1066,55 @@ def rename_document(doc_id):
         new_filename = data["filename"].strip()
         if not new_filename:
             return error_response("Invalid filename", 400, "INVALID_FILENAME")
-        
-        # Basic validation for dangerous characters but preserve file extensions
-        invalid_chars = '<>:"/\\|?*\x00-\x1f'
-        if any(char in invalid_chars for char in new_filename):
+        if has_invalid_name_chars(new_filename):
             return error_response("Filename contains invalid characters", 400, "INVALID_FILENAME")
-        
         if len(new_filename) > 255:
             return error_response("Filename too long", 400, "INVALID_FILENAME")
-        document.filename = new_filename
-        document.updated_at = datetime.datetime.now()
-        db.session.commit()
-        logger.info(f"Renamed document {doc_id} to: {new_filename}")
+        if new_filename == document.filename:
+            return success_response(document.to_dict())
+
+        # Mirror rename_folder: the file on disk, its thumbnail and the
+        # registry path all move with the name, so download, preview and
+        # indexing keep finding the file.
+        old_rel = document.path
+        new_rel = str(PurePosixPath(old_rel).with_name(new_filename))
+        old_physical = get_physical_path(old_rel)
+        new_physical = get_physical_path(new_rel)
+        taken = (
+            DBDocument.query.filter(DBDocument.id != doc_id, DBDocument.path == new_rel).first()
+            or DBDocument.query.filter(
+                DBDocument.id != doc_id,
+                DBDocument.folder_id == document.folder_id,
+                DBDocument.filename == new_filename,
+            ).first()
+            or (new_rel != old_rel and new_physical.exists())
+        )
+        if taken:
+            return error_response("A file with this name already exists", 409, "DOCUMENT_EXISTS")
+
+        moves = []  # (from, to) pairs done on disk, undone in reverse if the commit fails
+        if new_rel != old_rel and old_physical.exists():
+            shutil.move(str(old_physical), str(new_physical))
+            moves.append((old_physical, new_physical))
+            old_thumb = old_physical.parent / "thumbnails" / f"{old_physical.stem}.jpg"
+            if old_thumb.exists():
+                new_thumb = old_thumb.with_name(f"{new_physical.stem}.jpg")
+                shutil.move(str(old_thumb), str(new_thumb))
+                moves.append((old_thumb, new_thumb))
+        try:
+            document.filename = new_filename
+            document.path = new_rel
+            document.updated_at = datetime.datetime.now()
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            for src, dst in reversed(moves):
+                try:
+                    shutil.move(str(dst), str(src))
+                except Exception as undo_err:
+                    logger.error(f"Could not move {dst} back to {src} after a failed rename: {undo_err}")
+            raise
+        logger.info(f"Renamed document {doc_id}: {old_rel} -> {new_rel}")
         return success_response(document.to_dict())
     except SQLAlchemyError as e:
         db.session.rollback()
