@@ -386,6 +386,15 @@ const PluginCard = ({ plugin, onAction, onConfigOpen, showMessage }) => {
           {plugin.description || 'No description available.'}
         </Typography>
 
+        {/* Why the plugin is not (fully) ours to use: another install's copy
+            holding the port, a tool its start script could not find. The
+            backend sets it (status_message) and clears it on the next start. */}
+        {plugin.status_message && (
+          <Alert severity="warning" variant="outlined" sx={{ mb: 2 }} data-testid={`plugin-status-message-${plugin.id}`}>
+            {plugin.status_message}
+          </Alert>
+        )}
+
         <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mb: 1 }}>
           <Chip size="small" label={`v${plugin.version}`} variant="outlined" />
           <Chip size="small" label={plugin.type} variant="outlined" />
