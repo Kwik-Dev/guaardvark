@@ -63,6 +63,7 @@ import { pinnedToTop, pinnedFirst, isEditableTarget } from "../components/notes/
 import { useLayout, useDashboardWidth } from "../contexts/LayoutContext";
 import { ContextualLoader } from "../components/common/LoadingStates";
 import { opaqueMenuPaperSx } from "../components/common/opaqueMenuPaper";
+import { toHexColor } from "../utils/colorHex";
 
 const LAYOUT_MODES = ["normal", "compact", "collapsed"];
 const LAYOUT_MODE_LABELS = {
@@ -381,7 +382,7 @@ const StickyNote = React.memo(
             <input
               ref={colorInputRef}
               type="color"
-              value={color.startsWith("rgba") ? "#1e1e1e" : color}
+              value={toHexColor(color)}
               onChange={(e) => onColorChange(e.target.value)}
               style={{
                 position: "absolute",
