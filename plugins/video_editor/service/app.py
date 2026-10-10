@@ -248,6 +248,10 @@ def status() -> dict[str, Any]:
         "ffmpeg": {"found": bool(shutil.which("ffmpeg"))},
         "ffprobe": {"found": bool(shutil.which("ffprobe"))},
         "shotcut": {"found": bool(shutil.which("shotcut"))},
+        "auto_editor": {
+            "found": bool(shutil.which(_runtime.get("auto_editor", {}).get("path") or "auto-editor")),
+            "suggestion": "pip install -r plugins/video_editor/requirements.txt into the plugin venv",
+        },
     }
     return {
         "service": "video_editor",

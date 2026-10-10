@@ -6,6 +6,7 @@ Manages plugin lifecycle and operations.
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -320,6 +321,8 @@ class PluginManager:
         self._gate = PluginOperationGate()  # Traffic light for rapid clicks
         # plugin_id -> why the process on its port is not ours (see _instance_check).
         self._instance_problems: Dict[str, str] = {}
+        # plugin_id -> what its start script warned about (see _note_start_warnings).
+        self._start_warnings: Dict[str, str] = {}
 
         # Initialize status for all plugins
         self._init_plugin_status()
@@ -530,6 +533,41 @@ class PluginManager:
             problems[plugin_id] = problem
         else:
             self.__dict__.setdefault('_instance_problems', {}).pop(plugin_id, None)
+
+    _WARNING_LINE = re.compile(r"^\s*warning:\s*(.+?)\s*$", re.IGNORECASE)
+
+    def _note_start_warnings(self, plugin_id: str, stdout: str) -> None:
+        """Keep what a start script warned about, for the card.
+
+        A start script reports a missing optional tool as a ``Warning:`` line
+        and exits 0 (video_editor: melt, auto-editor), so the plugin runs and
+        the page said Running with nothing more. Lines about the health
+        endpoint are skipped: the manager waits on it itself, with the
+        manifest's own timeout.
+        """
+        warnings: List[str] = []
+        for line in (stdout or "").splitlines():
+            match = self._WARNING_LINE.match(line)
+            if not match or "health" in line.lower():
+                continue
+            warnings.append(match.group(1))
+        store = self.__dict__.setdefault('_start_warnings', {})
+        if warnings:
+            store[plugin_id] = " ".join(warnings)
+            logger.warning(f"Plugin '{plugin_id}' started with warnings: {store[plugin_id]}")
+        else:
+            store.pop(plugin_id, None)
+
+    def _clear_start_warnings(self, plugin_id: str) -> None:
+        self.__dict__.setdefault('_start_warnings', {}).pop(plugin_id, None)
+
+    def _status_message(self, plugin_id: str) -> Optional[str]:
+        """What the card shows under the description: a stranger on the port
+        first (the plugin is then not running at all), else its start warnings."""
+        problem = self.__dict__.setdefault('_instance_problems', {}).get(plugin_id)
+        if problem:
+            return problem
+        return self.__dict__.setdefault('_start_warnings', {}).get(plugin_id)
 
     @staticmethod
     def _local_model_files(plugin_dir: Optional[Path], subdirs: List[str], extensions: List[str]) -> set:
@@ -990,6 +1028,7 @@ class PluginManager:
 
             # Set status to starting
             self._plugin_status[plugin_id] = PluginStatus.STARTING
+            self._clear_start_warnings(plugin_id)
 
             # Try to find and run start script
             start_script = plugin_dir / 'scripts' / 'start.sh'
@@ -1031,6 +1070,8 @@ class PluginManager:
                     return self._fail_plugin_start(
                         plugin_id, {'success': False, 'error': f'Start script failed: {detail}'}
                     )
+
+                self._note_start_warnings(plugin_id, result.get('stdout', ''))
 
                 # Wait for the service to answer, for as long as its manifest
                 # says a start takes (config.timeout, ComfyUI 60 s). A fixed
@@ -1170,6 +1211,7 @@ class PluginManager:
 
                     if not self._check_service_running(metadata):
                         self._plugin_status[plugin_id] = PluginStatus.STOPPED
+                        self._clear_start_warnings(plugin_id)
                         self._save_running()
                         logger.info(f"Plugin stopped: {plugin_id}")
                         return {
@@ -1197,6 +1239,7 @@ class PluginManager:
 
             if not self._check_service_running(metadata):
                 self._plugin_status[plugin_id] = PluginStatus.STOPPED
+                self._clear_start_warnings(plugin_id)
                 self._save_running()
                 logger.info(f"Plugin stopped: {plugin_id}")
                 return {'success': True, 'message': 'Plugin stopped successfully'}
@@ -1333,6 +1376,7 @@ class PluginManager:
             metadata.config.enabled = False
 
         self._plugin_status[plugin_id] = PluginStatus.DISABLED
+        self._clear_start_warnings(plugin_id)
         logger.info(f"Plugin disabled (user pref): {plugin_id}")
         self._broadcast_plugins_status(f"disable:{plugin_id}")
         return {'success': True, 'message': 'Plugin disabled'}
@@ -1482,8 +1526,9 @@ class PluginManager:
         # Display form (plugins/<id>), the same as the listing: this reaches
         # the browser, the CLI and MCP clients.
         info['plugin_dir'] = self.registry.display_plugin_dir(plugin_id) or None
-        if plugin_id in self._instance_problems:
-            info['status_message'] = self._instance_problems[plugin_id]
+        status_message = self._status_message(plugin_id)
+        if status_message:
+            info['status_message'] = status_message
         
         # Add health info if running
         if status == PluginStatus.RUNNING:
@@ -1502,8 +1547,9 @@ class PluginManager:
             status = self._plugin_status.get(plugin_id, PluginStatus.UNKNOWN)
             plugin_info['status'] = status.value
             plugin_info['running'] = status == PluginStatus.RUNNING
-            if plugin_id in self._instance_problems:
-                plugin_info['status_message'] = self._instance_problems[plugin_id]
+            status_message = self._status_message(plugin_id)
+            if status_message:
+                plugin_info['status_message'] = status_message
             # Round to 1 decimal so the frontend doesn't get noisy fractional updates
             plugin_info['cooldown_remaining'] = round(self._gate.cooldown_remaining(plugin_id), 1)
             plugin_info['gpu_exclusive'] = plugin_id in GPU_EXCLUSIVE_PLUGIN_IDS

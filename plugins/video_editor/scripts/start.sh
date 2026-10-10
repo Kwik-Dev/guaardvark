@@ -81,6 +81,15 @@ fi
 # shellcheck disable=SC1091
 source "$PLUGIN_VENV/bin/activate"
 
+# plugin.json lists auto-editor as a required binary; requirements.txt puts it
+# in this venv. Like melt above, a missing one is reported, not fatal: the
+# beat-sync and compose endpoints work without it. The plugin manager keeps
+# "Warning:" lines from a successful start as the card's status message.
+if ! command -v auto-editor >/dev/null 2>&1; then
+    echo "Warning: auto-editor not found — the silence-trim endpoint (/auto-editor/trim) will fail until it is installed."
+    echo "  Install: $PLUGIN_VENV/bin/pip install -r $PLUGIN_ROOT/requirements.txt"
+fi
+
 LOG_DIR="$PROJECT_ROOT/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/video_editor.log"
