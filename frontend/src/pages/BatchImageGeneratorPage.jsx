@@ -2046,7 +2046,11 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                                   {!autoEnhance
                                     ? 'Off — prompts are sent as written.'
                                     : prosePrompts
-                                      ? 'Rewrites each prompt into a fuller description with the chat model before rendering. If no chat model answers, the prompt goes as typed. Steps and guidance are not changed.'
+                                      ? ('Rewrites each prompt into a fuller description with the chat model before rendering. '
+                                        + (params.style === 'realistic'
+                                          ? 'If no chat model answers, the prompt goes as typed. '
+                                          : `If no chat model answers, the prompt goes as typed plus one sentence asking for the ${params.style} look. `)
+                                        + 'Steps and guidance are not changed.')
                                       : unusedNegAnat
                                         ? 'Adds the content type\u2019s quality and anatomy phrasing to each prompt. This model ignores negative prompts. Steps and guidance are not changed.'
                                         : 'Adds the content type\u2019s quality and anatomy phrasing (and negatives) to each prompt. Steps and guidance are not changed.'}
