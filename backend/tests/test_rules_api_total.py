@@ -14,7 +14,7 @@ try:
     from backend.api.rules_api import rules_bp
     from backend.models import Rule, db
 except Exception:  # pragma: no cover - environment without Flask/SQLAlchemy
-    pytest.skip("Flask or backend models not available", allow_module_level=True)
+    pytest.skip("Flask or backend modules not available", allow_module_level=True)
 
 
 @pytest.fixture

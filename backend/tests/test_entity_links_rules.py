@@ -14,7 +14,7 @@ try:
     from backend.api.entity_links_api import entity_links_bp
     from backend.models import Project, Rule, db
 except Exception:  # pragma: no cover - environment without Flask/SQLAlchemy
-    pytest.skip("Flask or backend models not available", allow_module_level=True)
+    pytest.skip("Flask or backend modules not available", allow_module_level=True)
 
 
 @pytest.fixture
