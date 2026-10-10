@@ -111,6 +111,8 @@ import {
   FullscreenExit as FullscreenExitIcon,
 } from "@mui/icons-material";
 
+import axios from "axios";
+import { uploadDroppedMedia } from "../components/videoeditor/useExternalDrop";
 import { formatUiError } from "../utils/uiError";
 import EntityContextMenu from "../components/common/EntityContextMenu";
 import TextInputDialog from "../components/common/TextInputDialog";
@@ -1114,101 +1116,56 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     requestAnimationFrame(() => el?.focus());
   }, []);
 
-  // File upload handling
-  // Upload one end frame through the same route as start images and keep its
-  // server path; sent as last_frame_paths, one per start image.
+  // File upload handling. Start and end images go to Files > Images through
+  // /api/files/upload, the path the References board uses, and are sent as
+  // library document ids, which the generate routes resolve the same way as
+  // a Files pick. (The old /batch-image/upload route put every upload in
+  // Image Gen's Recent Batches as an "Uploaded Images" batch.)
+  const uploadImageDocuments = useCallback(async (files) => {
+    const docs = await uploadDroppedMedia(files, { http: axios });
+    const images = docs.filter((d) => d.kind === "image");
+    if (images.length === 0) throw new Error("Only image files can be used as frames.");
+    return images;
+  }, []);
+
   const handleEndFrameUpload = useCallback(async (file) => {
     if (!file) return;
     setIsUploadingEndFrame(true);
     try {
-      const formData = new FormData();
-      formData.append("files", file);
-      const response = await fetch(`${API_BASE}/batch-image/upload`, { method: "POST", body: formData });
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error || `Upload failed: HTTP ${response.status}`);
-      }
-      const data = await response.json();
-      if (data.success && data.data.batch_id) {
-        const statusRes = await fetch(`${API_BASE}/batch-image/status/${data.data.batch_id}?include_results=true`);
-        const statusData = statusRes.ok ? await statusRes.json() : null;
-        const first = statusData?.data?.results?.find((r) => r.success && r.image_path);
-        if (first) {
-          const fileName = first.image_path.replace(/\\/g, "/").split("/").pop();
-          setEndFrame({
-            ref: first.image_path,
-            name: file.name,
-            thumbnailUrl: `${API_BASE}/batch-image/image/${data.data.batch_id}/${encodeURIComponent(fileName)}`,
-          });
-          return;
-        }
-      }
-      throw new Error("The end frame did not upload");
+      const [doc] = await uploadImageDocuments([file]);
+      setEndFrame({
+        ref: String(doc.id),
+        name: doc.filename || file.name,
+        thumbnailUrl: doc.thumbnail_url || `${API_BASE}/files/thumbnail?document_id=${doc.id}`,
+      });
     } catch (err) {
-      setError(`End frame upload failed: ${err.message}`);
+      setError(`End frame upload failed: ${err.response?.data?.error?.message || err.message}`);
     } finally {
       setIsUploadingEndFrame(false);
     }
-  }, []);
+  }, [uploadImageDocuments]);
 
   const handleFileUpload = useCallback(async (files) => {
     if (!files || files.length === 0) return;
 
     setIsUploading(true);
     try {
-      const formData = new FormData();
-      files.forEach(file => {
-        formData.append('files', file);
-      });
-
-      const response = await fetch(`${API_BASE}/batch-image/upload`, {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error || `Upload failed: HTTP ${response.status}`);
-      }
-
-      const data = await response.json();
-
-      if (data.success && data.data.batch_id) {
-        // Fetch the uploaded images from the new batch
-        const statusRes = await fetch(`${API_BASE}/batch-image/status/${data.data.batch_id}?include_results=true`);
-        if (statusRes.ok) {
-          const statusData = await statusRes.json();
-          if (statusData.success && statusData.data.results) {
-            const newImages = statusData.data.results
-              .filter(r => r.success && r.image_path)
-              .map(r => {
-                const getFilename = (path) => {
-                  if (!path) return null;
-                  const parts = path.replace(/\\/g, '/').split('/');
-                  return parts[parts.length - 1];
-                };
-                const imageFilename = getFilename(r.image_path);
-                return {
-                  id: `${data.data.batch_id}_${imageFilename}`,
-                  path: r.image_path,
-                  thumbnailUrl: r.thumbnail_path
-                    ? `${API_BASE}/batch-image/image/${data.data.batch_id}/${encodeURIComponent(getFilename(r.thumbnail_path))}?thumbnail=true`
-                    : `${API_BASE}/batch-image/image/${data.data.batch_id}/${encodeURIComponent(imageFilename)}`,
-                  name: imageFilename,
-                  batchId: data.data.batch_id,
-                };
-              });
-            setSelectedImages(prev => [...prev, ...newImages]);
-          }
-        }
-        setSuccess(`Uploaded ${files.length} image(s) successfully`);
-      }
+      const docs = await uploadImageDocuments(files);
+      const newImages = docs.map((doc) => ({
+        id: `doc_${doc.id}`,
+        path: String(doc.id),
+        thumbnailUrl: doc.thumbnail_url || `${API_BASE}/files/thumbnail?document_id=${doc.id}`,
+        name: doc.filename,
+        documentId: doc.id,
+      }));
+      setSelectedImages((prev) => [...prev, ...newImages]);
+      setSuccess(`Uploaded ${newImages.length} image(s) to Files > Images`);
     } catch (err) {
-      setError(`Failed to upload files: ${err.message}`);
+      setError(`Failed to upload files: ${err.response?.data?.error?.message || err.message}`);
     } finally {
       setIsUploading(false);
     }
-  }, []);
+  }, [uploadImageDocuments]);
 
   const handleDragOver = useCallback((e) => {
     e.preventDefault();

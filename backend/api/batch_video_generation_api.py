@@ -242,6 +242,30 @@ def _media_path(ref, label: str):
     return (found.path, None) if found.path else (None, found.error or f"{label} not found: {ref}")
 
 
+def _start_frames(refs):
+    """Start images as files, or (None, why).
+
+    A path to a file that exists passes as given (the documented form). Any
+    other reference, a library document id or link as the Video page's
+    uploads and the Files picker give, resolves through ``_media_path`` the
+    way the end frame does.
+    """
+    import os
+    frames = []
+    for i, ref in enumerate(refs, start=1):
+        text = str(ref or "").strip()
+        if not text:
+            return None, f"Start image {i} is empty."
+        if os.path.isfile(text):
+            frames.append(text)
+            continue
+        path, err = _media_path(text, f"Start image {i}")
+        if err:
+            return None, err
+        frames.append(path)
+    return frames, None
+
+
 def _last_frames(data, model_id: str):
     """Index-paired end frames, resolved, or (None, why) on a model without
     a last-frame mode or a frame that cannot be read."""
@@ -343,9 +367,12 @@ def generate_image_to_video_batch():
     """
     try:
         data = request.get_json(silent=True) or request.form.to_dict()
-        image_paths = _parse_list(data.get("image_paths") or data.get("image_ids"))
-        if not image_paths:
+        image_refs = _parse_list(data.get("image_paths") or data.get("image_ids"))
+        if not image_refs:
             return error_response("No image_paths provided", 400)
+        image_paths, start_err = _start_frames(image_refs)
+        if start_err:
+            return _failure_response(start_err)
         # Index-paired with image_paths on models that declare l2v/flf2v and
         # audio_in. guides is a list per item of {"kind", "path", "frame_idx", ...}.
         guides = data.get("guides") if isinstance(data.get("guides"), list) else []
