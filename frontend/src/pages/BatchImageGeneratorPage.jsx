@@ -435,20 +435,30 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
           director_guidance: directorGuidance || undefined,
         })
       });
-      if (!resp.ok) throw new Error('expand failed');
-      const j = await resp.json();
+      let j = null;
+      try {
+        j = await resp.json();
+      } catch (e) {
+        j = null;
+      }
+      if (!resp.ok) {
+        throw new Error(errorMessageFrom(j, `HTTP ${resp.status}`));
+      }
       const plan = j?.data?.plan || j?.plan;
       const shots = (plan && plan.shots) || [];
       if (shots.length) {
         const lines = shots.map(s => (s.prompt || '').trim()).filter(Boolean);
         setBatchItems(lines.join('\n'));
         setInputMode('bulk'); // Director produces multiple -> switch to bulk
-        setSuccess(`Director expanded to ${lines.length} coherent shots (review & launch)`);
+        setSuccess(`Your idea became ${lines.length} shots. Read them over, edit any line, then Start.`);
       } else {
-        setError('Director returned no shots');
+        setError('The chat model gave no shots for this idea. Try a fuller description, or check that a chat model is running under Settings.');
       }
     } catch (e) {
-      setError('Director expand failed (ollama may be busy)');
+      setError(
+        'Could not turn the idea into shots. Check that a chat model is installed and running '
+        + `under Settings, then try again. (${e.message || e})`,
+      );
     } finally {
       setIsExpanding(false);
     }
@@ -2059,19 +2069,34 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                             onChange={(e) => setQuantity(clampQuantity(e.target.value))}
                             inputProps={{ min: 1, max: MAX_QUANTITY }}
                           />
-                          <Button
-                            variant="outlined"
-                            size="small"
-                            onClick={handleDirectorExpand}
-                            disabled={isExpanding || !(batchItems || lookAndFeel).trim()}
-                            title="Media Director (shared with MusicVideo): expand concept into N distinct coherent prompts"
+                          {/* /batch-image/expand-concept: the chat model turns the idea above
+                              into one prompt per shot and fills the prompt box with them. */}
+                          <Tooltip
+                            arrow
+                            title="Turns the idea above into several different shots, one prompt each, written by the chat model. They replace the text above so you can read and edit them before you start."
                           >
-                            {isExpanding ? '…' : 'Director expand'}
-                          </Button>
-                          <FormControlLabel
-                            control={<Switch size="small" checked={directorEnabled} onChange={(e) => setDirectorEnabled(e.target.checked)} />}
-                            label="use director"
-                          />
+                            <span>
+                              <Button
+                                variant="outlined"
+                                size="small"
+                                onClick={handleDirectorExpand}
+                                disabled={isExpanding || !(batchItems || lookAndFeel).trim()}
+                              >
+                                {isExpanding ? 'Writing shots…' : 'Expand into shots'}
+                              </Button>
+                            </span>
+                          </Tooltip>
+                          {/* director_mode: stills_policy picks the chat-model rewrite for every
+                              prompt, whatever the model's default enhancement would be. */}
+                          <Tooltip
+                            arrow
+                            title="Has the chat model rewrite every prompt into a fuller description before rendering, instead of the quick tag phrasing. Prose models get this rewrite anyway when Enhance prompts is on."
+                          >
+                            <FormControlLabel
+                              control={<Switch size="small" checked={directorEnabled} onChange={(e) => setDirectorEnabled(e.target.checked)} />}
+                              label="Rewrite prompts with the chat model"
+                            />
+                          </Tooltip>
                         </Grid>
 
                         <Grid item xs={12} sm={6} md={4}>
