@@ -40,9 +40,11 @@ import DashboardCardWrapper from "../dashboard/DashboardCardWrapper";
 import { useUnifiedProgress } from "../../contexts/UnifiedProgressContext";
 import * as codeIntelligenceService from "../../api/codeIntelligenceService";
 import * as fileOperationsService from "../../api/fileOperationsService";
+import * as documentService from "../../api/documentService";
 import { getLanguageFromFilename } from "../../utils/languageDetector";
 import { revealEditorLine } from "./codeEditorNav";
 import { createAiHoverProvider, readAiHoverPreference, writeAiHoverPreference } from "./aiHover";
+import { saveTargetFor } from "./tabOrigin";
 
 // Monaco command behind the lightbulb actions (Fix with AI, Explain, Optimize):
 // each sends the lines under the marker or selection to the chat card.
@@ -546,8 +548,11 @@ ${currentTab.content}
       if (!currentTab) return;
 
       try {
-        if (currentTab.readOnly || currentTab.source === 'live_repo') {
-          throw new Error('Live repository files are read-only here. Use self-code proposed edits for changes.');
+        // The tab's origin tag decides the save path; a name is never enough,
+        // since a library document and a repo file can share one.
+        const target = saveTargetFor(currentTab);
+        if (target.kind === 'readonly' || target.kind === 'error') {
+          throw new Error(target.message);
         }
         const processId = startProcess("save-file", "Saving file...", "file_generation");
 
@@ -577,10 +582,17 @@ ${currentTab.content}
           throw new Error('Invalid file path');
         }
 
-        // Handle different save targets based on tab source
-        if (currentTab.source === 'document' || currentTab.source === 'filesystem') {
-          // Save to backend/filesystem
-          const result = await fileOperationsService.writeFile(actualFilePath, currentTab.content);
+        if (target.kind === 'document') {
+          // A library document is saved by id through the documents API, the
+          // same route the Files page's code viewer uses. /api/files/write
+          // resolves bare names under the repo root and must not see it.
+          const result = await documentService.updateDocument(target.documentId, { content: currentTab.content });
+          if (result && result.error) {
+            throw new Error(result.error);
+          }
+        } else if (target.kind === 'repo') {
+          // A repo file keeps its repo-relative path and the guarded write route.
+          const result = await fileOperationsService.writeFile(target.path, currentTab.content);
           if (!result.success) {
             throw new Error(result.error || 'Failed to save file');
           }

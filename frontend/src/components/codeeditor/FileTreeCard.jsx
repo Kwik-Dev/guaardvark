@@ -488,10 +488,15 @@ const FileTreeCard = React.forwardRef(
           delete existingFiles[selectedItem.path];
           localStorage.setItem('codeEditorFiles', JSON.stringify(existingFiles));
         } else if (selectedItem.source === 'document') {
-          // Delete from backend
-          const result = await fileOperationsService.deleteFile(selectedItem.path);
-          if (!result.success) {
-            alert(`Failed to delete file: ${result.error}`);
+          // A library document is deleted by id. Its bare name must never reach
+          // /api/files/delete, which resolves names under the repo root.
+          if (!selectedItem.id) {
+            alert('This library document has no id, so it cannot be deleted here.');
+            return;
+          }
+          const result = await documentService.deleteDocument(selectedItem.id);
+          if (result && result.error) {
+            alert(`Failed to delete document: ${result.error}`);
             return;
           }
         } else if (selectedItem.source === 'filesystem') {
@@ -570,8 +575,19 @@ const FileTreeCard = React.forwardRef(
             };
             localStorage.setItem('codeEditorFiles', JSON.stringify(existingFiles));
           }
-        } else if (renameDialog.item.source === 'document' || renameDialog.item.source === 'filesystem') {
-          // Rename file on backend/filesystem
+        } else if (renameDialog.item.source === 'document') {
+          // A library document is renamed by id, not by a path under the repo root.
+          if (!renameDialog.item.id) {
+            alert('This library document has no id, so it cannot be renamed here.');
+            return;
+          }
+          const result = await documentService.renameDocument(renameDialog.item.id, newPath);
+          if (result && result.error) {
+            alert(`Failed to rename document: ${result.error}`);
+            return;
+          }
+        } else if (renameDialog.item.source === 'filesystem') {
+          // Rename a repo file by its repo-relative path
           const result = await fileOperationsService.renameFile(oldPath, newPath);
           if (!result.success) {
             alert(`Failed to rename file: ${result.error}`);
