@@ -167,6 +167,10 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   // Set by an Install button: Manage models opens on that row and starts it.
   const [installModelId, setInstallModelId] = useState(null);
   const [showPromptPreview, setShowPromptPreview] = useState(false);
+  // Where the offline generator renders ("cuda", "mps", "cpu"); from /batch-image/status.
+  // On a CUDA card the worker renders one picture at a time whatever Max Workers
+  // says (batch_image_generator: one pipeline on one card), so the page shows that.
+  const [generatorDevice, setGeneratorDevice] = useState(null);
   // Live queue panel (mirrors Video Gen) — stacked batches drain one-at-a-time
   const [queue, setQueue] = useState([]);
   const queueSignatureRef = useRef('');
@@ -307,6 +311,13 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   // picked. Every mode but CSV sends the cast.
   const castLocked = castSubjectIds.length > 0 && inputMode !== 'csv';
   const castLockedNote = 'Set by the selected character\u2019s base model while a character is picked.';
+  // The worker renders one picture at a time on a CUDA card (one pipeline, one
+  // card), so Max Workers only applies elsewhere; the chip shows the real count.
+  const oneAtATime = generatorDevice === 'cuda' || isFlux;
+  const effectiveWorkers = oneAtATime ? 1 : params.max_workers;
+  const oneAtATimeNote = isFlux && generatorDevice !== 'cuda'
+    ? 'FLUX renders one picture at a time.'
+    : 'One picture at a time on the graphics card.';
 
   // Generating never downloads a model. A picked model that is not installed
   // holds Start until Install finishes. A character renders with its own base
@@ -455,6 +466,8 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       if (!data.success) {
         setError('Batch image generation service is not available');
       }
+      const device = data.data?.image_generator?.device;
+      if (typeof device === 'string') setGeneratorDevice(device);
     } catch (err) {
       setError('Failed to check service status');
     }
@@ -1838,9 +1851,10 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                         variant="outlined"
                       />
                       <Chip
-                        label={`Workers: ${params.max_workers}`}
+                        label={oneAtATime ? 'One at a time' : `Workers: ${effectiveWorkers}`}
                         size="small"
                         variant="outlined"
+                        title={oneAtATime ? oneAtATimeNote : undefined}
                       />
                     </Box>
                   </Box>
@@ -2128,18 +2142,22 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
 
                         <Grid item xs={12}>
                           <Typography gutterBottom>
-                            Max Workers: {params.max_workers}
-                            {String(params.model).startsWith('flux') ? ' (FLUX forces 1 on server)' : ''}
+                            Max Workers: {effectiveWorkers}
                           </Typography>
                           <Slider
-                            value={params.max_workers}
+                            value={effectiveWorkers}
                             onChange={(e, value) => setParams({ ...params, max_workers: value })}
                             min={1}
                             max={4}
                             step={1}
                             marks
-                            disabled={String(params.model).startsWith('flux')}
+                            disabled={oneAtATime}
                           />
+                          {oneAtATime && (
+                            <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                              {oneAtATimeNote}
+                            </Typography>
+                          )}
                         </Grid>
 
                         <Grid item xs={12}>
