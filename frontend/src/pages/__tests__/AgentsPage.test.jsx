@@ -98,6 +98,23 @@ describe("AgentsPage", () => {
     expect(container.querySelector(".MuiChip-root")).toBeNull();
   });
 
+  it("keeps the exact setting out of the tile and shows it in the editor", async () => {
+    const desktop = agent({
+      id: "desktop_automation", name: "Desktop Automation", group: "computer", summary: "Drives the desktop",
+      description: "Mouse and keyboard on this computer.", unavailable_reason: "Off by default for safety",
+      unavailable_detail: "Set GUAARDVARK_DESKTOP_AUTOMATION=true in Guaardvark's .env file and restart to turn it on.",
+    });
+    agentsService.getAgents.mockResolvedValue({ success: true, agents: [...AGENTS, desktop] });
+    agentsService.getAgent.mockResolvedValue({ success: true, agent: detail(desktop) });
+    renderPage();
+    const tileEl = await screen.findByTestId("agent-tile-desktop_automation");
+    expect(within(tileEl).getByText("Off by default for safety")).toBeInTheDocument();
+    expect(within(tileEl).queryByText(/GUAARDVARK_DESKTOP_AUTOMATION/)).toBeNull();
+    fireEvent.click(within(tileEl).getByRole("button"));
+    const dialog = await screen.findByRole("dialog");
+    expect(await within(dialog).findByText(/GUAARDVARK_DESKTOP_AUTOMATION=true/)).toBeInTheDocument();
+  });
+
   it("opens the editor on click", async () => {
     renderPage();
     fireEvent.click(within(await screen.findByTestId("agent-tile-research_agent")).getByRole("button"));
@@ -113,6 +130,24 @@ describe("AgentsPage", () => {
     rightClick("research_agent");
     const names = screen.getAllByRole("menuitem").map((item) => item.textContent);
     expect(names).toEqual(["Edit", "Test", "Disable", "Copy id", "Reset to default"]);
+  });
+
+  it("the Test dialog says a run is real for an agent and plan-only for the orchestrator", async () => {
+    renderPage();
+    await screen.findByText("Web Research Agent");
+    rightClick("research_agent");
+    fireEvent.click(screen.getByRole("menuitem", { name: "Test" }));
+    let dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/really runs the agent/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/may create files/)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    rightClick("orchestrator_agent");
+    fireEvent.click(screen.getByRole("menuitem", { name: "Test" }));
+    dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/the steps are not run/)).toBeInTheDocument();
+    expect(within(dialog).queryByText(/really runs the agent/)).toBeNull();
   });
 
   it("Disable calls toggleAgent", async () => {
@@ -134,6 +169,23 @@ describe("AgentsPage", () => {
     rightClick("research_agent");
     fireEvent.click(screen.getByRole("menuitem", { name: "Copy id" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("research_agent"));
+  });
+
+  it("Copy id still copies when there is no navigator.clipboard (plain http on the LAN)", async () => {
+    Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
+    const execCommand = vi.fn(() => true);
+    document.execCommand = execCommand;
+    try {
+      renderPage();
+      await screen.findByText("Web Research Agent");
+      rightClick("research_agent");
+      fireEvent.click(screen.getByRole("menuitem", { name: "Copy id" }));
+      await waitFor(() => expect(execCommand).toHaveBeenCalledWith("copy"));
+      expect(await screen.findByText("Copied research_agent")).toBeInTheDocument();
+      expect(screen.queryByText("Could not copy to the clipboard")).toBeNull();
+    } finally {
+      delete document.execCommand;
+    }
   });
 
   it("Reset is disabled for an unedited agent", async () => {

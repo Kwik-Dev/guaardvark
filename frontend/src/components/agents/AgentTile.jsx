@@ -18,6 +18,21 @@ export function agentTone(agent) {
   return "ok";
 }
 
+/**
+ * The hover text on the tile's title: the description, plus the exact setting to
+ * change when the agent cannot run. The tile's one line holds only the plain reason.
+ */
+export function agentHelp(agent) {
+  if (!agent.unavailable_detail) return agent.description;
+  return (
+    <>
+      {agent.description}
+      <br />
+      {agent.unavailable_detail}
+    </>
+  );
+}
+
 /** The tile's second line: why it cannot run, or its tool count, limit, model and edits. */
 export function agentSub(agent) {
   if (!agent.enabled) return "Off";
@@ -46,7 +61,7 @@ const AgentTile = ({ agent, onOpen, onContextMenu }) => (
   >
     <DashboardTile
       label={agent.name}
-      help={agent.description}
+      help={agentHelp(agent)}
       tone={agentTone(agent)}
       value={agent.summary || agent.description}
       sub={agentSub(agent)}

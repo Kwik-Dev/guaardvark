@@ -564,8 +564,10 @@ class AgentConfigManager:
         """The agent as the Agents page shows it.
 
         Adds to to_dict(): editable, overridden, group, summary, tools_missing
-        (names the registry lacks) and unavailable_reason; with detail, also
-        tools_detail [{name, description, requires_approval, installed}].
+        (names the registry lacks), unavailable_reason (plain words that fit a
+        tile) and unavailable_detail (the exact setting to change, or None);
+        with detail, also tools_detail [{name, description, requires_approval,
+        installed}].
         """
         data = agent.to_dict()
         meta = agent.metadata or {}
@@ -573,7 +575,7 @@ class AgentConfigManager:
         missing: List[str] = []
         if registry is not None and not is_orchestrator:
             _, missing = registry.subset(agent.tools)
-        reason = agent_readiness(agent)
+        reason, reason_detail = agent_unmet_need(agent) or (None, None)
         if not reason and agent.tools and len(missing) == len(agent.tools):
             reason = "None of its tools are available"
         data.update({
@@ -583,6 +585,7 @@ class AgentConfigManager:
             "summary": meta.get("summary", ""),
             "tools_missing": missing,
             "unavailable_reason": reason,
+            "unavailable_detail": reason_detail,
         })
         if detail:
             data["tools_detail"] = _tools_detail(agent, registry, is_orchestrator)
@@ -683,39 +686,55 @@ def overridden_fields(agent: AgentConfig) -> List[str]:
     return [key for key in agent.editable if getattr(agent, key) != getattr(default, key)]
 
 
-def _need_unmet(need: str) -> Optional[str]:
-    """Why one of an agent's needs is not met on this install, or None when it is."""
+def _need_unmet(need: str) -> Optional[Tuple[str, Optional[str]]]:
+    """Why one of an agent's needs is not met on this install, or None when it is.
+
+    Returns (reason, detail). The reason is a few plain words short enough for
+    the one-line tile on the Agents page; the detail, when there is one, names
+    the exact setting to change and is shown in the tile's tooltip and the editor.
+    """
     from backend import config as _config
     if need == "web_access":
         from backend.utils.settings_utils import get_web_access
-        return None if get_web_access() else "Web access is off in Settings"
+        return None if get_web_access() else ("Web access is off in Settings", None)
     if need == "browser_automation":
-        return None if _config.BROWSER_AUTOMATION_ENABLED else "Browser automation is off (GUAARDVARK_BROWSER_AUTOMATION)"
+        if _config.BROWSER_AUTOMATION_ENABLED:
+            return None
+        return ("Turned off in the .env file",
+                "Set GUAARDVARK_BROWSER_AUTOMATION=true in Guaardvark's .env file and restart to turn it on.")
     if need == "desktop_automation":
-        return None if _config.DESKTOP_AUTOMATION_ENABLED else "Off until GUAARDVARK_DESKTOP_AUTOMATION=true"
+        if _config.DESKTOP_AUTOMATION_ENABLED:
+            return None
+        return ("Off by default for safety",
+                "Set GUAARDVARK_DESKTOP_AUTOMATION=true in Guaardvark's .env file and restart to turn it on.")
     if need == "screen_agent":
         from backend.utils.platform import screen_agent_available
-        return None if screen_agent_available() else "The agent screen needs Linux"
+        return None if screen_agent_available() else ("The agent screen needs Linux", None)
     if need == "media_player":
         from backend.utils.platform import media_player_available
-        return None if media_player_available() else "Media playback needs Linux"
+        return None if media_player_available() else ("Media playback needs Linux", None)
+    return None
+
+
+def agent_unmet_need(agent: AgentConfig) -> Optional[Tuple[str, Optional[str]]]:
+    """(reason, detail) for the first of the agent's needs this install does not
+    meet, or None when it meets them all. Reads the agent's metadata["needs"]."""
+    for need in (agent.metadata or {}).get("needs") or []:
+        try:
+            unmet = _need_unmet(need)
+        except Exception as e:
+            logger.debug(f"Readiness check '{need}' failed for {agent.id}: {e}")
+            unmet = None
+        if unmet:
+            return unmet
     return None
 
 
 def agent_readiness(agent: AgentConfig) -> Optional[str]:
-    """Why this agent cannot do its work on this install, or None when it can.
-
-    Reads the agent's metadata["needs"]; the first unmet need is the reason.
-    """
-    for need in (agent.metadata or {}).get("needs") or []:
-        try:
-            reason = _need_unmet(need)
-        except Exception as e:
-            logger.debug(f"Readiness check '{need}' failed for {agent.id}: {e}")
-            reason = None
-        if reason:
-            return reason
-    return None
+    """Why this agent cannot do its work on this install, in plain words, or
+    None when it can."""
+    unmet = agent_unmet_need(agent)
+    return unmet[0] if unmet else None
 
 
 def llm_for_agent(agent: Optional[AgentConfig], default=None):
