@@ -82,6 +82,7 @@ import { applicableAdapters as applicableAdapterModels } from "../utils/videoAda
 import { stepsFromProfile, stepsTileNote } from "../utils/videoSteps";
 import { promptControlsState } from "../utils/videoPromptControls";
 import { joinPreviews, previewLabel, promptsToPreview } from "../utils/videoPreviewPrompts";
+import { comfyUiLink } from "../utils/comfyUiLink";
 import { applyClipRename, applyClipRenameToPlayer, clipFileName } from "../utils/videoRename";
 import VideoGenEffectiveSettings from "../components/videogen/VideoGenEffectiveSettings";
 import LiveLatentPreview from "../components/videogen/LiveLatentPreview";
@@ -187,6 +188,9 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   const [faceRestoreModelReady, setFaceRestoreModelReady] = useState(null);
   const faceRestoreAvailable =
     faceRestoreNodeAvailable === true && faceRestoreModelReady === true;
+  // Where the backend talks to ComfyUI (/gpu/comfyui/status); the ComfyUI
+  // button opens that port on the host this page was opened on.
+  const [comfyUiUrl, setComfyUiUrl] = useState(null);
 
   // Prompt preview state (calls /enhance-preview)
   const [previewEnhanced, setPreviewEnhanced] = useState("");
@@ -324,6 +328,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         const gpu = await gpuRes.json();
         nodeOk = gpu?.data?.face_restore_node_available === true;
         setFaceRestoreNodeAvailable(nodeOk);
+        if (gpu?.data?.comfyui_url) setComfyUiUrl(gpu.data.comfyui_url);
       }
       if (modelsRes.ok) {
         const models = await modelsRes.json();
@@ -2258,7 +2263,11 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                     </Select>
                   </FormControl>
                   <ActionButton onClick={() => setVideoModelsModalOpen(true)}>Manage models</ActionButton>
-                  <ActionButton kind="link" onClick={() => window.open("http://localhost:8188", "_blank")}>
+                  <ActionButton
+                    kind="link"
+                    tooltip={`Opens ${comfyUiLink(window.location.hostname, comfyUiUrl)} in a new tab`}
+                    onClick={() => window.open(comfyUiLink(window.location.hostname, comfyUiUrl), "_blank", "noopener")}
+                  >
                     ComfyUI
                   </ActionButton>
                 </Line>
