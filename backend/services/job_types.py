@@ -163,6 +163,26 @@ _UNIFIED_PROGRESS_STATUS_MAP = {
     "canceled": JobStatus.CANCELLED,
 }
 
+# SelfImprovementRun.status (self_improvement_service.py). "no_change" is a run
+# that scanned and found nothing to do; "blocked_by_guardian" is a run the
+# guardian stopped before it applied anything, so it is cancelled, not broken.
+_SELF_IMPROVEMENT_STATUS_MAP = {
+    "running": JobStatus.RUNNING,
+    "success": JobStatus.COMPLETED,
+    "no_change": JobStatus.COMPLETED,
+    "failed": JobStatus.FAILED,
+    "blocked_by_guardian": JobStatus.CANCELLED,
+    "cancelled": JobStatus.CANCELLED,
+}
+
+# ExperimentRun.status (rag_autoresearch_service.py). A row is written once the
+# experiment has run; "keep" and "discard" are its verdict, not its health.
+_EXPERIMENT_STATUS_MAP = {
+    "keep": JobStatus.COMPLETED,
+    "discard": JobStatus.COMPLETED,
+    "crash": JobStatus.FAILED,
+}
+
 # Catch-all fallback for less-trafficked kinds. Unknown values map to FAILED
 # rather than silently to a "looks healthy" status.
 _GENERIC_STATUS_MAP = {
@@ -196,6 +216,8 @@ def map_status(kind: JobKind, native_status: str | None) -> JobStatus:
         JobKind.PUBLISH: _TASK_STATUS_MAP,
         JobKind.WEBSITE: _TASK_STATUS_MAP,
         JobKind.TRAINING: _TRAINING_STATUS_MAP,
+        JobKind.SELF_IMPROVEMENT: _SELF_IMPROVEMENT_STATUS_MAP,
+        JobKind.EXPERIMENT: _EXPERIMENT_STATUS_MAP,
         JobKind.UNIFIED_PROGRESS: _UNIFIED_PROGRESS_STATUS_MAP,
         JobKind.VIDEO_GEN: _GENERIC_STATUS_MAP,
         JobKind.MUSIC_VIDEO: _GENERIC_STATUS_MAP,
