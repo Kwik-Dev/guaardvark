@@ -3,7 +3,7 @@
 
 import { BASE_URL, handleResponse } from "./apiClient";
 
-const CODE_EXEC_BASE = "/api/code-execution";
+const CODE_EXEC_BASE = "/code-execution";
 
 /**
  * Execute Python code
