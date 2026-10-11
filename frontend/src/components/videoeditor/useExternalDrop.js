@@ -33,9 +33,11 @@ export function kindForFile(name = "", fallback = "video") {
  * @param {string} [opts.apiBase]  API root, e.g. "/api"
  * @param {string} [opts.fallbackFolder]  folder for a kind with no folder of its own
  * @param {(pct: number) => void} [opts.onProgress]
+ * @param {boolean} [opts.autoIndex]  false keeps the files out of the vision index
+ *   (inputs to a render, not documents to search); the route's default is true
  * @returns {Promise<Array<object>>} the created Documents, each with its `kind`
  */
-export async function uploadDroppedMedia(files, { http, apiBase = API_BASE, fallbackFolder = "Videos", onProgress } = {}) {
+export async function uploadDroppedMedia(files, { http, apiBase = API_BASE, fallbackFolder = "Videos", onProgress, autoIndex = true } = {}) {
   const folderApi = filesFolderApi(http, `${apiBase}/files`);
   const folderCache = new Map();
   const uploaded = [];
@@ -45,6 +47,7 @@ export async function uploadDroppedMedia(files, { http, apiBase = API_BASE, fall
     const form = new FormData();
     form.append("file", file);
     form.append("folder_path", folderPath);
+    if (!autoIndex) form.append("auto_index", "false");
     const res = await http.post(`${apiBase}/files/upload`, form, {
       headers: { "Content-Type": "multipart/form-data" },
       onUploadProgress: (e) => {

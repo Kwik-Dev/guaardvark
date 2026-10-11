@@ -242,26 +242,45 @@ def _media_path(ref, label: str):
     return (found.path, None) if found.path else (None, found.error or f"{label} not found: {ref}")
 
 
+def _caller_is_this_machine() -> bool:
+    """The request comes from the Guaardvark machine itself (the CLI, the
+    video skill), through the local proxy or not."""
+    from backend.utils.auth_guard import request_is_from_this_machine
+    return request_is_from_this_machine()
+
+
+_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")
+
+
 def _start_frames(refs):
     """Start images as files, or (None, why).
 
-    A path to a file that exists passes as given (the documented form). Any
-    other reference, a library document id or link as the Video page's
-    uploads and the Files picker give, resolves through ``_media_path`` the
-    way the end frame does.
+    Every reference goes through ``_media_path`` first: a library document
+    id or link, as the Video page's uploads and the Files picker give, or a
+    path inside the install, uploads or outputs. A path to a file anywhere
+    else is honoured only for a caller on this machine, the documented form
+    the CLI and the video skill send; the route needs no sign-in and the
+    backend listens on every interface, so a caller elsewhere on the network
+    gets no read of this machine's files. A file named like a credential is
+    refused for everyone, and a frame has to be an image.
     """
     import os
+    from backend.utils.path_safety import is_sensitive
     frames = []
     for i, ref in enumerate(refs, start=1):
+        label = f"Start image {i}"
         text = str(ref or "").strip()
         if not text:
-            return None, f"Start image {i} is empty."
-        if os.path.isfile(text):
-            frames.append(text)
-            continue
-        path, err = _media_path(text, f"Start image {i}")
+            return None, f"{label} is empty."
+        path, err = _media_path(text, label)
         if err:
-            return None, err
+            if not os.path.isfile(text) or not _caller_is_this_machine():
+                return None, err
+            if is_sensitive(text) or is_sensitive(os.path.realpath(text)):
+                return None, err
+            path = text
+        if not str(path).lower().endswith(_IMAGE_EXTENSIONS):
+            return None, f"{label} is not an image: {os.path.basename(str(path))}."
         frames.append(path)
     return frames, None
 

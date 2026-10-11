@@ -1111,7 +1111,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   // a Files pick. (The old /batch-image/upload route put every upload in
   // Image Gen's Recent Batches as an "Uploaded Images" batch.)
   const uploadImageDocuments = useCallback(async (files) => {
-    const docs = await uploadDroppedMedia(files, { http: axios });
+    // Frames are render inputs, not documents to search: no vision index pass.
+    const docs = await uploadDroppedMedia(files, { http: axios, autoIndex: false });
     const images = docs.filter((d) => d.kind === "image");
     if (images.length === 0) throw new Error("Only image files can be used as frames.");
     return images;
