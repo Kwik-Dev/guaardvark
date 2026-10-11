@@ -548,9 +548,10 @@ ${currentTab.content}
         const savedId = currentTab.id;
         const savedIndex = activeTabIndex;
 
-        // Determine filename for new files
+        // A tab with no name yet gets one; a new tab renamed before its first
+        // save keeps the name it was given.
         let actualFilePath = currentTab.filePath;
-        if (!actualFilePath || currentTab.isNew) {
+        if (!actualFilePath) {
           const timestamp = Date.now();
           const LANGUAGE_TO_EXT = {
             javascript: '.js', typescript: '.ts', python: '.py',
