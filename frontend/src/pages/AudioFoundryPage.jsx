@@ -1,6 +1,7 @@
 // frontend/src/pages/AudioFoundryPage.jsx
 import React, { useCallback, useEffect, useState, useRef, Suspense } from "react";
 import { formatUiError } from "../utils/uiError";
+import { fileNameOf } from "../utils/displayPath";
 import {
   Box,
   Typography,
@@ -1203,8 +1204,12 @@ const AudioFoundryPage = () => {
                           <Typography variant="body2" fontWeight="bold">{result.sample_rate} Hz</Typography>
                         </Grid>
                         <Grid item xs={12}>
-                          <Typography variant="caption" display="block" color="text.secondary">OUTPUT PATH</Typography>
-                          <Typography variant="body2" sx={{ fontFamily: "monospace", fontSize: "0.7rem", opacity: 0.7 }}>{result.path}</Typography>
+                          {/* The file's name only: the server path carries the account name, and
+                              the file is reached through the Audio library, not the path. */}
+                          <Typography variant="caption" display="block" color="text.secondary">FILE</Typography>
+                          <Typography variant="body2" sx={{ fontFamily: "monospace", fontSize: "0.7rem", opacity: 0.7 }}>
+                            {fileNameOf(result.path) || "—"}
+                          </Typography>
                         </Grid>
                       </Grid>
                     </CardContent>

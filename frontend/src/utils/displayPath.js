@@ -12,3 +12,6 @@ export const displayPath = (path, home) => {
 /** A browse root's label: "Home" for the home folder, ~/… under it. */
 export const rootLabel = (root, home) =>
   home && root.replace(/\/+$/, "") === home.replace(/\/+$/, "") ? "Home" : displayPath(root, home);
+
+/** The last part of a server path (its file name), for screens that should not show the path. */
+export const fileNameOf = (path) => (path ? String(path).split(/[\\/]/).pop() : "");
