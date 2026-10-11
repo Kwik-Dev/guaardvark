@@ -503,8 +503,14 @@ const AudioFoundryPage = () => {
     }
   };
 
+  // The route serves audio inline, so opening it in a tab only played it.
   const handleDownload = (url) => {
-    window.open(url, "_blank");
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
   };
 
   // ----- Music tab helpers -------------------------------------------------
