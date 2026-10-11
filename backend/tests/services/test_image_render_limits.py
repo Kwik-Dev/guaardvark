@@ -245,6 +245,21 @@ def test_one_family_mapper(model, family):
     assert irl.family_of(model) == family == resolve_family(model)
 
 
+@pytest.mark.parametrize("name", [
+    "Comfy-Org/Qwen-Image-2.1",
+    "qwen_image_2.1_int8_convrot.safetensors",
+    "qwen_image_2.1_turbo_int8_convrot.safetensors",
+    "qwen-image-2-1-ft.safetensors",
+])
+def test_family_of_agrees_with_the_paste_matcher_on_every_qwen21_spelling(name):
+    from backend.services.user_model_families import comfy_t2i_family
+    assert irl.family_of(name) == "qwen-image-21" == comfy_t2i_family(name)
+
+
+def test_qwen_image_edit_is_not_qwen21():
+    assert irl.family_of("qwen-image-edit") != "qwen-image-21"
+
+
 # ── the canvas: the old clamp, frozen ────────────────────────────────────────
 
 def _old_clamp(width, height, family):

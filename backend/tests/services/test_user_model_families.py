@@ -215,7 +215,7 @@ def test_a_diffusers_21_repo_with_the_10_class_still_resolves_to_21():
 
 
 @pytest.mark.parametrize("family,name,fragment", [
-    ("qwen-image-21", "qwen-image-2.1-FT-Q8_0.gguf", "GGUF loader does not read"),
+    ("qwen-image-21", "qwen-image-2.1-FT-Q8_0.gguf", "loads .safetensors with UNETLoader"),
     ("qwen-image-21", "qwen-image-2.1-FT-MLX-8bit.safetensors", "Apple MLX"),
     ("flux", "flux1-dev-MLX-4bit.safetensors", "Apple MLX"),
     ("qwen-image-edit", "qwen_image_edit_MLX.safetensors", "Apple MLX"),

@@ -7,6 +7,7 @@ import {
   isZimageModel,
   modelFamily,
   modelInstallNeed,
+  QWEN_IMAGE_21_GUIDANCE_MAX,
   qualityPresetsForModel,
   resolveQualityPreset,
 } from './batchImageSettings';
@@ -155,5 +156,17 @@ describe('model install state', () => {
     const some = [AUTO, imageModelOption(row('sd-xl', { is_downloaded: true }))];
     expect(modelInstallNeed(some, 'auto')).toBeNull();
     expect(modelInstallNeed(some, 'sd-xl')).toBeNull();
+  });
+});
+
+describe('Qwen-Image 2.1 guidance slider', () => {
+  it('stops at the registry cfg_range upper bound (media_model_registry qwen-image-21: 1.0-5.0)', () => {
+    expect(QWEN_IMAGE_21_GUIDANCE_MAX).toBe(5);
+  });
+  it('offers no preset outside that range', () => {
+    for (const p of qualityPresetsForModel('qwen-image-21')) {
+      expect(p.guidance).toBeGreaterThanOrEqual(1);
+      expect(p.guidance).toBeLessThanOrEqual(QWEN_IMAGE_21_GUIDANCE_MAX);
+    }
   });
 });

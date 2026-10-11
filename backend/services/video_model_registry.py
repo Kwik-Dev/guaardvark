@@ -879,14 +879,16 @@ VIDEO_MODEL_REGISTRY = {
         "size_gb": 7.26,
         # Sampling defaults are the official Comfy-Org template's
         # (image_qwen_image_2_1_t2i: 25 steps, cfg 1.0, euler/simple, 1024x1024).
-        # Nothing has been measured on a card yet, so there is no min_steps.
+        # No step count below 25 has been compared, so there is no min_steps.
         "default_steps": 25,
         "default_cfg": 1.0,
-        # PROVISIONAL, unmeasured: sized from the int8 transformer (7.3 GB on disk)
-        # plus the int8 Qwen3-VL encoder (9.4 GB) with ComfyUI offloading the
-        # encoder after the text pass, like the Qwen-Image-Edit pack above whose
-        # 12000 was measured. Replace with a measured peak.
-        "vram_mb": 14000,
+        # Measured 2026-10-11 on a 16 GB card, ComfyUI 0.39 at the stock flags
+        # (--reserve-vram 1.0, PyTorch attention): the Qwen3-VL encoder loads whole
+        # (8.9 GB), then the transformer (6.8 GB), one at a time. Peak 11.3 GB used
+        # on the card with 1.8 GB of other processes' contexts; 1024x1024 25 steps
+        # in 22 s, 2048x2048 in 108 s. With --reserve-vram 8 ComfyUI streams the
+        # transformer instead and peaks at 8.0 GB at the same 1024x1024 speed.
+        "vram_mb": 9500,
         "comfy_nodes": ["TextEncodeQwenImage21", "QwenImage21Cache"],
         "type": "qwen-image",
     },

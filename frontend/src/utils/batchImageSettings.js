@@ -60,9 +60,11 @@ export function promptStyleFor(model, modelOptions = [], autoPromptStyle = null)
 
 // Qwen-Image 2.1 guidance range. The official ComfyUI template
 // (image_qwen_image_2_1_t2i.json) runs cfg 1.0 and says to raise it only with a
-// negative prompt; the slider stops at 10 so a stray drag cannot reach SD-era
-// values. Nothing above 1.0 has been measured on this product's path.
-export const QWEN_IMAGE_21_GUIDANCE_MAX = 10;
+// negative prompt. The slider stops at 5, the upper end of the registry's
+// cfg_range for qwen-image-21 (media_model_registry.IMAGE_MODEL_LIMITS):
+// compared at 1024x1024 with a negative prompt, cfg 3 and 5 render clean and
+// cfg 9 crushes the shadows to black.
+export const QWEN_IMAGE_21_GUIDANCE_MAX = 5;
 
 export const ZIMAGE_STEPS = 9;
 export const ZIMAGE_GUIDANCE = 0;

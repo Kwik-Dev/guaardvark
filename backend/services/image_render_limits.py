@@ -49,7 +49,10 @@ def family_of(model: Optional[str]) -> str:
         return "zimage"
     if key.startswith("krea") or "krea2" in key or "krea-2" in key:
         return "krea2"
-    if "qwen-image-21" in key:
+    # Every Qwen-Image 2.1 spelling the paste matcher knows (repo ids, file
+    # names), so this mapper and comfy_t2i_family agree.
+    from backend.services.user_model_families import _QWEN21_TOKENS
+    if any(tok in key for tok in _QWEN21_TOKENS):
         return "qwen-image-21"
     if key.startswith("flux") or "flux" in key:
         return "flux"

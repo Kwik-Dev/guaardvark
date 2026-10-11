@@ -158,7 +158,7 @@ def test_qwen_image_21_generation_is_one_safetensors_in_diffusion_models(catalog
 
 
 @pytest.mark.parametrize("family,src,fragment", [
-    ("qwen-image-21", "qwen-image-2.1-FT-Q8_0.gguf", "GGUF loader does not read"),
+    ("qwen-image-21", "qwen-image-2.1-FT-Q8_0.gguf", "loads .safetensors with UNETLoader"),
     ("qwen-image-21", "qwen-image-2.1-FT-MLX-8bit.safetensors", "Apple MLX"),
     ("flux", "flux1-dev-MLX-4bit.safetensors", "Apple MLX"),
 ])
@@ -188,9 +188,9 @@ def test_preview_warns_about_files_the_suggested_family_cannot_load(monkeypatch)
     assert preview["suggested_family"] == "qwen-image-21"
     problems = {f["src"]: f.get("problem") for f in preview["files"]}
     assert problems["qwen-image-2.1-FT-fp8.safetensors"] is None
-    assert "GGUF loader" in problems["qwen-image-2.1-FT-Q8_0.gguf"]
+    assert "loads .safetensors with UNETLoader" in problems["qwen-image-2.1-FT-Q8_0.gguf"]
     assert "Apple MLX" in problems["qwen-image-2.1-FT-MLX-8bit.safetensors"]
-    assert any("qwen-image-2.1-FT-Q8_0.gguf" in w and "GGUF loader" in w for w in preview["warnings"])
+    assert any("qwen-image-2.1-FT-Q8_0.gguf" in w and "loads .safetensors with UNETLoader" in w for w in preview["warnings"])
     assert any("MLX-8bit" in w and "Apple MLX" in w for w in preview["warnings"])
     assert preview["base_model"] == ["Qwen/Qwen-Image-2.1"]
 

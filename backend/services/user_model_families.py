@@ -185,12 +185,13 @@ IMAGE_FAMILIES = (
         "lora_engine": None,
         "local_subdir": "diffusion_models",
         "comfy_graph": "qwen-image-21",
-        # The 2.1 GGUF architecture (qwen_image21) is not in the installed
-        # ComfyUI-GGUF loader; the fp8 / int8 .safetensors load with UNETLoader.
+        # The Qwen-Image 2.1 graph loads the UNET with UNETLoader, which reads
+        # .safetensors; the bundled ComfyUI-GGUF loader does not list the 2.1
+        # architecture (qwen_image21) either.
         "weight_suffixes": (".safetensors",),
         "refused_suffixes": {
-            ".gguf": "is a GGUF the installed GGUF loader does not read (qwen_image21 architecture). "
-                     "Pick the fp8 or int8 .safetensors instead.",
+            ".gguf": "is a GGUF; the Qwen-Image 2.1 graph here loads .safetensors with UNETLoader. "
+                     "Pick a .safetensors file instead.",
         },
         "refused_name_tokens": _MLX_REFUSAL,
         "tokens": _QWEN21_TOKENS,
