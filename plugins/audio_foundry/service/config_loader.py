@@ -19,6 +19,9 @@ import yaml
 logger = logging.getLogger(__name__)
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+# plugins/audio_foundry -> the checkout root
+CHECKOUT_ENV = PLUGIN_ROOT.parent.parent / ".env"
+API_KEY_HEADER = "X-API-Key"
 
 
 def resolve_backend_url(explicit: str | None = None) -> str:
@@ -36,6 +39,24 @@ def resolve_backend_url(explicit: str | None = None) -> str:
         return env_url
     port = os.environ.get("FLASK_PORT", "5000")
     return f"http://localhost:{port}"
+
+
+def backend_api_key() -> str:
+    """The key the backend's protected routes ask for, or "".
+
+    The same rule as backend/utils/backend_http.py (sidecars do not import the
+    backend): this checkout's .env first, read on every call because Settings →
+    Access rewrites it, then GUAARDVARK_API_KEY from the environment. With a key
+    set, the backend refuses the GPU memory routes from this machine too.
+    """
+    value = ""
+    try:
+        for line in CHECKOUT_ENV.read_text().splitlines():
+            if line.startswith("GUAARDVARK_API_KEY="):
+                value = line.split("=", 1)[1].strip().strip("'\"")
+    except OSError:
+        pass
+    return value or (os.environ.get("GUAARDVARK_API_KEY") or "").strip()
 
 
 def load_config() -> dict[str, Any]:

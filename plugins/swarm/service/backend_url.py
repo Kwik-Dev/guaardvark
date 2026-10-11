@@ -39,6 +39,17 @@ def backend_port() -> str:
     )
 
 
+API_KEY_HEADER = "X-API-Key"
+
+
+def backend_api_key() -> str:
+    """The key the backend's protected routes ask for, or "": this checkout's
+    .env first, read on every call because Settings → Access rewrites it, then
+    GUAARDVARK_API_KEY from the environment. With a key set, the backend refuses
+    the GPU memory routes from this machine too."""
+    return _checkout_env_value("GUAARDVARK_API_KEY") or (os.environ.get("GUAARDVARK_API_KEY") or "").strip()
+
+
 def backend_api_url() -> str:
     """The backend API base, e.g. ``http://localhost:5000/api``."""
     return f"http://localhost:{backend_port()}/api"
