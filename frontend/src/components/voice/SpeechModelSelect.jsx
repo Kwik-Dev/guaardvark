@@ -8,7 +8,7 @@ import voiceService from "../../api/voiceService";
 import { ActionButton, Cluster, Hint, Line } from "../settings/ui";
 
 const HELP =
-  "The Whisper model that turns what you say into text, on this machine. Larger models are more accurate and take longer per message. Only installed models are listed; install others in Voice models (Settings → Voice).";
+  "The Whisper model that turns what you say into text, on this machine. Larger models are more accurate and take longer per message. Only installed models are listed; install others in Voice models, in Voice Settings (Settings → Chat → Voice chat).";
 
 /**
  * @param {{reloadKey?: any, onManageModels?: () => void, onChange?: (id: string) => void,

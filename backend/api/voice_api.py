@@ -891,6 +891,16 @@ PIPER_VOICES = {
 }
 DEFAULT_VOICE = "libritts"
 
+# What a stock machine (no Piper model downloaded, Audio Foundry off) is told
+# when a reply should be spoken; the UI shows it once per failed reply. Voice
+# settings are a dialog off the Chat section of Settings, and Audio Foundry
+# speaks only with a Kokoro voice pack installed (see reply_tts_engine).
+NO_VOICE_INSTALLED_MESSAGE = (
+    "No voice is installed, so replies cannot be spoken. "
+    "Install a voice in Voice Settings (Settings > Chat > Voice chat), "
+    "or start the Audio Foundry plugin with a Kokoro voice pack installed."
+)
+
 
 def _installed_piper_voice(voice: str) -> Optional[str]:
     """The Piper voice to speak with: the one asked for when its model is
@@ -1391,11 +1401,14 @@ def text_to_speech():
             return jsonify(af_result)
         logger.info("Voice API: text-to-speech falling back to Piper (voice=%s)", voice)
 
-        if voice not in PIPER_VOICES:
-            return jsonify({"error": f"Invalid voice. Must be one of: {list(PIPER_VOICES.keys())}"}), 400
+        # The chosen voice may be a Kokoro id (Audio Foundry was running when
+        # it was picked); Piper then speaks with its default or any installed voice.
         piper_voice = _installed_piper_voice(voice)
         if piper_voice is None:
-            return jsonify({"error": "No Piper voice is installed on this machine."}), 503
+            return jsonify({
+                "error": NO_VOICE_INSTALLED_MESSAGE,
+                "code": "no_voice_installed",
+            }), 503
         if piper_voice != voice:
             logger.info("Voice API: Piper voice %s is not installed; speaking with %s", voice, piper_voice)
             voice = piper_voice
@@ -1873,40 +1886,96 @@ def get_audio_file(filename):
         logger.error(f"Voice API: Failed to serve audio file {filename}: {e}")
         return jsonify({"error": "Failed to serve audio file"}), 500
 
-@voice_bp.route("/voices", methods=["GET"])
-def get_available_voices():
-    """Get list of available TTS voices (only those with installed models)."""
-    voices = []
+def _audio_foundry_running() -> bool:
+    """True when the Audio Foundry plugin is running, read from the plugin
+    manager without a network call and without starting it."""
+    try:
+        from backend.services.audio_foundry_models import plugin_snapshot
+        return bool(plugin_snapshot().get("running"))
+    except Exception as e:  # noqa: BLE001 - plugin manager unavailable: Piper speaks
+        logger.debug("Voice API: audio_foundry snapshot failed (%s)", e)
+        return False
+
+
+def _kokoro_reply_voices():
+    """Installed Kokoro voices as the /voices shape, and the catalog default."""
+    from backend.services.audio_foundry_models import kokoro_catalog, kokoro_voice_choices
+    choices = kokoro_voice_choices(installed_only=True)
+    voices = [
+        {
+            "id": choice["id"],
+            "name": choice["label"].replace(" (default)", ""),
+            "description": f"Kokoro, {choice['group']}",
+            "available": True,
+            "engine": "kokoro",
+        }
+        for choice in choices
+    ]
+    default = kokoro_catalog().get("default")
+    if not any(v["id"] == default for v in voices):
+        default = voices[0]["id"] if voices else None
+    return voices, default
+
+
+def _piper_reply_voices():
+    """Every Piper voice with whether its model is installed, and the default."""
     backend_path = get_backend_path()
-    available_default = None
-    
+    voices = []
     for voice_id, voice_config in PIPER_VOICES.items():
-        model_path = os.path.join(backend_path, voice_config["model"])
-        is_available = os.path.exists(model_path)
-        
         voices.append({
             "id": voice_id,
             "name": voice_config["name"],
             "description": voice_config["description"],
-            "available": is_available
+            "available": os.path.exists(os.path.join(backend_path, voice_config["model"])),
+            "engine": "piper-tts",
         })
-        
-        # Track if default voice is available
-        if voice_id == DEFAULT_VOICE and is_available:
-            available_default = voice_id
-    
-    # If default voice is not available, pick the first available one
-    if not available_default:
-        for v in voices:
-            if v.get("available"):
-                available_default = v["id"]
-                break
-    
+    default = next((v["id"] for v in voices if v["id"] == DEFAULT_VOICE and v["available"]), None)
+    if not default:
+        default = next((v["id"] for v in voices if v["available"]), None)
+    return voices, default
+
+
+def reply_tts_engine() -> str:
+    """The engine /text-to-speech will speak with right now: "kokoro" when
+    Audio Foundry is running with a Kokoro voice pack installed, else "piper-tts"."""
+    if _audio_foundry_running():
+        try:
+            voices, _default = _kokoro_reply_voices()
+            if voices:
+                return "kokoro"
+        except Exception as e:  # noqa: BLE001 - catalog unreadable: Piper speaks
+            logger.warning("Voice API: Kokoro voice catalog unreadable (%s)", e)
+    return "piper-tts"
+
+
+@voice_bp.route("/voices", methods=["GET"])
+def get_available_voices():
+    """The voices a reply can be spoken in, listed by the engine that will speak.
+
+    /text-to-speech tries Audio Foundry (Kokoro) first and falls back to
+    Piper, so with the plugin running the list is Kokoro's installed voices
+    and the chosen id reaches Kokoro; otherwise it is the Piper voices. The
+    `engine` field names which one.
+    """
+    engine = reply_tts_engine()
+    if engine == "kokoro":
+        voices, default = _kokoro_reply_voices()
+        piper_voices, _piper_default = _piper_reply_voices()
+        return jsonify({
+            "voices": voices,
+            "default_voice": default,
+            "engine": "kokoro",
+            "models_installed": True,
+            "fallback_engine": "piper-tts",
+            "fallback_installed": any(v["available"] for v in piper_voices),
+        })
+
+    voices, default = _piper_reply_voices()
     return jsonify({
         "voices": voices,
-        "default_voice": available_default or DEFAULT_VOICE,
+        "default_voice": default or DEFAULT_VOICE,
         "engine": "piper-tts",
-        "models_installed": any(v.get("available") for v in voices)
+        "models_installed": any(v["available"] for v in voices),
     })
 
 @voice_bp.route("/models", methods=["GET"])
@@ -2017,7 +2086,7 @@ def voice_status():
             "ffmpeg_available": ffmpeg_available,
             "supported_formats": list(SUPPORTED_AUDIO_FORMATS),
             "available_voices": available_voices,
-            "engine": "local (whisper.cpp + piper-tts)",
+            "engine": f"local (whisper + {reply_tts_engine()})",
             "missing_build_packages": whisper_build["missing_build_packages"],
             "can_auto_install": whisper_build["can_auto_install"],
             "install_method": whisper_build["install_method"],

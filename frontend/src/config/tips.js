@@ -24,7 +24,7 @@ export const TIPS = Object.freeze([
   },
   {
     id: "floating-chat",
-    text: "Ctrl+Shift+C opens the floating chat on any page. It knows which page you are on, so you can ask about what is in front of you.",
+    text: "Ctrl+Shift+C opens the floating chat on any page. Its chip names the page you are on, and the chat is told which page and record you have open.",
     action: "floating-chat",
   },
   {

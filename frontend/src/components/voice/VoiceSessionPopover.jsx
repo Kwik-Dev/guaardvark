@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect } from "react";
 import PropTypes from "prop-types";
 import { Link as RouterLink } from "react-router-dom";
 import {
@@ -33,6 +33,9 @@ import brand from "../../config/brand";
 
 // The worklet's RMS for ordinary speech sits well under 0.3; scale it to the bar.
 const LEVEL_SCALE = 300;
+
+// How /voices names the engine that speaks replies, in the chooser's words.
+const ENGINE_LABELS = { kokoro: "Kokoro, Audio Foundry", "piper-tts": "Piper" };
 
 /**
  * Status and quick settings for the global mic: what it is doing, the last
@@ -70,8 +73,21 @@ const VoiceSessionPopover = ({ anchorEl, open, onClose, placement = "below" }) =
   const setMode = useAppStore((s) => s.setVoiceActivationMode);
   const systemName = useAppStore((s) => s.systemName) || brand.appName;
   const settings = useVoiceSettings();
-  const { availableVoices = [] } = useVoice() || {};
+  const { availableVoices = [], voiceEngine, defaultVoice, speakError, refreshVoices } = useVoice() || {};
+  // The engine that speaks replies can change while the page is open (Audio
+  // Foundry started or stopped); re-read the list once per open so the chooser
+  // names the engine that will speak now. A failed read keeps the last list.
+  useEffect(() => {
+    if (open && refreshVoices) refreshVoices().catch(() => {});
+  }, [open, refreshVoices]);
   const installedVoices = availableVoices.filter((v) => v.available !== false);
+  // /voices lists the engine that speaks replies now, so the choice reaches it.
+  const engineLabel = ENGINE_LABELS[voiceEngine] || voiceEngine || null;
+  const savedVoiceListed = installedVoices.some((v) => v.id === settings.voice);
+  const effectiveVoice = savedVoiceListed
+    ? settings.voice
+    : installedVoices.some((v) => v.id === defaultVoice) ? defaultVoice : "";
+  const effectiveVoiceName = installedVoices.find((v) => v.id === effectiveVoice)?.name || effectiveVoice;
   const { title, hint } = describeVoicePhase(state, { systemName, mode });
   const running = Boolean(state.session);
   const fixInSettings = state.errorCode === "model" || state.errorCode === "mic-off";
@@ -205,10 +221,15 @@ const VoiceSessionPopover = ({ anchorEl, open, onClose, placement = "below" }) =
           select
           size="small"
           fullWidth
-          label="Reply voice"
-          value={installedVoices.some((v) => v.id === settings.voice) ? settings.voice : ""}
+          label={engineLabel ? `Reply voice (${engineLabel})` : "Reply voice"}
+          value={effectiveVoice}
           onChange={(e) => updateVoiceSettings({ voice: e.target.value })}
           disabled={!settings.ttsEnabled}
+          helperText={
+            !savedVoiceListed && effectiveVoice
+              ? `Your saved voice is not one of ${engineLabel || "this engine"}'s; replies use ${effectiveVoiceName} until you pick one.`
+              : undefined
+          }
           sx={{ mt: 1 }}
           SelectProps={{ MenuProps: { sx: { zIndex: 1600 } } }}
         >
@@ -218,6 +239,20 @@ const VoiceSessionPopover = ({ anchorEl, open, onClose, placement = "below" }) =
             </MenuItem>
           ))}
         </TextField>
+      )}
+      {settings.ttsEnabled && installedVoices.length === 0 && (
+        <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>
+          No voice is installed: replies cannot be spoken until one is installed in{" "}
+          <Link component={RouterLink} to="/settings#settings-voice" onClick={onClose}>
+            Voice settings
+          </Link>
+          , or Audio Foundry runs with a Kokoro voice pack installed.
+        </Typography>
+      )}
+      {speakError && (
+        <Alert severity="warning" sx={{ mt: 1, py: 0, fontSize: "0.75rem" }}>
+          {speakError}
+        </Alert>
       )}
 
       <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mt: 1.5 }}>

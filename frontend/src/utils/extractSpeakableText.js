@@ -89,16 +89,11 @@ export default function extractSpeakableText(rawText, generatedImages) {
     // Once we've found speakable text, trailing meta is also dropped
   }
 
-  // 4. Reassemble
+  // 4. Reassemble. The whole reply is kept: VoiceContext.speak plays it in
+  // short chunks (utils/replySpeech.js), so nothing is cut off unannounced.
   let ttsText = speakableSegments.join(' ').replace(/\s+/g, ' ').trim();
 
-  // 5. Cap to 3 sentences max for natural speech
-  const allSentences = ttsText.match(/[^.!?]+[.!?]+/g) || [ttsText];
-  if (allSentences.length > 3) {
-    ttsText = allSentences.slice(0, 3).join(' ').trim();
-  }
-
-  // 6. Fallback
+  // 5. Fallback
   if (!ttsText || ttsText.length < 5) {
     ttsText = generatedImages?.length ? "Here you go." : "Done.";
   }
