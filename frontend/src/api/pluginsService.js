@@ -199,6 +199,12 @@ export const restoreComfyPrevious = async () => {
   return unwrapData(await handleResponse(response));
 };
 
+/** After a crash mid-update, put the old copy of ComfyUI back. Same contract as startComfyUpdate. */
+export const repairComfyUpdate = async () => {
+  const response = await fetch(`${BASE_URL}/comfyui/update/repair`, { method: "POST" });
+  return unwrapData(await handleResponse(response));
+};
+
 export default {
   listPlugins,
   getPlugin,
@@ -221,4 +227,5 @@ export default {
   startComfyUpdate,
   getComfyUpdateStatus,
   restoreComfyPrevious,
+  repairComfyUpdate,
 };

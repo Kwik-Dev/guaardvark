@@ -7,6 +7,7 @@ const api = {
   start: vi.fn(),
   status: vi.fn(),
   restore: vi.fn(),
+  repair: vi.fn(),
 };
 
 vi.mock("../../api/pluginsService", () => ({
@@ -25,6 +26,7 @@ vi.mock("../../api/pluginsService", () => ({
   startComfyUpdate: (...args) => api.start(...args),
   getComfyUpdateStatus: (...args) => api.status(...args),
   restoreComfyPrevious: (...args) => api.restore(...args),
+  repairComfyUpdate: (...args) => api.repair(...args),
 }));
 vi.mock("../../components/settings/OllamaLifecycleSection", () => ({ default: () => null }));
 vi.mock("../../components/layout/PageLayout", () => ({ default: ({ children }) => <div>{children}</div> }));
@@ -196,5 +198,62 @@ describe("ComfyUI card update section", () => {
 
     fireEvent.click(within(result).getByRole("button", { name: "Dismiss" }));
     expect(screen.queryByTestId("comfyui-update-result")).not.toBeInTheDocument();
+  });
+
+  const repairCheck = {
+    ...availableCheck,
+    installed: "0.39.0",
+    previous: "0.33.0",
+    needs_repair: true,
+    repair: {
+      paths: ["plugins/comfyui/ComfyUI.updating", "plugins/comfyui/ComfyUI.previous"],
+      message: "The last update stopped half way, so ComfyUI is not in one place. Repair puts the previous copy back.",
+    },
+  };
+
+  it("offers only Repair, with the backend's words and the paths, when an update was cut short", async () => {
+    api.check.mockResolvedValue(repairCheck);
+    api.status.mockResolvedValue({ ...IDLE, state: "needs_repair", message: "ComfyUI needs repair" });
+    renderCard();
+
+    const repair = await screen.findByTestId("comfyui-update-repair");
+    expect(within(repair).getByText(/The last update stopped half way/)).toBeInTheDocument();
+    expect(within(repair).getByText(/ComfyUI\.updating, plugins\/comfyui\/ComfyUI\.previous/)).toHaveStyle({ fontFamily: "monospace" });
+    expect(within(repair).getByRole("button", { name: "Repair" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: /Update to/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Restore/ })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("comfyui-update-result")).not.toBeInTheDocument();
+  });
+
+  it("confirms the repair in plain words, then shows its progress like an update", async () => {
+    api.check.mockResolvedValue(repairCheck);
+    api.status.mockResolvedValue({ ...IDLE, state: "needs_repair", message: "ComfyUI needs repair" });
+    api.repair.mockResolvedValue({
+      state: "running",
+      phase: "restore",
+      phase_label: "Moving models back",
+      percent: 20,
+      from: "0.39.0",
+      to: "0.33.0",
+      log_tail: ["Moving models/"],
+    });
+    renderCard();
+    fireEvent.click(await screen.findByRole("button", { name: "Repair" }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Put ComfyUI back the way it was")).toBeInTheDocument();
+    expect(within(dialog).getByText(/Moves your models and settings back to the previous copy of ComfyUI and restarts that version/)).toBeInTheDocument();
+    expect(within(dialog).getByText("0.39.0 → 0.33.0")).toBeInTheDocument();
+    expect(within(dialog).getByText(/ComfyUI\.updating/)).toBeInTheDocument();
+    expect(within(dialog).queryByText("This cannot be undone.")).toBeNull();
+    expect(api.repair).not.toHaveBeenCalled();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Repair now" }));
+    await waitFor(() => expect(api.repair).toHaveBeenCalledTimes(1));
+
+    const progress = await screen.findByTestId("comfyui-update-progress");
+    expect(within(progress).getByText(/ComfyUI 0\.39\.0 → 0\.33\.0: Moving models back \(20%\)/)).toBeInTheDocument();
+    expect(progress.querySelector(".MuiLinearProgress-root")).not.toBeNull();
+    expect(screen.queryByTestId("comfyui-update-repair")).not.toBeInTheDocument();
   });
 });

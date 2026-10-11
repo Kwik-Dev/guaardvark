@@ -11,6 +11,7 @@ import { ActionButton, ConfirmActionDialog, Hint, Line, StatusPill } from '../se
 import {
   checkComfyUpdate,
   getComfyUpdateStatus,
+  repairComfyUpdate,
   restoreComfyPrevious,
   startComfyUpdate,
 } from '../../api/pluginsService';
@@ -96,10 +97,11 @@ export const useComfyUpdate = (plugin, showMessage) => {
   }, [running, refreshCheck]);
 
   const confirm = useCallback(async () => {
-    const restore = dialog === 'restore';
+    const start = { update: startComfyUpdate, restore: restoreComfyPrevious, repair: repairComfyUpdate }[dialog];
+    if (!start) return;
     setBusy(true);
     try {
-      const started = await (restore ? restoreComfyPrevious() : startComfyUpdate());
+      const started = await start();
       setStatus(started?.state ? started : { state: 'running', percent: 0, phase_label: 'Starting' });
       setDialog(null);
     } catch (err) {
@@ -113,6 +115,15 @@ export const useComfyUpdate = (plugin, showMessage) => {
 
   const result = status && RESULT[status.state] && resultKey(status) !== dismissed ? status : null;
 
+  // A crash mid-update left ComfyUI half switched; only Repair is offered until it is put back.
+  const needsRepair = !running && (Boolean(check?.needs_repair) || status?.state === 'needs_repair');
+  const repair = needsRepair
+    ? {
+        paths: check?.repair?.paths || [],
+        message: check?.repair?.message || status?.message || 'The last update did not finish; ComfyUI needs to be put back.',
+      }
+    : null;
+
   return {
     active,
     check,
@@ -122,11 +133,13 @@ export const useComfyUpdate = (plugin, showMessage) => {
     dialog,
     busy,
     installed: check?.installed || null,
-    available: Boolean(check?.available) && !running,
-    previous: (!running && check?.previous) || null,
+    available: Boolean(check?.available) && !running && !needsRepair,
+    previous: (!running && !needsRepair && check?.previous) || null,
     blocked: check?.busy || null,
+    repair,
     openUpdate: () => setDialog('update'),
     openRestore: () => setDialog('restore'),
+    openRepair: () => setDialog('repair'),
     closeDialog: () => !busy && setDialog(null),
     confirm,
     dismissResult: () => status && setDismissed(resultKey(status)),
@@ -164,8 +177,36 @@ const LogTail = ({ lines }) => {
   );
 };
 
+const Paths = ({ paths }) => (
+  <Typography component="span" sx={{ fontFamily: 'monospace', fontSize: '0.7rem', wordBreak: 'break-all' }}>
+    {paths.join(', ')}
+  </Typography>
+);
+
+const RepairDialog = ({ comfy }) => {
+  const { check, repair, dialog, busy, closeDialog, confirm } = comfy;
+  const facts = [];
+  if (check?.previous) facts.push({ label: 'Version', value: versionArrow(check.installed, check.previous) });
+  if (repair?.paths?.length) facts.push({ label: 'Moves back', value: <Paths paths={repair.paths} /> });
+  return (
+    <ConfirmActionDialog
+      open={dialog === 'repair'}
+      title="Put ComfyUI back the way it was"
+      description="Moves your models and settings back to the previous copy of ComfyUI and restarts that version. It takes a few minutes."
+      facts={facts}
+      keeps={check?.keeps?.length ? check.keeps.join(', ') : undefined}
+      confirmLabel="Repair now"
+      busy={busy}
+      reversible
+      onConfirm={confirm}
+      onClose={closeDialog}
+    />
+  );
+};
+
 const UpdateDialog = ({ comfy }) => {
   const { check, dialog, busy, closeDialog, confirm } = comfy;
+  if (dialog === 'repair') return <RepairDialog comfy={comfy} />;
   if (!check) return null;
   const restore = dialog === 'restore';
   const target = restore ? check.previous : check.target;
@@ -202,13 +243,29 @@ const UpdateDialog = ({ comfy }) => {
  * @param {ReturnType<typeof useComfyUpdate>} comfy
  */
 export const ComfyUpdateSection = ({ comfy }) => {
-  const { active, check, status, running, result, available, previous, blocked } = comfy;
-  if (!active || (!check && !running && !result)) return null;
+  const { active, check, status, running, result, available, previous, blocked, repair } = comfy;
+  if (!active || (!check && !running && !result && !repair)) return null;
 
   const percent = Math.max(0, Math.min(100, Number(status?.percent) || 0));
 
   return (
     <Box data-testid="comfyui-update" sx={{ display: 'flex', flexDirection: 'column', gap: 0.75, mb: 1 }}>
+      {repair && (
+        <Box data-testid="comfyui-update-repair" sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+          <Hint sx={{ color: 'warning.main' }}>{repair.message}</Hint>
+          {repair.paths.length > 0 && <Paths paths={repair.paths} />}
+          <Line>
+            <ActionButton
+              onClick={comfy.openRepair}
+              disabled={Boolean(blocked)}
+              tooltip={blocked || 'Put the previous copy of ComfyUI back and restart it'}
+            >
+              Repair
+            </ActionButton>
+          </Line>
+        </Box>
+      )}
+
       {(available || previous) && (
         <Line>
           {available && (
@@ -236,7 +293,7 @@ export const ComfyUpdateSection = ({ comfy }) => {
       {running && (
         <Box data-testid="comfyui-update-progress" sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
           <Typography variant="caption" color="text.secondary">
-            {`Updating ComfyUI ${versionArrow(status.from, status.to)}: ${status.phase_label || 'working'} (${percent}%)`}
+            {`ComfyUI ${versionArrow(status.from, status.to)}: ${status.phase_label || 'working'} (${percent}%)`}
           </Typography>
           <LinearProgress variant={percent > 0 ? 'determinate' : 'indeterminate'} value={percent} />
           <LogTail lines={status.log_tail} />
