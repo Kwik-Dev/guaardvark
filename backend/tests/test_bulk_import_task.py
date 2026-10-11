@@ -115,7 +115,10 @@ def test_move_removes_the_source_only_after_the_row_commits(harness):
     result = harness.run(session)
 
     assert result["stats"] == {"total_files": 2, "imported": 2, "skipped": 0,
-                               "errors": 0, "queued_for_indexing": 2}
+                               "errors": 0, "queued_for_indexing": 2,
+                               "skipped_private": {"hidden_dirs": 0, "hidden_files": 0,
+                                                   "sensitive_files": 0, "symlinks": 0,
+                                                   "internal_dirs": 0}}
     assert not (harness.source / "notes.md").exists()
     assert not (harness.source / "sub" / "deep.txt").exists()
     assert (harness.uploads / "Imports" / "notes.md").read_text() == "# notes\n"
@@ -287,3 +290,43 @@ def test_copy_is_the_default_on_the_task_and_the_route():
     from backend.api import files_api
     src = inspect.getsource(files_api.start_bulk_import)
     assert 'data.get("force_copy", True)' in src
+
+
+def test_scan_prunes_guaardvark_backups_under_a_parent_import(tmp_path):
+    # Importing the install's parent folder must not walk into backups/ (full install zips).
+    root = tmp_path / "install"
+    (root / "backups").mkdir(parents=True)
+    (root / "backups" / "full-2026.zip").write_text("zip")
+    (root / "notes.txt").write_text("keep")
+    files, skipped = cti.scan_import_source(
+        str(root), {".txt", ".zip"}, None, None, None, str(root / "backups"))
+    assert [f[2] for f in files] == ["notes.txt"]
+    assert skipped["internal_dirs"] == 1
+
+
+def test_storage_dirs_resolve_like_backend_config(tmp_path, monkeypatch):
+    # Relative values resolve against GUAARDVARK_ROOT with config's defaults, so the
+    # worker and the routes agree on where data, uploads and backups live.
+    monkeypatch.setenv("GUAARDVARK_ROOT", str(tmp_path))
+    for var in ("GUAARDVARK_STORAGE_DIR", "GUAARDVARK_UPLOAD_DIR", "GUAARDVARK_BACKUP_DIR"):
+        monkeypatch.delenv(var, raising=False)
+    assert cti._guaardvark_storage_dirs() == (
+        str(tmp_path / "data"), str(tmp_path / "data/uploads"), str(tmp_path / "backups"))
+    monkeypatch.setenv("GUAARDVARK_STORAGE_DIR", "elsewhere/data")
+    monkeypatch.setenv("GUAARDVARK_BACKUP_DIR", "/abs/backups")
+    storage, upload, backup = cti._guaardvark_storage_dirs()
+    assert storage == str(tmp_path / "elsewhere/data")
+    assert upload == str(tmp_path / "data/uploads")
+    assert backup == "/abs/backups"
+
+
+def test_source_inside_guaardvark_backups_is_refused(tmp_path, monkeypatch, harness):
+    backups = tmp_path / "backups"
+    (backups / "old").mkdir(parents=True)
+    (backups / "old" / "dump.txt").write_text("d")
+    monkeypatch.setenv("GUAARDVARK_STORAGE_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("GUAARDVARK_UPLOAD_DIR", str(tmp_path / "data" / "uploads"))
+    monkeypatch.setenv("GUAARDVARK_BACKUP_DIR", str(backups))
+    refused = harness.run(FakeSession(), source_path=str(backups / "old"), dry_run=True)
+    assert "inside Guaardvark's backups folder" in refused["error"]
+    assert (backups / "old" / "dump.txt").exists()
