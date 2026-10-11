@@ -27,6 +27,7 @@ export const PROCESS_TYPE_LABELS = {
   wordpress_push: "WP Push",
   wordpress_processing: "WordPress",
   outreach: "Outreach",
+  code: "Code",
   processing: "Processing",
   unknown: "Working",
 };
@@ -39,7 +40,7 @@ const PRIORITY = [
   "production", "indexing", "video_gen", "video_render", "image_generation", "csv_processing",
   "file_generation", "analysis", "upload", "llm_processing", "web_scraping", "outreach", "backup",
   "training", "lora_train", "task_processing", "voice_processing", "document_processing",
-  "wordpress_pull", "wordpress_push", "wordpress_processing", "processing",
+  "wordpress_pull", "wordpress_push", "wordpress_processing", "code", "processing",
 ];
 
 export const TERMINAL_PROCESS_STATUSES = new Set(["complete", "end", "error", "cancelled"]);

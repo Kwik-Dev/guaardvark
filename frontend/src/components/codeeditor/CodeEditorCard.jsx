@@ -66,6 +66,7 @@ const CodeEditorCard = React.forwardRef(
       setActiveTabIndex,
       onEditorContextChange,
       onChatAction,
+      onRun,
       revealRequest,
       onRevealDone,
       ...props
@@ -548,9 +549,10 @@ ${currentTab.content}
         const savedId = currentTab.id;
         const savedIndex = activeTabIndex;
 
-        // Determine filename for new files
+        // A tab with no name yet gets one; a new tab renamed before its first
+        // save keeps the name it was given.
         let actualFilePath = currentTab.filePath;
-        if (!actualFilePath || currentTab.isNew) {
+        if (!actualFilePath) {
           const timestamp = Date.now();
           const LANGUAGE_TO_EXT = {
             javascript: '.js', typescript: '.ts', python: '.py',
@@ -697,10 +699,10 @@ ${currentTab.content}
       });
     }, [setOpenTabs, setActiveTabIndex]);
 
+    // The page owns Run (it also drives the header button and the Output card).
     const handleRunCode = useCallback(() => {
-      if (!currentTab) return;
-      console.log("Code execution not implemented yet");
-    }, [currentTab]);
+      if (currentTab?.content && onRun) onRun();
+    }, [currentTab, onRun]);
 
     const handleTabContextMenu = useCallback((event, tabIndex) => {
       event.preventDefault();
@@ -887,9 +889,9 @@ ${currentTab.content}
                   <SaveIcon fontSize="small" />
                 </IconButton>
               </Tooltip>
-              <Tooltip title="Code execution not implemented">
+              <Tooltip title="Run Code">
                 <span>
-                  <IconButton size="small" onClick={handleRunCode} disabled={true}>
+                  <IconButton size="small" onClick={handleRunCode} disabled={!currentTab?.content || !onRun}>
                     <PlayArrowIcon fontSize="small" />
                   </IconButton>
                 </span>

@@ -448,7 +448,7 @@ const CodeEditorPage = () => {
       /* eslint-disable no-case-declarations -- each case body is self-contained; wrapping every case in braces is noisier than this scoped suppression */
       switch (action) {
         case 'run':
-          startProcess(processId, 'Code Execution', 'Running code...');
+          startProcess(processId, 'Running code...', 'code');
           
           const language = currentTab.language || 'javascript';
           let result;
@@ -475,7 +475,7 @@ const CodeEditorPage = () => {
           break;
 
         case 'format':
-          startProcess(processId, 'Code Formatting', 'Formatting code...');
+          startProcess(processId, 'Formatting code...', 'code');
           
           const formatResult = await codeExecutionService.formatCode(
             currentTab.content,
@@ -498,7 +498,7 @@ const CodeEditorPage = () => {
           break;
 
         case 'debug':
-          startProcess(processId, 'Code Debugging', 'Analyzing code...');
+          startProcess(processId, 'Analyzing code...', 'code');
           
           const lintResult = await codeExecutionService.lintCode(
             currentTab.content,
@@ -533,7 +533,7 @@ const CodeEditorPage = () => {
             errorProcess(processId, BUILD_UNAVAILABLE_REASON);
             break;
           }
-          startProcess(processId, 'Project Build', 'Building project...');
+          startProcess(processId, 'Building project...', 'code');
           const buildResult = await codeExecutionService.buildProject(buildTarget);
 
           if (buildResult.success) {
@@ -1543,6 +1543,7 @@ const CodeEditorPage = () => {
                       {...(cardId === 'editor' && {
                         onEditorContextChange: handleEditorContextChange,
                         onChatAction: handleEditorChatAction,
+                        onRun: () => handleQuickAction('run'),
                         revealRequest,
                         onRevealDone: () => setRevealRequest(null),
                       })}
