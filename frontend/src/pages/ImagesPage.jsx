@@ -58,6 +58,7 @@ import BreadcrumbNav from '../components/filesystem/BreadcrumbNav';
 import ImageThumbnailGrid from '../components/images/ImageThumbnailGrid';
 import ImagesContextMenu from '../components/images/ImagesContextMenu';
 import ImageLightbox from '../components/images/ImageLightbox';
+import { fallbackBatchName } from '../utils/batchNames';
 import PublishModal from '../components/modals/PublishModal';
 import PageLayout from '../components/layout/PageLayout';
 import { MEDIA_TABS, MEDIA_LIBRARY_TAB, mediaTabIndexForPath } from '../constants/mediaTabs';
@@ -516,15 +517,6 @@ const ImagesPage = () => {
         month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
       });
     } catch { return ''; }
-  }, []);
-
-  // Legacy batches predate display_name in metadata — pull a humane label
-  // out of "VideoBatch_MM-DD-YYYY_NNN" instead of slicing it to "VideoBatch_0".
-  const fallbackBatchName = useCallback((batchId) => {
-    if (!batchId) return 'Batch';
-    const m = batchId.match(/^VideoBatch_(\d{2})-(\d{2})-\d{4}_(\d+)$/);
-    if (m) return `${m[1]}/${m[2]} #${m[3]}`;
-    return batchId.replace(/^VideoBatch_/, '');
   }, []);
 
   // ──────────────────── Window State Persistence ────────────────────
@@ -1544,7 +1536,7 @@ const ImagesPage = () => {
 
   if (loading && activeTab === MEDIA_LIBRARY_TAB) {
     return (
-      <PageLayout title="Images">
+      <PageLayout title="Media">
         <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 400 }}>
           <ContextualLoader loading message="Loading images..." showProgress={false} inline />
         </Box>
@@ -2289,6 +2281,7 @@ const ImagesPage = () => {
         onArrangeIcons={handleArrangeIcons}
         onArrangeWindows={handleArrangeWindows}
         hasClipboard={Boolean(clipboard)}
+        hasOpenWindows={activeWindows.length > 0}
         hasSelection={selectedItems.size > 0}
         contextType={contextMenuType}
         selectedItem={contextMenuItem}
@@ -2311,7 +2304,10 @@ const ImagesPage = () => {
           onPublish={handlePublishFromLightbox}
           onImageEdited={() => {
             setLightbox(null);
+            // A copy lands beside the original, which may be inside an open
+            // folder window; those grids refetch only on their refresh key.
             refreshData();
+            refreshOpenWindows();
           }}
           hasPrev={lightbox.fileIndex > 0}
           hasNext={lightbox.fileIndex < lightbox.fileList.length - 1}

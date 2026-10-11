@@ -1481,6 +1481,21 @@ def download_document(doc_id):
         return error_response("Failed to download document", 500, "DOWNLOAD_ERROR")
 
 
+def _thumbnail_dirs(physical: Path) -> list[Path]:
+    """Directories that may hold a cached thumbnail for ``physical``, nearest first.
+
+    Uploads, copies (``_copy_document_into``) and the ffmpeg fallback below keep
+    ``thumbnails/`` beside the file. The batch image and video generators lay a
+    batch out as ``<batch>/images/<file>`` (``<item>/videos/<file>``) with
+    ``<batch>/thumbnails/<stem>.jpg`` one level up, so a file in an ``images/``
+    or ``videos/`` directory is also looked up there.
+    """
+    dirs = [physical.parent / "thumbnails"]
+    if physical.parent.name in ("images", "videos"):
+        dirs.append(physical.parent.parent / "thumbnails")
+    return dirs
+
+
 @files_bp.route("/thumbnail", methods=["GET"])
 def get_thumbnail():
     """GET /api/files/thumbnail - Get thumbnail for a document.
@@ -1494,7 +1509,8 @@ def get_thumbnail():
                                 are reachable too.
 
     Looks for a cached thumbnail in a thumbnails/ subdirectory next to
-    the source. Generates one on the fly for video files via ffmpeg.
+    the source, then in the batch's thumbnails/ one level up (see
+    _thumbnail_dirs). Generates one on the fly for video files via ffmpeg.
     Falls back to serving the original file when nothing else hits.
     """
     doc_id_arg = request.args.get("document_id", "").strip()
@@ -1527,19 +1543,17 @@ def get_thumbnail():
     else:
         return error_response("path or document_id parameter required", 400, "NO_TARGET")
 
-    # Look for thumbnail in thumbnails/ subdirectory
+    # Look for a cached thumbnail, nearest location first.
     parent_dir = doc_physical.parent
     thumb_dir = parent_dir / "thumbnails"
     thumb_name = doc_physical.stem + ".jpg"
     thumb_path = thumb_dir / thumb_name
 
-    if thumb_path.exists():
-        return send_file(str(thumb_path), mimetype="image/jpeg")
-
-    # Try .png thumbnail as fallback
-    thumb_png = thumb_dir / (doc_physical.stem + ".png")
-    if thumb_png.exists():
-        return send_file(str(thumb_png), mimetype="image/png")
+    for candidate_dir in _thumbnail_dirs(doc_physical):
+        for ext, mimetype in ((".jpg", "image/jpeg"), (".png", "image/png")):
+            candidate = candidate_dir / (doc_physical.stem + ext)
+            if candidate.exists():
+                return send_file(str(candidate), mimetype=mimetype)
 
     # For video files, try to generate a thumbnail on the fly via ffmpeg
     video_exts = {'.mp4', '.webm', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.m4v'}
@@ -1663,18 +1677,30 @@ def edit_image():
             bg.paste(img, mask=img.split()[-1] if img.mode == "RGBA" else None)
             img = bg
 
-        # Determine save path
+        # Determine save path. A name is taken when a file or a row has it; a
+        # sibling is never written over.
+        def _name_taken(path: Path, doc_path: str) -> bool:
+            return path.exists() or DBDocument.query.filter_by(path=doc_path).first() is not None
+
+        old_path = None
+        previous = (document.filename, document.path, document.type, document.size)
         if save_mode == "overwrite":
             out_path = physical_path.with_suffix(target_ext)
             out_doc = document
             if out_path != physical_path:
-                # Format changed — update document record
+                # Format changed: the row moves to the new name and the original
+                # file goes once the row is committed.
+                new_doc_path = str(Path(document.path).with_suffix(target_ext))
+                if _name_taken(out_path, new_doc_path):
+                    return error_response(
+                        f"{out_path.name} already exists in this folder. "
+                        "Save as a copy instead, or rename that file first.",
+                        409, "NAME_TAKEN",
+                    )
                 out_doc.filename = physical_path.stem + target_ext
-                out_doc.path = str(Path(document.path).with_suffix(target_ext))
-                # Remove old file after save
+                out_doc.path = new_doc_path
+                out_doc.type = target_ext
                 old_path = physical_path
-            else:
-                old_path = None
         else:
             # Save as copy with _edited suffix
             stem = physical_path.stem
@@ -1682,45 +1708,58 @@ def edit_image():
             while True:
                 new_name = f"{stem}_edited{f'_{counter}' if counter > 1 else ''}{target_ext}"
                 out_path = physical_path.parent / new_name
-                if not out_path.exists():
+                new_doc_path = str(Path(document.path).parent / new_name)
+                if not _name_taken(out_path, new_doc_path):
                     break
                 counter += 1
 
-            # Create new document record
-            new_doc_path = str(Path(document.path).parent / new_name)
+            # Create new document record; size is set once the file is written.
             out_doc = DBDocument(
                 filename=new_name,
                 path=new_doc_path,
                 folder_id=document.folder_id,
-                file_size=0,
-                file_type=f"image/{target_format}",
+                type=target_ext,
+                index_status="NOT_INDEXED",
                 uploaded_at=utcnow(),
             )
             db.session.add(out_doc)
 
-        # Save
+        # Write beside the target, commit the row, then move the file into
+        # place and drop the original, so a failure at any step leaves the
+        # original file and row as they were.
         save_kwargs = {}
         if target_format in ("jpeg", "webp"):
             save_kwargs["quality"] = quality
         if target_format == "png":
             save_kwargs["optimize"] = True
-        img.save(str(out_path), format=target_format.upper(), **save_kwargs)
-
-        # Update file size
-        out_doc.file_size = out_path.stat().st_size
-
-        # Remove old file if format changed on overwrite
-        if save_mode == "overwrite" and old_path and old_path != out_path and old_path.exists():
+        tmp_path = out_path.with_name(f".{out_path.name}.{os.getpid()}.tmp")
+        try:
+            img.save(str(tmp_path), format=target_format.upper(), **save_kwargs)
+            out_doc.size = tmp_path.stat().st_size
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            tmp_path.unlink(missing_ok=True)
+            raise
+        try:
+            os.replace(tmp_path, out_path)
+        except OSError:
+            tmp_path.unlink(missing_ok=True)
+            if save_mode == "overwrite":
+                out_doc.filename, out_doc.path, out_doc.type, out_doc.size = previous
+            else:
+                db.session.delete(out_doc)
+            db.session.commit()
+            raise
+        if old_path is not None and old_path != out_path and old_path.exists():
             old_path.unlink()
-
-        db.session.commit()
 
         logger.info(f"Image edited: doc={doc_id}, mode={save_mode}, format={target_format}, path={out_path}")
         return success_response({
             "document_id": out_doc.id,
             "filename": out_doc.filename,
             "path": out_doc.path,
-            "file_size": out_doc.file_size,
+            "file_size": out_doc.size,
             "width": img.width,
             "height": img.height,
         }, "Image saved successfully")
