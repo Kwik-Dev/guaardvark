@@ -576,15 +576,24 @@ def generate_bulk_csv_v2_task(rule_id, project_id, target_site, source_site, tar
 
 
 def _guaardvark_storage_dirs():
-    """(storage_dir, upload_dir) from the GUAARDVARK_* variables backend.config
-    reads, taken at call time: this module stays free of backend.config, and
-    a worker or a test sees the current values rather than import-time ones."""
-    storage = os.environ.get('GUAARDVARK_STORAGE_DIR', STORAGE_DIR)
-    upload = os.environ.get('GUAARDVARK_UPLOAD_DIR', os.path.join(storage, 'uploads'))
-    return storage, upload
+    """(storage_dir, upload_dir, backup_dir) resolved the way backend.config
+    resolves them (relative values against GUAARDVARK_ROOT, same defaults),
+    taken at call time: this module stays free of backend.config, and a worker
+    or a test sees the current values rather than import-time ones."""
+    root = (os.environ.get('GUAARDVARK_ROOT')
+            or os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+    def resolve(var, default):
+        path = os.environ.get(var, default)
+        return path if os.path.isabs(path) else os.path.join(root, path)
+
+    return (resolve('GUAARDVARK_STORAGE_DIR', 'data'),
+            resolve('GUAARDVARK_UPLOAD_DIR', 'data/uploads'),
+            resolve('GUAARDVARK_BACKUP_DIR', 'backups'))
 
 
-def scan_import_source(source_path, supported_extensions, storage_dir, upload_dir, target_dir=None):
+def scan_import_source(source_path, supported_extensions, storage_dir, upload_dir, target_dir=None,
+                       backup_dir=None):
     """Walk ``source_path`` for files a bulk import may take.
 
     Returns ``(files, skipped)`` where ``files`` is a list of
@@ -599,6 +608,8 @@ def scan_import_source(source_path, supported_extensions, storage_dir, upload_di
       the import's target folder are pruned when they lie under the source,
       so docstore.json, index_store.json, config/*.json and the internal
       secret can never be imported or moved (skipped["internal_dirs"]);
+    - Guaardvark's backups folder (``backup_dir``: full install archives) is
+      pruned the same way when an import of a parent folder reaches it;
     - hidden files are skipped: .env, .netrc, .gitignore, .bashrc, ...
       (skipped["hidden_files"]);
     - credential and secret files named by path_safety.SENSITIVE_PATTERNS are
@@ -614,10 +625,13 @@ def scan_import_source(source_path, supported_extensions, storage_dir, upload_di
     storage_real = os.path.realpath(storage_dir) if storage_dir else None
     upload_real = os.path.realpath(upload_dir) if upload_dir else None
     target_real = os.path.realpath(target_dir) if target_dir else None
+    backup_real = os.path.realpath(backup_dir) if backup_dir else None
 
     def is_internal(path):
         real = os.path.realpath(path)
         if target_real and real == target_real:
+            return True
+        if backup_real and is_within(real, [backup_real]):
             return True
         if not storage_real or not is_within(real, [storage_real]):
             return False
@@ -726,11 +740,16 @@ def bulk_import_documents_task(job_id, source_path, target_folder, project_id=No
         # Guaardvark's own data folder is never a source (docstore, index
         # store, config, the internal secret); its uploads folder is the one
         # exception, so already-imported files can be reorganised.
-        storage_dir, upload_dir = _guaardvark_storage_dirs()
+        storage_dir, upload_dir, backup_dir = _guaardvark_storage_dirs()
         from backend.utils.path_safety import is_within
         if (is_within(source_path, [storage_dir]) and not is_within(source_path, [upload_dir])):
             error_msg = ("Source path is inside Guaardvark's own data folder; "
                          "only its uploads folder can be imported from")
+            logger.error(f"{error_msg}: {source_path}")
+            update_job_status("error", error_msg, 0)
+            return {'error': error_msg, 'job_id': job_id}
+        if is_within(source_path, [backup_dir]):
+            error_msg = "Source path is inside Guaardvark's backups folder"
             logger.error(f"{error_msg}: {source_path}")
             update_job_status("error", error_msg, 0)
             return {'error': error_msg, 'job_id': job_id}
@@ -809,7 +828,7 @@ def bulk_import_documents_task(job_id, source_path, target_folder, project_id=No
         supported_extensions = text_extensions | media_extensions | indexable_extensions
         
         files_to_import, skipped = scan_import_source(
-            source_path, supported_extensions, storage_dir, upload_dir, target_dir)
+            source_path, supported_extensions, storage_dir, upload_dir, target_dir, backup_dir)
         skipped_note = _skipped_summary(skipped)
 
         total_files = len(files_to_import)
