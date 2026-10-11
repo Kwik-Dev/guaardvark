@@ -43,6 +43,21 @@ PROMPT_SLOT_RULE_NAMES = (
     QA_DEFAULT_RULE_NAME,
 )
 
+# Prompt-slot rows are looked up at this level; a slot row saved at another
+# level is never found, so the Rules API stores them here.
+PROMPT_SLOT_LEVEL = "SYSTEM"
+
+# Levels the chat prompt lists: shipped SYSTEM rules, LEARNED rules, and
+# USER_GLOBAL, the level the Rules page saves a new rule at.
+CHAT_RULE_LEVELS = ("SYSTEM", "LEARNED", "USER_GLOBAL")
+
+# Ceiling for the rules block in a chat prompt, in characters: about 1,500
+# tokens, under a fifth of the 8,192-token window BrainState assumes for a
+# model it cannot measure, three times the memory block's 500-token budget,
+# and room for some forty one-line rules. Whole rules past it are left out,
+# the newest user rule first.
+CHAT_RULES_MAX_CHARS = 6000
+
 
 def _model_key(name: str) -> str:
     """A model name as Ollama resolves it: lowercased, with the implied
@@ -246,6 +261,62 @@ def get_formatted_rules(
     except Exception as e:
         logger.error("Database error fetching formatted rules: %s", e, exc_info=True)  # noqa: BLE001 - rule fetch failure returns safe fallback per infra
         return ""
+
+
+def _bounded_rules_block(block: str, max_chars: int) -> str:
+    """Drop whole rules from the end of a formatted block until it fits.
+
+    A level header left without bullets goes with them. The block is kept
+    verbatim when it already fits.
+    """
+    if len(block) <= max_chars:
+        return block
+    lines = block.rstrip("\n").split("\n")
+    dropped = 0
+    while lines and len("\n".join(lines)) + 1 > max_chars:
+        line = lines.pop()
+        if line.startswith("- "):
+            dropped += 1
+    while lines and lines[-1].startswith("## "):
+        lines.pop()
+    while lines and lines[-1] == "":
+        lines.pop()
+    if not any(line.startswith("- ") for line in lines):
+        logger.warning(
+            "Rules block left out of the chat prompt: no rule fits in %d chars.",
+            max_chars,
+        )
+        return ""
+    logger.warning(
+        "Rules block trimmed to %d chars; %d rule(s) left out of the chat prompt.",
+        max_chars,
+        dropped,
+    )
+    return "\n".join(lines) + "\n"
+
+
+def get_chat_rules_block(model_name: Optional[str] = None) -> str:
+    """The active rules a chat system prompt carries for model_name.
+
+    Lists CHAT_RULE_LEVELS through ``get_formatted_rules`` and bounds the
+    result at CHAT_RULES_MAX_CHARS. "" when no rule applies.
+    """
+    block = get_formatted_rules(levels=list(CHAT_RULE_LEVELS), model_name=model_name)
+    if not block:
+        return ""
+    return _bounded_rules_block(block, CHAT_RULES_MAX_CHARS)
+
+
+def clear_rule_caches() -> None:
+    """Forget every cached rule lookup.
+
+    The caches are keyed on the newest ``updated_at`` among matching rows, so
+    deleting any row but the newest leaves the key, and the stale entry, in
+    place. Rule writes call this before the chat prompts are rebuilt.
+    """
+    _cached_formatted_rules.cache_clear()
+    _cached_active_system_prompt.cache_clear()
+    _cached_active_qa_template.cache_clear()
 
 
 def get_active_system_prompt(

@@ -498,6 +498,9 @@ def set_rules_enabled():
             f"Failed to update rules_enabled setting: {e}", exc_info=True
         )
         return error_response("Failed to update setting", status_code=500)
+    # The switch gates the persona and rules block baked into the chat prompt.
+    from backend.services.brain_state import refresh_chat_prompts
+    refresh_chat_prompts()
     return success_response({"rules_enabled": enabled})
 
 
