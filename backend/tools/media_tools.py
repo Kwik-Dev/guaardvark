@@ -307,8 +307,13 @@ class MediaStatusTool(BaseTool):
 
         result = service.get_status(player)
         if not result.get("success") and "No media player" in (result.get("error") or ""):
-            # Nothing playing is an answer, not a failure.
-            return ToolResult(success=True, output="No media player is running.", metadata=result)
+            # Nothing playing is an answer, not a failure, so the metadata
+            # says so too rather than carrying the service's error dict.
+            return ToolResult(
+                success=True,
+                output="No media player is running.",
+                metadata={"success": True, "player": None, "players": [], "status": "Stopped"},
+            )
         if result.get("choice_needed"):
             # So is the list of open players when none of them is the obvious one.
             return ToolResult(success=True, output=result["error"], metadata=result)

@@ -246,6 +246,9 @@ def list_memories():
     """
     GET /api/memory?search=&limit=50&offset=0&type=&source=&status=&sort=
     List or search memories. sort=trust orders by importance * source trust weight.
+    status is one of active, archived, wrong, or all (every row); without it
+    the rows marked wrong are left out. The body's total is the count of
+    matching rows, so a caller can page with offset.
     """
     try:
         query = db.session.query(AgentMemory)
@@ -259,8 +262,12 @@ def list_memories():
         if source:
             query = query.filter(AgentMemory.source == normalize_memory_source(source))
 
-        status = request.args.get("status")
-        if status:
+        # status=all is every row, the ones marked wrong included. No status
+        # is the working set (the CLI's /memory list): wrong rows left out.
+        status = (request.args.get("status") or "").strip().lower()
+        if status == "all":
+            pass
+        elif status:
             query = query.filter(AgentMemory.status == normalize_memory_status(status))
         else:
             query = query.filter((AgentMemory.status == None) | (AgentMemory.status != "wrong"))

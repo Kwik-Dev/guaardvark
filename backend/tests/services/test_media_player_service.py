@@ -237,7 +237,11 @@ def test_no_obvious_player_acts_on_none_and_lists_them(env, statuses):
 def test_no_player_running(env):
     use_bus(env, {})
     assert pause().error == "No media player is running."
-    assert media_tools.MediaStatusTool().execute().output == "No media player is running."
+    status = media_tools.MediaStatusTool().execute()
+    assert status.success and status.output == "No media player is running."
+    # The answer and its metadata agree: no error dict rides along a success.
+    assert status.metadata["success"] is True and "error" not in status.metadata
+    assert status.metadata["player"] is None and status.metadata["players"] == []
 
 
 def test_status_names_the_player_why_and_the_others(env):

@@ -54,15 +54,20 @@ def _normalize_content(text: str) -> str:
     return collapsed.rstrip(".,;:!")
 
 
-def _extract_fact(message: str) -> str | None:
-    """Return the fact to store, or None if the message is not an explicit remember."""
+def _extract_fact(message: str, *, explicit_only: bool = False) -> str | None:
+    """Return the fact to store, or None if the message is not a remember.
+
+    explicit_only keeps just the forms that ask for the fact to be kept
+    ("remember that …", "from now on …"); "note that …" and "my X is Y"
+    are then left alone.
+    """
     text = (message or "").strip()
     if not text or text.endswith("?"):
         return None
     if _word_count(text) < _MIN_WORDS:
         return None
 
-    for pattern in _PREFIX_PATTERNS:
+    for pattern in _REMEMBER_PATTERNS if explicit_only else _PREFIX_PATTERNS:
         match = pattern.match(text)
         if match:
             fact = text[match.end():].strip()
@@ -70,7 +75,7 @@ def _extract_fact(message: str) -> str | None:
                 fact = fact[1:-1].strip()
             return fact or None
 
-    if _MY_OUR_IS.match(text):
+    if not explicit_only and _MY_OUR_IS.match(text):
         return text
 
     return None
@@ -112,16 +117,20 @@ def capture_from_message(
     session_id=None,
     project_id=None,
     user_id=None,
+    explicit_only: bool = False,
 ) -> str | None:
     """Store an explicit 'remember …' fact from a chat turn.
 
     A remember intent is stored without session_id so later chats recall it;
-    project_id is kept either way. Returns the new (or existing duplicate)
-    memory id, or None if the message is not a remember intent.
+    project_id is kept either way. explicit_only stores only the forms that
+    ask for the fact to be kept, so a path whose traffic is task requests
+    ("my goal is to …") does not file those as facts. Returns the new (or
+    existing duplicate) memory id, or None if the message is not a remember
+    intent.
     """
     if not isinstance(message, str):
         return None
-    fact = _extract_fact(message)
+    fact = _extract_fact(message, explicit_only=explicit_only)
     if not fact:
         return None
     across_chats = _is_remember(message)
