@@ -2363,6 +2363,8 @@ def load_rules_cli(bundle_file, enable):
     from backend.models import Setting
     from backend.seed_data import load_rule_bundle
 
+    from backend.utils.settings_utils import get_rules_enabled
+
     with app.app_context():
         counts = load_rule_bundle(bundle_file)
         if enable:
@@ -2372,11 +2374,17 @@ def load_rules_cli(bundle_file, enable):
             else:
                 row.value = "true"
             db.session.commit()
+        rules_on = get_rules_enabled()
     click.echo(
         f"{bundle_file}: inserted {counts['inserted']}, updated {counts['updated']}, "
         f"deactivated {counts['deactivated']}"
         + ("; rules_enabled=true" if enable else "")
     )
+    if not rules_on:
+        # The Rules switch gates the persona and the rules block in chat.
+        click.echo("Rules are off in Settings, so chat will not use this bundle's persona or "
+                   "rules until the switch is on (Settings → A.I. Features → Rules, or rerun "
+                   "with --enable).")
     click.echo("If the server is running: curl -X POST <host>/api/brain/refresh")
 
 
