@@ -441,7 +441,7 @@ export const readMultipleFiles = async (filePaths) => {
 
     const results = await Promise.allSettled(
       filePaths.map(async (path) => {
-        const response = await fetch(`${BASE_URL}/api/files/read`, {
+        const response = await fetch(`${BASE_URL}/files/read`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
