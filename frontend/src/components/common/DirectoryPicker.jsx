@@ -105,6 +105,7 @@ const joinPath = (dir, name) => (dir === "/" ? `/${name}` : `${dir}/${name}`);
  * @param {boolean}  [showFiles]     folder mode: list files (not selectable)
  * @param {"folder"|"file"|"fileOrFolder"} [mode]
  * @param {string[]} [fileExtensions] file modes: the extensions that can be picked, e.g. [".jsonl"]
+ * @param {string}   [purpose]       "training" also lets the picker browse the training datasets folder
  */
 const DirectoryPicker = ({
   open,
@@ -116,6 +117,7 @@ const DirectoryPicker = ({
   showFiles = false,
   mode = "folder",
   fileExtensions = null,
+  purpose = null,
 }) => {
   const pickFiles = mode !== "folder";
   const [currentPath, setCurrentPath] = useState("");
@@ -182,6 +184,7 @@ const DirectoryPicker = ({
           path,
           include_files: listFiles ? "true" : "false",
         });
+        if (purpose) params.set("purpose", purpose);
         const response = await fetch(`${BASE_URL}/files/browse-server?${params}`);
         const data = await handleResponse(response, { quiet: true });
         if (id !== requestId.current) return "stale";
@@ -211,7 +214,7 @@ const DirectoryPicker = ({
         if (id === requestId.current) setLoading(false);
       }
     },
-    [includeFiles],
+    [includeFiles, purpose],
   );
 
   /** Open a typed or starting path: a folder as it is, a file (in a file mode)

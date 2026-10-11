@@ -2021,6 +2021,25 @@ def bulk_import_roots() -> list:
     return roots
 
 
+def browse_purpose_roots(purpose: str) -> list:
+    """Folders a picker may also browse, never import from, for one purpose.
+    "training" adds the training datasets folder: the dataset picker opens
+    there, and a stock install keeps it inside the data folder."""
+    if purpose != "training":
+        return []
+    try:
+        from backend.api.training.routes import training_datasets_dir
+    except ImportError:
+        return []
+    return [str(training_datasets_dir())]
+
+
+def _with_extra_roots(extra_roots) -> list:
+    roots = bulk_import_roots()
+    roots += [root for root in extra_roots if root not in roots]
+    return roots
+
+
 def _hidden_below_root(path: str, root: str) -> bool:
     """True when a component of ``path`` below ``root`` starts with a dot
     (~/.ssh, ~/.gnupg, ~/.config, .git)."""
@@ -2070,13 +2089,15 @@ def display_path(path: str, home: str) -> str:
     return "~" + path[len(base):] if path.startswith(base + "/") else path
 
 
-def resolve_import_directory(requested: str):
+def resolve_import_directory(requested: str, extra_roots=()):
     """``(resolved_path, None)`` when ``requested`` is a directory Bulk Import
     may use, else ``(None, reason)``. Symlinks are resolved first, on the path
-    and on the roots, so a link inside the home folder cannot point out of it."""
+    and on the roots, so a link inside the home folder cannot point out of it.
+    ``extra_roots`` (from :func:`browse_purpose_roots`) widens browsing only;
+    the import route never passes it."""
     from backend.utils.path_safety import resolve
 
-    roots = bulk_import_roots()
+    roots = _with_extra_roots(extra_roots)
     home = roots[0]
     target = resolve(requested or home, base=home)
     root = _containing_root(target, roots)
@@ -2106,8 +2127,9 @@ def browse_server_directory():
         from backend.utils.path_safety import is_sensitive
 
         include_files = request.args.get("include_files", "false").lower() == "true"
-        requested_path, refusal = resolve_import_directory(request.args.get("path", ""))
-        roots = bulk_import_roots()
+        extra = browse_purpose_roots(request.args.get("purpose", ""))
+        requested_path, refusal = resolve_import_directory(request.args.get("path", ""), extra)
+        roots = _with_extra_roots(extra)
         if refusal:
             # The roots travel with the refusal so the picker can offer them;
             # ``home`` lets it write the home folder as ~ on screen.
@@ -2135,7 +2157,7 @@ def browse_server_directory():
                     if os.path.isdir(entry_path):
                         # A symlink to a folder outside the roots is not
                         # offered; opening it would only be refused.
-                        if resolve_import_directory(entry_path)[1]:
+                        if resolve_import_directory(entry_path, extra)[1]:
                             continue
                         # Count items in directory for preview
                         try:
@@ -2164,7 +2186,7 @@ def browse_server_directory():
             # The parent is offered only while it is still an allowed folder,
             # so the picker's Up button stops at a root instead of erroring.
             parent = os.path.dirname(requested_path)
-            parent_allowed, _ = resolve_import_directory(parent)
+            parent_allowed, _ = resolve_import_directory(parent, extra)
             response_data = {
                 "path": requested_path,
                 "directories": directories,
