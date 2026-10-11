@@ -338,7 +338,35 @@ def resolve_stills_model(requested: str | None = None) -> str:
 
 
 def get_stills_model_setting() -> str:
-    return _read_setting(SETTING_STILLS_MODEL, ENV_STILLS, DEFAULT_STILLS_MODEL)
+    # "auto" saved in the picker is no choice: answer with the product default,
+    # as when nothing was saved, or sampling and prompt style would follow an
+    # unknown family (SD defaults on a Z-Image render).
+    val = _read_setting(SETTING_STILLS_MODEL, ENV_STILLS, DEFAULT_STILLS_MODEL)
+    return DEFAULT_STILLS_MODEL if val == AUTO else val
+
+
+def configured_stills_default() -> Optional[str]:
+    """The Stills model a person chose in Settings > Generation (or set through
+    GUAARDVARK_STILLS_MODEL), or None when nothing was chosen.
+
+    get_stills_model_setting() answers "which model" and fills in the product
+    default; this answers "did anyone choose one", which is what an Auto pick
+    needs: a chosen model is honoured, an unchosen one leaves Auto to its own
+    per-card routing. "auto" saved in the picker counts as no choice.
+    """
+    val = _read_setting(SETTING_STILLS_MODEL, ENV_STILLS, "")
+    if not val or val == AUTO:
+        return None
+    return val
+
+
+def stills_default_catalog_key(model_id: str) -> str:
+    """The image catalog key a Stills profile id renders with (sdxl-legacy ->
+    sd-xl, flux-dev -> flux-dev); ids outside the registry pass through."""
+    p = get_profile(model_id)
+    if not p:
+        return (model_id or "").strip().lower()
+    return p.get("offline_model_key") or p.get("comfy_model_tag") or p["id"]
 
 
 def get_cast_train_base_setting() -> str:
@@ -658,6 +686,9 @@ def public_settings_payload() -> dict[str, Any]:
     maxq = get_max_quality_model_setting()
     return {
         "stills_model": stills,
+        # The choice itself, None when nothing was chosen: the Settings picker
+        # shows Auto then, not the filled-in default as if someone picked it.
+        "stills_chosen": configured_stills_default(),
         "cast_train_base": train,
         "max_quality_model": maxq,
         "character_lora_strength": _lora_strength_settings(),

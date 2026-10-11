@@ -44,6 +44,19 @@ def zimage_via_comfyui_enabled() -> bool:
     return _v in ("1", "true", "yes", "on")
 
 
+def configured_auto_model() -> str | None:
+    """The catalog key an Auto still renders with when a Stills model was chosen
+    in Settings > Generation and it can run here; None leaves Auto to the offline
+    router's per-card pick (OfflineImageGenerator.configured_default_for_auto
+    logs why)."""
+    try:
+        from backend.services.offline_image_generator import get_image_generator
+        return get_image_generator().configured_default_for_auto()
+    except Exception as e:  # noqa: BLE001
+        logger.debug("Stills default not consulted for Auto: %s", e)
+        return None
+
+
 @dataclass
 class StillResult:
     success: bool
@@ -140,6 +153,17 @@ def run_stills_pipeline(
             cleaned.append(s)
     if not cleaned:
         return [StillResult(success=False, error="No valid prompts after sanitize")]
+
+    # Auto honours the Stills model chosen in Settings > Generation, resolved here
+    # so the family defaults below and the engine dispatch in _generate_one agree
+    # with the model that renders (a FLUX default routes to ComfyUI like an
+    # explicit flux-dev pick). With no choice made, "auto" reaches the offline
+    # router unchanged.
+    if (model or "").strip().lower() in ("", "auto"):
+        preferred = configured_auto_model()
+        if preferred:
+            logger.info("stills_pipeline: Auto renders with the Stills default %r (%s)", preferred, source)
+            model = preferred
 
     # "comfyui" / "comfy" is a generic selector: the actual engine (Z-Image,
     # FLUX-dev, FLUX-schnell) is chosen from the live ComfyUI. Resolve it once

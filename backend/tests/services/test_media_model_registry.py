@@ -127,3 +127,20 @@ def test_train_base_must_be_installed(monkeypatch):
     assert mmr.train_base_path(sdxl) is None
     msg = mmr.train_base_missing_message(sdxl)
     assert "not installed" in msg and "never downloads" in msg
+
+
+def test_payload_tells_a_chosen_stills_model_from_the_filled_in_default(monkeypatch):
+    """The Settings picker shows Auto when nothing was chosen; it must not read
+    the filled-in default as a choice."""
+    monkeypatch.setattr(mmr, "_lora_strength_settings", lambda: {})
+    monkeypatch.setattr(mmr, "_read_setting", lambda key, env, default: default)
+    payload = mmr.public_settings_payload()
+    assert payload["stills_model"] == mmr.DEFAULT_STILLS_MODEL
+    assert payload["stills_chosen"] is None
+
+    monkeypatch.setattr(
+        mmr, "_read_setting",
+        lambda key, env, default: "flux-dev" if key == mmr.SETTING_STILLS_MODEL else default,
+    )
+    payload = mmr.public_settings_payload()
+    assert payload["stills_model"] == payload["stills_chosen"] == "flux-dev"
