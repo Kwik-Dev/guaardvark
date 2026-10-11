@@ -202,6 +202,22 @@ def test_allowed_path_inside_the_data_folder_is_its_own_root(client, install_und
     assert _browse(client, str(inst.data)).status_code == 403
 
 
+def test_training_pickers_browse_the_datasets_folder_but_cannot_import_it(
+    client, install_under_home, fake_task, monkeypatch,
+):
+    datasets = install_under_home.data / "training" / "datasets"
+    datasets.mkdir(parents=True)
+    monkeypatch.setattr(files_api, "browse_purpose_roots",
+                        lambda purpose: [str(datasets)] if purpose == "training" else [])
+    assert _browse(client, str(datasets)).status_code == 403
+    r = _browse(client, str(datasets), purpose="training")
+    assert r.status_code == 200, r.get_json()
+    assert str(datasets) in r.get_json()["roots"]
+    r = client.post("/api/files/bulk-import", json={"source_path": str(datasets), "purpose": "training"})
+    assert r.status_code == 403
+    assert fake_task.calls == []
+
+
 def test_wsl_leaves_mnt_out_of_the_roots(tmp_path, monkeypatch):
     mnt = tmp_path / "mnt"
     media = tmp_path / "media"

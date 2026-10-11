@@ -300,6 +300,7 @@ const TrainingDatasetModal = ({
         }}
         initialPath={formData.path.trim() || startPath}
         fallbackPath={startPath}
+        purpose="training"
         mode="fileOrFolder"
         fileExtensions={DATASET_EXTENSIONS}
         title="Choose a dataset file or folder"
