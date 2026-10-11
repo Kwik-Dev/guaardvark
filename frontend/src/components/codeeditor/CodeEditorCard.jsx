@@ -66,6 +66,7 @@ const CodeEditorCard = React.forwardRef(
       setActiveTabIndex,
       onEditorContextChange,
       onChatAction,
+      onRun,
       revealRequest,
       onRevealDone,
       ...props
@@ -698,10 +699,10 @@ ${currentTab.content}
       });
     }, [setOpenTabs, setActiveTabIndex]);
 
+    // The page owns Run (it also drives the header button and the Output card).
     const handleRunCode = useCallback(() => {
-      if (!currentTab) return;
-      console.log("Code execution not implemented yet");
-    }, [currentTab]);
+      if (currentTab?.content && onRun) onRun();
+    }, [currentTab, onRun]);
 
     const handleTabContextMenu = useCallback((event, tabIndex) => {
       event.preventDefault();
@@ -888,9 +889,9 @@ ${currentTab.content}
                   <SaveIcon fontSize="small" />
                 </IconButton>
               </Tooltip>
-              <Tooltip title="Code execution not implemented">
+              <Tooltip title="Run Code">
                 <span>
-                  <IconButton size="small" onClick={handleRunCode} disabled={true}>
+                  <IconButton size="small" onClick={handleRunCode} disabled={!currentTab?.content || !onRun}>
                     <PlayArrowIcon fontSize="small" />
                   </IconButton>
                 </span>

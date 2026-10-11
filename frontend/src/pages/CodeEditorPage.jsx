@@ -1543,6 +1543,7 @@ const CodeEditorPage = () => {
                       {...(cardId === 'editor' && {
                         onEditorContextChange: handleEditorContextChange,
                         onChatAction: handleEditorChatAction,
+                        onRun: () => handleQuickAction('run'),
                         revealRequest,
                         onRevealDone: () => setRevealRequest(null),
                       })}
