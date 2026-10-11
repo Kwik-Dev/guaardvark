@@ -37,7 +37,7 @@ import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import { useSnackbar } from "../components/common/SnackbarProvider";
 import PageLayout from "../components/layout/PageLayout";
-import { rootLabel } from "../utils/displayPath";
+import { displayPath, rootLabel } from "../utils/displayPath";
 import {
   startBulkImport,
   getBulkImportStatus,
@@ -166,8 +166,10 @@ const BulkImportDocumentsPage = () => {
     setCurrentPath(path);
   };
 
+  // The chosen folder is written with ~ for the home folder; the server
+  // resolves ~ before it checks or imports anything.
   const handleBrowserSelect = () => {
-    setForm((prev) => ({ ...prev, sourcePath: currentPath }));
+    setForm((prev) => ({ ...prev, sourcePath: displayPath(currentPath, browseHome) }));
     setBrowserOpen(false);
   };
 
@@ -503,7 +505,7 @@ const BulkImportDocumentsPage = () => {
           <Stack spacing={2}>
             <TextField
               label="Current Path"
-              value={currentPath}
+              value={displayPath(currentPath, browseHome)}
               fullWidth
               InputProps={{
                 readOnly: true,
