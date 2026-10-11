@@ -88,6 +88,7 @@ def harness(tmp_path, monkeypatch):
     (source / "sub").mkdir(parents=True)
     (source / "notes.md").write_text("# notes\n")
     (source / "sub" / "deep.txt").write_text("deep\n")
+    monkeypatch.setenv("GUAARDVARK_STORAGE_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("GUAARDVARK_UPLOAD_DIR", str(uploads))
 
     fake_redis = types.ModuleType("redis")
@@ -163,3 +164,126 @@ def test_rerun_skips_already_imported_files_without_a_suffixed_duplicate(harness
     assert set(session.documents) == {"Imports/notes.md", "Imports/sub/deep.txt"}
     # Only the unindexed one is queued again.
     assert [a for a, _ in harness.queued.calls] == [(session.documents["Imports/notes.md"][0],)]
+
+
+# --------------------------------------------------------------------------
+# The walk: hidden folders and files, credentials, symlinks and Guaardvark's
+# own data never leave the source.
+# --------------------------------------------------------------------------
+
+def _project_tree(root):
+    """A code project as a user would point the import at."""
+    (root / ".git" / "objects").mkdir(parents=True)
+    (root / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    (root / ".git" / "config").write_text("[core]\n")
+    (root / ".git" / "objects" / "pack").write_text("x")
+    (root / ".ssh").mkdir()
+    (root / ".ssh" / "id_rsa").write_text("PRIVATE\n")
+    (root / ".env").write_text("SECRET=1\n")
+    (root / "README").write_text("readme\n")
+    (root / "notes.md").write_text("# notes\n")
+    return root
+
+
+@pytest.fixture
+def project(tmp_path, monkeypatch, harness):
+    src = _project_tree(tmp_path / "project")
+    return types.SimpleNamespace(src=src, harness=harness)
+
+
+def test_import_takes_readme_and_notes_only(project):
+    session = FakeSession()
+    result = project.harness.run(session, source_path=str(project.src), force_copy=False)
+
+    assert result["stats"]["imported"] == 2
+    assert set(session.documents) == {"Imports/README", "Imports/notes.md"}
+    # The repository and the keys are exactly where they were.
+    assert (project.src / ".git" / "HEAD").read_text() == "ref: refs/heads/main\n"
+    assert (project.src / ".git" / "objects" / "pack").exists()
+    assert (project.src / ".ssh" / "id_rsa").read_text() == "PRIVATE\n"
+    assert (project.src / ".env").read_text() == "SECRET=1\n"
+    assert not (project.src / "README").exists(), "the plain file was moved as asked"
+    assert not list(project.harness.uploads.rglob("id_rsa"))
+    assert not list(project.harness.uploads.rglob("HEAD"))
+    assert result["stats"]["skipped_private"] == {
+        "hidden_dirs": 2, "hidden_files": 1, "sensitive_files": 0, "symlinks": 0, "internal_dirs": 0,
+    }
+
+
+def test_dry_run_reports_what_the_walk_skips(project):
+    result = project.harness.run(FakeSession(), source_path=str(project.src), dry_run=True)
+    assert sorted(result["files"]) == ["README", "notes.md"]
+    assert result["skipped_private"]["hidden_dirs"] == 2
+    assert result["skipped_private"]["hidden_files"] == 1
+
+
+def test_scan_rules_credentials_symlinks_and_guaardvark_data(tmp_path):
+    src = tmp_path / "home"
+    src.mkdir()
+    (src / "credentials").write_text("aws\n")
+    (src / "server.key").write_text("key\n")
+    (src / "cert.pem").write_text("pem\n")
+    (src / ".git-credentials").write_text("token\n")
+    (src / "Makefile").write_text("all:\n")
+    (src / "LICENSE").write_text("MIT\n")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside\n")
+    os.symlink(outside, src / "link.txt")
+    outside_dir = tmp_path / "outside_dir"
+    outside_dir.mkdir()
+    (outside_dir / "leak.txt").write_text("leak\n")
+    os.symlink(outside_dir, src / "linked_dir")
+    # Guaardvark's own data folder lives under the home folder being imported.
+    data = src / "GX" / "data"
+    (data / "config").mkdir(parents=True)
+    (data / "docstore.json").write_text("{}")
+    (data / "config" / "settings.json").write_text("{}")
+    (data / ".swarm_internal_secret").write_text("s")
+    (data / "uploads").mkdir()
+    (data / "uploads" / "old.txt").write_text("already imported\n")
+    (src / "GX" / "app.py").write_text("print()\n")
+
+    files, skipped = cti.scan_import_source(
+        str(src), {".txt", ".json", ".py"}, str(data), str(data / "uploads"), None)
+
+    assert sorted(f[2] for f in files) == ["LICENSE", "Makefile", "app.py"]
+    assert skipped["sensitive_files"] == 3            # credentials, server.key, cert.pem
+    assert skipped["hidden_files"] == 1               # .git-credentials (hidden; also sensitive)
+    assert skipped["symlinks"] == 2                   # link.txt, linked_dir
+    assert skipped["internal_dirs"] == 1              # GX/data as a whole
+
+
+def test_scan_never_enters_the_target_folder(tmp_path):
+    src = tmp_path / "src"
+    (src / "Imports").mkdir(parents=True)
+    (src / "Imports" / "earlier.txt").write_text("x")
+    (src / "new.txt").write_text("y")
+    files, skipped = cti.scan_import_source(
+        str(src), {".txt"}, None, None, str(src / "Imports"))
+    assert [f[2] for f in files] == ["new.txt"]
+    assert skipped["internal_dirs"] == 1
+
+
+def test_source_inside_guaardvark_data_is_refused_except_uploads(tmp_path, monkeypatch, harness):
+    data = tmp_path / "data"
+    (data / "config").mkdir(parents=True)
+    (data / "config" / "settings.json").write_text("{}")
+    (data / "uploads" / "old").mkdir(parents=True)
+    (data / "uploads" / "old" / "a.txt").write_text("a")
+    monkeypatch.setenv("GUAARDVARK_STORAGE_DIR", str(data))
+    monkeypatch.setenv("GUAARDVARK_UPLOAD_DIR", str(data / "uploads"))
+
+    refused = harness.run(FakeSession(), source_path=str(data / "config"), dry_run=True)
+    assert "inside Guaardvark's own data folder" in refused["error"]
+    assert (data / "config" / "settings.json").exists()
+
+    allowed = harness.run(FakeSession(), source_path=str(data / "uploads" / "old"), dry_run=True)
+    assert allowed["files"] == ["a.txt"]
+
+
+def test_copy_is_the_default_on_the_task_and_the_route():
+    import inspect
+    assert inspect.signature(cti.bulk_import_documents_task).parameters["force_copy"].default is True
+    from backend.api import files_api
+    src = inspect.getsource(files_api.start_bulk_import)
+    assert 'data.get("force_copy", True)' in src
