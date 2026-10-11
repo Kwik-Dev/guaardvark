@@ -274,13 +274,14 @@ const RuleActionModal = ({
           description: "Core system prompt",
         };
       case "LEARNED":
-        // /saverule records the chat session in reference_id; a learned rule
-        // without one came from the rule bundle.
+        // A learned row with a reference_id was written by the /saverule
+        // command of the /api/query endpoint, which the chat page does not
+        // call; one without came from the rule bundle.
         return {
           label: "LEARNED",
           color: theme.palette.info.main,
           description: ruleData?.reference_id
-            ? "Saved by the chat from a correction"
+            ? "Saved by /saverule on the /api/query endpoint"
             : "Learned rule shipped in the rule bundle",
         };
       default:

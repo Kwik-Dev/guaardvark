@@ -506,10 +506,9 @@ const RulesPage = () => {
             color="text.secondary"
             sx={{ display: "block", px: 2, pb: 1 }}
           >
-            Learned rules: ones the chat saved from a correction (/saverule,
-            with behaviour learning on) and ones shipped in the rule bundle.
-            Delete any that are wrong here; Settings can clear all of them at
-            once.
+            Learned rules are the ones shipped in the rule bundle. The chat
+            does not add rules on its own. Delete any that are wrong here;
+            Settings can clear all of them at once.
           </Typography>
         ) : null
       }
@@ -595,7 +594,7 @@ const RulesPage = () => {
                       }
                       description={
                         levelFilter === "LEARNED"
-                          ? "Nothing saved from a correction yet, and no learned rule is loaded from the bundle."
+                          ? "No learned rule is loaded from the rule bundle."
                           : "Create a rule to define system prompts and commands"
                       }
                     />
