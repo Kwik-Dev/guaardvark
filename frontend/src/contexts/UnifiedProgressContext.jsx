@@ -492,8 +492,10 @@ export const UnifiedProgressProvider = ({ children }) => {
         processTimeoutRef.current.delete(job_id);
       }
 
-      // Get existing process to preserve progress if not explicitly provided
-      const existingProcess = activeProcesses.get(job_id);
+      // Get existing process to preserve progress if not explicitly provided.
+      // Read through the ref: a caller that started a process and then awaited
+      // holds this callback from before the start, whose activeProcesses lacks it.
+      const existingProcess = activeProcessesRef.current.get(job_id);
 
       // Preserve existing additional_data and merge with new values
       const existingAdditionalData = existingProcess?.additional_data || {};
