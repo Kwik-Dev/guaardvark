@@ -825,6 +825,7 @@ const PluginsPage = () => {
   }, [plugins]);
 
   const handlePluginAction = async (pluginId, action) => {
+    const settles = action === 'start' || action === 'stop';
     try {
       let response;
       switch (action) {
@@ -847,10 +848,20 @@ const PluginsPage = () => {
           if (!plugins.find((p) => p.id === pluginId)?.enabled) {
             await enablePlugin(pluginId);
           }
+          // The call returns only once the service answers its health check
+          // (a minute for ComfyUI), so show the wait while it runs.
+          setPlugins((prev) => prev.map((p) => (
+            p.id === pluginId ? { ...p, status: 'starting' } : p
+          )));
           response = await startPlugin(pluginId);
           break;
         }
-        case 'stop': response = await stopPlugin(pluginId); break;
+        case 'stop':
+          setPlugins((prev) => prev.map((p) => (
+            p.id === pluginId ? { ...p, status: 'stopping' } : p
+          )));
+          response = await stopPlugin(pluginId);
+          break;
         case 'enable': response = await enablePlugin(pluginId); break;
         case 'disable': response = await disablePlugin(pluginId); break;
         default: throw new Error(`Unknown action: ${action}`);
@@ -876,23 +887,14 @@ const PluginsPage = () => {
 
         // Optimistic update: flip the enabled preference and status immediately so
         // the toggle switch in the UI reflects the change without waiting for the
-        // 'plugins:status' socket round-trip. The authoritative snapshot from the
-        // backend (via socket or later fetch) will reconcile any details (e.g. real
-        // status after start completes, cooldowns, etc.).
+        // 'plugins:status' socket round-trip. Start and stop need none: they answer
+        // after the plugin has settled, and the listing fetched below is final.
         if (action === 'enable' || action === 'disable') {
           const newEnabled = action === 'enable';
           setPlugins((prev) => prev.map((p) =>
             p.id === pluginId
               ? { ...p, enabled: newEnabled, status: newEnabled ? 'stopped' : 'disabled', running: false }
               : p
-          ));
-        } else if (action === 'start') {
-          setPlugins((prev) => prev.map((p) =>
-            p.id === pluginId ? { ...p, status: 'starting', running: false } : p
-          ));
-        } else if (action === 'stop') {
-          setPlugins((prev) => prev.map((p) =>
-            p.id === pluginId ? { ...p, status: 'stopping', running: false } : p
           ));
         }
 
@@ -915,6 +917,10 @@ const PluginsPage = () => {
       }
     } catch (err) {
       showMessage(err.message || `Failed to ${action} plugin`, 'error');
+    } finally {
+      // Replace the 'starting'/'stopping' shown during the call with the
+      // backend's settled status, whether the call worked, failed or was gated.
+      if (settles) await fetchPlugins();
     }
   };
 
