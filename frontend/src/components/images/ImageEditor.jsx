@@ -50,6 +50,8 @@ const FlipVIcon = () => (
 );
 
 const API_BASE = '/api/files';
+// The editor covers the viewer (9999); its own popups must sit above it.
+const EDITOR_Z = 10000;
 
 const ImageEditor = ({
   imageUrl,
@@ -369,7 +371,7 @@ const ImageEditor = ({
         position: 'fixed',
         top: 0, left: 0, right: 0, bottom: 0,
         backgroundColor: 'rgba(0,0,0,0.95)',
-        zIndex: 10000,
+        zIndex: EDITOR_Z,
         display: 'flex',
         flexDirection: 'column',
       }}
@@ -575,12 +577,13 @@ const ImageEditor = ({
         </Typography>
       </Box>
 
-      {/* Save Dialog */}
+      {/* Save Dialog: above the editor, or it opens hidden behind it */}
       <Dialog
         open={saveDialogOpen}
         onClose={() => !saving && setSaveDialogOpen(false)}
         maxWidth="xs"
         fullWidth
+        sx={{ zIndex: EDITOR_Z + 1 }}
         PaperProps={{ sx: { backgroundColor: '#1e1e1e', color: 'white' } }}
       >
         <DialogTitle>Save Image</DialogTitle>
@@ -611,6 +614,7 @@ const ImageEditor = ({
                 value={saveFormat}
                 onChange={(e) => setSaveFormat(e.target.value)}
                 label="Format"
+                MenuProps={{ sx: { zIndex: EDITOR_Z + 2 } }}
                 sx={{ color: 'white', '& .MuiOutlinedInput-notchedOutline': { borderColor: 'rgba(255,255,255,0.2)' } }}
               >
                 <MenuItem value="">Keep Original</MenuItem>
