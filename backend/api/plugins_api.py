@@ -484,6 +484,82 @@ def get_plugin_logs(plugin_id):
         return error_response(str(e), 500, "PLUGIN_LOGS_ERROR")
 
 
+# ── ComfyUI update (plugins/comfyui/releases.json declares the target) ──────
+# The only routes here that reach the network, and only on the POST: a clone
+# from GitHub and a pip install from PyPI, both named in the check payload.
+
+@plugins_bp.route("/comfyui/update/check", methods=["GET"])
+def comfyui_update_check():
+    """What an update would do: versions, busy reason, disk, package changes."""
+    from backend.services.comfyui_update_service import UpdateRefused, get_update_service
+
+    try:
+        return success_response(data=get_update_service().check(request.args.get("target")))
+    except UpdateRefused as e:
+        return error_response(str(e), 409, "COMFYUI_UPDATE_REFUSED")
+    except Exception as e:
+        logger.error(f"ComfyUI update check failed: {e}", exc_info=True)
+        return error_response(str(e), 500, "COMFYUI_UPDATE_CHECK_ERROR")
+
+
+@plugins_bp.route("/comfyui/update", methods=["POST"])
+def comfyui_update_start():
+    """Start the update job; 202 with its status, 409 with the refusal."""
+    from backend.services.comfyui_update_service import UpdateRefused, get_update_service
+
+    data = request.get_json(silent=True) or {}
+    try:
+        status = get_update_service().start(data.get("target"))
+        return success_response(data=status, message="ComfyUI update started", status_code=202)
+    except UpdateRefused as e:
+        return error_response(str(e), 409, "COMFYUI_UPDATE_REFUSED")
+    except Exception as e:
+        logger.error(f"ComfyUI update failed to start: {e}", exc_info=True)
+        return error_response(str(e), 500, "COMFYUI_UPDATE_ERROR")
+
+
+@plugins_bp.route("/comfyui/update/status", methods=["GET"])
+def comfyui_update_status():
+    """The current or last update job; ``needs_repair`` when one was interrupted."""
+    from backend.services.comfyui_update_service import get_update_service
+
+    try:
+        return success_response(data=get_update_service().status())
+    except Exception as e:
+        logger.error(f"ComfyUI update status failed: {e}", exc_info=True)
+        return error_response(str(e), 500, "COMFYUI_UPDATE_STATUS_ERROR")
+
+
+@plugins_bp.route("/comfyui/update/repair", methods=["POST"])
+def comfyui_update_repair():
+    """Walk an interrupted update back to the old tree; 202 with status, 409 with the refusal."""
+    from backend.services.comfyui_update_service import UpdateRefused, get_update_service
+
+    try:
+        status = get_update_service().repair()
+        return success_response(data=status, message="ComfyUI repair started", status_code=202)
+    except UpdateRefused as e:
+        return error_response(str(e), 409, "COMFYUI_UPDATE_REFUSED")
+    except Exception as e:
+        logger.error(f"ComfyUI repair failed to start: {e}", exc_info=True)
+        return error_response(str(e), 500, "COMFYUI_UPDATE_ERROR")
+
+
+@plugins_bp.route("/comfyui/update/restore-previous", methods=["POST"])
+def comfyui_update_restore_previous():
+    """Swap back to the kept previous tree; 202 with status, 409 with the refusal."""
+    from backend.services.comfyui_update_service import UpdateRefused, get_update_service
+
+    try:
+        status = get_update_service().restore_previous()
+        return success_response(data=status, message="ComfyUI restore started", status_code=202)
+    except UpdateRefused as e:
+        return error_response(str(e), 409, "COMFYUI_UPDATE_REFUSED")
+    except Exception as e:
+        logger.error(f"ComfyUI restore failed to start: {e}", exc_info=True)
+        return error_response(str(e), 500, "COMFYUI_UPDATE_ERROR")
+
+
 @plugins_bp.route("/stats/gpu", methods=["GET"])
 def get_live_gpu_stats():
     """Get live GPU memory usage via nvidia-smi."""

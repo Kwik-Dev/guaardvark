@@ -173,6 +173,23 @@ open(path, "w").write(src)
 print("Applied ComfyUI#15441 kitchen-import guard (except Exception)")
 PYEOF
 
+# Same crash, second site: comfy/float.py imports comfy_kitchen for stochastic
+# FP8 rounding and only catches (AttributeError, ImportError), so a kitchen that
+# fails on torch<=2.6 kills the import of float.py. Widen to Exception; the
+# pure-torch fallback below that line then takes over.
+"$VENV_PYTHON" - "$COMFYUI_DIR/comfy/float.py" <<'PYEOF'
+import sys
+path = sys.argv[1]
+src = open(path).read()
+old = "    _ck_stochastic_rounding_fp8 = ck.stochastic_rounding_fp8\n    _CK_STOCHASTIC_ROUNDING_AVAILABLE = True\nexcept (AttributeError, ImportError):"
+new = "    _ck_stochastic_rounding_fp8 = ck.stochastic_rounding_fp8\n    _CK_STOCHASTIC_ROUNDING_AVAILABLE = True\nexcept Exception:"
+if old not in src:
+    sys.exit(0)  # already patched or upstream changed
+src = src.replace(old, new, 1)
+open(path, "w").write(src)
+print("Applied comfy/float.py kitchen-import guard (except Exception)")
+PYEOF
+
 # Log file
 LOG_DIR="$PROJECT_ROOT/logs"
 mkdir -p "$LOG_DIR"

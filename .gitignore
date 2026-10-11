@@ -181,6 +181,11 @@ coverage.xml
 
 # Plugin dependencies (installed at runtime)
 plugins/comfyui/ComfyUI/
+# Trees the ComfyUI updater keeps beside the live one
+plugins/comfyui/ComfyUI.next/
+plugins/comfyui/ComfyUI.prev-*/
+plugins/comfyui/ComfyUI.next.stale-*/
+plugins/comfyui/.update_job.json
 plugins/*/venv/
 backend/tools/voice/piper-models/*.onnx
 backend/tools/voice/piper-models/*.onnx.json
