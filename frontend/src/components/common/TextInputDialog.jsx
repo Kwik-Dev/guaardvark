@@ -67,13 +67,21 @@ const TextInputDialog = ({
   return (
     // autoFocus alone loses to a caller that keeps focus in its own editor
     // (the Notes link button holds the text selection on mouse-down), so the
-    // field takes focus again once the dialog has finished opening.
+    // field takes focus again once the dialog has finished opening. The draft
+    // arrives after autoFocus has already selected an empty field, so it is
+    // selected here too, or typing would add to the old value instead of
+    // replacing it.
     <Dialog
       open={open}
       onClose={onClose}
       maxWidth="xs"
       fullWidth
-      TransitionProps={{ onEntered: () => inputRef.current?.focus() }}
+      TransitionProps={{
+        onEntered: () => {
+          inputRef.current?.focus();
+          inputRef.current?.select();
+        },
+      }}
     >
       <DialogTitle sx={{ fontSize: "0.9rem" }}>{title}</DialogTitle>
       <DialogContent>
