@@ -18,7 +18,7 @@ from typing import Any
 
 import httpx
 
-from service.config_loader import resolve_backend_url
+from service.config_loader import API_KEY_HEADER, backend_api_key, resolve_backend_url
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +115,13 @@ class OrchestratorClient:
 
     def _post(self, path: str, payload: dict[str, Any], op: str) -> bool:
         try:
-            response = httpx.post(f"{self._url}{path}", json=payload, timeout=self._timeout)
+            key = backend_api_key()
+            response = httpx.post(
+                f"{self._url}{path}",
+                json=payload,
+                headers={API_KEY_HEADER: key} if key else None,
+                timeout=self._timeout,
+            )
             response.raise_for_status()
             return True
         except httpx.HTTPError as e:
