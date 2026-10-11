@@ -63,7 +63,8 @@ describe("BulkImportDocumentsPage options", () => {
     fireEvent.click(copyBox);
     expect(copyBox).not.toBeChecked();
     expect(screen.getByText(/moved out of the source folder into Documents/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Start Import" }));
+    // The cancelled confirm dialog keeps the page aria-hidden until its exit transition ends.
+    fireEvent.click(await screen.findByRole("button", { name: "Start Import" }));
     expect(await screen.findByText("Files are moved out of the source folder.")).toBeInTheDocument();
   });
 });
