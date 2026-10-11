@@ -11,6 +11,16 @@ describe("per-tab models", () => {
     expect(modelPathFor(null)).toBeUndefined();
   });
 
+  it("gives a tab that has not loaded a model apart from its loaded one", () => {
+    const loading = modelPathFor({ id: "d1", filePath: "notes.md", loadState: "loading" });
+    const failed = modelPathFor({ id: "d1", filePath: "notes.md", loadState: "failed" });
+    const loaded = modelPathFor({ id: "d1", filePath: "notes.md", loadState: "loaded" });
+    expect(loading).toBe("inmemory://code-editor/d1/loading/notes.md");
+    expect(failed).toBe(loading);
+    expect(loaded).toBe("inmemory://code-editor/d1/notes.md");
+    expect(modelPathFor({ id: "d1", filePath: "notes.md" })).toBe(loaded);
+  });
+
   it("disposes the models of closed tabs and leaves the others alone", () => {
     const models = new Map();
     const monaco = {
@@ -27,6 +37,13 @@ describe("per-tab models", () => {
     expect(models.get(modelPathFor(tabs[1])).disposed).toBe(false);
     expect(disposeTabModels(monaco, [tabs[0]])).toBe(0);
     expect(disposeTabModels(null, tabs)).toBe(0);
+
+    const doc = { id: "c", filePath: "c.md", loadState: "loading" };
+    for (const tab of [doc, { ...doc, loadState: "loaded" }]) {
+      const model = { disposed: false, isDisposed: () => model.disposed, dispose: () => { model.disposed = true; } };
+      models.set(modelPathFor(tab), model);
+    }
+    expect(disposeTabModels(monaco, [{ ...doc, loadState: "loaded" }])).toBe(2);
   });
 });
 
