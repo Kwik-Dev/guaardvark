@@ -12,7 +12,7 @@ try:
 
     from backend.api.memory_api import get_memories_for_context, pop_last_selected_ids
     from backend.models import AgentMemory, db
-    from backend.services.memory_capture import capture_from_message
+    from backend.services.memory_capture import _extract_fact, capture_from_message
 except Exception:  # pragma: no cover - environment without backend deps
     pytest.skip("Flask or backend modules not available", allow_module_level=True)
 
@@ -293,3 +293,28 @@ def test_explicit_only_keeps_just_the_asked_for_forms(app, message, stored):
     assert (mem_id is not None) is stored
     with app.app_context():
         assert (AgentMemory.query.count() == 1) is stored
+
+
+@pytest.mark.parametrize(
+    "message, expected",
+    [
+        ("Remember that the oven runs ten degrees hot. First add 2 and 3, then multiply by 4.",
+         "the oven runs ten degrees hot."),
+        ("remember that the office printer is on the second floor, then open the printer page",
+         "the office printer is on the second floor"),
+        ("remember that the backup runs at 2am; and then check the log", "the backup runs at 2am"),
+        ("from now on reply in French. Now summarise this page", "reply in French."),
+        ("remember that if the build fails, then rerun it with --clean",
+         "if the build fails, then rerun it with --clean"),
+        ("remember that the server is at 10.0.0.5", "the server is at 10.0.0.5"),
+    ],
+)
+def test_explicit_only_stops_the_fact_where_the_task_begins(message, expected):
+    """A brain-path turn is a task request: the stored fact is the part the
+    person asked to keep, not the instructions that follow it."""
+    assert _extract_fact(message, explicit_only=True) == expected
+
+
+def test_engine_path_keeps_the_whole_remainder():
+    message = "remember that the oven runs hot. It was serviced in May."
+    assert _extract_fact(message) == "the oven runs hot. It was serviced in May."

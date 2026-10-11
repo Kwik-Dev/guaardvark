@@ -42,6 +42,12 @@ _MY_OUR_IS = re.compile(
     re.IGNORECASE,
 )
 
+# Where a task starts after the fact on the brain paths: "remember that X. First
+# do Y" or "remember that X, then do Y". A conditional ("if X, then Y") is one fact.
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=\S)")
+_THEN_CLAUSE = re.compile(r"\s*[,;]\s*(?:and\s+)?then\s+", re.IGNORECASE)
+_CONDITIONAL = re.compile(r"^\s*(?:if|when|whenever|once)\s", re.IGNORECASE)
+
 _WORD_RE = re.compile(r"\S+")
 
 
@@ -59,7 +65,8 @@ def _extract_fact(message: str, *, explicit_only: bool = False) -> str | None:
 
     explicit_only keeps just the forms that ask for the fact to be kept
     ("remember that …", "from now on …"); "note that …" and "my X is Y"
-    are then left alone.
+    are then left alone. Those turns are task requests, so the fact also
+    ends where the task begins: at the first sentence end, or at ", then".
     """
     text = (message or "").strip()
     if not text or text.endswith("?"):
@@ -71,6 +78,11 @@ def _extract_fact(message: str, *, explicit_only: bool = False) -> str | None:
         match = pattern.match(text)
         if match:
             fact = text[match.end():].strip()
+            if explicit_only:
+                fact = _SENTENCE_END.split(fact, 1)[0]
+                if not _CONDITIONAL.match(fact):
+                    fact = _THEN_CLAUSE.split(fact, 1)[0]
+                fact = fact.strip()
             if len(fact) >= 2 and fact[0] == fact[-1] and fact[0] in "\"'":
                 fact = fact[1:-1].strip()
             return fact or None
