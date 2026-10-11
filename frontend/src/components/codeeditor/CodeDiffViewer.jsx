@@ -22,7 +22,7 @@ import {
   Code as CodeIcon,
   SwapHoriz as DiffIcon,
 } from '@mui/icons-material';
-import Editor from '@monaco-editor/react';
+import Editor from '../../utils/monaco';
 
 const CodeDiffViewer = ({
   originalCode = '',
