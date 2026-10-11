@@ -903,10 +903,9 @@ Provide a helpful, specific response. Reference actual code when relevant. If mo
       if (last?.pending && last?.role === 'user' && !pendingProcessed.current.has(last.id)) {
         pendingProcessed.current.add(last.id);
         const msgSkipRag = last.skipRag || false;
-        // Clear the pending/skipRag flags so it renders as a normal user message
-        setChatMessages(prev => prev.map(m =>
-          m.id === last.id ? { ...m, pending: false, skipRag: undefined } : m
-        ));
+        // handleSendMessage adds the user message itself, so the pending copy
+        // goes; keeping it showed the question twice.
+        setChatMessages(prev => prev.filter(m => m.id !== last.id));
         // Send through the chat pipeline — skip RAG for editor right-click actions
         handleSendMessage(last.content, { skipRag: msgSkipRag });
       }
