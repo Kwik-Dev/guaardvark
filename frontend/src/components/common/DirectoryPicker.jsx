@@ -46,6 +46,7 @@ import {
   Refresh as RefreshIcon,
 } from "@mui/icons-material";
 import { BASE_URL, handleResponse } from "../../api/apiClient";
+import { rootLabel } from "../../utils/displayPath";
 
 const RECENT_PATHS_KEY = "guaardvark_recentDirectoryPaths";
 const MAX_RECENT_PATHS = 5;
@@ -130,7 +131,10 @@ const DirectoryPicker = ({
   const [recentPaths, setRecentPaths] = useState([]);
   const [showRecentPaths, setShowRecentPaths] = useState(false);
   const [includeFiles, setIncludeFiles] = useState(showFiles || pickFiles);
-  const [showHidden, setShowHidden] = useState(false);
+  // The folders the server lets this picker browse (its home folder first);
+  // it names them in every answer, refusals included.
+  const [roots, setRoots] = useState([]);
+  const [home, setHome] = useState(null);
   // Only the newest request may update the list; an older answer arriving
   // late would otherwise replace the folder the person just opened.
   const requestId = useRef(0);
@@ -169,7 +173,7 @@ const DirectoryPicker = ({
   /** List one folder. Resolves to "ok", or to the error for a path that is
    *  missing (404) or not a folder (400); other failures are shown. */
   const load = useCallback(
-    async (path, { selectName = null, listFiles = includeFiles, hidden = showHidden } = {}) => {
+    async (path, { selectName = null, listFiles = includeFiles } = {}) => {
       const id = ++requestId.current;
       setLoading(true);
       setError(null);
@@ -177,7 +181,6 @@ const DirectoryPicker = ({
         const params = new URLSearchParams({
           path,
           include_files: listFiles ? "true" : "false",
-          show_hidden: hidden ? "true" : "false",
         });
         const response = await fetch(`${BASE_URL}/files/browse-server?${params}`);
         const data = await handleResponse(response, { quiet: true });
@@ -185,6 +188,8 @@ const DirectoryPicker = ({
         const dirs = (data.directories || []).map((d) =>
           typeof d === "string" ? { name: d, item_count: -1 } : d,
         );
+        if (Array.isArray(data.roots)) setRoots(data.roots);
+        if (data.home) setHome(data.home);
         setCurrentPath(data.path);
         setInputPath(data.path);
         setParentPath(data.parent_path ?? null);
@@ -195,6 +200,8 @@ const DirectoryPicker = ({
         return "ok";
       } catch (err) {
         if (id !== requestId.current) return "stale";
+        if (Array.isArray(err.data?.roots)) setRoots(err.data.roots);
+        if (err.data?.home) setHome(err.data.home);
         if (err.status === 400 || err.status === 404) return err;
         setError(err.message || "Failed to load the folder");
         setDirectories([]);
@@ -204,7 +211,7 @@ const DirectoryPicker = ({
         if (id === requestId.current) setLoading(false);
       }
     },
-    [includeFiles, showHidden],
+    [includeFiles],
   );
 
   /** Open a typed or starting path: a folder as it is, a file (in a file mode)
@@ -287,12 +294,20 @@ const DirectoryPicker = ({
   };
 
   const breadcrumbs = useMemo(() => {
-    const crumbs = [{ path: "/", name: "Root" }];
-    currentPath.split("/").filter(Boolean).forEach((part, i, parts) => {
-      crumbs.push({ path: "/" + parts.slice(0, i + 1).join("/"), name: part });
+    // Crumbs start at the deepest allowed root holding the folder; the
+    // folders above it could only be refused.
+    const root = roots
+      .map((r) => r.replace(/\/+$/, ""))
+      .filter((r) => r && (currentPath === r || currentPath.startsWith(`${r}/`)))
+      .sort((a, b) => b.length - a.length)[0];
+    const base = root || "";
+    const rootName = base ? rootLabel(base, home).split("/").pop() : "Root";
+    const crumbs = [{ path: base || "/", name: rootName }];
+    currentPath.slice(base.length).split("/").filter(Boolean).forEach((part, i, parts) => {
+      crumbs.push({ path: `${base}/${parts.slice(0, i + 1).join("/")}`, name: part });
     });
     return crumbs;
-  }, [currentPath]);
+  }, [currentPath, roots, home]);
 
   const filteredDirectories = useMemo(() => {
     if (!searchQuery) return directories;
@@ -454,20 +469,27 @@ const DirectoryPicker = ({
                 label={<Typography variant="body2">Show files</Typography>}
               />
             )}
-            <FormControlLabel
-              control={
-                <Switch
-                  size="small"
-                  checked={showHidden}
-                  onChange={(e) => {
-                    setShowHidden(e.target.checked);
-                    reload({ hidden: e.target.checked });
-                  }}
-                />
-              }
-              label={<Typography variant="body2">Hidden</Typography>}
-            />
           </Stack>
+
+          {roots.length > 0 && (
+            <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap alignItems="center">
+              <Typography variant="caption" color="text.secondary">
+                Browse:
+              </Typography>
+              {roots.map((root) => (
+                <Chip
+                  key={root}
+                  label={rootLabel(root, home)}
+                  size="small"
+                  variant={root === currentPath ? "filled" : "outlined"}
+                  onClick={() => handleNavigate(root)}
+                />
+              ))}
+              <Typography variant="caption" color="text.secondary">
+                Hidden folders are not shown.
+              </Typography>
+            </Stack>
+          )}
 
           {notice && <Alert severity="info">{notice}</Alert>}
 

@@ -37,6 +37,7 @@ import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import { useSnackbar } from "../components/common/SnackbarProvider";
 import PageLayout from "../components/layout/PageLayout";
+import { rootLabel } from "../utils/displayPath";
 import {
   startBulkImport,
   getBulkImportStatus,
@@ -75,9 +76,15 @@ const BulkImportDocumentsPage = () => {
   const [websites, setWebsites] = useState([]);
   const [loadingEntities, setLoadingEntities] = useState(true);
 
-  // File browser
+  // File browser. An empty path asks the server for its default folder (the
+  // user's home); the server also says which parent, if any, is still allowed.
   const [browserOpen, setBrowserOpen] = useState(false);
-  const [currentPath, setCurrentPath] = useState("/");
+  const [currentPath, setCurrentPath] = useState("");
+  const [loadedPath, setLoadedPath] = useState(null);
+  const [parentPath, setParentPath] = useState(null);
+  const [browseRoots, setBrowseRoots] = useState([]);
+  const [browseHome, setBrowseHome] = useState(null);
+  const [browseError, setBrowseError] = useState(null);
   const [directories, setDirectories] = useState([]);
   const [loadingDirs, setLoadingDirs] = useState(false);
 
@@ -105,12 +112,14 @@ const BulkImportDocumentsPage = () => {
     loadEntities();
   }, [showMessage]);
 
-  // Load directories when browser opens
+  // Load directories when browser opens or the path changes. The server
+  // answers with the folder it resolved, so the first (empty) request settles
+  // on the home folder without a second fetch.
   useEffect(() => {
-    if (browserOpen) {
+    if (browserOpen && loadedPath !== currentPath) {
       loadDirectories(currentPath);
     }
-  }, [browserOpen, currentPath]);
+  }, [browserOpen, currentPath, loadedPath]);
 
   const loadDirectories = async (path) => {
     setLoadingDirs(true);
@@ -119,16 +128,35 @@ const BulkImportDocumentsPage = () => {
         `${BASE_URL}/files/browse-server?path=${encodeURIComponent(path)}`
       );
       const data = await response.json();
+      if (Array.isArray(data.roots)) {
+        setBrowseRoots(data.roots);
+      }
+      if (data.home) {
+        setBrowseHome(data.home);
+      }
       if (response.ok && data.directories) {
-        setDirectories(data.directories);
+        setLoadedPath(data.path);
+        setBrowseError(null);
+        setDirectories(data.directories.map((dir) => dir.name));
+        setParentPath(data.parent_path || null);
+        if (data.path && data.path !== path) {
+          setCurrentPath(data.path);
+        }
       } else {
-        showMessage(data.error || "Failed to load directories", "error");
+        // A refused or missing folder: the dialog shows why and offers a way
+        // out; the path field alone is read-only.
+        setBrowseError(data.error || "Failed to load directories");
+        setLoadedPath(null);
         setDirectories([]);
+        setParentPath(null);
       }
     } catch (error) {
       console.error("Error loading directories:", error);
       showMessage("Failed to load directories", "error");
+      setBrowseError("Failed to load directories");
+      setLoadedPath(null);
       setDirectories([]);
+      setParentPath(null);
     } finally {
       setLoadingDirs(false);
     }
@@ -479,19 +507,38 @@ const BulkImportDocumentsPage = () => {
               fullWidth
               InputProps={{
                 readOnly: true,
-                startAdornment: currentPath !== "/" && (
+                startAdornment: parentPath && (
                   <IconButton
                     size="small"
-                    onClick={() => {
-                      const parentPath = currentPath.split("/").slice(0, -1).join("/") || "/";
-                      handleBrowserNavigate(parentPath);
-                    }}
+                    aria-label="Up one folder"
+                    onClick={() => handleBrowserNavigate(parentPath)}
                   >
                     <ArrowBackIcon />
                   </IconButton>
                 ),
               }}
             />
+            {browseRoots.length > 0 && (
+              <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap alignItems="center">
+                <Typography variant="caption" color="text.secondary">
+                  Browse:
+                </Typography>
+                {browseRoots.map((root) => (
+                  <Button
+                    key={root}
+                    size="small"
+                    variant={root === currentPath ? "contained" : "outlined"}
+                    onClick={() => handleBrowserNavigate(root)}
+                    sx={{ textTransform: "none" }}
+                  >
+                    {rootLabel(root, browseHome)}
+                  </Button>
+                ))}
+                <Typography variant="caption" color="text.secondary">
+                  Hidden folders are not shown.
+                </Typography>
+              </Stack>
+            )}
 
             {loadingDirs ? (
               <Box sx={{ p: 2, textAlign: "center" }}>
@@ -499,6 +546,17 @@ const BulkImportDocumentsPage = () => {
                   Loading directories...
                 </Typography>
               </Box>
+            ) : browseError ? (
+              <Alert
+                severity="error"
+                action={
+                  <Button color="inherit" size="small" onClick={() => handleBrowserNavigate("")}>
+                    Go to home folder
+                  </Button>
+                }
+              >
+                {browseError}
+              </Alert>
             ) : directories.length === 0 ? (
               <Alert severity="info">
                 No subdirectories found. You can select this directory.
@@ -527,7 +585,11 @@ const BulkImportDocumentsPage = () => {
           <Button onClick={() => setBrowserOpen(false)}>
             Cancel
           </Button>
-          <Button onClick={handleBrowserSelect} variant="contained">
+          <Button
+            onClick={handleBrowserSelect}
+            variant="contained"
+            disabled={!currentPath || loadedPath !== currentPath || Boolean(browseError)}
+          >
             Select This Directory
           </Button>
         </DialogActions>

@@ -1949,6 +1949,14 @@ def start_bulk_import():
         if not source_path:
             return error_response("source_path cannot be empty", 400, "INVALID_SOURCE_PATH")
 
+        # The same folders the picker may browse; the task then walks the
+        # resolved path, not the one the request named.
+        source_path, refusal = resolve_import_directory(source_path)
+        if refusal:
+            return error_response(refusal, 403, "PATH_NOT_ALLOWED")
+        if not os.path.isdir(source_path):
+            return error_response("source_path is not a directory", 400, "INVALID_SOURCE_PATH")
+
         # Generate a job ID
         import uuid
         job_id = str(uuid.uuid4())
@@ -2057,48 +2065,164 @@ def get_bulk_import_status_endpoint(job_id):
         return jsonify({"error": "Failed to get job status"}), 500
 
 
+BULK_IMPORT_ROOTS_ENV = "GUAARDVARK_ALLOWED_PATHS"
+# Where Linux and macOS mount removable and extra drives; each is a root only
+# while it exists on this machine.
+DRIVE_MOUNT_ROOTS = ("/media", "/run/media", "/mnt", "/Volumes")
+# Under WSL, /mnt holds the Windows drives (/mnt/c is all of C:), so it is not
+# a root there; GUAARDVARK_ALLOWED_PATHS adds a Windows folder by name.
+WSL_SKIPPED_MOUNT_ROOTS = ("/mnt",)
+
+
+def _on_wsl() -> bool:
+    """True under WSL1 or WSL2, by the marker scripts/platform/detect.sh reads."""
+    try:
+        with open("/proc/version", encoding="utf-8", errors="replace") as fh:
+            return bool(re.search(r"microsoft|wsl", fh.read(), re.IGNORECASE))
+    except OSError:
+        return False
+
+
+def bulk_import_roots() -> list:
+    """Directories Bulk Import may browse and import from, the home folder first.
+
+    The user's home folder, Guaardvark's uploads folder, the drive mount
+    points present on this machine (/media, /run/media, /Volumes, and /mnt
+    except under WSL) and the folders in GUAARDVARK_ALLOWED_PATHS
+    (colon-separated, the same variable the automation tools honour). The rest
+    of the data folder is refused even where the home folder holds it (see
+    :func:`_inside_data_folder`). Everything else on the disk, /etc and /
+    included, is refused: the route serves every LAN browser once network
+    access is on.
+    """
+    from backend import config
+
+    skipped = WSL_SKIPPED_MOUNT_ROOTS if _on_wsl() else ()
+    candidates = [os.path.expanduser("~"), getattr(config, "UPLOAD_DIR", "")]
+    candidates += [mount for mount in DRIVE_MOUNT_ROOTS
+                   if mount not in skipped and os.path.isdir(mount)]
+    candidates += (os.environ.get(BULK_IMPORT_ROOTS_ENV) or "").split(":")
+    roots = []
+    for candidate in candidates:
+        candidate = os.path.expanduser(str(candidate or "").strip())
+        if candidate and candidate not in roots:
+            roots.append(candidate)
+    return roots
+
+
+def _hidden_below_root(path: str, root: str) -> bool:
+    """True when a component of ``path`` below ``root`` starts with a dot
+    (~/.ssh, ~/.gnupg, ~/.config, .git)."""
+    rel = os.path.relpath(path, root)
+    return any(part.startswith(".") for part in rel.split(os.sep) if part not in ("", "."))
+
+
+def _containing_root(target: str, roots) -> str:
+    """The deepest resolved root that contains ``target``, or None. The
+    deepest one decides the hidden check, so a root configured under a hidden
+    folder (GUAARDVARK_UPLOAD_DIR=~/.local/share/...) works while ~/.local
+    itself stays refused."""
+    from backend.utils.path_safety import is_within, resolve
+
+    deepest = None
+    for root in roots:
+        root_real = resolve(root)
+        if is_within(target, [root_real]) and (deepest is None or len(root_real) > len(deepest)):
+            deepest = root_real
+    return deepest
+
+
+def _inside_data_folder(target: str, root: str) -> bool:
+    """True when ``target`` is in Guaardvark's data folder but the root that
+    admitted it is not. A stock install keeps data/ under the home folder, and
+    importing its docstore.json, index files or config/ would break the
+    install. The uploads folder, and a GUAARDVARK_ALLOWED_PATHS folder inside
+    data/, are roots of their own and stay usable."""
+    from backend import config
+    from backend.utils.path_safety import is_within, resolve
+
+    storage = getattr(config, "STORAGE_DIR", "")
+    if not storage:
+        return False
+    storage_real = resolve(storage)
+    return is_within(target, [storage_real]) and not is_within(root, [storage_real])
+
+
+def display_path(path: str, home: str) -> str:
+    """``path`` with the home folder written as ~, for text a person reads."""
+    base = home.rstrip("/")
+    if path == base:
+        return "~"
+    return "~" + path[len(base):] if path.startswith(base + "/") else path
+
+
+def resolve_import_directory(requested: str):
+    """``(resolved_path, None)`` when ``requested`` is a directory Bulk Import
+    may use, else ``(None, reason)``. Symlinks are resolved first, on the path
+    and on the roots, so a link inside the home folder cannot point out of it."""
+    from backend.utils.path_safety import resolve
+
+    roots = bulk_import_roots()
+    home = roots[0]
+    target = resolve(requested or home, base=home)
+    root = _containing_root(target, roots)
+    if root is None:
+        named = ["your home folder"] + [display_path(r, home) for r in roots[1:]]
+        return None, (
+            "Bulk Import can only use folders in " + ", ".join(named)
+            + f" ({BULK_IMPORT_ROOTS_ENV} adds more)."
+        )
+    if _hidden_below_root(target, root):
+        return None, "Hidden folders (names starting with a dot) are not imported."
+    if _inside_data_folder(target, root):
+        return None, "Guaardvark's own data folder is not imported; its uploads folder can be."
+    return target, None
+
+
 @files_bp.route("/browse-server", methods=["GET"])
 def browse_server_directory():
-    """GET /api/files/browse-server?path=/some/path&include_files=true - Browse server directories for bulk import"""
+    """GET /api/files/browse-server?path=/some/path&include_files=true
+
+    Lists a folder for the Bulk Import page's folder picker. No ``path`` lists
+    the home folder. Only folders under :func:`bulk_import_roots` are listed,
+    never hidden entries, and never credential files (path_safety.is_sensitive).
+    """
     logger.info("API: Browse server directory")
     try:
-        requested_path = request.args.get("path", "/")
+        from backend.utils.path_safety import is_sensitive
+
         include_files = request.args.get("include_files", "false").lower() == "true"
-        show_hidden = request.args.get("show_hidden", "false").lower() == "true"
+        requested_path, refusal = resolve_import_directory(request.args.get("path", ""))
+        roots = bulk_import_roots()
+        if refusal:
+            # The roots travel with the refusal so the picker can offer them;
+            # ``home`` lets it write the home folder as ~ on screen.
+            return jsonify({"error": refusal, "code": "PATH_NOT_ALLOWED",
+                            "roots": roots, "home": roots[0]}), 403
 
-        # Security: Prevent directory traversal attacks
-        # Only allow absolute paths and validate they exist
-        import os
-
-        if not os.path.isabs(requested_path):
-            # If relative, assume it's relative to user's home or a safe base
-            requested_path = os.path.abspath(os.path.expanduser(requested_path))
-
-        # Resolve the path to prevent .. tricks
-        requested_path = os.path.realpath(requested_path)
-
-        # Check if path exists and is a directory
         if not os.path.exists(requested_path):
             return jsonify({"error": "Path does not exist"}), 404
 
         if not os.path.isdir(requested_path):
             return jsonify({"error": "Path is not a directory"}), 400
 
-        # List contents of the directory
         try:
             entries = os.listdir(requested_path)
             directories = []
             files = []
 
             for entry in sorted(entries):
-                # Skip hidden entries unless show_hidden is true
-                if entry.startswith('.') and not show_hidden:
+                if entry.startswith('.'):
                     continue
 
                 entry_path = os.path.join(requested_path, entry)
                 try:
                     stat_info = os.stat(entry_path)
                     if os.path.isdir(entry_path):
+                        # A symlink to a folder outside the roots is not
+                        # offered; opening it would only be refused.
+                        if resolve_import_directory(entry_path)[1]:
+                            continue
                         # Count items in directory for preview
                         try:
                             item_count = len([e for e in os.listdir(entry_path) if not e.startswith('.')])
@@ -2110,7 +2234,7 @@ def browse_server_directory():
                             "item_count": item_count,
                             "modified": stat_info.st_mtime
                         })
-                    elif include_files:
+                    elif include_files and not is_sensitive(entry):
                         # Get file extension for type identification
                         _, ext = os.path.splitext(entry)
                         files.append({
@@ -2123,10 +2247,16 @@ def browse_server_directory():
                     # Skip entries we can't access
                     continue
 
+            # The parent is offered only while it is still an allowed folder,
+            # so the picker's Up button stops at a root instead of erroring.
+            parent = os.path.dirname(requested_path)
+            parent_allowed, _ = resolve_import_directory(parent)
             response_data = {
                 "path": requested_path,
                 "directories": directories,
-                "parent_path": os.path.dirname(requested_path) if requested_path != "/" else None
+                "parent_path": parent if parent != requested_path and parent_allowed else None,
+                "roots": roots,
+                "home": roots[0],
             }
 
             if include_files:
