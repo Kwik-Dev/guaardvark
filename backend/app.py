@@ -1547,6 +1547,20 @@ try:
             except Exception as e:
                 app.logger.warning("[SELF-IMPROVEMENT] stale run recovery failed: %s", e)
 
+            # ---- Documents left INDEXING with nothing indexing them ---------------
+            # Server only: Celery workers build this app too, and the worker
+            # that starts is the one about to take the queued INDEXING rows.
+            if os.environ.get("CELERY_WORKER_MODE", "false").lower() != "true":
+                try:
+                    from backend.tasks.index_resume_tasks import reconcile_stuck_indexing
+                    _stuck = reconcile_stuck_indexing()
+                    if _stuck.get("pending") or _stuck.get("not_indexed"):
+                        app.logger.warning(
+                            "[INDEXING] reset %d document(s) left INDEXING with no task: %d to PENDING, %d to NOT_INDEXED",
+                            _stuck["pending"] + _stuck["not_indexed"], _stuck["pending"], _stuck["not_indexed"])
+                except Exception as e:
+                    app.logger.warning("[INDEXING] stuck row reconcile failed: %s", e)
+
         except OperationalError as op_err:
             app.logger.error(f"Database operation error during create_all: {op_err}")
             app.logger.error("Check database connection and configuration.")

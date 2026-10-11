@@ -839,7 +839,11 @@ class Document(db.Model):
     filename = db.Column(db.String(255), nullable=False)
     path = db.Column(db.String(1024), nullable=False, unique=True)
     type = db.Column(db.String(50), nullable=True)
-    index_status = db.Column(db.String(50), default="INDEXING", index=True)
+    # A row that nothing has queued is NOT_INDEXED (the status the Files page
+    # shows with no dot). Paths that queue a Celery task set INDEXING or
+    # PENDING themselves. Python-side default only; the column has no server
+    # default, so this is not a schema change.
+    index_status = db.Column(db.String(50), default="NOT_INDEXED", index=True)
     indexed_at = db.Column(db.DateTime, nullable=True)
     error_message = db.Column(db.Text, nullable=True)
 

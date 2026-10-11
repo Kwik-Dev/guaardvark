@@ -66,6 +66,42 @@ const ICON_GRID_PAD = 20;
 // avoids spurious re-renders and `.has` on undefined.
 const EMPTY_SELECTION = new Set();
 
+// Statuses the orange dot stands for (see IndexStatusIndicator in fileUtils).
+const INDEX_IN_PROGRESS = new Set(['INDEXING', 'PENDING']);
+// After an Index action the listing is re-read on this cadence while
+// something is still in progress, for at most this many reads.
+const INDEX_POLL_INTERVAL_MS = 3000;
+const INDEX_POLL_MAX_TICKS = 40;
+// Listings read per poll tick: root, the open windows, the indexed folders
+// and their still-unindexed subfolders.
+const INDEX_POLL_MAX_LISTINGS = 12;
+
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+// The live repository mount and everything under it is read-only: the
+// server lists them with source_type "live_repo" and string ids ("repo:…"),
+// and delete, rename and index take integer ids. The context menu hides
+// those actions for such an item; the keyboard paths filter the keys.
+const isLiveRepoItem = (item) => item?.source_type === 'live_repo';
+const isLiveRepoKey = (key) => /^(folder|file)-repo:/.test(String(key));
+const writableKeys = (keys) => Array.from(keys).filter((key) => !isLiveRepoKey(key));
+
+// What the bulk index call did, from its queued and skipped counts. The
+// server skips a document whose content hash has not changed since it was
+// indexed, so "everything skipped" is the already-indexed case.
+export const indexingMessage = (queued, skipped, folderCount) => {
+  if (queued === 0) {
+    if (skipped === 0) return 'Nothing to index';
+    return skipped === 1
+      ? 'Already indexed; the file has not changed'
+      : `Everything is already indexed (${skipped} files unchanged)`;
+  }
+  let message = `Indexing ${plural(queued, 'document')}`;
+  if (folderCount > 0) message += ` from ${plural(folderCount, 'folder')}`;
+  if (skipped > 0) message += `, ${skipped} already indexed`;
+  return message;
+};
+
 const DocumentsPage = () => {
   const { gridSettings } = useLayout();
   const { RGL_WIDTH_PROP_PX, _CONTAINER_PADDING_PX } = gridSettings;
@@ -380,11 +416,13 @@ const DocumentsPage = () => {
 
         return finalWindows;
       });
+      return { folders, files };
     } catch (err) {
       if (isMountedRef.current) {
         showMessage?.('Failed to refresh', 'error');
       }
     }
+    return null;
   }, [showMessage]);
 
   // Re-fetch every open folder window. Changes made on this page announce
@@ -398,6 +436,82 @@ const DocumentsPage = () => {
       return updated;
     });
   }, []);
+
+  // Index and Index Contents queue Celery work and return at once, so the
+  // status dots only change when the listings are read again. Re-read them
+  // now, then every few seconds while any watched document is still INDEXING
+  // or PENDING (INDEXED, ERROR and NOT_INDEXED are final), until it settles or
+  // the poll has run long enough to call the job stuck. Watched: the root,
+  // every open window, each folder that was indexed, and the subfolders of
+  // those whose counts still show unindexed documents.
+  const indexPollRef = useRef(null);
+  const stopIndexPoll = useCallback(() => {
+    if (indexPollRef.current) {
+      clearTimeout(indexPollRef.current);
+      indexPollRef.current = null;
+    }
+  }, []);
+  useEffect(() => stopIndexPoll, [stopIndexPoll]);
+
+  const readListing = useCallback(async (path) => {
+    const response = await axios.get(`${API_BASE}/browse`, { params: { path, fields: 'light' } });
+    const data = response.data?.data || {};
+    return { folders: data.folders || [], documents: data.documents || [] };
+  }, []);
+
+  const followIndexing = useCallback(async ({ folderIds = [], folderPaths = [] } = {}) => {
+    stopIndexPoll();
+    const targetIds = new Set(folderIds);
+    const targetPaths = new Set(folderPaths.filter(Boolean));
+    const underTarget = (path) =>
+      Array.from(targetPaths).some((t) => path === t || path.startsWith(`${t}/`));
+    let ticks = 0;
+    const tick = async () => {
+      indexPollRef.current = null;
+      if (!isMountedRef.current) return;
+      const fresh = await refreshData();
+      if (!isMountedRef.current) return;
+      refreshOpenWindows();
+      if (!fresh) return;
+
+      const listings = [{ folders: fresh.folders, documents: fresh.files }];
+      const queue = windowsRef.current
+        .filter((w) => w.state !== 'folded' && w.folder?.path && !isLiveRepoItem(w.folder))
+        .map((w) => w.folder.path);
+      const noteFolders = (listing) => {
+        listing.folders.forEach((f) => {
+          if (!f.path || isLiveRepoItem(f)) return;
+          if (targetIds.has(f.id)) targetPaths.add(f.path);
+          if (underTarget(f.path) && (f.document_count || 0) > (f.indexed_document_count || 0)) {
+            queue.push(f.path);
+          }
+        });
+      };
+      noteFolders(listings[0]);
+      targetPaths.forEach((p) => queue.push(p));
+      const seen = new Set(['/']);
+      while (queue.length > 0 && listings.length < INDEX_POLL_MAX_LISTINGS) {
+        const path = queue.shift();
+        if (seen.has(path)) continue;
+        seen.add(path);
+        try {
+          const listing = await readListing(path);
+          listings.push(listing);
+          noteFolders(listing);
+        } catch (err) {
+          // A window on a folder that is gone; nothing to watch there.
+        }
+      }
+      if (!isMountedRef.current) return;
+
+      const busy = listings.some((l) => l.documents.some((d) => INDEX_IN_PROGRESS.has(d.index_status)));
+      ticks += 1;
+      if (busy && ticks < INDEX_POLL_MAX_TICKS) {
+        indexPollRef.current = setTimeout(tick, INDEX_POLL_INTERVAL_MS);
+      }
+    };
+    await tick();
+  }, [refreshData, refreshOpenWindows, stopIndexPoll, readListing]);
 
   // Listen for file/folder changes from any tab/component and refresh in place
   useEffect(() => {
@@ -1313,11 +1427,18 @@ const DocumentsPage = () => {
     refreshOpenWindows();
   }, [clipboard, showMessage, contextMenuType, contextMenuItem, refreshData, refreshOpenWindows, folderIdForPath]);
 
+  // The keys in the selection that the server can delete.
+  const deletableSelection = useMemo(() => writableKeys(activeSelection), [activeSelection]);
+
   const handleDelete = useCallback(() => {
     setContextMenu(null);
     if (activeSelection.size === 0) return;
+    if (deletableSelection.length === 0) {
+      showMessage?.('The live code mount is read-only', 'info');
+      return;
+    }
     setDeleteConfirmOpen(true);
-  }, [activeSelection]);
+  }, [activeSelection, deletableSelection, showMessage]);
 
   // Optimistically remove items from visible UI state immediately (for instant feel).
   // Only affects desktop root lists if deleting from desktop context.
@@ -1375,7 +1496,7 @@ const DocumentsPage = () => {
 
   const handleDeleteConfirm = useCallback(() => {
     setDeleteConfirmOpen(false);
-    const keysToDelete = Array.from(activeSelection);
+    const keysToDelete = deletableSelection;
     if (keysToDelete.length === 0) return;
 
     // INSTANT: remove from UI now (optimistic). This is the key UX fix.
@@ -1414,7 +1535,7 @@ const DocumentsPage = () => {
       }
     };
     doDeletes();
-  }, [activeSelection, showMessage, refreshData, applyOptimisticDeletions]);
+  }, [deletableSelection, showMessage, refreshData, applyOptimisticDeletions]);
 
   const handleRename = useCallback(async () => {
     setContextMenu(null);
@@ -1491,7 +1612,9 @@ const DocumentsPage = () => {
       // Refresh data after rename
       await refreshData();
     } catch (err) {
-      showMessage?.('Rename failed', 'error');
+      // The server says why a name is refused; show that over a bare "failed".
+      const reason = err.response?.data?.message || err.response?.data?.error?.message;
+      showMessage?.(reason ? `Rename failed: ${reason}` : 'Rename failed', 'error');
     }
   }, [renameItem, renameName, showMessage, refreshData]);
 
@@ -1544,7 +1667,9 @@ const DocumentsPage = () => {
       return;
     }
     if (isCodeFile(filename)) {
-      setCodeViewer({ file });
+      // Covers code and plain text (.txt, .md, .csv, .log); Edit opens the
+      // modal's editor, double-click opens it read-only.
+      setCodeViewer({ file, editMode });
       return;
     }
     if (isPdfFile(filename)) {
@@ -1562,7 +1687,7 @@ const DocumentsPage = () => {
     window.open(`${API_BASE}/document/${file.id}/download`, '_blank');
   }, []);
 
-  const handleEditImage = useCallback(() => {
+  const handleEditFile = useCallback(() => {
     setContextMenu(null);
     const item = contextMenuItem;
     if (!item || contextMenuType !== 'file') return;
@@ -1697,12 +1822,13 @@ const DocumentsPage = () => {
         result?.message || 'Reindexing triggered successfully. Status will update shortly.',
         'success'
       );
+      followIndexing();
     } catch (err) {
       const errorMsg = err.response?.data?.message || err.message || 'Failed to trigger reindexing';
       showMessage?.(`Reindexing failed: ${errorMsg}`, 'error');
       throw err;
     }
-  }, [showMessage]);
+  }, [showMessage, followIndexing]);
 
   // Handle bulk index from context menu
   const handleIndex = useCallback(async () => {
@@ -1720,6 +1846,7 @@ const DocumentsPage = () => {
       itemKeys = Array.from(activeSelection);
     }
 
+    itemKeys = writableKeys(itemKeys);
     if (itemKeys.length === 0) return;
 
     // Split into folder IDs and document IDs
@@ -1739,15 +1866,20 @@ const DocumentsPage = () => {
       if (result?.error) {
         throw new Error(result.error);
       }
-      const parts = [];
-      if (result.total_documents) parts.push(`${result.total_documents} document${result.total_documents !== 1 ? 's' : ''}`);
-      if (folderIds.length > 0) parts.push(`from ${folderIds.length} folder${folderIds.length !== 1 ? 's' : ''}`);
-      showMessage?.(`Indexing ${parts.join(' ')}`, 'success');
+      const queued = Number(result?.total_documents) || 0;
+      const skipped = Number(result?.skipped) || 0;
+      showMessage?.(indexingMessage(queued, skipped, folderIds.length), queued > 0 ? 'success' : 'info');
+      if (queued > 0) {
+        followIndexing({
+          folderIds,
+          folderPaths: contextMenuType === 'folder' && contextMenuItem?.path ? [contextMenuItem.path] : [],
+        });
+      }
     } catch (err) {
       const errorMsg = err.message || 'Failed to trigger indexing';
       showMessage?.(`Indexing failed: ${errorMsg}`, 'error');
     }
-  }, [contextMenuItem, contextMenuType, activeSelection, showMessage]);
+  }, [contextMenuItem, contextMenuType, activeSelection, showMessage, followIndexing]);
 
   // Desktop drag-to-select handlers
   const handleDesktopSelectionMouseDown = useCallback((e) => {
@@ -1838,8 +1970,8 @@ const DocumentsPage = () => {
         if (activeContext.type === 'desktop') {
           e.preventDefault();
           const allKeys = new Set([
-            ...foldedWindows.map(f => `folder-${f.folderId}`),
-            ...rootFiles.map(file => getItemKey(file, 'file')),
+            ...foldedWindows.filter(f => !isLiveRepoItem(f.folder)).map(f => `folder-${f.folderId}`),
+            ...rootFiles.filter(file => !isLiveRepoItem(file)).map(file => getItemKey(file, 'file')),
           ]);
           handleSelectionChange('desktop', allKeys);
         }
@@ -2467,7 +2599,7 @@ const DocumentsPage = () => {
         onProperties={contextMenuItem?.source_type === 'live_repo' ? undefined : handleProperties}
         onRename={contextMenuItem?.source_type === 'live_repo' ? undefined : handleRename}
         onDownload={handleDownload}
-        onEdit={handleEditImage}
+        onEdit={handleEditFile}
         onColorChange={handleColorChange}
         onIndex={contextMenuItem?.source_type === 'live_repo' ? undefined : handleIndex}
         onReviewWithAgent={contextMenuItem?.source_type === 'live_repo' ? handleReviewWithAgent : undefined}
@@ -2553,6 +2685,11 @@ const DocumentsPage = () => {
             onChange={(e) => setRenameName(e.target.value)}
             onKeyPress={(e) => e.key === 'Enter' && handleRenameSubmit()}
           />
+          {renameItem?.type !== 'folder' && (
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+              Changes the name shown in Guaardvark; the file on disk keeps its name.
+            </Typography>
+          )}
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setRenameDialogOpen(false)}>Cancel</Button>
@@ -2567,7 +2704,7 @@ const DocumentsPage = () => {
         <DialogTitle>Confirm Delete</DialogTitle>
         <DialogContent>
           <Typography>
-            Delete {activeSelection.size} item{activeSelection.size !== 1 ? 's' : ''}? This action cannot be undone.
+            Delete {deletableSelection.length} item{deletableSelection.length !== 1 ? 's' : ''}? This action cannot be undone.
           </Typography>
         </DialogContent>
         <DialogActions>
@@ -2664,6 +2801,7 @@ const DocumentsPage = () => {
         open={!!codeViewer}
         onClose={() => setCodeViewer(null)}
         file={codeViewer?.file}
+        startEditing={Boolean(codeViewer?.editMode)}
         onOpenInCodeEditor={handleOpenInCodeEditor}
       />
 

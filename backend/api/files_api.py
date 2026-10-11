@@ -119,6 +119,51 @@ def ensure_path_is_safe(path: str) -> bool:
         return False
 
 
+# Characters no file or folder name may carry: the ones Windows refuses plus
+# the path separators and control characters. Checked per character; the old
+# string form '<>:"/\\|?*\x00-\x1f' made "-" and "x" invalid too, since a
+# string is a set of characters, not a range.
+_INVALID_NAME_CHARS = frozenset('<>:"/\\|?*')
+
+
+def has_invalid_name_chars(name: str) -> bool:
+    return any(ch in _INVALID_NAME_CHARS or ord(ch) < 32 for ch in name)
+
+
+# Device names Windows reserves whatever the extension (CON.txt is CON).
+_WINDOWS_RESERVED_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
+
+def document_name_problem(name: str):
+    """Why a document may not take this name, or None when it may.
+
+    The name is stored and shown, and may be used as a filename by an export
+    or a sync to another machine, so it must be a valid filename on every
+    platform the product runs on.
+    """
+    if not name:
+        return "Invalid filename"
+    if name in (".", ".."):
+        return 'A filename cannot be "." or ".."'
+    if name.startswith("."):
+        return "A filename cannot start with a dot"
+    if any(ch in _INVALID_NAME_CHARS for ch in name):
+        return 'A filename cannot contain any of < > : " / \\ | ? *'
+    if any(ord(ch) < 32 or ord(ch) == 0x7F for ch in name):
+        return "A filename cannot contain control characters"
+    if name[-1] in ". ":
+        return "A filename cannot end with a dot or a space"
+    if name.split(".", 1)[0].upper() in _WINDOWS_RESERVED_NAMES:
+        return f'"{name.split(".", 1)[0]}" is a reserved device name on Windows'
+    if len(name) > 255:
+        return "Filename too long (255 characters at most)"
+    return None
+
+
 def get_physical_path(relative_path: str) -> Path:
     """Convert relative path to absolute physical path"""
     base = get_upload_base_path()
@@ -443,9 +488,7 @@ def rename_folder(folder_id):
         if not new_name or new_name == folder.name:
             return success_response(folder.to_dict())
         
-        # Basic validation for dangerous characters
-        invalid_chars = '<>:"/\\|?*\x00-\x1f'
-        if any(char in invalid_chars for char in new_name):
+        if has_invalid_name_chars(new_name):
             return error_response("Folder name contains invalid characters", 400, "INVALID_FILENAME")
         
         if len(new_name) > 255:
@@ -1055,16 +1098,23 @@ def rename_document(doc_id):
         if not data or "filename" not in data:
             return error_response("New filename required", 400, "MISSING_FILENAME")
         new_filename = data["filename"].strip()
-        if not new_filename:
-            return error_response("Invalid filename", 400, "INVALID_FILENAME")
-        
-        # Basic validation for dangerous characters but preserve file extensions
-        invalid_chars = '<>:"/\\|?*\x00-\x1f'
-        if any(char in invalid_chars for char in new_filename):
-            return error_response("Filename contains invalid characters", 400, "INVALID_FILENAME")
-        
-        if len(new_filename) > 255:
-            return error_response("Filename too long", 400, "INVALID_FILENAME")
+        problem = document_name_problem(new_filename)
+        if problem:
+            return error_response(problem, 400, "INVALID_FILENAME")
+        if new_filename == document.filename:
+            return success_response(document.to_dict())
+        sibling = DBDocument.query.filter(
+            DBDocument.id != doc_id,
+            DBDocument.folder_id == document.folder_id,
+            DBDocument.filename == new_filename,
+        ).first()
+        if sibling:
+            return error_response("A file with this name already exists here", 409, "DOCUMENT_EXISTS")
+
+        # The shown name only. The file on disk and document.path keep their
+        # name: chunk metadata (citations), batch thumbnails and
+        # batch_metadata.json, and files registered from outside the uploads
+        # folder are all keyed by that path.
         document.filename = new_filename
         document.updated_at = datetime.datetime.now()
         db.session.commit()

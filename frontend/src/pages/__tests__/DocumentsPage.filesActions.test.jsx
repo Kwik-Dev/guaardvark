@@ -47,6 +47,7 @@ vi.mock("../../components/common/SnackbarProvider", () => {
 });
 
 import DocumentsPage from "../DocumentsPage";
+import { indexBulk } from "../../api/indexingService";
 
 const REPORTS = { id: 7, name: "Reports", path: "Reports", document_count: 0, subfolder_count: 0 };
 const ARCHIVE = { id: 8, name: "Archive", path: "Archive", document_count: 1, subfolder_count: 0 };
@@ -248,5 +249,109 @@ describe("Files page operating-system drop", () => {
       expect(uploaded).toEqual(["one.txt", "two.txt", "three.txt"]);
     });
     await waitFor(() => expect(messages.at(-1)).toEqual({ text: "Imported 3 file(s) into Files", level: "success" }));
+  });
+});
+
+describe("Files page indexing", () => {
+  const rootReads = () =>
+    axiosMock.get.mock.calls.filter(([url]) => url.startsWith("/api/files/browse?path=/")).length;
+
+  it("re-reads the listing after Index so the status dots update", async () => {
+    indexBulk.mockResolvedValue({ total_documents: 1, skipped: 0, job_id: "job-1" });
+    renderPage();
+    await screen.findByText("notes.txt");
+    const before = rootReads();
+
+    fireEvent.contextMenu(screen.getByText("notes.txt"));
+    fireEvent.click(menuItem("Index"));
+
+    await waitFor(() => expect(indexBulk).toHaveBeenCalledWith([], [31]));
+    await waitFor(() => expect(rootReads()).toBeGreaterThan(before));
+  });
+});
+
+describe("Files page index message", () => {
+  it("says everything is already indexed when the server skipped every file", async () => {
+    indexBulk.mockResolvedValue({ total_documents: 0, skipped: 1, job_id: "job-2" });
+    renderPage();
+
+    fireEvent.contextMenu(await screen.findByText("notes.txt"));
+    fireEvent.click(menuItem("Index"));
+
+    await waitFor(() => expect(messages.at(-1)).toEqual({
+      text: "Already indexed; the file has not changed",
+      level: "info",
+    }));
+  });
+
+  it("counts what was queued and what was skipped", async () => {
+    indexBulk.mockResolvedValue({ total_documents: 2, skipped: 3, job_id: "job-3" });
+    renderPage();
+
+    fireEvent.contextMenu(await screen.findByText("Archive"));
+    fireEvent.click(menuItem("Index Contents"));
+
+    await waitFor(() => expect(indexBulk).toHaveBeenCalledWith([8], []));
+    await waitFor(() => expect(messages.at(-1)).toEqual({
+      text: "Indexing 2 documents from 1 folder, 3 already indexed",
+      level: "success",
+    }));
+  });
+});
+
+describe("Files page keyboard and the read-only code mount", () => {
+  const CODE_MOUNT = {
+    id: "repo:.",
+    name: "Guaardvark Code",
+    path: "/__repo__",
+    source_type: "live_repo",
+    document_count: 0,
+    subfolder_count: 0,
+  };
+
+  beforeEach(() => {
+    axiosMock.get.mockImplementation(async (url) => {
+      if (url.startsWith("/api/files/browse")) {
+        return { data: { data: { folders: [CODE_MOUNT, REPORTS, ARCHIVE], documents: [NOTES] } } };
+      }
+      throw new Error(`unexpected GET ${url}`);
+    });
+  });
+
+  it("Ctrl+A then Delete counts only what the server can delete", async () => {
+    renderPage();
+    await screen.findByText("Guaardvark Code");
+
+    fireEvent.keyDown(window, { key: "a", ctrlKey: true });
+    fireEvent.keyDown(window, { key: "Delete" });
+
+    expect(await screen.findByText("Delete 3 items? This action cannot be undone.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => expect(posts()).toContainEqual({
+      url: "/api/files/bulk-delete",
+      body: { items: [
+        { type: "folder", id: 7 },
+        { type: "folder", id: 8 },
+        { type: "document", id: 31 },
+      ] },
+    }));
+  });
+});
+
+describe("Files page index poll scope", () => {
+  const listingReads = () =>
+    axiosMock.get.mock.calls
+      .filter(([url, config]) => url === "/api/files/browse" && config?.params?.fields === "light")
+      .map(([, config]) => config.params.path);
+
+  it("reads the indexed folder's own listing, not just the root", async () => {
+    indexBulk.mockResolvedValue({ total_documents: 1, skipped: 0, job_id: "job-4" });
+    renderPage();
+
+    fireEvent.contextMenu(await screen.findByText("Archive"));
+    fireEvent.click(menuItem("Index Contents"));
+
+    await waitFor(() => expect(listingReads()).toContain("Archive"));
   });
 });

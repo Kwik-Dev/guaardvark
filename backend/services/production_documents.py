@@ -58,11 +58,14 @@ def register_production_output(
     p = Path(file_path)
     size = p.stat().st_size if p.exists() else 0
 
+    # Registration only: nothing queues indexing for a render, so the row
+    # must not say INDEXING.
     doc = Document(
         filename=p.name,
         path=str(p),
         folder_id=leaf.id,
         size=size,
+        index_status="NOT_INDEXED",
     )
     db.session.add(doc)
     db.session.commit()
