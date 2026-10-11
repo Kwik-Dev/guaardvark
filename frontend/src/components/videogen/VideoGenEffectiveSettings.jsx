@@ -1,7 +1,6 @@
 import React from "react";
 import { Box, Chip, Typography } from "@mui/material";
 import {
-  isWanModel,
   MODEL_OPTIONS,
   modelChipLabel,
   PROMPT_STYLES,
@@ -19,7 +18,6 @@ export default function VideoGenEffectiveSettings({
   keyframeModel,
   directorMode,
   faceRestore,
-  freeu,
   capabilities = null,
 }) {
   if (!computedParams) return null;
@@ -96,9 +94,6 @@ export default function VideoGenEffectiveSettings({
         )}
         {faceRestore && (
           <Chip size="small" variant="outlined" color="success" label="Face restore" />
-        )}
-        {freeu && isWanModel(model) && (
-          <Chip size="small" variant="outlined" color="success" label="FreeU" />
         )}
         {computedParams.interpolation_multiplier > 1 && (
           <Chip

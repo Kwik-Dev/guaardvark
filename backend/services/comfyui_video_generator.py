@@ -254,6 +254,8 @@ class VideoGenerationRequest:
     enhance_prompt: bool = True       # Whether to run prompt through the enhancer
     fidelity_mode: bool = False       # Light enhancement only (Exact text / preserve fidelity mode)
     wan_sampler_profile: Optional[str] = None  # Wan 5B: "adaptive" | "official" (see WAN5B_SAMPLER_PROFILES)
+    # Deprecated, ignored: FreeU patches UNet skip connections and every routed
+    # model is a transformer. Kept so older callers passing freeu= still construct.
     freeu: bool = False
     face_restore: bool = False
     lora_name: Optional[str] = None
@@ -501,8 +503,6 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
     }
     # Single-file CogVideoX loader map — DERIVED from the registry like Wan/LTX.
     COGVIDEOX_I2V_FILES = _cogvideox_comfyui_map()
-    # Both wrapper loaders emit COGVIDEOMODEL; the FreeU/LoRA hooks below key on them.
-    _COG_MODEL_LOADER_NODES = ("DownloadAndLoadCogVideoModel", "CogVideoXModelLoader")
 
     # ── Wan 2.2 model mapping ────────────────────────────────────────────────
     # DERIVED from the shared registry (backend/services/video_model_registry.py)
@@ -740,7 +740,17 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
         from backend.services.user_video_models import DEFAULT_ADAPTER_STRENGTH
 
         out = []
-        for raw in request.adapters or []:
+        raws = list(request.adapters or [])
+        # A legacy lora_name rides the adapter path when it names a catalog LoRA
+        # made for this model. Anything else (an SDXL cast LoRA the film pipeline
+        # threads through, a stray file name) is left out and logged after the
+        # graph is built: applying a LoRA trained on another base breaks the render.
+        legacy_id = self._lora_name_adapter_id(request.lora_name, model_key)
+        if legacy_id and not any(
+            (r if isinstance(r, str) else (r or {}).get("id")) == legacy_id for r in raws
+        ):
+            raws.append({"id": legacy_id, "strength": request.lora_strength})
+        for raw in raws:
             if isinstance(raw, str):
                 aid, strength = raw, None
             elif isinstance(raw, dict):
@@ -779,6 +789,26 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                 ),
             })
         return out, None
+
+    @staticmethod
+    def _lora_name_adapter_id(lora_name: Optional[str], model_key: str) -> Optional[str]:
+        """The catalog id of the LoRA a legacy ``lora_name`` names (by id or by
+        file name), when it is an adapter for ``model_key``; None otherwise."""
+        name = (lora_name or "").strip()
+        if not name:
+            return None
+        from backend.services.video_model_registry import VIDEO_MODEL_REGISTRY, speed_profile_loras
+        owned = speed_profile_loras(model_key)
+        base = os.path.basename(name)
+        for aid, entry in VIDEO_MODEL_REGISTRY.items():
+            if entry.get("type") != "lora" or entry.get("adapter") is False or aid in owned:
+                continue
+            if model_key not in (entry.get("applies_to") or []):
+                continue
+            files = {os.path.basename(f.get("dst") or "") for f in entry.get("files") or []}
+            if name == aid or base in files:
+                return aid
+        return None
 
     def _resolve_minimax_common(self, request: VideoGenerationRequest, model_key: str, caps: dict, entry_name: str) -> tuple:
         """Speed profile, LoRA, step count and prompt for either H3 build.
@@ -2551,78 +2581,18 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                             "Install CodeFormer from Manage Video Models. Continuing without face restore."
                         )
 
-            # Apply FreeU if requested
-            if request.freeu:
-                model_node_id = None
-                for nid, node in workflow.items():
-                    if node.get("class_type") in self._COG_MODEL_LOADER_NODES:
-                        model_node_id = nid
-                        break
-                if model_node_id:
-                    # CogVideoX uses a custom typed model (COGVIDEOMODEL) from the wrapper.
-                    # Generic FreeU_V2 outputs plain MODEL, which causes ComfyUI prompt
-                    # validation to fail with "Return type mismatch ... MODEL vs COGVIDEOMODEL"
-                    # on the CogVideoSampler input. Skip for Cog (Wan never reaches here).
-                    family = self._model_family(model)
-                    if family == "cogvideox":
-                        logger.warning(
-                            "FreeU Enhance requested for CogVideoX model but skipped: "
-                            "incompatible with custom COGVIDEOMODEL typing (would produce "
-                            "invalid prompt for CogVideoSampler). General options like "
-                            "interpolation, upscale, and prompt enhancement still apply. "
-                            "FreeU works on supported Wan paths."
-                        )
-                    else:
-                        freeu_id = self._add_freeu_node(workflow, model_node_id, is_cogvideo=True)
-                        for nid, node in workflow.items():
-                            if node.get("class_type") == "CogVideoSampler":
-                                if node["inputs"].get("model", [None])[0] == model_node_id:
-                                    node["inputs"]["model"] = [freeu_id, 0]
-
-            # Apply Lora if requested. Only the CogVideoX backbone has a LoRA hook
-            # here (DownloadAndLoadCogVideoModel + CLIPLoader → LoraLoader chain).
-            # Wan 2.2's GGUF backbone (UnetLoaderGGUF) has NO matching hook and no
-            # base-matched Wan LoRAs exist, so wiring would be a no-op at best —
-            # be HONEST about the skip instead of silently dropping it. Identity on
-            # the Wan i2v path comes from the init (keyframe) image, not a LoRA.
-            if request.lora_name:
-                model_node_id = None
-                clip_node_id = None
-                for nid, node in workflow.items():
-                    if node.get("class_type") in self._COG_MODEL_LOADER_NODES:
-                        model_node_id = nid
-                    elif node.get("class_type") == "CLIPLoader":
-                        clip_node_id = nid
-                family = self._model_family(model)
-                if family == "cogvideox":
-                    # Same type incompatibility as FreeU: LoraLoader produces generic
-                    # MODEL; CogVideoSampler expects COGVIDEOMODEL from the custom loader.
-                    # This produces the exact "Return type mismatch MODEL vs COGVIDEOMODEL"
-                    # validation error seen in logs. Skip with explanation.
-                    logger.warning(
-                        "LoRA '%s' requested for CogVideoX but not applied: "
-                        "incompatible with custom COGVIDEOMODEL typing used by "
-                        "DownloadAndLoadCogVideoModel + CogVideoSampler (causes prompt "
-                        "validation failure). The option is ignored for Cog models. "
-                        "Use Wan models if LoRA character consistency is needed, or "
-                        "rely on the I2V starting image for identity.",
-                        request.lora_name,
-                    )
-                elif model_node_id and clip_node_id:
-                    new_model, new_clip = self._add_lora_loader(workflow, model_node_id, clip_node_id, request.lora_name, request.lora_strength)
-                    for nid, node in workflow.items():
-                        if node.get("class_type") == "CogVideoSampler":
-                            if node["inputs"].get("model", [None])[0] == model_node_id:
-                                node["inputs"]["model"] = [new_model, 0]
-                        elif "TextEncode" in node.get("class_type", ""):
-                            if node["inputs"].get("clip", [None])[0] == clip_node_id:
-                                node["inputs"]["clip"] = [new_clip, 0]
-                else:
-                    logger.warning(
-                        "LoRA '%s' not applied: backbone=%s has no LoRA hook; "
-                        "identity comes from the init frame.",
-                        request.lora_name, family,
-                    )
+            # A legacy lora_name that is not a catalog LoRA for this model was
+            # left out by _resolve_adapters (CogVideoX has no adapter path at
+            # all). Say so, rather than render as if it applied.
+            if request.lora_name and not (
+                self._model_family(model) != "cogvideox"
+                and self._lora_name_adapter_id(request.lora_name, model)
+            ):
+                logger.warning(
+                    "LoRA '%s' not applied: it is not an installed catalog LoRA for %s. "
+                    "Add it in Manage Video Models and pick it as an adapter.",
+                    request.lora_name, model,
+                )
 
             # Frame-sequence export (Q3): when frames are requested, tee the FINAL
             # frames (post upscale/face-restore/interpolation — the exact frames the
@@ -2988,11 +2958,10 @@ class Wan22I2VGenerator:
     This is the film pipeline's preferred animator (Layer 2 of the film-orchestrator
     plan). Identity rides ENTIRELY in the LoRA-locked storyboard/keyframe image that
     seeds the animation — Wan 2.2 takes a text prompt (motion guidance) plus that
-    init frame. It does NOT apply a LoRA: the Wan GGUF backbone (UnetLoaderGGUF) has
-    no LoRA hook (see _build_workflow's "no LoRA hook" skip), so any lora_name passed
-    here is currently inert — it's threaded through only for forward-compat if a
-    Wan-format LoRA loader is ever added. Lock the character in the keyframe upstream,
-    not here. Per-step progress is surfaced automatically by the Layer-1 ws bridge
+    init frame. The LoRAs passed here are the cast's image-model (SDXL) LoRAs: they
+    do not fit Wan, so generate_video leaves them out (a lora_name is applied only
+    when it names a catalog LoRA made for the video model). Lock the character in
+    the keyframe upstream, not here. Per-step progress is surfaced automatically by the Layer-1 ws bridge
     inside generate_video. Short clips keep identity stable and VRAM in budget on 16 GB.
     """
 
@@ -3024,9 +2993,8 @@ class Wan22I2VGenerator:
             fps=self.fps,
             enhance_prompt=False,
             output_dir=out_dir,                      # known base → result path resolves
-            # NOTE: the Wan GGUF backbone applies NO LoRA (no loader hook — see
-            # _build_workflow). Identity comes from the LoRA-locked init frame, not
-            # from this. lora_name is passed through inert for forward-compat only.
+            # Identity comes from the LoRA-locked init frame. This lora_name is an
+            # image-model LoRA, so generate_video leaves it out and logs that.
             lora_name=(loras[0] if loras else None),
             metadata={"image_path": image_path},
         )

@@ -130,11 +130,39 @@ def _parse_int(value):
         return None
 
 
-def _parse_float(value):
+class _BadField(ValueError):
+    """A request field that is not the number it has to be (answered as a 400)."""
+
+
+def _parse_float(value, field: str = "value"):
     """A number, or None for a field left out (the model's own value applies)."""
     if value is None or value == "":
         return None
-    return float(value)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise _BadField(f"{field} must be a number, got {value!r}.")
+
+
+def _float_field(data, key: str, default: float) -> float:
+    value = _parse_float(data.get(key), key)
+    return default if value is None else value
+
+
+def _int_field(data, key: str, default: int) -> int:
+    raw = data.get(key)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        raise _BadField(f"{key} must be a whole number, got {raw!r}.")
+
+
+def _optional_positive_float(data, key: str):
+    """A tuning value where 0 or blank means off (TeaCache threshold, FETA weight)."""
+    value = _parse_float(data.get(key), key)
+    return value if value else None
 
 
 def _failure_response(message, default_kind=RenderErrorKind.INVALID_REQUEST, status_code: int = 400):
@@ -183,6 +211,19 @@ def _clip_params(data, model_id: str) -> dict:
     }
 
 
+def _subject_ids(data) -> List[int]:
+    """Cast member ids, as whole numbers (the batch stores them as ints)."""
+    ids = []
+    for raw in _parse_list(data.get("subject_ids")):
+        if not str(raw).strip():
+            continue
+        try:
+            ids.append(int(raw))
+        except (TypeError, ValueError):
+            raise _BadField(f"subject_ids must be whole numbers, got {raw!r}.")
+    return ids
+
+
 def _render_params(data, model_id: str) -> dict:
     """The render settings every generate route reads the same way."""
     clip = _clip_params(data, model_id)
@@ -192,23 +233,24 @@ def _render_params(data, model_id: str) -> dict:
         "fps": clip["fps"],
         "width": clip["width"],
         "height": clip["height"],
-        "motion_strength": float(data.get("motion_strength", 1.0)),
+        "motion_strength": _float_field(data, "motion_strength", 1.0),
         "num_inference_steps": clip["num_inference_steps"],
-        "guidance_scale": _parse_float(data.get("guidance_scale")),
+        "guidance_scale": _parse_float(data.get("guidance_scale"), "guidance_scale"),
         "seed": _parse_int(data.get("seed")),
         "generate_frames_only": str(data.get("generate_frames_only", "false")).lower() == "true",
-        "frames_per_batch": int(data.get("frames_per_batch", 1)),
+        "frames_per_batch": _int_field(data, "frames_per_batch", 1),
         "combine_frames": str(data.get("combine_frames", "false")).lower() == "true",
-        "interpolation_multiplier": int(data.get("interpolation_multiplier", 2)),
+        "interpolation_multiplier": _int_field(data, "interpolation_multiplier", 2),
         "prompt_style": data.get("prompt_style", "cinematic"),
         "enhance_prompt": str(data.get("enhance_prompt", "true")).lower() != "false",
         "fidelity_mode": str(data.get("fidelity_mode", data.get("preserve_text_fidelity", "false"))).lower() == "true",
         "wan_sampler_profile": (data.get("wan_sampler_profile") or None),
         "negative_prompt": data.get("negative_prompt", "") or "",
-        "freeu": str(data.get("freeu", "false")).lower() == "true",
+        # "freeu" is accepted and ignored: FreeU patches UNet skip connections
+        # and every routed video model is a transformer, so it never applied.
         "face_restore": str(data.get("face_restore", "false")).lower() == "true",
         "lora_name": data.get("lora_name"),
-        "lora_strength": float(data.get("lora_strength", 1.0)),
+        "lora_strength": _float_field(data, "lora_strength", 1.0),
         "adapters": data.get("adapters") if isinstance(data.get("adapters"), list) else [],
         "text_encoder": (data.get("text_encoder") or "").strip() or None,
         # Capability-contract knobs; the generator validates them against
@@ -223,14 +265,28 @@ def _render_params(data, model_id: str) -> dict:
         "metadata": {
             **(data.get("metadata") or {}),
             "upscale": str(data.get("upscale", "false")).lower() == "true",
-            "teacache_threshold": float(data.get("teacache_threshold")) if data.get("teacache_threshold") else None,
-            "feta_weight": float(data.get("feta_weight")) if data.get("feta_weight") else None,
+            "teacache_threshold": _optional_positive_float(data, "teacache_threshold"),
+            "feta_weight": _optional_positive_float(data, "feta_weight"),
             "high_consistency": str(data.get("high_consistency", "false")).lower() == "true",
             # A step count the person typed keeps priority over a model's
             # step floor; preset-driven values are raised to the floor.
             "steps_explicit": str(data.get("steps_explicit", "false")).lower() == "true",
         },
     }
+
+
+def _saved_batch_preflight(params: dict):
+    """The checks a new request gets, for a batch rebuilt from its saved
+    settings (retry, re-render): the model is still installed and ComfyUI can
+    load it, and the prompt style is still offered. None when it can run,
+    else the refusal response."""
+    model_id = params.get("model")
+    if not model_id:
+        return _failure_response("This batch did not save which model it used.")
+    ready, preflight_err = prepare_video_model(model_id)
+    if not ready:
+        return _failure_response(preflight_err)
+    return _withheld_style_error(params)
 
 
 def _media_path(ref, label: str):
@@ -281,7 +337,7 @@ def generate_text_to_video_batch():
         # shots via the Storyboard agent in the background worker. Capped to keep a typo
         # from queuing hundreds of renders.
         storyboard_concept = (data.get("storyboard_concept") or "").strip()
-        storyboard_shots = int(data.get("storyboard_shots") or 0)
+        storyboard_shots = _int_field(data, "storyboard_shots", 0)
         if storyboard_concept and storyboard_shots > 0:
             prompts = [storyboard_concept] * max(1, min(storyboard_shots, 50))
         if not prompts:
@@ -307,7 +363,7 @@ def generate_text_to_video_batch():
             # Trained cast members to lock into each clip. The video model can't apply
             # a LoRA, so each selected character's SDXL LoRA is baked into a cinematic
             # keyframe (which then seeds I2V) — selecting cast implies cinematic mode.
-            "subject_ids": _parse_list(data.get("subject_ids")),
+            "subject_ids": _subject_ids(data),
             "storyboard_concept": storyboard_concept or None,
         }
 
@@ -328,6 +384,8 @@ def generate_text_to_video_batch():
             "stage": getattr(status, "stage", "queued"),
             "gpu": gpu_hint,
         })
+    except _BadField as e:
+        return _failure_response(str(e))
     except Exception as e:
         logger.error(f"Failed to start text-to-video batch: {e}")
         return error_response(str(e), 500)
@@ -379,6 +437,8 @@ def generate_image_to_video_batch():
             "stage": getattr(status, "stage", "queued"),
             "gpu": gpu_hint,
         })
+    except _BadField as e:
+        return _failure_response(str(e))
     except Exception as e:
         logger.error(f"Failed to start image-to-video batch: {e}")
         return error_response(str(e), 500)
@@ -539,6 +599,8 @@ def generate_reference_video_batch():
             "stage": getattr(status, "stage", "queued"),
             "gpu": gpu_hint,
         })
+    except _BadField as e:
+        return _failure_response(str(e))
     except Exception as e:
         logger.error(f"Failed to start reference-to-video batch: {e}")
         return error_response(str(e), 500)
@@ -635,7 +697,7 @@ def enhance_prompt_preview():
             reference_prompt = _reference_prompt(prompt, spec, {
                 "duration_frames": clip["duration_frames"], "fps": clip["fps"],
                 "prompt_style": style, "fidelity_mode": fidelity,
-                "motion_strength": _parse_float(data.get("motion_strength")),
+                "motion_strength": _parse_float(data.get("motion_strength"), "motion_strength"),
             }, (data.get("language") or "").strip() or "English")
 
         if reference_prompt:
@@ -673,6 +735,8 @@ def enhance_prompt_preview():
             "model_family": model_family,
             "style": style,
         })
+    except _BadField as e:
+        return _failure_response(str(e))
     except Exception as e:
         logger.error(f"Failed to generate prompt preview: {e}")
         return error_response(str(e), 500)
@@ -874,7 +938,7 @@ def retry_batch(batch_id: str):
     Retry a failed (or cancelled) batch using the exact original parameters
     that were persisted at submission time. This lets the UI offer a one-click
     "Retry" without the user having to re-type prompts, re-select images,
-    re-choose model, steps, fidelity_mode, FreeU, LoRA, quality tier, etc.
+    re-choose model, steps, fidelity_mode, LoRA, quality tier, etc.
 
     Returns the new batch_id (a fresh VideoBatch_... entry is created and queued).
     The original failed batch is left as-is in history.
@@ -889,6 +953,9 @@ def retry_batch(batch_id: str):
             return error_response("This batch has no retry data (too old, or created before retry support)", 400)
 
         params = dict(rd.get("params") or {})
+        refused = _saved_batch_preflight(params)
+        if refused:
+            return refused
         mode = rd.get("mode")
         if mode == "text":
             prompts = rd.get("prompts") or []
@@ -935,6 +1002,14 @@ def rerender_held_clip(batch_id: str, item_id: str):
     """Render one clip again as a new batch with the same settings and a fresh seed."""
     try:
         generator = get_batch_video_generator()
+        orig = generator.get_batch_status(batch_id)
+        if not orig:
+            return error_response("Clip not found", 404)
+        saved = dict((getattr(orig, "retry_data", None) or {}).get("params") or {})
+        # A batch that kept no settings gets rerender_item's own 400 below.
+        refused = _saved_batch_preflight(saved) if saved else None
+        if refused:
+            return refused
         new_status = generator.rerender_item(batch_id, item_id)
         if new_status is None:
             return error_response("Clip not found", 404)
@@ -1035,7 +1110,10 @@ def download_batch(batch_id: str):
 def combine_frames(batch_id: str):
     try:
         data = request.get_json(silent=True) or {}
-        fps = int(data.get("fps", 24))
+        try:
+            fps = _int_field(data, "fps", 24)
+        except _BadField as e:
+            return _failure_response(str(e))
         item_id = data.get("item_id")
         generator = get_batch_video_generator()
         combined = generator.combine_frames(batch_id, item_id=item_id, fps=fps)
@@ -1308,7 +1386,7 @@ def list_prompt_presets():
 @batch_video_bp.route("/models/download", methods=["POST"])
 def download_video_model():
     """Start downloading a video model from HuggingFace."""
-    data = request.get_json()
+    data = request.get_json(silent=True)
     if not data or "model_id" not in data:
         return error_response("No model_id provided", 400)
     return start_video_model_download(data["model_id"])
@@ -1395,17 +1473,29 @@ def start_video_model_download(model_id):
                             pass
                 return total
 
+            class _Superseded(Exception):
+                """A newer download took over (stale-lock takeover, or the stall
+                monitor failed this one): stop before starting another file, so
+                two pulls never write the same directory."""
+
+            def _still_owner():
+                if stalled.is_set() or not _is_current():
+                    raise _Superseded()
+
             def _pull_one(einfo, local_dir):
                 """Pull a single registry entry's files into local_dir."""
+                _still_owner()
                 if einfo.get("dest") == "hf_cache":
                     # The loader that reads this file calls hf_hub_download
                     # itself, so the file has to sit in the Hugging Face cache
                     # under its own repo, not in a local_dir.
                     for spec in einfo.get("files", []):
+                        _still_owner()
                         hf_hub_download(repo_id=einfo["hf_repo"], filename=spec["src"])
                 elif "direct_urls" in einfo:
                     import urllib.request
                     for spec in einfo["direct_urls"]:
+                        _still_owner()
                         dst = local_dir / spec["dst"]
                         if dst.exists() and dst.stat().st_size > 0:
                             continue
@@ -1415,6 +1505,7 @@ def start_video_model_download(model_id):
                     # Explicit per-file pulls: only the bytes we actually need,
                     # placed at the exact name ComfyUI's loaders expect.
                     for spec in einfo["files"]:
+                        _still_owner()
                         dst = local_dir / spec["dst"]
                         if not (dst.exists() and dst.stat().st_size > 0):
                             dst.parent.mkdir(parents=True, exist_ok=True)
@@ -1532,7 +1623,7 @@ def start_video_model_download(model_id):
 
                 try:
                     for eid, einfo, ldir in entries:
-                        if stalled.is_set():
+                        if stalled.is_set() or not _is_current():
                             break
                         last_repo = einfo.get("hf_repo")
                         _update_status(current_model=eid)
@@ -1548,8 +1639,8 @@ def start_video_model_download(model_id):
                     stop_monitor.set()
                     monitor_thread.join(timeout=2)
 
-                if stalled.is_set():
-                    return  # monitor already wrote the terminal failed state
+                if stalled.is_set() or not _is_current():
+                    return  # the monitor or a newer download owns the status
 
                 _update_status(
                     progress=100,
@@ -1559,6 +1650,8 @@ def start_video_model_download(model_id):
                 )
                 logger.info(f"Video model(s) downloaded: {', '.join(plan_ids)}")
 
+            except _Superseded:
+                logger.info("Video model download (epoch %s) stopped: superseded", my_epoch)
             except Exception as e:
                 logger.error(f"Video model download failed: {e}", exc_info=True)
                 if not stalled.is_set():

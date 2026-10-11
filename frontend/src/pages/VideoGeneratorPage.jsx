@@ -206,7 +206,6 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     generate_frames_only: false,
     frames_per_batch: 1,
     combine_frames: false,
-    freeu: false,
     face_restore: false,
     lora_name: "",
     lora_strength: 1.0,
@@ -283,7 +282,6 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     setAdvancedParams((prev) => ({
       ...prev,
       face_restore: faceRestoreAvailable === true,
-      freeu: isWanModel(model, modelMeta[model]),
     }));
     if (isCogVideoXModel(model, modelMeta[model])) {
       setFetaEnabled(true);
@@ -897,7 +895,6 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       generate_frames_only: advancedParams.generate_frames_only,
       frames_per_batch: lowVramMode && (isCogVideoXModel(model, modelMeta[model]) || isWanModel(model, modelMeta[model])) ? 1 : advancedParams.frames_per_batch,
       combine_frames: advancedParams.combine_frames,
-      freeu: advancedParams.freeu,
       face_restore: advancedParams.face_restore,
       lora_name: advancedParams.lora_name,
       lora_strength: advancedParams.lora_strength,
@@ -1555,7 +1552,6 @@ const VideoGeneratorPage = ({ embedded = false }) => {
           style_embedding: p.style_embedding || "",
           guidance_scale: p.guidance_scale ?? prev.guidance_scale,
           wan_sampler_profile: p.wan_sampler_profile ?? prev.wan_sampler_profile,
-          freeu: !!p.freeu,
           face_restore: !!p.face_restore,
           lora_name: p.lora_name || "",
           lora_strength: p.lora_strength ?? prev.lora_strength,
@@ -2426,14 +2422,6 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   tooltip="Also save a lossless PNG sequence beside the MP4."
                   onToggle={(next) => setAdvancedParams({ ...advancedParams, generate_frames_only: next })}
                 />
-                {isWanModel(model, modelMeta[model]) && (
-                  <SettingChip
-                    label="FreeU"
-                    on={advancedParams.freeu}
-                    tooltip="Fine-detail boost on Wan."
-                    onToggle={(next) => setAdvancedParams({ ...advancedParams, freeu: next })}
-                  />
-                )}
                 {isCogVideoXModel(model, modelMeta[model]) && (
                   <SettingChip
                     label="FETA"
@@ -2581,7 +2569,6 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                 keyframeModel={keyframeModel}
                 directorMode={directorMode}
                 faceRestore={advancedParams.face_restore}
-                freeu={advancedParams.freeu}
               />
               <GpuGateBanner gpuBusy={gpuBusy} blockReason={blockReason} queueMode />
               <ActionButton

@@ -16,8 +16,20 @@ from backend.services.video_render_limits import UNKNOWN_PROFILE
 logger = logging.getLogger(__name__)
 
 
+def _next_node_id(workflow: dict) -> int:
+    """The id after the graph's highest numeric node id (1 for an empty graph).
+    Non-numeric ids ("4v", "13b") never collide with it."""
+    ids = [int(k) for k in workflow if str(k).isdigit()]
+    return (max(ids) + 1) if ids else 1
+
+
+# MiniMax ref2va loader id ranges: (first id, slots before the next range).
+# Tests and the template's API JSON pin the first ids; user LoRAs start at 40.
+_MINIMAX_REF_RANGES = {"images": (20, 10), "videos": (30, 3), "video_audios": (33, 3), "audios": (36, 4)}
+
+
 class ComfyUIVideoWorkflowMixin:
-    """Wan / CogVideoX / LTX workflow graphs + post nodes (RIFE, upscale, FreeU, …)."""
+    """Wan / CogVideoX / LTX workflow graphs + post nodes (RIFE, upscale, …)."""
 
     def _create_svd_workflow(
         self,
@@ -128,8 +140,7 @@ class ComfyUIVideoWorkflowMixin:
         Returns:
             The modified workflow dict.
         """
-        existing_ids = [int(k) for k in workflow.keys() if k.isdigit()]
-        next_id = max(existing_ids) + 1
+        next_id = _next_node_id(workflow)
 
         if teacache_threshold is not None:
             tea_id = str(next_id)
@@ -666,7 +677,6 @@ class ComfyUIVideoWorkflowMixin:
             },
         }
 
-        # Add RIFE frame interpolation if multiplier > 1
         if lora_high or lora_low:
             # A speed profile's distilled LoRA pair, one per expert. Model-only
             # loaders so the text encoder is untouched; the two ModelSamplingSD3
@@ -2071,6 +2081,15 @@ class ComfyUIVideoWorkflowMixin:
         steps = int(num_inference_steps or 20)
         max_ref_frames = 362  # 15 s at 24 fps on the 17k+5 grid
 
+        # Each kind of reference has a fixed id range; one more than a range
+        # holds would overwrite the next range's loaders (or the LoRA chain at
+        # 40) without a word. The registry's ref_limits stay inside these.
+        for kind, count in (("images", len(ref_images or [])), ("videos", len(ref_videos or [])),
+                            ("audios", len(ref_audios or []))):
+            first, slots = _MINIMAX_REF_RANGES[kind]
+            if count > slots:
+                raise ValueError(f"MiniMax H3 reference graph takes at most {slots} {kind}, got {count}")
+
         ref_inputs: dict = {}
         workflow = {
             "1": {
@@ -2089,11 +2108,11 @@ class ComfyUIVideoWorkflowMixin:
             "4": {"class_type": "VAELoader", "inputs": {"vae_name": files["audio_vae"]}},
         }
         for i, filename in enumerate(ref_images or []):
-            nid = str(20 + i)
+            nid = str(_MINIMAX_REF_RANGES["images"][0] + i)
             workflow[nid] = {"class_type": "LoadImage", "inputs": {"image": filename}}
             ref_inputs[f"ref_images.ref_image_{i}"] = [nid, 0]
         for k, video in enumerate(ref_videos or []):
-            vid_id = str(30 + k)
+            vid_id = str(_MINIMAX_REF_RANGES["videos"][0] + k)
             workflow[vid_id] = {
                 "class_type": "VHS_LoadVideo",
                 "inputs": {
@@ -2111,11 +2130,11 @@ class ComfyUIVideoWorkflowMixin:
             if audio is True:
                 ref_inputs[f"ref_video_audios.ref_video_audio_{k}"] = [vid_id, 2]
             elif audio:
-                aud_id = str(33 + k)
+                aud_id = str(_MINIMAX_REF_RANGES["video_audios"][0] + k)
                 workflow[aud_id] = {"class_type": "LoadAudio", "inputs": {"audio": audio}}
                 ref_inputs[f"ref_video_audios.ref_video_audio_{k}"] = [aud_id, 0]
         for j, filename in enumerate(ref_audios or []):
-            nid = str(36 + j)
+            nid = str(_MINIMAX_REF_RANGES["audios"][0] + j)
             workflow[nid] = {"class_type": "LoadAudio", "inputs": {"audio": filename}}
             ref_inputs[f"ref_audios.ref_audio_{j}"] = [nid, 0]
 
@@ -2442,8 +2461,7 @@ class ComfyUIVideoWorkflowMixin:
         the official templates feed CreateVideo. RIFE and the upscaler only
         rewire ``images``, so the audio survives them. Returns the new node id.
         """
-        existing = [int(k) for k in workflow if str(k).isdigit()]
-        node_id = str(max(existing) + 1)
+        node_id = str(_next_node_id(workflow))
         workflow[node_id] = {
             "class_type": "LTXVAudioVAEDecode",
             "inputs": {"samples": [separate_node_id, 1], "audio_vae": [audio_vae_node_id, 0]},
@@ -2471,9 +2489,7 @@ class ComfyUIVideoWorkflowMixin:
         Returns:
             The modified workflow dict.
         """
-        # Pick the next available node ID
-        existing_ids = [int(k) for k in workflow.keys() if k.isdigit()]
-        rife_node_id = str(max(existing_ids) + 1)
+        rife_node_id = str(_next_node_id(workflow))
 
         # Insert RIFE VFI node
         workflow[rife_node_id] = {
@@ -2521,9 +2537,8 @@ class ComfyUIVideoWorkflowMixin:
         Returns:
             The modified workflow dict.
         """
-        existing_ids = [int(k) for k in workflow.keys() if k.isdigit()]
-        loader_id = str(max(existing_ids) + 1)
-        upscale_id = str(max(existing_ids) + 2)
+        first = _next_node_id(workflow)
+        loader_id, upscale_id = str(first), str(first + 1)
 
         # Load the upscale model
         workflow[loader_id] = {
@@ -2553,32 +2568,6 @@ class ComfyUIVideoWorkflowMixin:
         return workflow
 
 
-    def _add_freeu_node(self, workflow: dict, model_node_id: str, is_cogvideo: bool = False) -> str:
-        """Insert FreeU_V2 node to improve generation quality.
-        Returns the ID of the new FreeU node.
-        """
-        existing_ids = [int(k) for k in workflow.keys() if k.isdigit()]
-        freeu_id = str(max(existing_ids) + 1)
-        
-        # FreeU V2 defaults (tuned for video models generally)
-        b1, b2, s1, s2 = 1.01, 1.02, 0.99, 0.95
-        if is_cogvideo:
-            b1, b2, s1, s2 = 1.1, 1.2, 0.9, 0.2
-
-        workflow[freeu_id] = {
-            "class_type": "FreeU_V2",
-            "inputs": {
-                "model": [model_node_id, 0],
-                "b1": b1,
-                "b2": b2,
-                "s1": s1,
-                "s2": s2,
-            }
-        }
-        logger.info(f"Added FreeU_V2 node ({freeu_id}) after model node {model_node_id}")
-        return freeu_id
-
-
     def _stack_user_loras(self, workflow: dict, extra_loras: Optional[list], unet_node: str = "1") -> dict:
         """Insert LoraLoaderModelOnly nodes between the UNET loader and every
         node that reads it as ``model``. Ids continue after the graph's highest
@@ -2592,8 +2581,7 @@ class ComfyUIVideoWorkflowMixin:
             if isinstance(node, dict) and isinstance(node.get("inputs"), dict)
             and node["inputs"].get("model") == [unet_node, 0]
         ]
-        ids = [int(k) for k in workflow if str(k).isdigit()]
-        model_ref, _ = self._chain_model_only_loras(workflow, [unet_node, 0], extra_loras, (max(ids) if ids else 0) + 1)
+        model_ref, _ = self._chain_model_only_loras(workflow, [unet_node, 0], extra_loras, _next_node_id(workflow))
         for inputs in consumers:
             inputs["model"] = model_ref
         return workflow
@@ -2647,9 +2635,8 @@ class ComfyUIVideoWorkflowMixin:
                 edges.setdefault(tuple(ref), []).append(inputs)
         if not edges:
             return workflow
-        ids = [int(k) for k in workflow if str(k).isdigit()]
         sources = [list(ref) for ref in edges]
-        pinned = self._apply_declared_attention(workflow, model_key, sources, max(ids) + 1, speed_profile)
+        pinned = self._apply_declared_attention(workflow, model_key, sources, _next_node_id(workflow), speed_profile)
         for ref, new_ref in zip(edges, pinned):
             for inputs in edges[ref]:
                 inputs["model"] = new_ref
@@ -2677,36 +2664,11 @@ class ComfyUIVideoWorkflowMixin:
             current = [sid, 0]
         return current, nid
 
-    def _add_lora_loader(self, workflow: dict, model_node_id: str, clip_node_id: str, lora_name: str, strength: float = 1.0) -> tuple[str, str]:
-        """Insert a LoraLoader node.
-        Returns the new (model_node_id, clip_node_id) to use in downstream nodes.
-        """
-        if not lora_name:
-            return model_node_id, clip_node_id
-            
-        existing_ids = [int(k) for k in workflow.keys() if k.isdigit()]
-        lora_id = str(max(existing_ids) + 1)
-        
-        workflow[lora_id] = {
-            "class_type": "LoraLoader",
-            "inputs": {
-                "model": [model_node_id, 0],
-                "clip": [clip_node_id, 0],
-                "lora_name": lora_name,
-                "strength_model": strength,
-                "strength_clip": strength,
-            }
-        }
-        logger.info(f"Added LoraLoader node ({lora_id}) for {lora_name} (strength: {strength})")
-        return lora_id, lora_id
-
-
     def _add_face_detailer_node(self, workflow: dict, source_node_id: str, video_combine_node_id: str) -> dict:
         """Insert FaceRestoreWithModel node for human realism before VHS_VideoCombine.
         """
-        existing_ids = [int(k) for k in workflow.keys() if k.isdigit()]
-        restore_loader_id = str(max(existing_ids) + 1)
-        restore_node_id = str(max(existing_ids) + 2)
+        first = _next_node_id(workflow)
+        restore_loader_id, restore_node_id = str(first), str(first + 1)
         
         workflow[restore_loader_id] = {
             "class_type": "FaceRestoreModelLoader",
@@ -2750,8 +2712,7 @@ class ComfyUIVideoWorkflowMixin:
                 return False
             import re as _re
             slug = _re.sub(r"[^A-Za-z0-9_-]", "_", str(item_id or "clip"))
-            existing_ids = [int(k) for k in workflow.keys() if str(k).isdigit()]
-            nid = (max(existing_ids) + 1) if existing_ids else 9000
+            nid = _next_node_id(workflow)
             while str(nid) in workflow:
                 nid += 1
             workflow[str(nid)] = {
