@@ -608,7 +608,7 @@ def test_crash_between_renames_needs_repair_and_repair_restores(world, monkeypat
     world.controller.calls.clear()
     status = fresh.repair(background=False)
     assert status["state"] == "rolled_back", status
-    assert status["message"] == f"Repaired a update interrupted at swap; ComfyUI {OLD} is running again."
+    assert status["message"] == f"Repaired an interrupted update (it stopped at swap); ComfyUI {OLD} is running again."
     assert world.controller.calls == ["start"]
     assert_live_is_old(world)
     assert not (world.root / ".update_job.json").exists()

@@ -753,7 +753,7 @@ class ComfyUIUpdateService:
             return
         self._log(epoch, f"repairing a {ctx.kind} interrupted at {ctx.phase}")
         self._rollback_or_fail(ctx, UpdateError("interrupted"),
-                               headline=f"Repaired a {ctx.kind} interrupted at {ctx.phase}")
+                               headline=f"Repaired an interrupted {ctx.kind} (it stopped at {ctx.phase})")
 
     def _rollback_or_fail(self, ctx: "_Transition", error: Exception, *, headline: Optional[str] = None) -> None:
         """Roll back; whatever happens, the status leaves ``running``."""
