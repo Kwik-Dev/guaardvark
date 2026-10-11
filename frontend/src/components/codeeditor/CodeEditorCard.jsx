@@ -542,6 +542,11 @@ ${currentTab.content}
         if (currentTab.content === undefined || currentTab.content === null) {
           throw new Error('Cannot save file with undefined content');
         }
+        // The text this save writes, and the tab it belongs to: the user can
+        // type, switch or close tabs while the write is in flight.
+        const sent = currentTab.content;
+        const savedId = currentTab.id;
+        const savedIndex = activeTabIndex;
 
         // Determine filename for new files
         let actualFilePath = currentTab.filePath;
@@ -568,13 +573,13 @@ ${currentTab.content}
           // A library document is saved by id through the documents API, the
           // same route the Files page's code viewer uses. /api/files/write
           // resolves bare names under the repo root and must not see it.
-          const result = await documentService.updateDocument(target.documentId, { content: currentTab.content });
+          const result = await documentService.updateDocument(target.documentId, { content: sent });
           if (result && result.error) {
             throw new Error(result.error);
           }
         } else if (target.kind === 'repo') {
           // A repo file keeps its repo-relative path and the guarded write route.
-          const result = await fileOperationsService.writeFile(target.path, currentTab.content);
+          const result = await fileOperationsService.writeFile(target.path, sent);
           if (!result.success) {
             throw new Error(result.error || 'Failed to save file');
           }
@@ -582,7 +587,7 @@ ${currentTab.content}
           // Save to localStorage with error handling
           const fileData = {
             path: actualFilePath,
-            content: currentTab.content,
+            content: sent,
             language: currentTab.language,
             lastModified: new Date().toISOString()
           };
@@ -607,16 +612,17 @@ ${currentTab.content}
           }
         }
 
-        // Update tab state
+        // Mark the saved tab by id, not by the index it had when Save started,
+        // and only the text that was sent as saved.
         setOpenTabs(prev => prev.map((tab, index) =>
-          index === activeTabIndex
+          (savedId !== undefined ? tab.id === savedId : index === savedIndex)
             ? {
                 ...tab,
                 filePath: actualFilePath,
-                savedContent: tab.content,
+                savedContent: sent,
                 loadState: TAB_LOAD.LOADED,
                 loadError: null,
-                isModified: false,
+                isModified: tab.content !== sent,
                 isNew: false,
               }
             : tab
