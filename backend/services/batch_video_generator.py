@@ -1653,7 +1653,7 @@ class BatchVideoGenerator:
         **params,
     ) -> BatchVideoStatus:
         from backend.services.output_registration import bates_name
-        batch_id = params.get("batch_id") or bates_name("video_batch", "", self.base_output_dir)
+        batch_id = params.pop("batch_id", None) or bates_name("video_batch", "", self.base_output_dir)
         # Index-paired with prompts: guides and an end frame per item (l2v).
         # item_metadata goes on every item: the reference inputs the render
         # worker reads from there.
@@ -1681,7 +1681,7 @@ class BatchVideoGenerator:
         **params,
     ) -> BatchVideoStatus:
         from backend.services.output_registration import bates_name
-        batch_id = params.get("batch_id") or bates_name("video_batch", "", self.base_output_dir)
+        batch_id = params.pop("batch_id", None) or bates_name("video_batch", "", self.base_output_dir)
         user_prompt = params.pop("prompt", "")
         # Index-paired with image_paths: an end frame per item (flf2v) and the
         # guides per item. Shorter lists leave the remaining items without.

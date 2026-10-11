@@ -218,6 +218,9 @@ def test_reference_clip_shorter_than_the_floor_is_refused(gen, tmp_path, monkeyp
     wf, err = _ref(gen, tmp_path, ref_videos=[{"path": str(clip)}])
     assert wf is None and "at least 2 s" in err and "1.2 s" in err
     monkeypatch.setattr(cvg, "_media_seconds", lambda path: 20.0)
+    # The file is not a clip. Duration is stubbed, so preparation must be too:
+    # a real over-long clip is trimmed by ffmpeg before it is uploaded.
+    monkeypatch.setattr(gen, "_prepare_reference_clip", lambda path, width, height, max_s=None: path)
     wf, err = _ref(gen, tmp_path, ref_videos=[{"path": str(clip)}])
     assert err is None  # longer clips are read up to the model's longest
 

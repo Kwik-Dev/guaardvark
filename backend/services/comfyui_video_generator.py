@@ -745,11 +745,11 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
         # made for this model. Anything else (an SDXL cast LoRA the film pipeline
         # threads through, a stray file name) is left out and logged after the
         # graph is built: applying a LoRA trained on another base breaks the render.
-        legacy_id = self._lora_name_adapter_id(request.lora_name, model_key)
+        legacy_id = self._lora_name_adapter_id(getattr(request, "lora_name", None), model_key)
         if legacy_id and not any(
             (r if isinstance(r, str) else (r or {}).get("id")) == legacy_id for r in raws
         ):
-            raws.append({"id": legacy_id, "strength": request.lora_strength})
+            raws.append({"id": legacy_id, "strength": getattr(request, "lora_strength", None)})
         for raw in raws:
             if isinstance(raw, str):
                 aid, strength = raw, None
