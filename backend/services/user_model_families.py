@@ -46,10 +46,13 @@ class DuplicateUserModel(ValueError):
 # catalog id whose sampling policy and (for Comfy) graph the add clones.
 # comfy_graph names the ComfyUI text-to-image graph a Comfy family renders on
 # (comfyui_image_generator._build_workflow); a Comfy family without one (the
-# Chat editor) has no stills route.
+# Chat editor) has no stills route. graph_models maps a UNET suffix to the
+# shipped registry entry whose graph (and companions) a user file of that
+# suffix renders on; files not listed render on `like`.
 # weight_suffixes / refused_suffixes / refused_name_tokens say which weight
 # files a Comfy family's loader reads; build_user_entry refuses the rest and
-# Look up warns about them (weight_file_problem).
+# Look up warns about them (weight_file_problem). A row without
+# weight_suffixes takes every WEIGHT_SUFFIXES file.
 
 # Apple MLX repacks carry the format in the name; ComfyUI has no loader for them.
 _MLX_REFUSAL = {
@@ -144,7 +147,9 @@ IMAGE_FAMILIES = (
         "single_file": True,
         "lora_engine": "comfy",
         "comfy_graph": "flux",
-        "weight_suffixes": (".safetensors", ".gguf"),
+        # A .gguf UNET renders on the schnell graph (UnetLoaderGGUF, fp8 T5);
+        # any other file on the dev graph (`like`). Companions follow the graph.
+        "graph_models": {".gguf": "flux-schnell"},
         "refused_name_tokens": _MLX_REFUSAL,
         "tokens": ("flux", "flux.1", "flux1"),
         "pipeline_tags": ("flux",),
@@ -162,7 +167,6 @@ IMAGE_FAMILIES = (
         "single_file": True,
         "lora_engine": None,
         "local_subdir": "diffusion_models",
-        "weight_suffixes": (".safetensors", ".gguf"),
         "refused_name_tokens": _MLX_REFUSAL,
         "tokens": ("qwen-image-edit", "qwenimage-edit", "qwen_image_edit"),
         "pipeline_tags": ("qwen-image-edit",),
@@ -372,8 +376,24 @@ def image_generation_families() -> dict:
             "layout": row["layout"],
             "local_subdir": row.get("local_subdir"),
             "comfy_graph": row.get("comfy_graph"),
+            "graph_models": dict(row.get("graph_models") or {}),
         }
     return out
+
+
+def comfy_graph_model(family_id: str, unet: str | None) -> str | None:
+    """The shipped registry entry whose ComfyUI graph a user UNET of ``family_id``
+    renders on, which is also the tag the graph builder dispatches on and the
+    entry whose ``requires`` are the model's companions. None for families
+    without a stills graph."""
+    row = _image_family_row(family_id) or {}
+    if not row.get("comfy_graph"):
+        return None
+    low = (unet or "").lower()
+    for suffix, model_id in (row.get("graph_models") or {}).items():
+        if low.endswith(suffix):
+            return model_id
+    return row.get("like")
 
 
 def _image_family_row(family_id: str) -> dict | None:
@@ -662,20 +682,28 @@ def _inspect_warnings(files: list, has_model_index: bool) -> list:
     return warnings
 
 
-def _blob(files: list, src: str | None, hf_repo: str, base_model=None) -> str:
+def _blob(files: list, src: str | None, hf_repo: str) -> str:
     names = [src] if src else [f.get("src") or "" for f in files]
-    bases = [str(b) for b in (base_model or [])] if isinstance(base_model, (list, tuple)) else (
-        [str(base_model)] if base_model else []
-    )
-    return " ".join(names + [hf_repo or ""] + bases).lower()
+    return " ".join(names + [hf_repo or ""]).lower()
 
 
-def _qwen_claim(blob: str, cls: str | None) -> str | None:
+def _base_models_text(base_model) -> str:
+    if isinstance(base_model, (list, tuple)):
+        return " ".join(str(b) for b in base_model if b).lower()
+    return str(base_model or "").lower()
+
+
+def _qwen_claim(blob: str, cls: str | None, base_model=None) -> str | None:
     """Which Qwen-Image family a paste names, in claim order: "edit", "21", or
-    None (Qwen-Image 1.0, or no Qwen at all)."""
+    None (Qwen-Image 1.0, or no Qwen at all). The card's base_model counts for
+    the 2.1 claim only, so a repack without a version in its names resolves;
+    it stays out of the general match (a multi-base LoRA card names families
+    the file is not)."""
     if "edit" in blob or (cls and "edit" in cls.lower()):
         return "edit"
     if any(tok in blob for tok in _QWEN21_TOKENS):
+        return "21"
+    if any(tok in _base_models_text(base_model) for tok in _QWEN21_TOKENS):
         return "21"
     return None
 
@@ -791,12 +819,13 @@ def match_families(
 ) -> list[dict]:
     """Rank family matches. Unwired hits are returned alone so the UI refuses them.
 
-    ``base_model`` is the card's base_model field; a repack whose file names
-    carry no version still resolves through it.
+    ``base_model`` is the card's base_model field; a Qwen-Image 2.1 repack whose
+    file names carry no version still resolves through it.
     """
-    blob = _blob(files, src, hf_repo, base_model)
+    blob = _blob(files, src, hf_repo)
     tag = (pipeline_tag or "").lower().replace("_", "-")
     cls = _class_stem(index_class)
+    qwen_claim = _qwen_claim(blob, cls, base_model) if domain == "image" else None
     unwired = []
     for row in UNWIRED_FAMILIES:
         if row["domain"] != domain:
@@ -806,7 +835,7 @@ def match_families(
             or tag in {t.lower() for t in row.get("pipeline_tags") or ()}
             or (cls and cls in (row.get("index_classes") or ()))
         )
-        if row["id"] == "qwen-image" and _qwen_claim(blob, cls):
+        if row["id"] == "qwen-image" and qwen_claim:
             # Edit and 2.1 are wired families; only 1.0 is refused here.
             continue
         if hit:
@@ -862,6 +891,9 @@ def match_families(
             if row["id"] == "zimage" and role == "lora" and score == 0:
                 score += 1
                 reasons.append("lora-default")
+            if row["id"] == "qwen-image-21" and qwen_claim == "21" and score == 0:
+                score += 3
+                reasons.append("base_model")
             if role not in row["roles"]:
                 continue
             if score <= 0:

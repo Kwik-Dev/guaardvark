@@ -31,6 +31,7 @@ from pathlib import Path
 
 from backend.services.user_model_families import (
     DuplicateUserModel,
+    comfy_graph_model,
     comfy_t2i_family,
     family_choices as _table_family_choices,
     find_duplicate,
@@ -498,14 +499,26 @@ def _user_file_entry_for(generator, key: str) -> dict | None:
     return uf
 
 
-def companion_ids(generator, key: str) -> list:
-    """Registry ids a user ComfyUI generation model renders with (its like's ``requires``)."""
-    uf = _user_file_entry_for(generator, key)
+def _graph_model_of(uf: dict | None) -> str | None:
+    """The shipped registry entry whose graph a user ComfyUI generation model
+    renders on (user_model_families.comfy_graph_model); None for LoRAs,
+    snapshots and families without a stills graph."""
     if not uf or uf.get("engine") != "comfy" or uf.get("kind") != "comfy_files":
+        return None
+    files = uf.get("files") or []
+    unet = (files[0].get("dst") if files else None) or None
+    return comfy_graph_model(uf.get("family") or "", unet)
+
+
+def companion_ids(generator, key: str) -> list:
+    """Registry ids a user ComfyUI generation model renders with: the ``requires``
+    of the shipped entry whose graph it renders on (a FLUX .gguf renders on
+    flux-schnell and needs its fp8 T5, a .safetensors on flux-dev's fp16 T5)."""
+    graph_model = _graph_model_of(_user_file_entry_for(generator, key))
+    if not graph_model:
         return []
-    like = GENERATION_FAMILIES.get(uf.get("family") or "", {}).get("like")
     from backend.services.video_model_registry import VIDEO_MODEL_REGISTRY
-    return list((VIDEO_MODEL_REGISTRY.get(like or "") or {}).get("requires") or [])
+    return list((VIDEO_MODEL_REGISTRY.get(graph_model) or {}).get("requires") or [])
 
 
 def missing_companions(generator, key: str) -> list:
@@ -608,8 +621,8 @@ def comfy_t2i_target(generator, model_id: str) -> dict | None:
     ``{"family", "tag", "unet"}``: ``tag`` is the model string _build_workflow
     dispatches on and ``unet`` the loader filename. A shipped id passes through
     (``unet`` None, the graph loads its registry file). A user entry supplies
-    its own UNET; a FLUX .gguf renders on the schnell graph, a FLUX
-    .safetensors on the dev graph.
+    its own UNET and renders on the shipped entry comfy_graph_model names for
+    it, the same entry its companions come from.
     """
     family = comfy_t2i_family(model_id)
     if not family:
@@ -620,11 +633,7 @@ def comfy_t2i_target(generator, model_id: str) -> dict | None:
     entry = (getattr(generator, "user_entries", None) or {}).get(mid) or {}
     files = entry.get("files") or []
     unet = (files[0].get("dst") if files else None) or None
-    if family == "flux":
-        tag = "flux-schnell" if unet and str(unet).lower().endswith(".gguf") else "flux-dev"
-    else:
-        tag = family
-    return {"family": family, "tag": tag, "unet": unet}
+    return {"family": family, "tag": comfy_graph_model(family, unet) or family, "unet": unet}
 
 
 def _write_lora_sidecar(base: Path, uf: dict) -> None:

@@ -237,6 +237,32 @@ def test_weight_files_the_loader_reads_pass(family, name):
     assert umf.weight_file_problem(family, name) is None
 
 
+@pytest.mark.parametrize("family", ["flux", "qwen-image-edit"])
+@pytest.mark.parametrize("suffix", umf.WEIGHT_SUFFIXES)
+def test_flux_and_edit_rows_still_take_every_weight_suffix(family, suffix):
+    # Only Qwen-Image 2.1 narrows the suffixes; the other Comfy rows keep taking
+    # what they took before (the MLX refusal is by name, not suffix).
+    assert umf.weight_file_problem(family, f"model{suffix}") is None
+
+
+def test_a_multi_base_lora_card_is_not_refused_for_a_base_it_also_names():
+    # The card's base_model feeds the Qwen 2.1 claim only; a FLUX LoRA whose card
+    # also lists SD3.5 as a base stays a FLUX LoRA instead of an SD3 refusal.
+    m = umf.match_families(
+        domain="image", files=[{"src": "flux-dev-style-lora.safetensors"}], src=None,
+        hf_repo="someone/flux-style-lora", has_model_index=False,
+        base_model=["black-forest-labs/FLUX.1-dev", "stabilityai/stable-diffusion-3.5-large"],
+    )
+    assert (m[0]["family"], m[0]["role"], m[0]["wired"]) == ("flux", "lora", True)
+    # And a base_model naming an unwired family alone does not refuse a plain file.
+    m = umf.match_families(
+        domain="image", files=[{"src": "merged.safetensors"}], src=None,
+        hf_repo="someone/sdxl-merge", has_model_index=False,
+        base_model=["stabilityai/stable-diffusion-3.5-large"],
+    )
+    assert all(x["wired"] for x in m) or m == []
+
+
 @pytest.mark.parametrize("model_id,family", [
     ("flux-dev", "flux"), ("flux", "flux"), ("FLUX1-dev", "flux"), ("comfyui (flux-schnell)", "flux"),
     ("user-flux-fp8", "flux"), ("qwen-image-21", "qwen-image-21"),

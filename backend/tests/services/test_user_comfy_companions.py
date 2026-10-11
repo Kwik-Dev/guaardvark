@@ -55,21 +55,70 @@ def _write(path: Path):
     path.write_bytes(b"x")
 
 
-def test_companions_are_the_likes_requires(catalog_dir, tmp_path, comfy_models):
+def test_companions_follow_the_graph_the_model_renders_on(catalog_dir, tmp_path, comfy_models):
     gen = _generator(tmp_path)
     mid, _ = _add_qwen(gen)
     assert uim.companion_ids(gen, mid) == vmr.VIDEO_MODEL_REGISTRY["qwen-image-21"]["requires"]
     assert uim.companion_ids(gen, mid) == ["qwen-image-21-clip", "qwen-image-21-vae"]
     assert uim.companion_dirs(gen, mid) == [comfy_models / "text_encoders", comfy_models / "vae"]
-    flux_mid, _ = uim.add_user_model(
+    st_mid, _ = uim.add_user_model(
         gen, role="generation", family="flux", hf_repo="someone/flux-finetune",
         files=[{"src": "flux1-dev-fp8.safetensors"}], has_model_index=False, name="Flux FP8",
     )
-    assert uim.companion_ids(gen, flux_mid) == vmr.VIDEO_MODEL_REGISTRY["flux-dev"]["requires"]
+    assert uim.companion_ids(gen, st_mid) == vmr.VIDEO_MODEL_REGISTRY["flux-dev"]["requires"]
+    assert "flux-t5-fp16" in uim.companion_ids(gen, st_mid)
+    # A .gguf renders on the schnell graph, which loads the fp8 T5, not dev's fp16.
+    gguf_mid, _ = uim.add_user_model(
+        gen, role="generation", family="flux", hf_repo="city96/flux-mirror",
+        files=[{"src": "flux1-dev-Q8_0.gguf"}], has_model_index=False, name="Flux Q8",
+    )
+    assert uim.companion_ids(gen, gguf_mid) == vmr.VIDEO_MODEL_REGISTRY["flux-schnell"]["requires"]
+    assert "flux-t5-fp8" in uim.companion_ids(gen, gguf_mid)
+    assert "flux-t5-fp16" not in uim.companion_ids(gen, gguf_mid)
     lora_mid, _ = uim.add_user_model(
         gen, role="lora", family="zimage", hf_repo="x/y", files=[{"src": "l.safetensors"}], name="L",
     )
     assert uim.companion_ids(gen, lora_mid) == []
+
+
+def test_dispatch_and_companions_share_one_graph_rule(catalog_dir, tmp_path):
+    # The entry comfy_t2i_target renders on is the entry companion_ids reads
+    # `requires` from, for every user ComfyUI generation model.
+    from backend.services.user_model_families import comfy_graph_model
+
+    gen = _generator(tmp_path)
+    added = [
+        _add_qwen(gen)[0],
+        uim.add_user_model(gen, role="generation", family="flux", hf_repo="city96/flux-mirror",
+                           files=[{"src": "flux1-dev-Q8_0.gguf"}], has_model_index=False, name="Q8")[0],
+        uim.add_user_model(gen, role="generation", family="flux", hf_repo="someone/flux-finetune",
+                           files=[{"src": "flux1-dev-fp8.safetensors"}], has_model_index=False, name="FP8")[0],
+    ]
+    for mid in added:
+        target = uim.comfy_t2i_target(gen, mid)
+        assert target["tag"] == comfy_graph_model(target["family"], target["unet"])
+        assert uim.companion_ids(gen, mid) == vmr.VIDEO_MODEL_REGISTRY[target["tag"]]["requires"]
+    assert comfy_graph_model("flux", "x.gguf") == "flux-schnell"
+    assert comfy_graph_model("flux", "x.safetensors") == "flux-dev"
+    assert comfy_graph_model("qwen-image-21", "x.safetensors") == "qwen-image-21"
+    assert comfy_graph_model("qwen-image-edit", "x.safetensors") is None
+    assert comfy_graph_model("sdxl", "x.safetensors") is None
+
+
+def test_a_user_flux_gguf_is_ready_with_the_schnell_companions(catalog_dir, tmp_path, comfy_models):
+    gen = _generator(tmp_path)
+    mid, _ = uim.add_user_model(
+        gen, role="generation", family="flux", hf_repo="city96/flux-mirror",
+        files=[{"src": "flux1-dev-Q8_0.gguf"}], has_model_index=False, name="Flux Q8",
+    )
+    sentinel = uim.user_sentinel(mid)
+    _write(comfy_models / "unet" / "flux1-dev-Q8_0.gguf")
+    for eid in vmr.VIDEO_MODEL_REGISTRY["flux-schnell"]["requires"]:
+        entry = vmr.VIDEO_MODEL_REGISTRY[eid]
+        _write(vmr.resolve_entry_dir(entry) / entry["check_files"][0])
+    assert uim.user_model_ready(gen, sentinel) is True, "the fp16 T5 of the dev graph is not needed"
+    assert uim.user_missing_files(gen, mid) == []
+    assert uim.missing_companion_size_gb(gen, mid) == 0.0
 
 
 def test_ready_needs_the_unet_and_every_companion(catalog_dir, tmp_path, comfy_models):
