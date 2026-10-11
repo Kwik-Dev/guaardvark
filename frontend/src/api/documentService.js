@@ -127,6 +127,29 @@ export const updateDocument = async (documentId, documentData) => {
   }
 };
 
+// Renames a library document by id (PUT /api/files/document/:id), the route the
+// Files page uses. Content and path stay with the document.
+export const renameDocument = async (documentId, filename) => {
+  if (!documentId) return { error: "Invalid Document ID for rename." };
+  try {
+    const response = await fetch(`${BASE_URL}/files/document/${documentId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename }),
+    });
+    const data = await handleResponse(response);
+    if (typeof data === "object" && data !== null && data.error)
+      throw new Error(data.error);
+    return data;
+  } catch (err) {
+    console.error(
+      `documentService: Error renaming document ${documentId}:`,
+      err.message,
+    );
+    throw err;
+  }
+};
+
 export const getDocumentSources = async (docId) => {
   if (!docId) return { error: "Document ID is required." };
   try {

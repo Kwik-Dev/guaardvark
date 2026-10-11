@@ -140,29 +140,36 @@ const CodeEditorPage = () => {
       return;
     }
     let content = doc.content;
-    // Fetch content if not provided
+    // Fetch content if not provided. A failed fetch leaves the tab in the
+    // failed state with nothing in it; an empty string must never pass for
+    // the document's content, since Save would write it over the document.
+    let loadError = null;
     if (content === null || content === undefined) {
       try {
         const { getDocumentContent, getRepoFileContent } = await import("../api/documentService");
         const result = doc.source === 'live_repo'
           ? await getRepoFileContent(doc.relativePath || doc.filePath || "")
           : await getDocumentContent(doc.id);
-        content = typeof result === "string" ? result : result.content || result.data || "";
-      } catch {
-        content = "";
+        if (result && typeof result === "object" && result.error) {
+          loadError = result.error;
+        } else {
+          content = typeof result === "string" ? result : result.content ?? result.data ?? "";
+        }
+      } catch (err) {
+        loadError = err?.message || "fetch failed";
       }
     }
     const { getLanguageFromFilename } = await import("../utils/languageDetector");
-    const newTab = {
+    const { loadedTab, failedTab } = await import("../components/codeeditor/tabOrigin");
+    const baseTab = {
       id: `doc-${doc.id}-${Date.now()}`,
       filePath: doc.filePath || doc.filename,
-      content: content,
       language: getLanguageFromFilename(doc.filename),
-      isModified: false,
       source: doc.source || 'document',
       documentId: doc.source === 'live_repo' ? null : doc.id,
       readOnly: doc.source === 'live_repo',
     };
+    const newTab = loadError ? failedTab(baseTab, loadError) : loadedTab(baseTab, content);
     setOpenTabs(prev => {
       const updated = [...prev, newTab];
       setActiveTabIndex(updated.length - 1);

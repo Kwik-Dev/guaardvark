@@ -20,6 +20,7 @@ import {
   DialogActions,
   Button,
   TextField,
+  CircularProgress,
   useTheme,
 } from "@mui/material";
 import {
@@ -40,9 +41,12 @@ import DashboardCardWrapper from "../dashboard/DashboardCardWrapper";
 import { useUnifiedProgress } from "../../contexts/UnifiedProgressContext";
 import * as codeIntelligenceService from "../../api/codeIntelligenceService";
 import * as fileOperationsService from "../../api/fileOperationsService";
+import * as documentService from "../../api/documentService";
 import { getLanguageFromFilename } from "../../utils/languageDetector";
 import { revealEditorLine } from "./codeEditorNav";
 import { createAiHoverProvider, readAiHoverPreference, writeAiHoverPreference } from "./aiHover";
+import { saveTargetFor, saveRefusal, loadedTab, tabDisplayName, TAB_LOAD } from "./tabOrigin";
+import { bindEditorActions, modelPathFor, disposeTabModels } from "./editorBindings";
 
 // Monaco command behind the lightbulb actions (Fix with AI, Explain, Optimize):
 // each sends the lines under the marker or selection to the chat card.
@@ -128,6 +132,24 @@ const CodeEditorCard = React.forwardRef(
       ? openTabs[activeTabIndex]
       : openTabs && openTabs.length > 0 ? openTabs[0] : null;
     currentTabRef.current = currentTab;
+
+    // Monaco's onMount runs once per editor instance; Ctrl+S reads this ref so
+    // it saves the tab showing now, not the one open when the editor mounted.
+    const handleSaveRef = useRef(null);
+
+    // Each tab has its own Monaco model (the Editor's `path` prop); models of
+    // closed tabs are disposed here, and all of them when the card unmounts.
+    const monacoRef = useRef(null);
+    const knownTabsRef = useRef([]);
+    useEffect(() => {
+      const current = new Set((openTabs || []).map((tab) => tab.id));
+      const gone = knownTabsRef.current.filter((tab) => !current.has(tab.id));
+      knownTabsRef.current = openTabs || [];
+      if (gone.length && monacoRef.current) disposeTabModels(monacoRef.current, gone);
+    }, [openTabs]);
+    useEffect(() => () => {
+      if (monacoRef.current) disposeTabModels(monacoRef.current, knownTabsRef.current);
+    }, []);
 
     // Create preview HTML with theme styles
     const getPreviewContent = useCallback(() => {
@@ -215,6 +237,7 @@ ${currentTab.content}
 
     const handleEditorDidMount = useCallback((editor, monaco) => {
       editorRef.current = editor;
+      monacoRef.current = monaco;
       setEditorMounts((n) => n + 1);
 
       // Configure editor with AI enhancements
@@ -263,14 +286,9 @@ ${currentTab.content}
         tabCompletion: "on",
       });
 
-      // Add keyboard shortcuts
-      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
-        handleSave();
-      });
-
       // Hover provider for AI explanations: only when the tab menu's "AI hover
       // explanations" is on, one request per word (see aiHover.js).
-      monaco.languages.registerHoverProvider(currentTab?.language || 'javascript', {
+      monaco.languages.registerHoverProvider(currentTabRef.current?.language || 'javascript', {
         provideHover: createAiHoverProvider({
           isEnabled: () => aiHoverEnabledRef.current,
           explain: codeIntelligenceService.analyzeCodeIntelligent,
@@ -280,7 +298,7 @@ ${currentTab.content}
       });
 
       // Lightbulb actions: each hands the lines in range to the chat card.
-      monaco.languages.registerCodeActionProvider(currentTab?.language || 'javascript', {
+      monaco.languages.registerCodeActionProvider(currentTabRef.current?.language || 'javascript', {
         provideCodeActions: async (model, range, context) => {
           const actions = [];
           const problems = (context.markers || []).map((m) => m.message);
@@ -309,58 +327,12 @@ ${currentTab.content}
         }
       });
 
-      // Register Chat context menu actions (appear in Monaco's right-click menu)
-      editor.addAction({
-        id: 'chat.ask',
-        label: 'Ask Chat',
-        contextMenuGroupId: '9_chat',
-        contextMenuOrder: 1,
-        precondition: 'editorHasSelection',
-        run: (ed) => {
-          const sel = ed.getSelection();
-          const text = ed.getModel().getValueInRange(sel);
-          if (text && onChatAction) onChatAction('ask', text, currentTab?.filePath);
-        }
-      });
-
-      editor.addAction({
-        id: 'chat.fix',
-        label: 'Fix This',
-        contextMenuGroupId: '9_chat',
-        contextMenuOrder: 2,
-        precondition: 'editorHasSelection',
-        run: (ed) => {
-          const sel = ed.getSelection();
-          const text = ed.getModel().getValueInRange(sel);
-          if (text && onChatAction) onChatAction('fix', text, currentTab?.filePath);
-        }
-      });
-
-      editor.addAction({
-        id: 'chat.explain',
-        label: 'Explain',
-        contextMenuGroupId: '9_chat',
-        contextMenuOrder: 3,
-        keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyE],
-        precondition: 'editorHasSelection',
-        run: (ed) => {
-          const sel = ed.getSelection();
-          const text = ed.getModel().getValueInRange(sel);
-          if (text && onChatAction) onChatAction('explain', text, currentTab?.filePath);
-        }
-      });
-
-      editor.addAction({
-        id: 'chat.addToChat',
-        label: 'Add to Chat',
-        contextMenuGroupId: '9_chat',
-        contextMenuOrder: 4,
-        precondition: 'editorHasSelection',
-        run: (ed) => {
-          const sel = ed.getSelection();
-          const text = ed.getModel().getValueInRange(sel);
-          if (text && onChatAction) onChatAction('add', text, currentTab?.filePath);
-        }
+      // Ctrl+S and the right-click chat actions read the active tab and their
+      // handlers through refs: onMount runs once per editor while tabs change.
+      bindEditorActions(editor, monaco, {
+        getTab: () => currentTabRef.current,
+        save: () => handleSaveRef.current?.(),
+        chatAction: (action, text, filePath) => onChatActionRef.current?.(action, text, filePath),
       });
 
       // Add real-time context tracking listeners
@@ -385,7 +357,7 @@ ${currentTab.content}
           clearTimeout(contextUpdateTimeoutRef.current);
         }
       };
-    }, [currentTab, updateEditorContext, onEditorContextChange]);
+    }, [updateEditorContext, onEditorContextChange]);
 
     // Not bound to a key: the completion it fetches is never shown, so Ctrl+Space
     // stays Monaco's own suggestion list.
@@ -524,6 +496,7 @@ ${currentTab.content}
     const handleContentChange = useCallback((value) => {
       if (!currentTab || activeTabIndex < 0 || activeTabIndex >= openTabs.length) return;
       if (currentTab.readOnly || currentTab.source === 'live_repo') return;
+      if (currentTab.loadState && currentTab.loadState !== TAB_LOAD.LOADED) return;
 
       setOpenTabs(prev => {
         if (activeTabIndex >= 0 && activeTabIndex < prev.length) {
@@ -546,8 +519,22 @@ ${currentTab.content}
       if (!currentTab) return;
 
       try {
-        if (currentTab.readOnly || currentTab.source === 'live_repo') {
-          throw new Error('Live repository files are read-only here. Use self-code proposed edits for changes.');
+        // The tab's origin tag decides the save path; a name is never enough,
+        // since a library document and a repo file can share one.
+        const target = saveTargetFor(currentTab);
+        if (target.kind === 'readonly' || target.kind === 'error') {
+          throw new Error(target.message);
+        }
+        // A tab that is still loading, failed to load, or holds exactly what
+        // was loaded is never written: that is how a placeholder or an empty
+        // string would replace the stored document.
+        const refusal = saveRefusal(currentTab);
+        if (refusal && refusal.reason === 'clean') {
+          completeProcess(startProcess("save-file", "Saving file...", "file_generation"), refusal.message);
+          return;
+        }
+        if (refusal) {
+          throw new Error(refusal.message);
         }
         const processId = startProcess("save-file", "Saving file...", "file_generation");
 
@@ -555,6 +542,11 @@ ${currentTab.content}
         if (currentTab.content === undefined || currentTab.content === null) {
           throw new Error('Cannot save file with undefined content');
         }
+        // The text this save writes, and the tab it belongs to: the user can
+        // type, switch or close tabs while the write is in flight.
+        const sent = currentTab.content;
+        const savedId = currentTab.id;
+        const savedIndex = activeTabIndex;
 
         // Determine filename for new files
         let actualFilePath = currentTab.filePath;
@@ -577,10 +569,17 @@ ${currentTab.content}
           throw new Error('Invalid file path');
         }
 
-        // Handle different save targets based on tab source
-        if (currentTab.source === 'document' || currentTab.source === 'filesystem') {
-          // Save to backend/filesystem
-          const result = await fileOperationsService.writeFile(actualFilePath, currentTab.content);
+        if (target.kind === 'document') {
+          // A library document is saved by id through the documents API, the
+          // same route the Files page's code viewer uses. /api/files/write
+          // resolves bare names under the repo root and must not see it.
+          const result = await documentService.updateDocument(target.documentId, { content: sent });
+          if (result && result.error) {
+            throw new Error(result.error);
+          }
+        } else if (target.kind === 'repo') {
+          // A repo file keeps its repo-relative path and the guarded write route.
+          const result = await fileOperationsService.writeFile(target.path, sent);
           if (!result.success) {
             throw new Error(result.error || 'Failed to save file');
           }
@@ -588,7 +587,7 @@ ${currentTab.content}
           // Save to localStorage with error handling
           const fileData = {
             path: actualFilePath,
-            content: currentTab.content,
+            content: sent,
             language: currentTab.language,
             lastModified: new Date().toISOString()
           };
@@ -613,13 +612,17 @@ ${currentTab.content}
           }
         }
 
-        // Update tab state
+        // Mark the saved tab by id, not by the index it had when Save started,
+        // and only the text that was sent as saved.
         setOpenTabs(prev => prev.map((tab, index) =>
-          index === activeTabIndex
+          (savedId !== undefined ? tab.id === savedId : index === savedIndex)
             ? {
                 ...tab,
                 filePath: actualFilePath,
-                isModified: false,
+                savedContent: sent,
+                loadState: TAB_LOAD.LOADED,
+                loadError: null,
+                isModified: tab.content !== sent,
                 isNew: false,
               }
             : tab
@@ -630,6 +633,7 @@ ${currentTab.content}
         errorProcess("save-file", err.message);
       }
     }, [currentTab, activeTabIndex, setOpenTabs, startProcess, completeProcess, errorProcess]);
+    handleSaveRef.current = handleSave;
 
     const handleTabChange = useCallback((event, newValue) => {
       setActiveTabIndex(newValue);
@@ -680,14 +684,12 @@ ${currentTab.content}
     }, []);
 
     const createNewTab = useCallback(() => {
-      const newTab = {
+      const newTab = loadedTab({
         id: Math.random().toString(36).slice(2, 11),
         filePath: null,
-        content: "",
         language: "javascript",
-        isModified: false,
         isNew: true,
-      };
+      }, "");
       setOpenTabs(prev => {
         const newTabs = [...prev, newTab];
         setActiveTabIndex(newTabs.length - 1);
@@ -920,15 +922,33 @@ ${currentTab.content}
                 </Typography>
               </Box>
             ) : currentTab ? (
+              <>
+              {/* Load state lives beside the editor, never in its text */}
+              {currentTab.loadState === TAB_LOAD.LOADING && (
+                <Box
+                  data-testid="tab-loading"
+                  sx={{ position: 'absolute', inset: 0, zIndex: 2, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1, bgcolor: 'rgba(0,0,0,0.55)' }}
+                >
+                  <CircularProgress size={20} />
+                  <Typography variant="body2">Loading {tabDisplayName(currentTab)}…</Typography>
+                </Box>
+              )}
+              {currentTab.loadState === TAB_LOAD.FAILED && (
+                <Alert severity="error" data-testid="tab-failed" sx={{ position: 'absolute', top: 8, left: 8, right: 8, zIndex: 2 }}>
+                  {tabDisplayName(currentTab)} did not load: {currentTab.loadError}. Nothing will be saved from this tab; close it and open the file again.
+                </Alert>
+              )}
               <Editor
                 height="100%"
+                path={modelPathFor(currentTab)}
                 language={currentTab.language}
                 value={currentTab.content}
                 onChange={currentTab.readOnly || currentTab.source === 'live_repo' ? undefined : handleContentChange}
                 onMount={handleEditorDidMount}
                 theme="vs-dark"
                 options={{
-                  readOnly: currentTab.readOnly || currentTab.source === 'live_repo',
+                  readOnly: currentTab.readOnly || currentTab.source === 'live_repo'
+                    || (Boolean(currentTab.loadState) && currentTab.loadState !== TAB_LOAD.LOADED),
                   fontSize: 14,
                   wordWrap: "on",
                   minimap: { enabled: true },
@@ -941,6 +961,7 @@ ${currentTab.content}
                   setEditorError(error);
                 }}
               />
+              </>
             ) : (
               /* Empty state - no tabs open */
               <Box

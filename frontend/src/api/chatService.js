@@ -5,6 +5,12 @@ import { validateChatInput, checkRateLimit, ValidationError } from "../utils/inp
 import { RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_MS } from "../config/constants";
 import { debugLog } from "../utils/debugLog";
 
+// The Code Editor's AI Assistant keeps its own chat session. Its prompts carry
+// whole files, and without a session id the backend files them under its
+// default session next to ordinary chat traffic. Alphanumeric only: that is
+// what validateChatInput accepts for a session id.
+export const CODE_EDITOR_SESSION_ID = "codeEditorAssistant";
+
 export const sendQuery = async (
   inputText,
   tags = [],
