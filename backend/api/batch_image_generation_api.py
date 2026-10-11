@@ -665,6 +665,35 @@ def get_service_status():
         return error_response(str(e), 500)
 
 
+def _auto_resolves_to(gen) -> Optional[str]:
+    """The catalog key Auto renders with on this box for a neutral prompt, or
+    None when the generator cannot say.
+
+    The same selection the batch intake uses: the Stills default from Settings
+    when the generator can honour it (configured_default_for_auto, which also
+    covers a ComfyUI-only default), else the per-card router for an empty
+    prompt (_auto_select_model, which _resolve_batch_model_key also asks).
+    """
+    if gen is None:
+        return None
+    preferred = getattr(gen, "configured_default_for_auto", None)
+    if callable(preferred):
+        try:
+            key = preferred()
+            if key:
+                return str(key)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Stills default not consulted for the models list: %s", e)
+    select = getattr(gen, "_auto_select_model", None)
+    if callable(select):
+        try:
+            key = select("", "realistic")
+            return str(key) if key else None
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Auto selection failed for the models list: %s", e)
+    return None
+
+
 @batch_image_bp.route("/models", methods=["GET"])
 def list_models():
     """List all available models and their installation status."""
@@ -683,9 +712,11 @@ def list_models():
         # (?check=1, Check access in Manage models), never on page load.
         check = request.args.get("check", "").lower() in ("1", "true", "yes")
         meta = generator.image_generator.get_available_models(probe_remote=check)
+        from backend.services.stills_defaults import prompt_style, prompt_style_for_family
         models = []
         unavailable = []
         for model_id, info in sorted(meta.items(), key=lambda kv: kv[1].get("order", 99)):
+            family = info.get("family")
             row = {
                 "id": model_id,
                 "path": info["id"],
@@ -699,8 +730,13 @@ def list_models():
                 "gated": bool(info.get("gated")),
                 # User catalog rows (Manage Image Models → Add new model).
                 "user": bool(info.get("user")),
-                "family": info.get("family"),
+                "family": family,
                 "kind": info.get("kind"),
+                # "natural": an LLM text encoder that reads prompts as prose, so
+                # the page's content-type tags and anatomy phrasing are not
+                # applied (offline_image_generator.enhance_prompt_for_quality).
+                # "tags": CLIP-era models that take the tag suffixes.
+                "prompt_style": prompt_style_for_family(family) if family else prompt_style(model_id),
             }
             # A model the user cannot actually run must not sit in the picker — that
             # is how a gated Krea 2 got selected and silently produced SD 1.5 output.
@@ -720,10 +756,15 @@ def list_models():
         except Exception as e:  # noqa: BLE001 — the picker must list even if a pack probe fails
             logger.warning("image editing pack rows failed: %s", e)
             editing = []
+        auto_model = _auto_resolves_to(generator.image_generator)
         return success_response({
             "models": models,
             "unavailable_models": unavailable,
             "default_model": "auto",
+            # What Auto renders with today, so the page can say which controls
+            # apply before a model is picked.
+            "auto_model": auto_model,
+            "auto_prompt_style": prompt_style(auto_model or "auto"),
             # User LoRAs never enter the picker; the page shows them as chips and
             # the modal lists them with Install / Remove.
             "adapters": catalog_rows(generator.image_generator),

@@ -17,6 +17,8 @@ import { guardedMediaSrc } from '../../utils/assetGuard';
 const ImageLightbox = ({
   imageUrl,
   imageName = '',
+  // Small line under the name, e.g. the prompt a rewrite sent to the model.
+  caption = '',
   documentId,
   onClose,
   onPrev,
@@ -97,10 +99,24 @@ const ImageLightbox = ({
           zIndex: 1,
         }}
       >
-        <Typography variant="body2" sx={{ color: 'white', ml: 1, opacity: 0.8 }} noWrap>
-          {imageName}
-        </Typography>
-        <Box>
+        <Box sx={{ minWidth: 0, flex: 1, mr: 1 }}>
+          <Typography variant="body2" sx={{ color: 'white', ml: 1, opacity: 0.8 }} noWrap>
+            {imageName}
+          </Typography>
+          {caption && (
+            <Typography
+              variant="caption"
+              title={caption}
+              sx={{
+                color: 'white', ml: 1, opacity: 0.6, display: '-webkit-box',
+                WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden',
+              }}
+            >
+              {caption}
+            </Typography>
+          )}
+        </Box>
+        <Box sx={{ flexShrink: 0 }}>
           {documentId && (
             <Tooltip title="Edit image (E)">
               <IconButton onClick={() => setEditMode(true)} sx={{ color: 'white' }} size="small">

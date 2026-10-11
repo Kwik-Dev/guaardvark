@@ -670,7 +670,7 @@ const stageLabel = (mv) => {
 };
 
 const MusicVideoPage = () => {
-  const { gpuBusy, gpuSubmitBlocked, blockReason } = useJobsGate({ submitMode: "queue" });
+  const { gpuBusy, gpuSubmitBlocked, blockReason, blockDetail } = useJobsGate({ submitMode: "queue" });
   const { getProcessesByType, activeProcesses, getPreviewUrl } = useUnifiedProgress();
   const [videos, setVideos] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
@@ -1365,7 +1365,7 @@ const MusicVideoPage = () => {
               </Collapse>
 
               {error && <Alert severity="error" onClose={() => setError(null)}>{formatUiError(error)}</Alert>}
-              <GpuGateBanner gpuBusy={gpuBusy} blockReason={blockReason} queueMode />
+              <GpuGateBanner gpuBusy={gpuBusy} blockReason={blockReason} blockDetail={blockDetail} queueMode />
               <Button variant="contained" onClick={handleCreate} disabled={busy || gpuSubmitBlocked}>
                 {busy ? <CircularProgress size={20} /> : (hasActiveGeneration ? "Add another to queue" : "Create & Analyze")}
               </Button>
@@ -1643,7 +1643,7 @@ const MusicVideoPage = () => {
                     <br />Estimated full video time after storyboards: <b>{detail.estimate.estimated_human}</b>.
                   </Alert>
                   <Box>
-                    <GpuGateBanner gpuBusy={gpuBusy} blockReason={blockReason} queueMode />
+                    <GpuGateBanner gpuBusy={gpuBusy} blockReason={blockReason} blockDetail={blockDetail} queueMode />
                     <Stack direction="row" spacing={1} alignItems="center">
                       <Button variant="contained" color="warning" onClick={handleApprove} disabled={busy || gpuSubmitBlocked}>
                         {busy ? <CircularProgress size={20} /> : "Approve & Generate Video"}

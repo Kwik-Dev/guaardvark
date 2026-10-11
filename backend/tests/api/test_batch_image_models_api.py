@@ -276,6 +276,60 @@ def test_list_includes_undownloaded_user_flux(client, monkeypatch):
     assert "user-flux-fp8" not in [m["id"] for m in payload["data"]["unavailable_models"]]
 
 
+def test_list_reports_prompt_style_per_model_and_for_auto(client, monkeypatch):
+    # The page hides the content-type and anatomy controls for models that
+    # read prompts as prose; the list says which ones those are.
+    from backend.services import user_image_models as uim
+
+    gen = api.get_batch_image_generator().image_generator
+    base = {
+        "downloaded": True, "availability": "installed", "selectable": True,
+        "description": "", "recommended": False, "user": False, "kind": "diffusers",
+    }
+    gen.get_available_models = lambda probe_remote=True: {
+        "zimage-turbo": {**base, "id": "Tongyi-MAI/Z-Image-Turbo", "label": "Z-Image", "family": "zimage", "order": 1},
+        "sd-xl": {**base, "id": "stabilityai/sdxl", "label": "SDXL", "family": "sdxl", "order": 2},
+        "user-krea-thing": {**base, "id": "user:krea", "label": "Krea", "family": None, "order": 3},
+    }
+    monkeypatch.setattr(uim, "catalog_rows", lambda _g: [])
+    monkeypatch.setattr(uim, "family_choices", lambda: [])
+    payload = client.get("/api/batch-image/models").get_json()
+    assert payload["success"], payload
+    styles = {m["id"]: m["prompt_style"] for m in payload["data"]["models"]}
+    assert styles["zimage-turbo"] == "natural"
+    assert styles["sd-xl"] == "tags"
+    # No family on the row: the id decides (Krea 2 is a tags family until A/B'd).
+    assert styles["user-krea-thing"] == "tags"
+    assert payload["data"]["auto_prompt_style"] in ("natural", "tags")
+
+
+def test_list_auto_prompt_style_follows_what_auto_renders_with(client, monkeypatch):
+    # Not the Settings model's family: the model the router would pick for a
+    # neutral prompt on this box (Krea 2 on a roomy card, SDXL when Z-Image is
+    # not installed), or the Settings default when the generator can honour it.
+    from backend.services import user_image_models as uim
+
+    gen = api.get_batch_image_generator().image_generator
+    gen.get_available_models = lambda probe_remote=True: {}
+    monkeypatch.setattr(uim, "catalog_rows", lambda _g: [])
+    monkeypatch.setattr(uim, "family_choices", lambda: [])
+
+    gen._auto_select_model = lambda prompt="", style="realistic": "sd-xl"
+    data = client.get("/api/batch-image/models").get_json()["data"]
+    assert (data["auto_model"], data["auto_prompt_style"]) == ("sd-xl", "tags")
+
+    gen.configured_default_for_auto = lambda: "zimage-turbo"
+    data = client.get("/api/batch-image/models").get_json()["data"]
+    assert (data["auto_model"], data["auto_prompt_style"]) == ("zimage-turbo", "natural")
+
+    # Nothing on disk: the router answers None and the family default stands in.
+    gen.configured_default_for_auto = lambda: None
+    gen._auto_select_model = lambda prompt="", style="realistic": None
+    data = client.get("/api/batch-image/models").get_json()["data"]
+    assert data["auto_model"] is None
+    assert data["auto_prompt_style"] in ("natural", "tags")
+
+
 def test_dir_bytes_counts_dest_including_incomplete(tmp_path):
     dest = tmp_path / "unet"
     dest.mkdir()

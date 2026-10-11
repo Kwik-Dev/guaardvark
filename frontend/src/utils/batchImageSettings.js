@@ -27,13 +27,30 @@ export const isZimageModel = (model) => modelFamily(model) === 'zimage';
 
 /**
  * Stills paths with no negative prompt: Z-Image and Krea 2 Turbo (CFG-free)
- * and Sana Sprint (its pipeline takes none). The backend ignores negative
- * prompt and enhance-anatomy on these. Krea Raw still uses both; `auto` may
- * route to SDXL so it stays editable.
+ * and Sana Sprint (its pipeline takes none). Krea Raw still uses one; `auto`
+ * may route to SDXL so it stays editable. Whether anatomy phrasing applies is
+ * a different question, answered by promptStyleFor: the backend skips it for
+ * prose models only, and Krea Turbo and Sana still take it.
  */
 export function ignoresNegativeAndAnatomy(model) {
   const fam = modelFamily(model);
   return fam === 'zimage' || fam === 'krea-turbo' || fam === 'sana';
+}
+
+/**
+ * How the model reads a prompt: 'natural' (an LLM text encoder trained on
+ * prose; Z-Image) or 'tags' (CLIP-era models that take comma tags). The backend
+ * skips the content-type and anatomy tag stuffing for natural models, so the
+ * page hides those controls for them. The answer comes from /batch-image/models
+ * (`prompt_style` per row, `auto_prompt_style` for Auto); the family table is
+ * the fallback for the first paint, before the list has arrived.
+ */
+export function promptStyleFor(model, modelOptions = [], autoPromptStyle = null) {
+  const m = String(model || 'auto');
+  if (m === 'auto') return autoPromptStyle || 'natural';
+  const opt = (modelOptions || []).find((o) => o.value === m);
+  if (opt?.promptStyle) return opt.promptStyle;
+  return modelFamily(m) === 'zimage' ? 'natural' : 'tags';
 }
 
 export const ZIMAGE_STEPS = 9;
@@ -191,6 +208,7 @@ export function imageModelOption(m) {
     recommended: !!m.recommended,
     name: m.name || m.label || m.id,
     sizeGb: m.size_gb || 0,
+    promptStyle: m.prompt_style || null,
   };
 }
 
