@@ -1,7 +1,7 @@
 // frontend/src/components/codeeditor/FileTreeCard.jsx
 // File tree navigation card for the code editor
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   Box,
   List,
@@ -67,6 +67,7 @@ const FileTreeCard = React.forwardRef(
     const [selectedItem, setSelectedItem] = useState(null);
     const [createDialog, setCreateDialog] = useState({ open: false, type: null });
     const [newItemName, setNewItemName] = useState("");
+    const createInputRef = useRef(null);
     const [renameDialog, setRenameDialog] = useState({ open: false, item: null });
     const [renameValue, setRenameValue] = useState("");
 
@@ -799,13 +800,20 @@ const FileTreeCard = React.forwardRef(
         </Menu>
 
         {/* Create Dialog */}
-        <Dialog open={createDialog.open} onClose={() => setCreateDialog({ open: false, type: null })}>
+        <Dialog
+          open={createDialog.open}
+          onClose={() => setCreateDialog({ open: false, type: null })}
+          // autoFocus alone can lose focus to whatever had it before the
+          // dialog opened; focus the field once the dialog is in.
+          TransitionProps={{ onEntered: () => createInputRef.current?.focus() }}
+        >
           <DialogTitle>
             Create New {createDialog.type === 'file' ? 'File' : 'Folder'}
           </DialogTitle>
           <DialogContent>
             <TextField
               autoFocus
+              inputRef={createInputRef}
               margin="dense"
               label={`${createDialog.type === 'file' ? 'File' : 'Folder'} Name`}
               fullWidth
