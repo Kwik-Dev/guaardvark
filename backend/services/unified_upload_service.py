@@ -298,7 +298,16 @@ class UnifiedUploadService:
                 logger.info(f"Submitted indexing task for document {document.id}: {task.id}")
             except Exception as index_err:
                 logger.error(f"Failed to trigger indexing for document {document.id}: {index_err}")
-                # Don't fail the upload if indexing fails - user can manually reindex
+                # The upload stands; the row says that nothing is indexing it,
+                # as /api/index/<id> does on the same failure, so callers and
+                # the resume tick see the truth instead of a queued-looking row.
+                try:
+                    document.index_status = "ERROR"
+                    document.error_message = f"Indexing could not be queued: {index_err}"
+                    db.session.commit()
+                except Exception as status_err:
+                    db.session.rollback()
+                    logger.warning(f"Could not record the queue failure on document {document.id}: {status_err}")
                 if progress_system and job_id:
                     progress_system.error_process(job_id, f"Indexing trigger failed: {index_err}")
         

@@ -893,12 +893,19 @@ def upload_document():
             auto_index=True      # Automatically trigger indexing (now uses direct Celery, no HTTP delay)
         )
 
-        return jsonify({
+        # The service records a failed queue attempt on the row (ERROR with
+        # the reason) rather than failing the upload; say so in the reply.
+        indexing_queued = document.index_status != "ERROR"
+        payload = {
             "message": "Document uploaded successfully",
             "document_id": document.id,
             "filename": document.filename,
-            "job_id": job_id
-        }), 201
+            "job_id": job_id,
+            "indexing_queued": indexing_queued,
+        }
+        if not indexing_queued:
+            payload["indexing_error"] = document.error_message
+        return jsonify(payload), 201
 
     except ValueError as e:
         logger.warning(f"Validation error during upload: {e}")

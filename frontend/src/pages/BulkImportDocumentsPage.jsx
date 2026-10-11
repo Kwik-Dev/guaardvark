@@ -48,6 +48,14 @@ import { getWebsites } from "../api/websiteService";
 
 const POLL_INTERVAL_MS = 3000;
 
+// The worker ends a job with "complete"; this page used to wait for
+// "completed" and polled forever. Either spelling ends the job.
+const SUCCESS_STATUSES = ["complete", "completed"];
+const TERMINAL_STATUSES = [...SUCCESS_STATUSES, "error", "failed", "cancelled"];
+const normalizeStatus = (status) => String(status || "").toLowerCase();
+const isSuccessStatus = (status) => SUCCESS_STATUSES.includes(normalizeStatus(status));
+const isTerminalStatus = (status) => TERMINAL_STATUSES.includes(normalizeStatus(status));
+
 const initialForm = {
   sourcePath: "",
   targetFolder: "",
@@ -193,6 +201,9 @@ const BulkImportDocumentsPage = () => {
 
   const resetForm = () => {
     setForm(initialForm);
+    // Stop the status poll too; the effect below clears its interval when
+    // either of these changes.
+    setPolling(false);
     setJobId(null);
     setJobStatus(null);
   };
@@ -249,12 +260,7 @@ const BulkImportDocumentsPage = () => {
       try {
         const statusResp = await getBulkImportStatus(jobId);
         setJobStatus(statusResp);
-        if (
-          statusResp?.status &&
-          ["completed", "error", "failed", "cancelled"].includes(
-            statusResp.status.toLowerCase()
-          )
-        ) {
+        if (isTerminalStatus(statusResp?.status)) {
           setPolling(false);
         }
       } catch (err) {
@@ -274,15 +280,24 @@ const BulkImportDocumentsPage = () => {
       );
     }
 
-    const severity = jobStatus?.status === "completed"
+    const failedFiles = Number(jobStatus?.stats?.errors) || 0;
+    const finished = isSuccessStatus(jobStatus?.status);
+    // A job ends "complete" even when files failed; that is not green.
+    const severity = finished && failedFiles > 0
+      ? "warning"
+      : finished
       ? "success"
-      : jobStatus?.status === "error" || jobStatus?.status === "failed"
+      : ["error", "failed"].includes(normalizeStatus(jobStatus?.status))
       ? "error"
       : "info";
 
     return (
       <Alert severity={severity}>
-        <AlertTitle>Job Status</AlertTitle>
+        <AlertTitle>
+          {finished && failedFiles > 0
+            ? `Finished with errors (${failedFiles} failed)`
+            : "Job Status"}
+        </AlertTitle>
         <Typography variant="body2" component="div" sx={{ mt: 1 }}>
           <strong>Job ID:</strong> {jobId}
         </Typography>
@@ -450,8 +465,13 @@ const BulkImportDocumentsPage = () => {
                   disabled={submitting}
                 />
               }
-              label="Re-index existing documents"
+              label="Index already-imported files that aren't indexed yet"
             />
+            <Typography variant="caption" color="text.secondary" sx={{ pl: 4 }}>
+              A file this import already brought in (same target path) is skipped and its source is
+              left alone; with this ticked it is queued for indexing if its indexing never finished.
+              Files that are already indexed are not indexed again.
+            </Typography>
             <FormControlLabel
               control={
                 <Checkbox
@@ -460,8 +480,13 @@ const BulkImportDocumentsPage = () => {
                   disabled={submitting}
                 />
               }
-              label="Force copy files (even if already imported)"
+              label="Copy files instead of moving them"
             />
+            <Typography variant="caption" color="text.secondary" sx={{ pl: 4 }}>
+              {form.forceCopy
+                ? "Each file is copied into Documents; the source folder is left as it is."
+                : "Each file is moved out of the source folder into Documents. Tick to copy and leave the source folder as it is."}
+            </Typography>
             <FormControlLabel
               control={
                 <Checkbox
@@ -607,6 +632,11 @@ const BulkImportDocumentsPage = () => {
           <Box component="ul" sx={{ pl: 2, mt: 1 }}>
             <li>From: <strong>{form.sourcePath || "(not specified)"}</strong></li>
             <li>To: <strong>{form.targetFolder || "root"}</strong></li>
+            <li>
+              {form.forceCopy
+                ? "Files are copied; the source folder is left as it is."
+                : "Files are moved out of the source folder."}
+            </li>
             {form.clientId && <li>Client: <strong>{form.clientId.name}</strong></li>}
             {form.projectId && <li>Project: <strong>{form.projectId.name}</strong></li>}
             {form.websiteId && <li>Website: <strong>{form.websiteId.url}</strong></li>}
