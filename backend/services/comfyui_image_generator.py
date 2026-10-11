@@ -379,7 +379,7 @@ class ComfyUIImageGenerator:
         except requests.exceptions.RequestException:
             return False
 
-    def _object_info(self) -> dict | None:
+    def _object_info(self, *, fresh: bool = False) -> dict | None:
         """The running server's ``/object_info``: the authoritative source for the
         node classes it has and where its models are (an external Comfy Desktop
         install, not the bundled plugin dir). None when the server is unreachable.
@@ -387,9 +387,9 @@ class ComfyUIImageGenerator:
         Cached for a few seconds (``_ENGINE_CACHE_TTL_SECONDS``) so callers that
         must not block, and per-model listings, do not issue a probe each time;
         an unreachable server is cached too, so a down ComfyUI does not cost a
-        timeout per model.
+        timeout per model. ``fresh`` skips the cache for one probe.
         """
-        cached = _engine_cache_get(self.comfy_url)
+        cached = _CACHE_MISS if fresh else _engine_cache_get(self.comfy_url)
         if cached is not _CACHE_MISS:
             return cached
         try:
@@ -407,13 +407,21 @@ class ComfyUIImageGenerator:
     def missing_node_classes(self, class_names) -> list[str]:
         """The node classes in ``class_names`` the running ComfyUI does not have.
 
-        Empty when every one is there, and also when the server could not be
-        asked (its own validation then reports what is missing).
+        Empty when nothing is asked for (no probe is made), when every one is
+        there, and when the server could not be asked even by a fresh probe (its
+        own validation then reports what is missing). A cached empty answer, from
+        a server that was still starting, is not trusted for this: one uncached
+        probe is made first.
         """
+        names = list(class_names or ())
+        if not names:
+            return []
         info = self._object_info()
         if not info:
+            info = self._object_info(fresh=True)
+        if not info:
             return []
-        return [name for name in class_names if name not in info]
+        return [name for name in names if name not in info]
 
     def comfyui_installed_engines(self) -> list[str]:
         """Which image engines can the reachable ComfyUI actually run?
@@ -551,6 +559,13 @@ class ComfyUIImageGenerator:
                     ml = "zimage"
 
         if QWEN21_TAG in ml:
+            if lora_names:
+                # The graph has no LoRA input; dropping them would silently lose
+                # the identity or style the caller asked for.
+                raise RuntimeError(
+                    "Qwen-Image 2.1 renders do not take LoRAs yet. Remove the LoRA "
+                    "or pick a FLUX, SDXL or Z-Image model for it."
+                )
             return self._build_qwen21_workflow(
                 prompt=prompt, negative=negative, width=width, height=height,
                 seed=seed, steps=steps, cfg=cfg,
@@ -1074,8 +1089,12 @@ class ComfyUIImageGenerator:
 
     def check_graph_nodes(self, model: str | None) -> None:
         """Raise before queueing when the running ComfyUI lacks a node the
-        model's graph uses; the message names the ComfyUI version that has it."""
-        missing = self.missing_node_classes(self.required_node_classes(model))
+        model's graph uses; the message names the ComfyUI version that has it.
+        A graph that declares no nodes is not probed for."""
+        required = self.required_node_classes(model)
+        if not required:
+            return
+        missing = self.missing_node_classes(required)
         if missing:
             raise RuntimeError(
                 "Qwen-Image 2.1 needs ComfyUI 0.37 or newer: the running ComfyUI has no "

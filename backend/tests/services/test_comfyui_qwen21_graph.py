@@ -84,6 +84,18 @@ def test_user_ids_and_their_unet_reach_the_graph():
     assert "TextEncodeQwenImage21" in _types(wf)
 
 
+def test_loras_on_qwen_are_refused_not_dropped():
+    # The graph has no LoRA input; a LoRA request must fail plainly before queueing.
+    gen = ComfyUIImageGenerator(model="qwen-image-21")
+    with pytest.raises(RuntimeError, match="do not take LoRAs"):
+        gen._build_workflow(prompt="p", negative="", lora_names=["style_v1.safetensors"],
+                            width=1024, height=1024, seed=1, steps=25, cfg=1.0, model="qwen-image-21")
+    with pytest.raises(RuntimeError, match="do not take LoRAs"):
+        gen._build_workflow(prompt="p", negative="", lora_names=["style_v1.safetensors"],
+                            width=1024, height=1024, seed=1, steps=25, cfg=1.0,
+                            model="user-qwen-image-21-uc-fp8")
+
+
 def test_flux_graphs_are_untouched():
     wf = _build(model="flux-dev", steps=28, cfg=3.5)
     assert "FluxGuidance" in _types(wf) and "TextEncodeQwenImage21" not in _types(wf)
@@ -157,6 +169,38 @@ def test_an_unanswered_probe_does_not_refuse(monkeypatch):
     gen = ComfyUIImageGenerator(comfy_url="http://down-comfy.test")
     assert gen.missing_node_classes(cig.QWEN21_NODES) == []
     gen.check_graph_nodes("qwen-image-21")
+
+
+def test_graphs_without_declared_nodes_make_no_probe(monkeypatch):
+    calls = _serve(monkeypatch, OLD_COMFY)
+    gen = ComfyUIImageGenerator(comfy_url="http://no-probe.test")
+    for model in ("flux-dev", "flux-schnell", "sdxl", "zimage"):
+        gen.check_graph_nodes(model)
+    assert gen.missing_node_classes(()) == []
+    assert calls["n"] == 0
+
+
+def test_a_cached_empty_probe_is_retried_before_trusting_it(monkeypatch):
+    # The engine list cached None while ComfyUI was starting; a Qwen render a
+    # moment later must ask again instead of letting ComfyUI's raw error through.
+    answers = [cig.requests.exceptions.RequestException("starting"), OLD_COMFY]
+    monkeypatch.setattr(cig, "_ENGINE_CACHE_TTL_SECONDS", 5.0)
+    monkeypatch.setattr(cig, "_ENGINE_CACHE", {})
+    calls = {"n": 0}
+
+    def fake_get(*args, **kwargs):
+        calls["n"] += 1
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return _Resp(answer)
+
+    monkeypatch.setattr(cig.requests, "get", fake_get)
+    gen = ComfyUIImageGenerator(comfy_url="http://booting-comfy.test")
+    assert gen.comfyui_installed_engines() == []          # cached None
+    with pytest.raises(RuntimeError, match="ComfyUI 0.37 or newer"):
+        gen.check_graph_nodes("qwen-image-21")             # fresh probe, old server
+    assert calls["n"] == 2
 
 
 def test_generate_image_refuses_before_queueing(monkeypatch):
