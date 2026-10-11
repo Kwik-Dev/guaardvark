@@ -64,6 +64,9 @@ def test_all_venv_dirs_excluded(svc, path):
     # master stamp makes clients SKIP installing deps their venv never got
     "plugins/comfyui/.requirements_installed",
     "plugins/comfyui/.custom_nodes_installed",
+    # trees the ComfyUI updater keeps beside the live one
+    "plugins/comfyui/ComfyUI.next/main.py",
+    "plugins/comfyui/ComfyUI.prev-0.33.0/comfy/float.py",
 ])
 def test_real_artifacts_still_excluded(svc, path):
     assert svc.should_exclude_file(path) is True, f"{path} should be excluded but was not"

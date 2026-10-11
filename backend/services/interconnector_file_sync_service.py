@@ -188,6 +188,9 @@ class InterconnectorFileSyncService:
             ".egg-info",
             # Plugin runtime artifacts (not source code)
             "plugins/comfyui/ComfyUI/",
+            # Trees the ComfyUI updater keeps beside the live one
+            "plugins/comfyui/ComfyUI.next/",
+            "plugins/comfyui/ComfyUI.prev-",
             "plugins/upscaling/models/",
             "plugins/upscaling/input/",
             "plugins/upscaling/output/",
