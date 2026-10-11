@@ -168,8 +168,10 @@ def install_under_home(tmp_path, monkeypatch):
     (data / "config").mkdir()
     (data / "docstore.json").write_text("{}")
     (home / "app" / "backend").mkdir()
+    (home / "app" / "backups").mkdir()
     from backend import config
     monkeypatch.setattr(config, "STORAGE_DIR", str(data))
+    monkeypatch.setattr(config, "BACKUP_DIR", str(home / "app" / "backups"))
     monkeypatch.setattr(files_api, "bulk_import_roots", lambda: [str(home), str(uploads)])
     return types.SimpleNamespace(home=home, data=data, uploads=uploads)
 
@@ -178,6 +180,7 @@ def test_data_folder_under_home_is_refused_but_uploads_is_not(client, install_un
     inst = install_under_home
     assert _browse(client, str(inst.data)).status_code == 403
     assert _browse(client, str(inst.data / "config")).status_code == 403
+    assert _browse(client, str(inst.home / "app" / "backups")).status_code == 403
     assert _browse(client, str(inst.uploads)).status_code == 200
     assert _browse(client, str(inst.uploads / "scans")).status_code == 200
     listing = _browse(client, str(inst.home / "app")).get_json()
