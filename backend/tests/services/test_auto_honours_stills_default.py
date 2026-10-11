@@ -46,7 +46,7 @@ def _settings(monkeypatch, stored, env=None):
 @pytest.mark.parametrize("stored", [None, "", "auto", "AUTO"])
 def test_nothing_chosen_is_no_choice_even_though_the_default_reads_zimage(monkeypatch, stored):
     _settings(monkeypatch, stored)
-    assert mmr.get_stills_model_setting() in (mmr.DEFAULT_STILLS_MODEL, mmr.AUTO)
+    assert mmr.get_stills_model_setting() == mmr.DEFAULT_STILLS_MODEL
     assert mmr.configured_stills_default() is None
 
 

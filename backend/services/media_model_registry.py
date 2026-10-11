@@ -338,7 +338,11 @@ def resolve_stills_model(requested: str | None = None) -> str:
 
 
 def get_stills_model_setting() -> str:
-    return _read_setting(SETTING_STILLS_MODEL, ENV_STILLS, DEFAULT_STILLS_MODEL)
+    # "auto" saved in the picker is no choice: answer with the product default,
+    # as when nothing was saved, or sampling and prompt style would follow an
+    # unknown family (SD defaults on a Z-Image render).
+    val = _read_setting(SETTING_STILLS_MODEL, ENV_STILLS, DEFAULT_STILLS_MODEL)
+    return DEFAULT_STILLS_MODEL if val == AUTO else val
 
 
 def configured_stills_default() -> Optional[str]:
