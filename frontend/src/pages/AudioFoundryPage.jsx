@@ -179,6 +179,8 @@ const AudioFoundryPage = () => {
   const [voiceText, setVoiceText] = useState("");
   const [fxPrompt, setFxPrompt] = useState("");
   const [duration, setDuration] = useState(10);
+  // FX Lab has its own length: Music runs 10-240 s, Stable Audio Open stops at 47 s.
+  const [fxDuration, setFxDuration] = useState(10);
 
   // Music tab — Suno-style chip composition + LLM polish.
   // `musicGenres/Moods/Instruments` are arrays of selected chip labels.
@@ -474,7 +476,7 @@ const AudioFoundryPage = () => {
         }
       } else if (type === "fx") {
         endpoint = "/generate/fx";
-        payload = { prompt: fxPrompt, duration_s: duration };
+        payload = { prompt: fxPrompt, duration_s: fxDuration };
       }
 
       const res = await axios.post(
@@ -501,8 +503,14 @@ const AudioFoundryPage = () => {
     }
   };
 
+  // The route serves audio inline, so opening it in a tab only played it.
   const handleDownload = (url) => {
-    window.open(url, "_blank");
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
   };
 
   // ----- Music tab helpers -------------------------------------------------
@@ -1103,12 +1111,12 @@ const AudioFoundryPage = () => {
                       sx={{ "& .MuiFilledInput-root": { borderRadius: 2 } }}
                     />
                     <Box>
-                      <Typography variant="caption" fontWeight="bold">Duration: {duration > 47 ? 47 : duration}s (Max 47s)</Typography>
+                      <Typography variant="caption" fontWeight="bold">Duration: {fxDuration}s (Max 47s)</Typography>
                       <Slider
-                        value={duration > 47 ? 47 : duration}
+                        value={fxDuration}
                         min={1}
                         max={47}
-                        onChange={(e, v) => setDuration(v)}
+                        onChange={(e, v) => setFxDuration(v)}
                         sx={{ color: "#ff9800" }}
                       />
                     </Box>
