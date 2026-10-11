@@ -822,7 +822,8 @@ const ToolsPage = () => {
                   <Paper
                     sx={{
                       p: 2,
-                      bgcolor: "grey.100",
+                      bgcolor: "grey.900",
+                      color: "grey.100",
                       fontFamily: "monospace",
                       fontSize: 12,
                       whiteSpace: "pre-wrap",
