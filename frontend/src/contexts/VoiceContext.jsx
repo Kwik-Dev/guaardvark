@@ -319,6 +319,19 @@ export const VoiceProvider = ({ children }) => {
     }
   }, []);
 
+  // One GET /voices. /text-to-speech picks its engine per request (Kokoro while
+  // Audio Foundry runs with a voice pack, else Piper), so the list is re-read
+  // when the mic popover opens, not only at mount. Resolves to the response,
+  // or null once unmounted; a failed request rejects.
+  const refreshVoices = useCallback(async () => {
+    const voices = await getAvailableVoices();
+    if (!isMountedRef.current) return null;
+    setAvailableVoices(voices.voices || []);
+    setVoiceEngine(voices.engine || null);
+    setDefaultVoice(voices.default_voice || null);
+    return voices;
+  }, []);
+
   const initializeVoice = useCallback(async () => {
     if (!isMountedRef.current) return;
 
@@ -327,11 +340,8 @@ export const VoiceProvider = ({ children }) => {
       if (!isMountedRef.current) return;
       setVoiceStatus(status);
 
-      const voices = await getAvailableVoices();
-      if (!isMountedRef.current) return;
-      setAvailableVoices(voices.voices || []);
-      setVoiceEngine(voices.engine || null);
-      setDefaultVoice(voices.default_voice || null);
+      const voices = await refreshVoices();
+      if (!voices) return;
 
       if (voices.voices && voices.voices.length > 0) {
         if (!isMountedRef.current) return;
@@ -358,7 +368,7 @@ export const VoiceProvider = ({ children }) => {
         setVoiceStatus({ status: "error", error: error.message });
       }
     }
-  }, [checkMicrophonePermissions, selectedVoice]);
+  }, [checkMicrophonePermissions, refreshVoices, selectedVoice]);
 
   useEffect(() => {
     initializeVoice();
@@ -517,6 +527,7 @@ export const VoiceProvider = ({ children }) => {
     stopRecording,
     speak,
     clearSpeakError,
+    refreshVoices,
     clearTranscription,
     setSelectedVoice,
     setTtsEnabled,

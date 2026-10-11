@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect } from "react";
 import PropTypes from "prop-types";
 import { Link as RouterLink } from "react-router-dom";
 import {
@@ -73,7 +73,13 @@ const VoiceSessionPopover = ({ anchorEl, open, onClose, placement = "below" }) =
   const setMode = useAppStore((s) => s.setVoiceActivationMode);
   const systemName = useAppStore((s) => s.systemName) || brand.appName;
   const settings = useVoiceSettings();
-  const { availableVoices = [], voiceEngine, defaultVoice, speakError } = useVoice() || {};
+  const { availableVoices = [], voiceEngine, defaultVoice, speakError, refreshVoices } = useVoice() || {};
+  // The engine that speaks replies can change while the page is open (Audio
+  // Foundry started or stopped); re-read the list once per open so the chooser
+  // names the engine that will speak now. A failed read keeps the last list.
+  useEffect(() => {
+    if (open && refreshVoices) refreshVoices().catch(() => {});
+  }, [open, refreshVoices]);
   const installedVoices = availableVoices.filter((v) => v.available !== false);
   // /voices lists the engine that speaks replies now, so the choice reaches it.
   const engineLabel = ENGINE_LABELS[voiceEngine] || voiceEngine || null;
@@ -236,7 +242,11 @@ const VoiceSessionPopover = ({ anchorEl, open, onClose, placement = "below" }) =
       )}
       {settings.ttsEnabled && installedVoices.length === 0 && (
         <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>
-          No voice is installed: replies cannot be spoken until one is (Settings → Voice).
+          No voice is installed: replies cannot be spoken until one is installed in{" "}
+          <Link component={RouterLink} to="/settings#settings-voice" onClick={onClose}>
+            Voice settings
+          </Link>
+          , or Audio Foundry runs with a Kokoro voice pack installed.
         </Typography>
       )}
       {speakError && (

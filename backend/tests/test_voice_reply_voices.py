@@ -97,4 +97,4 @@ def test_no_voice_installed_is_one_plain_message(client, monkeypatch, tmp_path):
     assert resp.status_code == 503
     body = resp.get_json()
     assert body["code"] == "no_voice_installed"
-    assert "Settings > Voice" in body["error"] and "Audio Foundry" in body["error"]
+    assert "Voice Settings" in body["error"] and "Kokoro voice pack" in body["error"]

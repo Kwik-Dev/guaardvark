@@ -67,13 +67,18 @@ export async function speakInChunks(chunks, { synthesize, play, isCancelled = ()
   return { spoken: total, total, cancelled: false, error: null };
 }
 
+// Voice settings are a dialog opened from the Chat section of Settings.
+// Audio Foundry speaks a reply only with a Kokoro voice pack installed.
 export const NO_VOICE_INSTALLED_MESSAGE =
-  "No voice is installed, so replies can't be spoken. Install one under Settings → Voice, or start the Audio Foundry plugin.";
+  "No voice is installed, so replies can't be spoken. Install one in Voice Settings (Settings → Chat → Voice chat), or start the Audio Foundry plugin with a Kokoro voice pack installed.";
 
-/** One sentence for a failed reply, naming how far it got when it got anywhere. */
+/**
+ * One sentence for a failed reply, naming how far it got when it got anywhere.
+ * Only the backend's own `no_voice_installed` code means no voice: a 503 can
+ * also be a proxy or the task queue during a restart on a machine with voices.
+ */
 export function describeSpeakError(error, { spoken = 0, total = 0 } = {}) {
-  const code = error?.data?.code;
-  if (code === "no_voice_installed" || error?.status === 503) return NO_VOICE_INSTALLED_MESSAGE;
+  if (error?.data?.code === "no_voice_installed") return NO_VOICE_INSTALLED_MESSAGE;
   const detail = error?.message ? `: ${error.message}` : "";
   if (spoken > 0 && total > spoken) {
     return `Spoke the first part of the reply, then speaking stopped${detail}`;

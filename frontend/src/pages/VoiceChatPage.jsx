@@ -161,7 +161,7 @@ const VoiceChatPage = () => {
                 detail={
                   status.speech_model_installed
                     ? `Whisper ${status.speech_model_id || ""} on this machine`
-                    : "Install it in Settings → Voice"
+                    : "Install it in Voice settings (below)"
                 }
               />
               <StatusRow
@@ -171,7 +171,7 @@ const VoiceChatPage = () => {
                 detail={
                   piperVoices.length
                     ? `${piperVoices.join(", ")}. Kokoro is used first while Audio Foundry runs.`
-                    : "Install a voice in Settings → Voice, or start Audio Foundry."
+                    : "Install a voice in Voice settings (below), or start Audio Foundry with a Kokoro voice pack installed."
                 }
               />
               <StatusRow

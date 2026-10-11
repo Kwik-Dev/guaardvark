@@ -73,10 +73,14 @@ describe("speakInChunks", () => {
 });
 
 describe("describeSpeakError", () => {
-  it("names the install step when no voice is installed", () => {
-    expect(describeSpeakError({ status: 503, message: "x" })).toBe(NO_VOICE_INSTALLED_MESSAGE);
+  it("names the install step only when the backend says no voice is installed", () => {
     expect(describeSpeakError({ data: { code: "no_voice_installed" } })).toBe(NO_VOICE_INSTALLED_MESSAGE);
-    expect(NO_VOICE_INSTALLED_MESSAGE).toContain("Settings → Voice");
+    expect(NO_VOICE_INSTALLED_MESSAGE).toContain("Voice Settings");
+    expect(NO_VOICE_INSTALLED_MESSAGE).toContain("Kokoro voice pack");
+    // A proxy or task-queue 503 during a restart is not a missing voice.
+    expect(describeSpeakError({ status: 503, message: "Service Unavailable" })).toBe(
+      "Speaking the reply failed: Service Unavailable",
+    );
   });
 
   it("says when only the first part was spoken", () => {

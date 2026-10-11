@@ -892,10 +892,13 @@ PIPER_VOICES = {
 DEFAULT_VOICE = "libritts"
 
 # What a stock machine (no Piper model downloaded, Audio Foundry off) is told
-# when a reply should be spoken; the UI shows it once per failed reply.
+# when a reply should be spoken; the UI shows it once per failed reply. Voice
+# settings are a dialog off the Chat section of Settings, and Audio Foundry
+# speaks only with a Kokoro voice pack installed (see reply_tts_engine).
 NO_VOICE_INSTALLED_MESSAGE = (
     "No voice is installed, so replies cannot be spoken. "
-    "Install a voice under Settings > Voice, or start the Audio Foundry plugin."
+    "Install a voice in Voice Settings (Settings > Chat > Voice chat), "
+    "or start the Audio Foundry plugin with a Kokoro voice pack installed."
 )
 
 
@@ -1428,7 +1431,6 @@ def text_to_speech():
             "audio_url": f"/api/voice/stream-tts/{stream_id}",
             "text": text,
             "voice": voice,
-            "engine": "piper-tts",
             "engine": "piper-tts-stream"
         })
     except Exception as e:
