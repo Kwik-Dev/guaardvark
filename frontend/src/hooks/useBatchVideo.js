@@ -6,16 +6,6 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 const ACTIVE_STATUSES = new Set(["queued", "pending", "running"]);
 const TERMINAL_STATUSES = new Set(["completed", "error", "cancelled"]);
 const STATUS_POLL_MS = 2000;
-const CLEARED_QUEUE_KEY = "clearedVideoQueueIds";
-
-function readClearedQueueIds() {
-  try {
-    const stored = JSON.parse(localStorage.getItem(CLEARED_QUEUE_KEY) || "[]");
-    return Array.isArray(stored) ? stored : [];
-  } catch {
-    return [];
-  }
-}
 
 /**
  * Batch video queue state, WebSocket progress, and batch lifecycle handlers.
@@ -68,11 +58,7 @@ export function useBatchVideo({ setError, setSuccess, computedParams } = {}) {
       if (res.ok) {
         const data = await res.json();
         if (data.success) {
-          const cleared = new Set(readClearedQueueIds());
-          const visible = (data.data.queue || []).filter(
-            (q) => !(TERMINAL_STATUSES.has(q.status) && cleared.has(q.batch_id)),
-          );
-          setQueue(visible);
+          setQueue(data.data.queue || []);
         }
       }
     } catch {
@@ -80,22 +66,22 @@ export function useBatchVideo({ setError, setSuccess, computedParams } = {}) {
     }
   }, []);
 
-  const handleClearCompletedQueue = useCallback(() => {
-    const doneIds = queue
-      .filter((q) => TERMINAL_STATUSES.has(q.status))
-      .map((q) => q.batch_id);
-    if (doneIds.length === 0) return;
+  // Clears finished batches from the backend's queue snapshot, so they are
+  // gone for every browser; their clips and history stay.
+  const handleClearCompletedQueue = useCallback(async () => {
+    if (!queue.some((q) => TERMINAL_STATUSES.has(q.status))) return;
     try {
-      const stored = readClearedQueueIds();
-      localStorage.setItem(
-        CLEARED_QUEUE_KEY,
-        JSON.stringify(Array.from(new Set([...stored, ...doneIds]))),
-      );
+      const res = await fetch(`${API_BASE}/batch-video/queue/clear-finished`, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        setError?.(data.error || `Clear failed: HTTP ${res.status}`);
+        return;
+      }
+      setQueue(data.data?.queue || []);
     } catch (e) {
-      console.error("Failed to save cleared video queue items:", e);
+      setError?.(`Clear failed: ${e.message}`);
     }
-    setQueue((prev) => prev.filter((q) => !TERMINAL_STATUSES.has(q.status)));
-  }, [queue]);
+  }, [queue, setError]);
 
   const fetchStatusOnce = useCallback(async (batchId) => {
     try {

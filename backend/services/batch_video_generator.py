@@ -518,15 +518,7 @@ class BatchVideoGenerator:
                 continue
 
             try:
-                cancel_event = self.cancel_events.get(batch_request.batch_id)
-                if cancel_event and cancel_event.is_set():
-                    status.status = "cancelled"
-                    status.error_kind = RenderErrorKind.CANCELLED.value
-                    status.end_time = datetime.now()
-                    if not status.error:
-                        status.error = "Cancelled before start"
-                    self._save_metadata(status)
-                    logger.info(f"Skipped cancelled batch {batch_request.batch_id}")
+                if self._skip_if_cancelled(batch_request.batch_id, status):
                     continue
 
                 self._running_batch_id = batch_request.batch_id
@@ -547,6 +539,29 @@ class BatchVideoGenerator:
                         # so the UI can show recent history. _cleanup_stale_batches
                         # already trims old data.
                         pass
+
+    def _skip_if_cancelled(self, batch_id: str, status: "BatchVideoStatus") -> bool:
+        """The worker's check as it dequeues a batch: True when the batch was
+        cancelled while it waited, in which case it is marked and not rendered.
+
+        The cancel event is the only thing that tells the worker to skip, so
+        it must outlive everything else (Clear Completed included) until the
+        worker has dequeued the batch; it is consumed here.
+        """
+        with self.batch_lock:
+            cancel_event = self.cancel_events.get(batch_id)
+        if not (cancel_event and cancel_event.is_set()):
+            return False
+        status.status = "cancelled"
+        status.error_kind = RenderErrorKind.CANCELLED.value
+        status.end_time = datetime.now()
+        if not status.error:
+            status.error = "Cancelled before start"
+        self._save_metadata(status)
+        with self.batch_lock:
+            self.cancel_events.pop(batch_id, None)
+        logger.info(f"Skipped cancelled batch {batch_id}")
+        return True
 
     @staticmethod
     def _extract_thumbnail(video_path: Path, thumbnail_path: Path) -> bool:
@@ -2220,6 +2235,38 @@ class BatchVideoGenerator:
                 "error": status.error,
             })
         return snapshot
+
+    _FINISHED_STATUSES = frozenset({"completed", "error", "cancelled"})
+
+    def clear_finished_queue(self) -> List[str]:
+        """Drop finished batches (completed, error, cancelled) from the queue
+        snapshot that ``list_queue`` serves, for every browser at once.
+
+        Only the in-memory bookkeeping goes: the batch folder, its clips and
+        its metadata stay, and the batch keeps showing in ``list_batches``.
+        A batch that is queued or running is never touched. Returns the ids
+        removed, in queue order.
+
+        Cancel events are kept: a batch cancelled while it waited is still in
+        the worker's input queue, and its set event is what makes the worker
+        skip it instead of rendering it (``_skip_if_cancelled`` consumes it).
+        """
+        removed: List[str] = []
+        with self.batch_lock:
+            for batch_id in list(self.queue_order):
+                status = self.active_batches.get(batch_id)
+                if status is None:
+                    # Deleted meanwhile; nothing to show for it either way.
+                    self.queue_order.remove(batch_id)
+                    continue
+                if status.status not in self._FINISHED_STATUSES or batch_id == self._running_batch_id:
+                    continue
+                self.queue_order.remove(batch_id)
+                self.active_batches.pop(batch_id, None)
+                removed.append(batch_id)
+        if removed:
+            logger.info("Cleared %d finished batch(es) from the queue view: %s", len(removed), removed)
+        return removed
 
     def _cleanup_stale_batches(self) -> None:
         """Mark batches stuck in running/pending/processing as cancelled.
