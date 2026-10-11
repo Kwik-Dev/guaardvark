@@ -3,8 +3,9 @@ Bulk Import roots.
 
 The picker used to list any readable folder on the server (/etc, ~/.ssh) and
 the import route queued any path. Both now resolve symlinks and refuse
-anything outside the home folder, Guaardvark's data folder and
-GUAARDVARK_ALLOWED_PATHS, and never list hidden entries.
+anything outside the home folder, Guaardvark's uploads folder, drive mounts
+and GUAARDVARK_ALLOWED_PATHS, refuse the rest of the data folder, and never
+list hidden entries.
 """
 from __future__ import annotations
 
@@ -140,10 +141,78 @@ def test_missing_folder_inside_a_root_is_404(client, roots):
     assert r.status_code == 404
 
 
-def test_refusal_names_the_roots(client, roots):
+def test_refusal_names_the_roots_with_home_written_as_words(client, roots):
     body = _browse(client, "/etc").get_json()
     assert body["roots"] == [str(roots.home), str(roots.data)]
-    assert str(roots.home) in body["error"]
+    assert body["home"] == str(roots.home)
+    assert "your home folder" in body["error"]
+    assert str(roots.data) in body["error"]
+    assert str(roots.home) not in body["error"], "the account's home path stays off screen"
+
+
+def test_display_path_writes_home_as_tilde():
+    assert files_api.display_path("/home/u", "/home/u") == "~"
+    assert files_api.display_path("/home/u/app/data/uploads", "/home/u/") == "~/app/data/uploads"
+    assert files_api.display_path("/home/user2/x", "/home/u") == "/home/user2/x"
+    assert files_api.display_path("/media", "/home/u") == "/media"
+
+
+@pytest.fixture
+def install_under_home(tmp_path, monkeypatch):
+    """A stock install inside the home folder: home/app/data with uploads/
+    (a root) and the index files beside it."""
+    home = tmp_path / "home"
+    data = home / "app" / "data"
+    uploads = data / "uploads"
+    (uploads / "scans").mkdir(parents=True)
+    (data / "config").mkdir()
+    (data / "docstore.json").write_text("{}")
+    (home / "app" / "backend").mkdir()
+    from backend import config
+    monkeypatch.setattr(config, "STORAGE_DIR", str(data))
+    monkeypatch.setattr(files_api, "bulk_import_roots", lambda: [str(home), str(uploads)])
+    return types.SimpleNamespace(home=home, data=data, uploads=uploads)
+
+
+def test_data_folder_under_home_is_refused_but_uploads_is_not(client, install_under_home):
+    inst = install_under_home
+    assert _browse(client, str(inst.data)).status_code == 403
+    assert _browse(client, str(inst.data / "config")).status_code == 403
+    assert _browse(client, str(inst.uploads)).status_code == 200
+    assert _browse(client, str(inst.uploads / "scans")).status_code == 200
+    listing = _browse(client, str(inst.home / "app")).get_json()
+    assert [d["name"] for d in listing["directories"]] == ["backend"]
+
+
+def test_data_folder_under_home_cannot_be_imported(client, install_under_home, fake_task):
+    r = client.post("/api/files/bulk-import", json={"source_path": str(install_under_home.data)})
+    assert r.status_code == 403
+    assert fake_task.calls == []
+
+
+def test_allowed_path_inside_the_data_folder_is_its_own_root(client, install_under_home, monkeypatch):
+    inst = install_under_home
+    (inst.data / "outputs").mkdir()
+    monkeypatch.setattr(files_api, "bulk_import_roots",
+                        lambda: [str(inst.home), str(inst.uploads), str(inst.data / "outputs")])
+    assert _browse(client, str(inst.data / "outputs")).status_code == 200
+    assert _browse(client, str(inst.data)).status_code == 403
+
+
+def test_wsl_leaves_mnt_out_of_the_roots(tmp_path, monkeypatch):
+    mnt = tmp_path / "mnt"
+    media = tmp_path / "media"
+    mnt.mkdir()
+    media.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "h"))
+    monkeypatch.delenv(files_api.BULK_IMPORT_ROOTS_ENV, raising=False)
+    monkeypatch.setattr(files_api, "DRIVE_MOUNT_ROOTS", (str(media), str(mnt)))
+    monkeypatch.setattr(files_api, "WSL_SKIPPED_MOUNT_ROOTS", (str(mnt),))
+    monkeypatch.setattr(files_api, "_on_wsl", lambda: True)
+    assert str(mnt) not in files_api.bulk_import_roots()
+    assert str(media) in files_api.bulk_import_roots()
+    monkeypatch.setattr(files_api, "_on_wsl", lambda: False)
+    assert str(mnt) in files_api.bulk_import_roots()
 
 
 def test_roots_under_a_hidden_folder_still_work(client, tmp_path, monkeypatch):

@@ -1980,23 +1980,38 @@ BULK_IMPORT_ROOTS_ENV = "GUAARDVARK_ALLOWED_PATHS"
 # Where Linux and macOS mount removable and extra drives; each is a root only
 # while it exists on this machine.
 DRIVE_MOUNT_ROOTS = ("/media", "/run/media", "/mnt", "/Volumes")
+# Under WSL, /mnt holds the Windows drives (/mnt/c is all of C:), so it is not
+# a root there; GUAARDVARK_ALLOWED_PATHS adds a Windows folder by name.
+WSL_SKIPPED_MOUNT_ROOTS = ("/mnt",)
+
+
+def _on_wsl() -> bool:
+    """True under WSL1 or WSL2, by the marker scripts/platform/detect.sh reads."""
+    try:
+        with open("/proc/version", encoding="utf-8", errors="replace") as fh:
+            return bool(re.search(r"microsoft|wsl", fh.read(), re.IGNORECASE))
+    except OSError:
+        return False
 
 
 def bulk_import_roots() -> list:
-    """Directories Bulk Import may browse and import from.
+    """Directories Bulk Import may browse and import from, the home folder first.
 
     The user's home folder, Guaardvark's uploads folder, the drive mount
-    points present on this machine (/media, /run/media, /mnt, /Volumes) and
-    the folders in GUAARDVARK_ALLOWED_PATHS (colon-separated, the same
-    variable the automation tools honour). The rest of the data folder is not
-    a root: importing docstore.json, index_store.json or config/ into uploads
-    would break the install. Everything else on the disk, /etc and / included,
-    is refused: the route serves every LAN browser once network access is on.
+    points present on this machine (/media, /run/media, /Volumes, and /mnt
+    except under WSL) and the folders in GUAARDVARK_ALLOWED_PATHS
+    (colon-separated, the same variable the automation tools honour). The rest
+    of the data folder is refused even where the home folder holds it (see
+    :func:`_inside_data_folder`). Everything else on the disk, /etc and /
+    included, is refused: the route serves every LAN browser once network
+    access is on.
     """
     from backend import config
 
+    skipped = WSL_SKIPPED_MOUNT_ROOTS if _on_wsl() else ()
     candidates = [os.path.expanduser("~"), getattr(config, "UPLOAD_DIR", "")]
-    candidates += [mount for mount in DRIVE_MOUNT_ROOTS if os.path.isdir(mount)]
+    candidates += [mount for mount in DRIVE_MOUNT_ROOTS
+                   if mount not in skipped and os.path.isdir(mount)]
     candidates += (os.environ.get(BULK_IMPORT_ROOTS_ENV) or "").split(":")
     roots = []
     for candidate in candidates:
@@ -2028,6 +2043,30 @@ def _containing_root(target: str, roots) -> str:
     return deepest
 
 
+def _inside_data_folder(target: str, root: str) -> bool:
+    """True when ``target`` is in Guaardvark's data folder but the root that
+    admitted it is not. A stock install keeps data/ under the home folder, and
+    importing its docstore.json, index files or config/ would break the
+    install. The uploads folder, and a GUAARDVARK_ALLOWED_PATHS folder inside
+    data/, are roots of their own and stay usable."""
+    from backend import config
+    from backend.utils.path_safety import is_within, resolve
+
+    storage = getattr(config, "STORAGE_DIR", "")
+    if not storage:
+        return False
+    storage_real = resolve(storage)
+    return is_within(target, [storage_real]) and not is_within(root, [storage_real])
+
+
+def display_path(path: str, home: str) -> str:
+    """``path`` with the home folder written as ~, for text a person reads."""
+    base = home.rstrip("/")
+    if path == base:
+        return "~"
+    return "~" + path[len(base):] if path.startswith(base + "/") else path
+
+
 def resolve_import_directory(requested: str):
     """``(resolved_path, None)`` when ``requested`` is a directory Bulk Import
     may use, else ``(None, reason)``. Symlinks are resolved first, on the path
@@ -2039,12 +2078,15 @@ def resolve_import_directory(requested: str):
     target = resolve(requested or home, base=home)
     root = _containing_root(target, roots)
     if root is None:
+        named = ["your home folder"] + [display_path(r, home) for r in roots[1:]]
         return None, (
-            "Bulk Import can only use folders under " + ", ".join(roots)
+            "Bulk Import can only use folders in " + ", ".join(named)
             + f" ({BULK_IMPORT_ROOTS_ENV} adds more)."
         )
     if _hidden_below_root(target, root):
         return None, "Hidden folders (names starting with a dot) are not imported."
+    if _inside_data_folder(target, root):
+        return None, "Guaardvark's own data folder is not imported; its uploads folder can be."
     return target, None
 
 
@@ -2062,10 +2104,12 @@ def browse_server_directory():
 
         include_files = request.args.get("include_files", "false").lower() == "true"
         requested_path, refusal = resolve_import_directory(request.args.get("path", ""))
+        roots = bulk_import_roots()
         if refusal:
-            # The roots travel with the refusal so the picker can offer them.
+            # The roots travel with the refusal so the picker can offer them;
+            # ``home`` lets it write the home folder as ~ on screen.
             return jsonify({"error": refusal, "code": "PATH_NOT_ALLOWED",
-                            "roots": bulk_import_roots()}), 403
+                            "roots": roots, "home": roots[0]}), 403
 
         if not os.path.exists(requested_path):
             return jsonify({"error": "Path does not exist"}), 404
@@ -2122,7 +2166,8 @@ def browse_server_directory():
                 "path": requested_path,
                 "directories": directories,
                 "parent_path": parent if parent != requested_path and parent_allowed else None,
-                "roots": bulk_import_roots(),
+                "roots": roots,
+                "home": roots[0],
             }
 
             if include_files:

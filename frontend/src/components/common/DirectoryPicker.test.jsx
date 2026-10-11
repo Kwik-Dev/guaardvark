@@ -25,7 +25,7 @@ const json = (status, body) =>
 
 // What the server lets this picker browse: the home folder and a drive mount.
 const ROOTS = ["/home/u", "/media"];
-const REFUSAL = "Bulk Import can only use folders under /home/u, /media (GUAARDVARK_ALLOWED_PATHS adds more).";
+const REFUSAL = "Bulk Import can only use folders in your home folder, /media (GUAARDVARK_ALLOWED_PATHS adds more).";
 
 function answer(url) {
   const params = new URL(url, "http://localhost").searchParams;
@@ -38,11 +38,12 @@ function answer(url) {
       directories: node.dirs.map((name) => ({ name, item_count: 0 })),
       parent_path: path === "/home/u" ? null : path.slice(0, cut) || "/",
       roots: ROOTS,
+      home: "/home/u",
       ...(params.get("include_files") === "true" ? { files: node.files } : {}),
     });
   }
   if (!ROOTS.some((root) => path === root || path.startsWith(`${root}/`))) {
-    return json(403, { error: REFUSAL, code: "PATH_NOT_ALLOWED", roots: ROOTS });
+    return json(403, { error: REFUSAL, code: "PATH_NOT_ALLOWED", roots: ROOTS, home: "/home/u" });
   }
   if (FILES.has(path)) return json(400, { error: "Path is not a directory" });
   return json(404, { error: "Path does not exist" });
@@ -178,6 +179,10 @@ describe("DirectoryPicker", () => {
 
     expect(screen.queryByText("Root")).toBeNull();
     expect(screen.queryByText("home")).toBeNull();
+    // The home folder is named "Home", never by the account's path or name.
+    expect(screen.queryByRole("button", { name: "/home/u" })).toBeNull();
+    expect(screen.queryByText("u")).toBeNull();
+    expect(screen.getAllByRole("button", { name: "Home" }).length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: "/media" }));
     await waitFor(() => expect(requested().at(-1).path).toBe("/media"));
   });

@@ -46,6 +46,7 @@ import {
   Refresh as RefreshIcon,
 } from "@mui/icons-material";
 import { BASE_URL, handleResponse } from "../../api/apiClient";
+import { rootLabel } from "../../utils/displayPath";
 
 const RECENT_PATHS_KEY = "guaardvark_recentDirectoryPaths";
 const MAX_RECENT_PATHS = 5;
@@ -133,6 +134,7 @@ const DirectoryPicker = ({
   // The folders the server lets this picker browse (its home folder first);
   // it names them in every answer, refusals included.
   const [roots, setRoots] = useState([]);
+  const [home, setHome] = useState(null);
   // Only the newest request may update the list; an older answer arriving
   // late would otherwise replace the folder the person just opened.
   const requestId = useRef(0);
@@ -187,6 +189,7 @@ const DirectoryPicker = ({
           typeof d === "string" ? { name: d, item_count: -1 } : d,
         );
         if (Array.isArray(data.roots)) setRoots(data.roots);
+        if (data.home) setHome(data.home);
         setCurrentPath(data.path);
         setInputPath(data.path);
         setParentPath(data.parent_path ?? null);
@@ -198,6 +201,7 @@ const DirectoryPicker = ({
       } catch (err) {
         if (id !== requestId.current) return "stale";
         if (Array.isArray(err.data?.roots)) setRoots(err.data.roots);
+        if (err.data?.home) setHome(err.data.home);
         if (err.status === 400 || err.status === 404) return err;
         setError(err.message || "Failed to load the folder");
         setDirectories([]);
@@ -297,12 +301,13 @@ const DirectoryPicker = ({
       .filter((r) => r && (currentPath === r || currentPath.startsWith(`${r}/`)))
       .sort((a, b) => b.length - a.length)[0];
     const base = root || "";
-    const crumbs = [{ path: base || "/", name: base ? base.split("/").pop() : "Root" }];
+    const rootName = base ? rootLabel(base, home).split("/").pop() : "Root";
+    const crumbs = [{ path: base || "/", name: rootName }];
     currentPath.slice(base.length).split("/").filter(Boolean).forEach((part, i, parts) => {
       crumbs.push({ path: `${base}/${parts.slice(0, i + 1).join("/")}`, name: part });
     });
     return crumbs;
-  }, [currentPath, roots]);
+  }, [currentPath, roots, home]);
 
   const filteredDirectories = useMemo(() => {
     if (!searchQuery) return directories;
@@ -474,7 +479,7 @@ const DirectoryPicker = ({
               {roots.map((root) => (
                 <Chip
                   key={root}
-                  label={root}
+                  label={rootLabel(root, home)}
                   size="small"
                   variant={root === currentPath ? "filled" : "outlined"}
                   onClick={() => handleNavigate(root)}

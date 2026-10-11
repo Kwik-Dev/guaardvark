@@ -37,6 +37,7 @@ import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import { useSnackbar } from "../components/common/SnackbarProvider";
 import PageLayout from "../components/layout/PageLayout";
+import { rootLabel } from "../utils/displayPath";
 import {
   startBulkImport,
   getBulkImportStatus,
@@ -82,6 +83,7 @@ const BulkImportDocumentsPage = () => {
   const [loadedPath, setLoadedPath] = useState(null);
   const [parentPath, setParentPath] = useState(null);
   const [browseRoots, setBrowseRoots] = useState([]);
+  const [browseHome, setBrowseHome] = useState(null);
   const [browseError, setBrowseError] = useState(null);
   const [directories, setDirectories] = useState([]);
   const [loadingDirs, setLoadingDirs] = useState(false);
@@ -128,6 +130,9 @@ const BulkImportDocumentsPage = () => {
       const data = await response.json();
       if (Array.isArray(data.roots)) {
         setBrowseRoots(data.roots);
+      }
+      if (data.home) {
+        setBrowseHome(data.home);
       }
       if (response.ok && data.directories) {
         setLoadedPath(data.path);
@@ -526,7 +531,7 @@ const BulkImportDocumentsPage = () => {
                     onClick={() => handleBrowserNavigate(root)}
                     sx={{ textTransform: "none" }}
                   >
-                    {root}
+                    {rootLabel(root, browseHome)}
                   </Button>
                 ))}
                 <Typography variant="caption" color="text.secondary">
