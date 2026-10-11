@@ -2044,19 +2044,22 @@ def _containing_root(target: str, roots) -> str:
 
 
 def _inside_data_folder(target: str, root: str) -> bool:
-    """True when ``target`` is in Guaardvark's data folder but the root that
-    admitted it is not. A stock install keeps data/ under the home folder, and
-    importing its docstore.json, index files or config/ would break the
-    install. The uploads folder, and a GUAARDVARK_ALLOWED_PATHS folder inside
-    data/, are roots of their own and stay usable."""
+    """True when ``target`` is in Guaardvark's data or backup folder but the
+    root that admitted it is not. A stock install keeps both under the home
+    folder; importing data/'s docstore.json, index files or config/ would break
+    the install, and backups/ holds full copies of it. The uploads folder, and
+    a GUAARDVARK_ALLOWED_PATHS folder inside either, are roots of their own and
+    stay usable."""
     from backend import config
     from backend.utils.path_safety import is_within, resolve
 
-    storage = getattr(config, "STORAGE_DIR", "")
-    if not storage:
-        return False
-    storage_real = resolve(storage)
-    return is_within(target, [storage_real]) and not is_within(root, [storage_real])
+    for folder in (getattr(config, "STORAGE_DIR", ""), getattr(config, "BACKUP_DIR", "")):
+        if not folder:
+            continue
+        folder_real = resolve(folder)
+        if is_within(target, [folder_real]) and not is_within(root, [folder_real]):
+            return True
+    return False
 
 
 def display_path(path: str, home: str) -> str:
@@ -2086,7 +2089,7 @@ def resolve_import_directory(requested: str):
     if _hidden_below_root(target, root):
         return None, "Hidden folders (names starting with a dot) are not imported."
     if _inside_data_folder(target, root):
-        return None, "Guaardvark's own data folder is not imported; its uploads folder can be."
+        return None, "Guaardvark's own data and backup folders are not imported; its uploads folder can be."
     return target, None
 
 
