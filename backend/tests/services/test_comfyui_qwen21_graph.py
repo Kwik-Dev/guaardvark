@@ -239,3 +239,34 @@ def test_admission_wraps_the_render_like_an_edit(monkeypatch, tmp_path):
     assert seen["vram_mb"] == 14000 and seen["job"] == "stills_comfy"
     assert "TextEncodeQwenImage21" in _types(seen["workflow"])
     assert gen.last_steps == 25
+
+
+def test_the_measured_estimate_admits_an_idle_12gb_card(monkeypatch):
+    """The registry figure is the measured peak (9500 MB), so the hard fit check
+    the chat and batch paths use admits an idle 12 GB card."""
+    from unittest import mock
+    from backend.services import gpu_resource_policy as grp
+    from backend.services.job_types import JobKind
+    from backend.services.video_model_registry import vram_mb_for_model
+
+    estimate = vram_mb_for_model("qwen-image-21")
+    assert estimate == 9500
+    co = mock.Mock()
+    co.get_available_vram.return_value = {"success": True, "available_mb": 12000, "total_mb": 12282}
+    monkeypatch.setattr("backend.services.gpu_resource_coordinator.get_gpu_coordinator", lambda: co)
+    monkeypatch.setattr(grp, "reclaim_gpu", lambda **kw: None)
+    monkeypatch.setattr(grp, "_wait_until_fits", lambda *a, **kw: None)
+    monkeypatch.setattr(grp, "_load_admit_or_busy", lambda *a, **kw: None)
+    monkeypatch.setattr(grp, "_orchestrator_request", lambda *a, **kw: None)
+    monkeypatch.setattr(grp, "_orchestrator_release", lambda *a, **kw: None)
+    with grp.gpu_session(JobKind.VIDEO_RENDER, "qwen21-12gb", on_busy="raise",
+                         vram_estimate_mb=estimate, require_fit=True) as acquired:
+        assert acquired
+
+
+def test_the_cfg_range_is_declared_and_a_typed_cfg_still_wins():
+    from backend.services.image_render_limits import limits_for
+    assert limits_for("qwen-image-21")["cfg_range"] == (1.0, 5.0)
+    assert _build(cfg=3.0)["sampler"]["inputs"]["cfg"] == 3.0
+    # Not hard-clamped: an explicit value reaches the sampler unchanged.
+    assert _build(cfg=9.0)["sampler"]["inputs"]["cfg"] == 9.0

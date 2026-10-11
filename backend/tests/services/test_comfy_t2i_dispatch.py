@@ -76,7 +76,7 @@ def test_comfy_prices_come_from_the_family_rows():
     assert gen._comfy_t2i_price("flux") == (12000, 16.0)
     from backend.services.video_model_registry import vram_mb_for_model
     assert gen._comfy_t2i_price("qwen-image-21") == (vram_mb_for_model("qwen-image-21"), 16.0)
-    assert gen._comfy_t2i_price("qwen-image-21")[0] == 14000
+    assert gen._comfy_t2i_price("qwen-image-21")[0] == 9500
 
 
 # ── batch dispatch ────────────────────────────────────────────────────────────
@@ -214,7 +214,7 @@ def test_chat_user_qwen_resolves_its_unet_and_is_admitted(recording, monkeypatch
     inst = recording.instances[-1]
     assert inst.kwargs == {"qwen21_unet": "qwen-image-2.1-FT-fp8.safetensors"}
     assert inst.call["model"] == "qwen-image-21"
-    assert inst.call["admit_vram_mb"] == 14000
+    assert inst.call["admit_vram_mb"] == 9500
 
 
 def test_chat_shipped_qwen_is_admitted_and_flux_is_not(recording, tmp_path):
@@ -223,7 +223,7 @@ def test_chat_shipped_qwen_is_admitted_and_flux_is_not(recording, tmp_path):
         guidance=1.0, seed=1, enhance_mode="none", output="path", output_dir=str(tmp_path), hold_gpu=True,
     )
     qwen = recording.instances[-1]
-    assert qwen.kwargs == {} and qwen.call["model"] == "qwen-image-21" and qwen.call["admit_vram_mb"] == 14000
+    assert qwen.kwargs == {} and qwen.call["model"] == "qwen-image-21" and qwen.call["admit_vram_mb"] == 9500
     sp._generate_comfy_flux(
         prompt="p", negative="", model="flux-dev", width=1024, height=1024, steps=28,
         guidance=3.5, seed=1, enhance_mode="none", output="path", output_dir=str(tmp_path), hold_gpu=True,

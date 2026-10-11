@@ -222,15 +222,16 @@ IMAGE_FAMILY_SPECS: dict[str, dict[str, Any]] = {
     },
     # Qwen-Image 2.1 through ComfyUI. Every number is the official Comfy-Org
     # template's (image_qwen_image_2_1_t2i: 1024x1024, 25 steps, cfg 1.0; its
-    # usage note names native 2K output and sides in multiples of 32). Nothing is
-    # measured on a card yet, so there is no min_steps; vram_mb/ram_gb are the
-    # registry entry's provisional figures (video_model_registry "qwen-image-21").
+    # usage note names native 2K output and sides in multiples of 32). No step
+    # count below 25 has been compared, so there is no min_steps. vram_mb is the
+    # registry entry's measured figure (video_model_registry "qwen-image-21");
+    # ram_gb is sized from the files, not measured.
     # prompt_style "natural": a Qwen3-VL encoder reads prompts as prose.
     "qwen-image-21": {
         "max_side": 2048, "max_pixel_area": 2048 * 2048, "min_side": 256, "dimension_alignment": 32,
         "width": 1024, "height": 1024, "default_steps": 25, "cfg_when_unset": 1.0,
         "prompt_style": "natural", "engine": "comfy",
-        "vram_mb": _registry_vram_mb("qwen-image-21", 14000), "ram_gb": 16.0,
+        "vram_mb": _registry_vram_mb("qwen-image-21", 9500), "ram_gb": 16.0,
     },
     # SDXL loads whole onto cards of 10 GB and up (vram_mb 8000: ~6.9 GB of fp16
     # weights plus the working set). Below that it runs with CPU model offload,
@@ -286,6 +287,10 @@ IMAGE_MODEL_LIMITS: dict[str, dict[str, Any]] = {
                  "min_dimensions": (512, 512), "hard_clamp": False, "force_max_workers": 1},
     # The template's usage note: cfg stays 1.0 unless a negative prompt is used;
     # the official pipeline samples 40-50 steps, the template starts at 25.
+    # cfg compared 2026-10-11 (1024x1024, 25 steps, seed 1984, with a negative
+    # prompt): 3 and 5 render clean; 9 crushes the shadows to black and hardens
+    # the contrast. The Studio slider stops at 5; a value typed through the API
+    # still wins, so the range is not hard-clamped.
     "qwen-image-21": {"family": "qwen-image-21", "steps_range": (10, 50), "cfg_range": (1.0, 5.0),
                       "min_dimensions": (512, 512), "hard_clamp": False, "force_max_workers": 1},
     # SDXL: guidance above 9 renders black images, so its range is enforced.

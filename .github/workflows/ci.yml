@@ -393,6 +393,9 @@ jobs:
             backend/tests/test_csv_quote_repair.py \
             backend/tests/test_generation_reply_validation.py \
             backend/tests/services/test_image_render_limits.py \
+            backend/tests/services/test_comfy_t2i_dispatch.py \
+            backend/tests/services/test_comfyui_qwen21_graph.py \
+            backend/tests/services/test_user_comfy_companions.py \
             backend/tests/services/test_model_availability.py \
             backend/tests/services/test_video_dimension_limits.py \
             backend/tests/services/test_video_model_preflight.py \
