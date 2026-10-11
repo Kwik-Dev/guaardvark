@@ -1609,14 +1609,16 @@ const DocumentsPage = () => {
       setRenameItem(null);
       setRenameName('');
 
-      // Refresh data after rename
+      // Refresh data after rename: the desktop and every open window, since a
+      // change made on this page does not come back through the listener.
       await refreshData();
+      refreshOpenWindows();
     } catch (err) {
       // The server says why a name is refused; show that over a bare "failed".
       const reason = err.response?.data?.message || err.response?.data?.error?.message;
       showMessage?.(reason ? `Rename failed: ${reason}` : 'Rename failed', 'error');
     }
-  }, [renameItem, renameName, showMessage, refreshData]);
+  }, [renameItem, renameName, showMessage, refreshData, refreshOpenWindows]);
 
   const handleColorChange = useCallback((color) => {
     if (!contextMenuItem || contextMenuType !== 'folder') return;
