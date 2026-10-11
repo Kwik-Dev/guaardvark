@@ -80,6 +80,7 @@ const CodeEditorCard = React.forwardRef(
     const [contextMenu, setContextMenu] = useState(null);
     const [renameDialog, setRenameDialog] = useState({ open: false, tabIndex: null });
     const [renameValue, setRenameValue] = useState("");
+    const renameInputRef = useRef(null);
     const [previewDialogOpen, setPreviewDialogOpen] = useState(false);
     const { startProcess, completeProcess, errorProcess } = useUnifiedProgress();
     const theme = useTheme();
@@ -1066,13 +1067,25 @@ ${currentTab.content}
         </Dialog>
 
         {/* Rename Dialog */}
-        <Dialog open={renameDialog.open} onClose={() => setRenameDialog({ open: false, tabIndex: null })}>
+        <Dialog
+          open={renameDialog.open}
+          onClose={() => setRenameDialog({ open: false, tabIndex: null })}
+          // autoFocus alone loses to the tab menu, which hands focus back to
+          // where it was as it closes; focus and select once the dialog is in.
+          TransitionProps={{
+            onEntered: () => {
+              renameInputRef.current?.focus();
+              renameInputRef.current?.select();
+            },
+          }}
+        >
           <DialogTitle>
             Rename File
           </DialogTitle>
           <DialogContent>
             <TextField
               autoFocus
+              inputRef={renameInputRef}
               margin="dense"
               label="New File Name"
               fullWidth
