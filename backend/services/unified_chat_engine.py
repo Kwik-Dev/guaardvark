@@ -2606,6 +2606,14 @@ class UnifiedChatEngine:
                 known = set(self.registry.list_tools())
                 selected_tools = [t for t in allowed_tools if t in known]
 
+            # Step 5's capture stores this message's fact itself; with save_memory
+            # also offered, the model files the same fact again in its own words.
+            if ("save_memory" in selected_tools and options.get("persist", True)
+                    and not options.get("skip_memory_capture")):
+                from backend.services.memory_capture import will_capture
+                if will_capture(message):
+                    selected_tools = [t for t in selected_tools if t != "save_memory"]
+
             tool_list = build_concise_tool_list(self.registry, selected_tools)
             mcp_section = build_mcp_inventory_for_prompt(selected_tools)
             if mcp_section:

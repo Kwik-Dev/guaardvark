@@ -93,6 +93,11 @@ def _extract_fact(message: str, *, explicit_only: bool = False) -> str | None:
     return None
 
 
+def will_capture(message: str, *, explicit_only: bool = False) -> bool:
+    """True when capture_from_message would store a fact from this message."""
+    return isinstance(message, str) and _extract_fact(message, explicit_only=explicit_only) is not None
+
+
 def _is_remember(message: str) -> bool:
     return any(pattern.match(message or "") for pattern in _REMEMBER_PATTERNS)
 

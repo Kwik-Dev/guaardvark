@@ -12,7 +12,7 @@ try:
 
     from backend.api.memory_api import get_memories_for_context, pop_last_selected_ids
     from backend.models import AgentMemory, db
-    from backend.services.memory_capture import _extract_fact, capture_from_message
+    from backend.services.memory_capture import _extract_fact, capture_from_message, will_capture
 except Exception:  # pragma: no cover - environment without backend deps
     pytest.skip("Flask or backend modules not available", allow_module_level=True)
 
@@ -318,3 +318,19 @@ def test_explicit_only_stops_the_fact_where_the_task_begins(message, expected):
 def test_engine_path_keeps_the_whole_remainder():
     message = "remember that the oven runs hot. It was serviced in May."
     assert _extract_fact(message) == "the oven runs hot. It was serviced in May."
+
+
+@pytest.mark.parametrize(
+    "message, captured",
+    [
+        ("Remember that my favourite tea is peppermint.", True),
+        ("note that the build takes ten minutes", True),
+        ("my favourite colour is green", True),
+        ("Save a memory that my desk lamp is warm white.", False),
+        ("what is my favourite tea?", False),
+    ],
+)
+def test_will_capture_matches_what_capture_stores(message, captured):
+    """The engine drops save_memory from a turn the capture already stores,
+    so the two must agree on which messages those are."""
+    assert will_capture(message) is captured
