@@ -59,7 +59,7 @@ import {
 } from "../api";
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 import RefreshIcon from "@mui/icons-material/Refresh";
-import Editor from "@monaco-editor/react";
+import Editor from "../utils/monaco";
 import { useSearchParams, Link as RouterLink } from "react-router-dom";
 import { useTheme } from "@mui/material/styles";
 import axios from "axios";

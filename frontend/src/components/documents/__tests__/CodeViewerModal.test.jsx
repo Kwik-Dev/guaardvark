@@ -2,7 +2,7 @@ import React from "react";
 import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 
-vi.mock("@monaco-editor/react", () => ({
+vi.mock("../../../utils/monaco", () => ({
   default: ({ value, options }) => (
     <textarea data-testid="editor" readOnly={options.readOnly} defaultValue={value} />
   ),

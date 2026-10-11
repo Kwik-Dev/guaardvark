@@ -24,7 +24,7 @@ import {
   Save as SaveIcon,
   Visibility as ViewIcon,
 } from "@mui/icons-material";
-import Editor from "@monaco-editor/react";
+import Editor from "../../utils/monaco";
 import { getDocumentContent, getRepoFileContent, updateDocument } from "../../api/documentService";
 import { getLanguageFromFilename } from "../../utils/languageDetector";
 import copyText from "../../utils/copyText";

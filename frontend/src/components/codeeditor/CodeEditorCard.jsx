@@ -34,7 +34,7 @@ import {
   Warning as WarningIcon,
   SmartToy as SmartToyIcon,
 } from "@mui/icons-material";
-import Editor, { useMonaco } from "@monaco-editor/react";
+import Editor, { useMonaco } from "../../utils/monaco";
 
 import DashboardCardWrapper from "../dashboard/DashboardCardWrapper";
 import { useUnifiedProgress } from "../../contexts/UnifiedProgressContext";
