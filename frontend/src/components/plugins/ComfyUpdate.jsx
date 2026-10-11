@@ -189,6 +189,7 @@ const UpdateDialog = ({ comfy }) => {
       keeps={check.keeps?.length ? check.keeps.join(', ') : undefined}
       confirmLabel={restore ? 'Restore now' : 'Update now'}
       busy={busy}
+      reversible
       onConfirm={confirm}
       onClose={closeDialog}
     />

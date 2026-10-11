@@ -135,6 +135,8 @@ describe("ComfyUI card update section", () => {
     expect(within(dialog).getByText("2.6.0, removed")).toBeInTheDocument();
     expect(within(dialog).getByText("120.4 GB")).toBeInTheDocument();
     expect(within(dialog).getByText(/Not touched: models, custom nodes, your outputs/)).toBeInTheDocument();
+    // An update switches back on its own, so the dialog does not claim it is final.
+    expect(within(dialog).queryByText("This cannot be undone.")).toBeNull();
     expect(api.start).not.toHaveBeenCalled();
 
     fireEvent.click(within(dialog).getByRole("button", { name: "Update now" }));
