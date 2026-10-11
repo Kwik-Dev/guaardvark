@@ -71,6 +71,7 @@ import {
 } from '../api/pluginsService';
 import { getGpuStatus } from '../api/gpuService';
 import OllamaLifecycleSection from '../components/settings/OllamaLifecycleSection';
+import { ComfyUpdateSection, useComfyUpdate } from '../components/plugins/ComfyUpdate';
 
 // ── Constants ──────────────────────────────────────────────────────────
 const STATUS_CONFIG = {
@@ -285,11 +286,13 @@ const LogViewer = ({ pluginId, open }) => {
 };
 
 // ── Plugin Card ────────────────────────────────────────────────────────
-const PluginCard = ({ plugin, onAction, onConfigOpen, showMessage }) => {
+export const PluginCard = ({ plugin, onAction, onConfigOpen, showMessage }) => {
   const [expanded, setExpanded] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const [actionLoading, setActionLoading] = useState(null);
   const cardMenu = useContextMenu();
+  // Inert for every plugin but ComfyUI.
+  const comfy = useComfyUpdate(plugin, showMessage);
 
   // Camera state (vision_pipeline only)
   const [cameraActive, setCameraActive] = useState(false);
@@ -402,6 +405,9 @@ const PluginCard = ({ plugin, onAction, onConfigOpen, showMessage }) => {
 
         <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mb: 1 }}>
           <Chip size="small" label={`v${plugin.version}`} variant="outlined" />
+          {comfy.installed && (
+            <Chip size="small" label={`ComfyUI ${comfy.installed}`} variant="outlined" />
+          )}
           <Chip size="small" label={plugin.type} variant="outlined" />
           {plugin.port && (
             <Chip size="small" label={`Port ${plugin.port}`} variant="outlined" />
@@ -416,6 +422,8 @@ const PluginCard = ({ plugin, onAction, onConfigOpen, showMessage }) => {
             />
           )}
         </Stack>
+
+        <ComfyUpdateSection comfy={comfy} />
 
         <Collapse in={expanded}>
           <Divider sx={{ my: 1.5 }} />
@@ -539,6 +547,11 @@ const PluginCard = ({ plugin, onAction, onConfigOpen, showMessage }) => {
             label: cameraActive ? 'Stop camera' : 'Start camera',
             onClick: handleCameraToggle,
             disabled: cameraLoading,
+          },
+          comfy.available && {
+            label: `Update ComfyUI to ${comfy.check.target}…`,
+            onClick: comfy.openUpdate,
+            disabled: Boolean(comfy.blocked),
           },
           { label: logsOpen ? 'Hide logs' : 'Show logs', onClick: () => setLogsOpen(!logsOpen), dividerBefore: true },
           { label: 'Settings…', onClick: () => onConfigOpen(plugin), disabled: isLoading },

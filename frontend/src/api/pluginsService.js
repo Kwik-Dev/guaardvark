@@ -166,6 +166,39 @@ export const getVisionCameraStatus = async () => {
   return handleResponse(response);
 };
 
+// --- ComfyUI update ---
+// The backend wraps these as {success, message, data}; callers get `data`.
+
+const unwrapData = (response) =>
+  response && typeof response === "object" && "data" in response ? response.data : response;
+
+/**
+ * What an update would do: installed and target versions, package changes,
+ * free disk, a kept older copy, and why it cannot run right now (`busy`).
+ */
+export const checkComfyUpdate = async () => {
+  const response = await fetch(`${BASE_URL}/comfyui/update/check`, { method: "GET" });
+  return unwrapData(await handleResponse(response));
+};
+
+/** Start the update. Resolves to the job status; throws with the reason when refused. */
+export const startComfyUpdate = async () => {
+  const response = await fetch(`${BASE_URL}/comfyui/update`, { method: "POST" });
+  return unwrapData(await handleResponse(response));
+};
+
+/** The current or last update job: state, phase, percent, message, log tail. */
+export const getComfyUpdateStatus = async () => {
+  const response = await fetch(`${BASE_URL}/comfyui/update/status`, { method: "GET" });
+  return unwrapData(await handleResponse(response));
+};
+
+/** Put the kept older copy of ComfyUI back. Same contract as startComfyUpdate. */
+export const restoreComfyPrevious = async () => {
+  const response = await fetch(`${BASE_URL}/comfyui/update/restore-previous`, { method: "POST" });
+  return unwrapData(await handleResponse(response));
+};
+
 export default {
   listPlugins,
   getPlugin,
@@ -184,4 +217,8 @@ export default {
   startVisionCamera,
   stopVisionCamera,
   getVisionCameraStatus,
+  checkComfyUpdate,
+  startComfyUpdate,
+  getComfyUpdateStatus,
+  restoreComfyPrevious,
 };
