@@ -232,6 +232,10 @@ export const VoiceProvider = ({ children }) => {
   }, [cancelCurrentTTS]);
 
   useEffect(() => {
+    // Set on every mount: React's development mode mounts, unmounts and mounts
+    // again, and a flag left false makes every state update below a no-op
+    // (isPlaying never turns on, so the mic would not pause for a spoken reply).
+    isMountedRef.current = true;
     return () => {
       isMountedRef.current = false;
       cleanupMediaResources();
