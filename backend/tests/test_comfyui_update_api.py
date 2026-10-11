@@ -23,9 +23,23 @@ class FakeService:
     def __init__(self):
         self.refuse = None
         self.started = []
+        self.repair_needed = None
 
     def check(self, target=None):
-        return dict(CHECK)
+        return dict(CHECK, needs_repair=self.repair_needed)
+
+    def status(self):
+        s = cus.get_status()
+        if self.repair_needed and s["state"] != "running":
+            s["state"] = "needs_repair"
+            s["message"] = self.repair_needed
+        return s
+
+    def repair(self, *, background=True):
+        if self.refuse:
+            raise cus.UpdateRefused(self.refuse)
+        self.started.append(("repair", None))
+        return {"state": "running", "phase": "swap"}
 
     def start(self, target=None, *, background=True):
         if self.refuse:
@@ -58,7 +72,7 @@ def test_check_returns_the_dialog_payload(client):
     assert r.status_code == 200
     body = r.get_json()
     assert body["success"] is True
-    assert body["data"] == CHECK
+    assert body["data"] == dict(CHECK, needs_repair=None)
 
 
 def test_update_starts_with_202(client):
@@ -95,3 +109,24 @@ def test_restore_previous_202_and_409(client):
     r = client.post("/api/plugins/comfyui/update/restore-previous")
     assert r.status_code == 409
     assert "no previous" in r.get_json()["error"]["message"]
+
+
+def test_status_reports_needs_repair(client):
+    client.fake.repair_needed = "A ComfyUI update was interrupted at swap: old tree at .../ComfyUI.prev-0.33.0"
+    data = client.get("/api/plugins/comfyui/update/status").get_json()["data"]
+    assert data["state"] == "needs_repair"
+    assert data["message"] == client.fake.repair_needed
+    assert set(data) == {"state", "phase", "phase_label", "percent", "from", "to",
+                         "started_at", "finished_at", "message", "log_tail"}
+    assert client.get("/api/plugins/comfyui/update/check").get_json()["data"]["needs_repair"] == client.fake.repair_needed
+
+
+def test_repair_202_and_409(client):
+    r = client.post("/api/plugins/comfyui/update/repair")
+    assert r.status_code == 202
+    assert r.get_json()["data"]["state"] == "running"
+    assert client.fake.started == [("repair", None)]
+    client.fake.refuse = "There is nothing to repair."
+    r = client.post("/api/plugins/comfyui/update/repair")
+    assert r.status_code == 409
+    assert r.get_json()["error"] == {"code": "COMFYUI_UPDATE_REFUSED", "message": "There is nothing to repair."}

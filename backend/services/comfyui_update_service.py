@@ -9,6 +9,14 @@ the plugin system. Every step after ComfyUI is stopped is undone on failure,
 and the old tree is kept as ``ComfyUI.prev-<version>`` so a working update can
 still be stepped back with :meth:`ComfyUIUpdateService.restore_previous`.
 
+The state directories are the user's model library, so no tree that holds
+one is ever deleted: a verified clone is stripped of its placeholder copies
+before anything moves in, and any ``ComfyUI.next`` / ``.prev`` / ``.stale``
+tree that holds one is set aside, never removed. A journal
+(``.update_job.json``) is written before ComfyUI is stopped and after every
+move or rename, so a job interrupted by a crash is reported as
+``needs_repair`` and :meth:`ComfyUIUpdateService.repair` walks it back.
+
 Network is used only here, on the user's explicit action: ``git clone`` from
 the declared GitHub repo and ``pip install`` from PyPI.
 
@@ -26,7 +34,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import threading
 import time
 from collections import deque
@@ -45,6 +52,7 @@ LIVE_DIR = "ComfyUI"
 NEXT_DIR = "ComfyUI.next"
 PREV_PREFIX = "ComfyUI.prev-"
 STAMP_FILE = ".requirements_installed"
+JOURNAL_FILE = ".update_job.json"
 LOG_BASENAME = "comfyui-update.log"
 LOG_TAIL_LINES = 30
 
@@ -61,8 +69,9 @@ PHASES: List[tuple[str, int, str]] = [
     ("done", 100, "Done"),
 ]
 _PHASE_INDEX = {name: i for i, (name, _, _) in enumerate(PHASES)}
+_PHASES_WITH_NEW_RUNNING = frozenset({"start", "post-check", "done"})
 
-STATES = ("idle", "running", "succeeded", "rolled_back", "failed")
+STATES = ("idle", "running", "succeeded", "rolled_back", "failed", "needs_repair")
 
 # Runner results are duck-typed: anything with returncode/stdout/stderr.
 Runner = Callable[..., Any]
@@ -138,6 +147,17 @@ def manifest_marker_nodes(manifest_path: Path) -> List[str]:
     return nodes
 
 
+def state_dirs_present(tree: Path, names: List[str]) -> List[str]:
+    """The declared state dirs that exist in ``tree`` (a dangling symlink counts)."""
+    return [n for n in names if os.path.lexists(tree / n)]
+
+
+def _write_json_atomic(path: Path, data: Dict[str, Any]) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=1, sort_keys=True), encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def _default_runner(argv, *, cwd=None, timeout=None, env=None):
     return subprocess.run(
         [str(a) for a in argv], cwd=cwd, timeout=timeout, env=env,
@@ -160,19 +180,35 @@ def _default_http_get(url: str, timeout: float):
     return resp.status_code, body
 
 
+_GPU_HOLDER_RE = re.compile(r"GPU is busy with '([^']+)'")
+
+
 class PluginManagerController:
     """Start/stop ComfyUI through the plugin manager (gate, GPU exclusivity, health wait).
 
-    A start right after a stop can be gated by the manager's cooldown; that is
-    backpressure, so it is waited out and retried rather than reported as a failure.
+    A gated refusal is backpressure, not failure: a cooldown is slept through
+    and retried a few times; another GPU plugin's operation is waited on,
+    polling until it releases the gate or ``gpu_wait_s`` runs out.
     """
 
-    def __init__(self, sleep: Callable[[float], None] = time.sleep, gate_retries: int = 5):
+    def __init__(
+        self,
+        sleep: Callable[[float], None] = time.sleep,
+        *,
+        cooldown_retries: int = 10,
+        gpu_wait_s: float = 600.0,
+        gpu_poll_s: float = 5.0,
+        manager=None,
+    ):
         self._sleep = sleep
-        self._gate_retries = gate_retries
+        self._cooldown_retries = cooldown_retries
+        self._gpu_wait_s = gpu_wait_s
+        self._gpu_poll_s = gpu_poll_s
+        self._manager_override = manager
 
-    @staticmethod
-    def _manager():
+    def _manager(self):
+        if self._manager_override is not None:
+            return self._manager_override
         from backend.plugins.plugin_manager import get_plugin_manager
 
         return get_plugin_manager()
@@ -184,13 +220,27 @@ class PluginManagerController:
         return self._retry_gate(lambda: self._manager().start_plugin(PLUGIN_ID))
 
     def _retry_gate(self, op) -> Dict[str, Any]:
-        result: Dict[str, Any] = {}
-        for _ in range(self._gate_retries + 1):
+        cooldowns = 0
+        gpu_waited = 0.0
+        while True:
             result = op() or {}
             if result.get("success") or not result.get("gated"):
                 return result
+            reason = str(result.get("error") or "")
+            holder = _GPU_HOLDER_RE.search(reason)
+            if holder:
+                if gpu_waited >= self._gpu_wait_s:
+                    return {
+                        "success": False,
+                        "error": f"the GPU is still held by '{holder.group(1)}' after {int(gpu_waited)} s",
+                    }
+                self._sleep(self._gpu_poll_s)
+                gpu_waited += self._gpu_poll_s
+                continue
+            if cooldowns >= self._cooldown_retries:
+                return result
+            cooldowns += 1
             self._sleep(float(result.get("cooldown_remaining") or 1.0) + 0.5)
-        return result
 
 
 def default_busy_reason() -> Optional[str]:
@@ -256,7 +306,7 @@ _log_tail: deque = deque(maxlen=LOG_TAIL_LINES)
 def get_status() -> Dict[str, Any]:
     with _status_lock:
         snapshot = dict(_status)
-    snapshot["log_tail"] = list(_log_tail)
+        snapshot["log_tail"] = list(_log_tail)
     snapshot.pop("epoch", None)
     return snapshot
 
@@ -304,6 +354,9 @@ class ComfyUIUpdateService:
         self.health_poll_s = health_poll_s
         self.clone_timeout_s = clone_timeout_s
         self.pip_timeout_s = pip_timeout_s
+        repair = self.needs_repair()
+        if repair:
+            logger.warning("ComfyUI update needs repair: %s", repair)
 
     # ── wiring ──────────────────────────────────────────────────────────
 
@@ -337,6 +390,10 @@ class ComfyUIUpdateService:
     def stamp_path(self) -> Path:
         return self.plugin_root / STAMP_FILE
 
+    @property
+    def journal_path(self) -> Path:
+        return self.plugin_root / JOURNAL_FILE
+
     # ── declared data ───────────────────────────────────────────────────
 
     def releases(self) -> Dict[str, Any]:
@@ -344,7 +401,10 @@ class ComfyUIUpdateService:
             return json.load(f)
 
     def state_dirs(self) -> List[str]:
-        return list(self.releases().get("state_dirs") or [])
+        try:
+            return list(self.releases().get("state_dirs") or [])
+        except (OSError, ValueError):
+            return []
 
     def _release(self, tag: Optional[str]) -> tuple[str, Dict[str, Any]]:
         data = self.releases()
@@ -357,8 +417,11 @@ class ComfyUIUpdateService:
     def installed_version(self) -> Optional[str]:
         return read_tree_version(self.live_dir)
 
+    def previous_trees(self) -> List[Path]:
+        return sorted(p for p in self.plugin_root.glob(PREV_PREFIX + "*") if p.is_dir())
+
     def previous_tree(self) -> Optional[Path]:
-        trees = sorted(p for p in self.plugin_root.glob(PREV_PREFIX + "*") if p.is_dir())
+        trees = [p for p in self.previous_trees() if ".stale-" not in p.name]
         return trees[-1] if trees else None
 
     def previous_version(self) -> Optional[str]:
@@ -415,6 +478,61 @@ class ComfyUIUpdateService:
             if installed.get(name) != version
         ]
 
+    def read_journal(self) -> Optional[Dict[str, Any]]:
+        try:
+            data = json.loads(self.journal_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as e:
+            return {"unreadable": str(e)}
+        return data if isinstance(data, dict) else {"unreadable": "not an object"}
+
+    def needs_repair(self) -> Optional[str]:
+        """A sentence naming what an interrupted job left behind, or None.
+
+        Either the journal of a job that never finished is still there, or the
+        live path is empty while a kept or staged tree exists.
+        """
+        if get_status().get("state") == "running":
+            return None
+        journal = self.read_journal()
+        if journal is not None:
+            if "unreadable" in journal:
+                return f"{self.journal_path} is unreadable ({journal['unreadable']}); repair reads the disk instead"
+            where = journal.get("old_tree_at") or "?"
+            moved = ", ".join(journal.get("moved") or []) or "none"
+            holder = journal.get("new_tree_at") or journal.get("new_tree") or "?"
+            return (
+                f"A ComfyUI {journal.get('kind', 'update')} was interrupted at {journal.get('phase')}: "
+                f"old tree at {where}, new tree at {holder}, state dirs moved into it: {moved}. "
+                f"Journal: {self.journal_path}"
+            )
+        if not self.live_dir.exists():
+            others = [p.name for p in self.previous_trees()]
+            if self.next_dir.exists():
+                others.append(self.next_dir.name)
+            if others:
+                return (
+                    f"{self.live_dir} is missing while {', '.join(others)} exist(s) in {self.plugin_root}; "
+                    f"no journal was found"
+                )
+        return None
+
+    def _stale_next_holding_state(self) -> Optional[str]:
+        """Set aside a ``ComfyUI.next`` that holds state dirs; the sentence says where it went."""
+        nxt = self.next_dir
+        if not os.path.lexists(nxt):
+            return None
+        held = state_dirs_present(nxt, self.state_dirs())
+        if not held:
+            return None
+        parked = nxt.with_name(f"{nxt.name}.stale-{int(time.time())}")
+        os.rename(nxt, parked)
+        return (
+            f"{nxt} held {', '.join(held)} and was set aside as {parked}; "
+            f"look inside before removing it by hand"
+        )
+
     def check(self, target: Optional[str] = None) -> Dict[str, Any]:
         data = self.releases()
         tag, rel = self._release(target)
@@ -442,11 +560,22 @@ class ComfyUIUpdateService:
                 f"and its Python packages from PyPI."
             ),
             "notes": rel.get("notes"),
+            "needs_repair": self.needs_repair(),
         }
+
+    def status(self) -> Dict[str, Any]:
+        """:func:`get_status`, with ``needs_repair`` reported when no job is running."""
+        current = get_status()
+        if current["state"] != "running":
+            repair = self.needs_repair()
+            if repair:
+                current["state"] = "needs_repair"
+                current["message"] = repair
+        return current
 
     # ── job control ─────────────────────────────────────────────────────
 
-    def _claim(self, old_version: Optional[str], new_version: str) -> int:
+    def _claim(self, kind: str, old_version: Optional[str], new_version: Optional[str]) -> int:
         global _status, _epoch
         with _status_lock:
             if _status.get("state") == "running":
@@ -463,6 +592,8 @@ class ComfyUIUpdateService:
     def _refuse_if_blocked(self, check: Dict[str, Any]) -> None:
         if get_status()["state"] == "running":
             raise UpdateRefused("A ComfyUI update is already running")
+        if check["needs_repair"]:
+            raise UpdateRefused(f"Repair the interrupted job first. {check['needs_repair']}")
         if check["busy"]:
             raise UpdateRefused(f"ComfyUI is busy: {check['busy']}. Try again when it is idle.")
         if check["disk_free_gb"] < check["min_free_gb"]:
@@ -475,12 +606,15 @@ class ComfyUIUpdateService:
         """Begin the update; raises :class:`UpdateRefused` instead of starting."""
         tag, rel = self._release(target)
         check = self.check(tag)
-        if check["installed"] is None:
+        if check["installed"] is None and not check["needs_repair"]:
             raise UpdateRefused("No ComfyUI tree is installed; the plugin has to be set up first.")
-        if not check["available"]:
+        if not check["available"] and not check["needs_repair"]:
             raise UpdateRefused(f"ComfyUI {check['installed']} is already at or past {rel['version']}.")
         self._refuse_if_blocked(check)
-        epoch = self._claim(check["installed"], rel["version"])
+        set_aside = self._stale_next_holding_state()
+        if set_aside:
+            raise UpdateRefused(f"Not started: {set_aside}.")
+        epoch = self._claim("update", check["installed"], rel["version"])
         return self._launch(
             lambda: self._run_update(tag, rel, check["installed"], epoch),
             background=background,
@@ -488,18 +622,58 @@ class ComfyUIUpdateService:
 
     def restore_previous(self, *, background: bool = True) -> Dict[str, Any]:
         """Swap back to the kept ``ComfyUI.prev-*`` tree."""
+        check = self.check()
+        self._refuse_if_blocked(check)
         prev = self.previous_tree()
         if prev is None:
             raise UpdateRefused("There is no previous ComfyUI tree to restore.")
-        installed = self.installed_version()
-        check = self.check()
-        self._refuse_if_blocked(check)
+        held = state_dirs_present(prev, self.state_dirs())
+        if held:
+            raise UpdateRefused(f"{prev} holds {', '.join(held)}; look inside before restoring it.")
         prev_version = self.previous_version() or "?"
-        epoch = self._claim(installed, prev_version)
+        epoch = self._claim("restore", check["installed"], prev_version)
         return self._launch(
-            lambda: self._run_restore(prev, prev_version, installed, epoch),
+            lambda: self._run_restore(prev, prev_version, check["installed"], epoch),
             background=background,
         )
+
+    def repair(self, *, background: bool = True) -> Dict[str, Any]:
+        """Walk an interrupted job back to the old tree and start it."""
+        if get_status()["state"] == "running":
+            raise UpdateRefused("A ComfyUI update is already running")
+        reason = self.needs_repair()
+        if not reason:
+            raise UpdateRefused("There is nothing to repair.")
+        plan = self._repair_plan()
+        epoch = self._claim("repair", plan.get("old_version"), plan.get("new_version"))
+        return self._launch(lambda: self._run_repair(plan, epoch), background=background)
+
+    def _repair_plan(self) -> Dict[str, Any]:
+        journal = self.read_journal()
+        if journal is not None and "unreadable" not in journal:
+            return journal
+        # No usable journal: read the disk. Exactly one kept tree can be the old one.
+        prevs = self.previous_trees()
+        if self.live_dir.exists() or len(prevs) != 1:
+            raise UpdateRefused(
+                f"Cannot repair without a journal: {self.live_dir} "
+                f"{'exists' if self.live_dir.exists() else 'is missing'} and "
+                f"{len(prevs)} kept tree(s) found ({', '.join(p.name for p in prevs) or 'none'}). "
+                f"Put the old tree back at {self.live_dir} by hand."
+            )
+        old = prevs[0]
+        holder = self.next_dir if self.next_dir.exists() else None
+        return {
+            "kind": "update", "phase": "swap",
+            "old_version": read_tree_version(old) or old.name[len(PREV_PREFIX):],
+            "new_version": read_tree_version(holder) if holder else None,
+            "old_tree_at": str(old), "new_tree": str(self.next_dir),
+            "new_tree_at": str(holder) if holder else None, "prev_target": str(old),
+            "stale_namesake": None,
+            "moved": state_dirs_present(holder, self.state_dirs()) if holder else [],
+            "stopped": True, "started": False, "pip_touched": False,
+            "snapshot": {}, "stamp_before": None, "stamp_recorded": False,
+        }
 
     def _launch(self, job, *, background: bool) -> Dict[str, Any]:
         if background:
@@ -543,28 +717,60 @@ class ComfyUIUpdateService:
     # ── the jobs ────────────────────────────────────────────────────────
 
     def _run_update(self, tag: str, rel: Dict[str, Any], old_version: str, epoch: int) -> None:
-        data = self.releases()
-        ctx = _Transition(self, epoch, old_version=old_version, new_version=rel["version"])
+        ctx: Optional[_Transition] = None
         try:
+            data = self.releases()
+            ctx = _Transition(self, epoch, kind="update", old_version=old_version, new_version=rel["version"])
             self._phase(epoch, "fetch")
             self._fetch(epoch, data["repo"], tag, rel)
             ctx.new_tree = self.next_dir
             ctx.apply(post_nodes=list(rel.get("post_start_nodes") or []))
         except Exception as e:  # noqa: BLE001
-            ctx.rollback(e)
+            if ctx is None:
+                self._finish(epoch, "rolled_back",
+                             f"Update failed at fetch: {e}; ComfyUI {old_version} was not touched and is still running.")
+            else:
+                self._rollback_or_fail(ctx, e)
 
     def _run_restore(self, prev: Path, prev_version: str, old_version: Optional[str], epoch: int) -> None:
-        ctx = _Transition(self, epoch, old_version=old_version, new_version=prev_version)
-        ctx.new_tree = prev
+        ctx: Optional[_Transition] = None
         try:
+            ctx = _Transition(self, epoch, kind="restore", old_version=old_version, new_version=prev_version)
+            ctx.new_tree = prev
             ctx.apply(post_nodes=[])
         except Exception as e:  # noqa: BLE001
-            ctx.rollback(e)
+            if ctx is None:
+                self._finish(epoch, "rolled_back",
+                             f"Restore failed at snapshot: {e}; ComfyUI {old_version} was not touched and is still running.")
+            else:
+                self._rollback_or_fail(ctx, e)
+
+    def _run_repair(self, plan: Dict[str, Any], epoch: int) -> None:
+        try:
+            ctx = _Transition.from_journal(self, epoch, plan)
+        except Exception as e:  # noqa: BLE001
+            self._finish(epoch, "failed", f"Repair could not read the journal: {e}. Journal: {self.journal_path}")
+            return
+        self._log(epoch, f"repairing a {ctx.kind} interrupted at {ctx.phase}")
+        self._rollback_or_fail(ctx, UpdateError("interrupted"),
+                               headline=f"Repaired a {ctx.kind} interrupted at {ctx.phase}")
+
+    def _rollback_or_fail(self, ctx: "_Transition", error: Exception, *, headline: Optional[str] = None) -> None:
+        """Roll back; whatever happens, the status leaves ``running``."""
+        try:
+            ctx.rollback(error, headline=headline)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("ComfyUI update rollback crashed")
+            self._finish(ctx.epoch, "failed",
+                         f"{headline or error}. Rolling back crashed: {e}. Use Repair, or read {self.log_path}.")
 
     def _fetch(self, epoch: int, repo: str, tag: str, rel: Dict[str, Any]) -> None:
         nxt = self.next_dir
-        if nxt.exists():
-            self._log(epoch, f"removing stale {nxt.name}")
+        if os.path.lexists(nxt):
+            set_aside = self._stale_next_holding_state()
+            if set_aside:
+                raise UpdateError(set_aside)
+            self._log(epoch, f"removing stale bare clone {nxt.name}")
             shutil.rmtree(nxt)
         result = self.runner(
             ["git", "clone", "--depth", "1", "--branch", tag, repo, nxt],
@@ -572,6 +778,14 @@ class ComfyUIUpdateService:
         )
         if result.returncode != 0:
             raise UpdateError(f"git clone failed: {(result.stderr or '').strip()[-400:]}")
+        # The clone ships placeholder state dirs; the user's own move in at
+        # the swap, and a tree without any of them is known to be a bare clone.
+        for name in state_dirs_present(nxt, self.state_dirs()):
+            path = nxt / name
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
         head = self.runner(["git", "-C", nxt, "rev-parse", "HEAD"], timeout=60)
         head_sha = (head.stdout or "").strip()
         if head.returncode != 0 or head_sha != rel["commit"]:
@@ -663,17 +877,26 @@ class _Transition:
     """One tree swap and everything needed to undo it.
 
     ``apply`` runs snapshot → stop → swap → install → start → post-check; each
-    step records what it changed so ``rollback`` can reverse exactly that.
+    step records what it changed, in memory and in the journal file, so
+    ``rollback`` (now, or as a repair after a crash) reverses exactly that.
     """
 
-    def __init__(self, svc: ComfyUIUpdateService, epoch: int, *, old_version: Optional[str], new_version: str):
+    _JOURNAL_FIELDS = (
+        "kind", "phase", "old_version", "new_version", "old_tree_at", "new_tree", "new_tree_at",
+        "prev_target", "stale_namesake", "moved", "stopped", "started", "pip_touched",
+        "snapshot", "stamp_before", "stamp_recorded",
+    )
+
+    def __init__(self, svc: ComfyUIUpdateService, epoch: int, *, kind: str,
+                 old_version: Optional[str], new_version: Optional[str]):
         self.svc = svc
         self.epoch = epoch
+        self.kind = kind
         self.old_version = old_version or "unknown"
-        self.new_version = new_version
+        self.new_version = new_version or "unknown"
         self.new_tree: Optional[Path] = None
         self.phase = "fetch"
-        self.moved: List[str] = []          # state dirs now inside new_tree
+        self.moved: List[str] = []          # state dirs now inside the new tree
         self.old_tree_at: Path = svc.live_dir  # where the old tree currently is
         self.new_tree_at: Optional[Path] = None
         self.prev_target: Optional[Path] = None
@@ -684,12 +907,62 @@ class _Transition:
         self.snapshot: Dict[str, Optional[str]] = {}
         self.stamp_before: Optional[str] = None
         self.stamp_recorded = False
+        self.journaled = False
+
+    @classmethod
+    def from_journal(cls, svc: ComfyUIUpdateService, epoch: int, data: Dict[str, Any]) -> "_Transition":
+        ctx = cls(svc, epoch, kind=str(data.get("kind") or "update"),
+                  old_version=data.get("old_version"), new_version=data.get("new_version"))
+        ctx.phase = str(data.get("phase") or "swap")
+        if ctx.phase not in _PHASE_INDEX:
+            ctx.phase = "swap"
+        ctx.new_tree = Path(data["new_tree"]) if data.get("new_tree") else svc.next_dir
+        ctx.old_tree_at = Path(data["old_tree_at"]) if data.get("old_tree_at") else svc.live_dir
+        ctx.new_tree_at = Path(data["new_tree_at"]) if data.get("new_tree_at") else None
+        ctx.prev_target = Path(data["prev_target"]) if data.get("prev_target") else None
+        namesake = data.get("stale_namesake")
+        ctx.stale_namesake = (Path(namesake[0]), Path(namesake[1])) if namesake else None
+        ctx.moved = [str(n) for n in (data.get("moved") or [])]
+        ctx.stopped = True  # the old ComfyUI is started again whatever the journal says
+        ctx.started = bool(data.get("started")) or ctx.phase in _PHASES_WITH_NEW_RUNNING
+        ctx.pip_touched = bool(data.get("pip_touched"))
+        ctx.snapshot = dict(data.get("snapshot") or {})
+        ctx.stamp_before = data.get("stamp_before")
+        ctx.stamp_recorded = bool(data.get("stamp_recorded"))
+        ctx.journaled = True
+        return ctx
+
+    # ── journal ─────────────────────────────────────────────────────────
+
+    def _journal(self) -> Dict[str, Any]:
+        data: Dict[str, Any] = {"job_id": f"{self.epoch}-{self.kind}", "written_at": _utc_now()}
+        for field in self._JOURNAL_FIELDS:
+            value = getattr(self, field)
+            if isinstance(value, Path):
+                value = str(value)
+            elif isinstance(value, tuple):
+                value = [str(v) for v in value]
+            data[field] = value
+        return data
+
+    def save_journal(self) -> None:
+        _write_json_atomic(self.svc.journal_path, self._journal())
+        self.journaled = True
+
+    def clear_journal(self) -> None:
+        try:
+            self.svc.journal_path.unlink()
+        except FileNotFoundError:
+            pass
+        self.journaled = False
 
     # ── forward ─────────────────────────────────────────────────────────
 
     def _phase(self, name: str) -> None:
         self.phase = name
         self.svc._phase(self.epoch, name)
+        if self.journaled:
+            self.save_journal()
 
     def _log(self, line: str) -> None:
         self.svc._log(self.epoch, line)
@@ -706,25 +979,31 @@ class _Transition:
         self._log(f"recorded {len(self.snapshot)} package versions and the requirements stamp")
 
         self._phase("stop")
+        # stop_plugin does not probe the job gate itself, so a render that
+        # starts between this probe and the stop is cancelled by the stop.
         busy = svc.busy_reason()
         if busy:
             raise UpdateError(f"ComfyUI became busy: {busy}")
+        self.save_journal()
         result = svc.controller.stop() or {}
         if not result.get("success"):
             raise UpdateError(f"could not stop ComfyUI: {result.get('error') or result}")
         self.stopped = True
+        self.save_journal()
 
         self._phase("swap")
         self._swap()
 
         self._phase("install")
         self.pip_touched = True
+        self.save_journal()
         svc.pip_install(["-r", svc.live_dir / "requirements.txt"])
         svc.write_stamp(requirements_stamp((svc.live_dir / "requirements.txt").read_bytes()))
         self._log("requirements installed; stamp written")
 
         self._phase("start")
         self.started = True
+        self.save_journal()
         result = svc.controller.start() or {}
         if not result.get("success"):
             raise UpdateError(f"could not start ComfyUI: {result.get('error') or result}")
@@ -743,84 +1022,112 @@ class _Transition:
             self._log(f"object_info caches not invalidated: {e}")
         self._remove_older_prev_trees()
 
+        self.clear_journal()
         self._phase("done")
         svc._finish(self.epoch, "succeeded", f"ComfyUI updated from {self.old_version} to {self.new_version}.")
 
     def _swap(self) -> None:
         svc = self.svc
         live, new = svc.live_dir, self.new_tree
-        for name in svc.state_dirs():
+        names = svc.state_dirs()
+        for name in names:
             src = live / name
-            if not src.exists():
+            if not os.path.lexists(src):
                 continue
             dst = new / name
-            if dst.exists():
-                shutil.rmtree(dst)
+            if os.path.lexists(dst):
+                raise UpdateError(f"{dst} already exists; the new tree is not a bare clone")
             os.rename(src, dst)
             self.moved.append(name)
+            self.save_journal()
         self._log(f"carried over: {', '.join(self.moved) or 'nothing'}")
 
         target = svc.plugin_root / f"{PREV_PREFIX}{self.old_version}"
-        if target.exists():
+        if os.path.lexists(target):
             # Only ever one tree per name; the stale namesake goes after success.
             parked = target.with_name(f"{target.name}.stale-{int(time.time())}")
             os.rename(target, parked)
             self.stale_namesake = (target, parked)
+            self.save_journal()
         os.rename(live, target)
         self.old_tree_at = target
         self.prev_target = target
+        self.save_journal()
         os.rename(new, live)
         self.new_tree_at = live
+        self.save_journal()
+        for name in names:
+            if not os.path.lexists(live / name):
+                (live / name).mkdir()
         self._log(f"old tree kept as {target.name}; {new.name} is now {live.name}")
 
     def _remove_older_prev_trees(self) -> None:
-        for tree in self.svc.plugin_root.glob(PREV_PREFIX + "*"):
-            if tree.is_dir() and tree != self.prev_target:
-                self._log(f"removing older kept tree {tree.name}")
-                shutil.rmtree(tree, ignore_errors=True)
+        names = self.svc.state_dirs()
+        for tree in self.svc.previous_trees():
+            if tree == self.prev_target:
+                continue
+            held = state_dirs_present(tree, names)
+            if held:
+                self._log(f"keeping {tree.name}: it holds {', '.join(held)}")
+                continue
+            self._log(f"removing older kept tree {tree.name}")
+            shutil.rmtree(tree, ignore_errors=True)
 
     # ── backward ────────────────────────────────────────────────────────
 
-    def rollback(self, error: Exception) -> None:
+    def rollback(self, error: Exception, *, headline: Optional[str] = None) -> None:
         svc = self.svc
         failed_phase, reason = self.phase, str(error)
+        headline = headline or f"{self.kind.capitalize()} failed at {failed_phase}: {reason}"
+        new_running = self.started
         self._log(f"FAILED at {failed_phase}: {reason}")
         self.svc._set(self.epoch, phase_label=f"Undoing: {PHASES[_PHASE_INDEX[failed_phase]][2]}")
         try:
             if self.started:
                 self._log("stopping the new ComfyUI")
-                svc.controller.stop()
+                result = svc.controller.stop() or {}
+                if not result.get("success"):
+                    raise UpdateError(f"could not stop the new ComfyUI: {result.get('error') or result}")
+                new_running = False
+                self.started = False
+                if self.journaled:
+                    self.save_journal()
             if self.new_tree_at is not None and self.new_tree_at == svc.live_dir:
                 # The new tree sits at the live path; it returns to where it
                 # came from, then the old tree returns to the live path.
-                parked = self.new_tree
-                if parked.exists():
+                parked = self.new_tree or svc.next_dir
+                if os.path.lexists(parked):
                     raise UpdateError(f"{parked} exists; refusing to overwrite it")
                 os.rename(self.new_tree_at, parked)
                 self.new_tree_at = parked
+                self.save_journal()
                 self._log(f"new tree parked as {parked.name}")
             if self.old_tree_at != svc.live_dir:
                 os.rename(self.old_tree_at, svc.live_dir)
                 self.old_tree_at = svc.live_dir
+                self.save_journal()
                 self._log("old tree is back at ComfyUI/")
             if self.stale_namesake is not None:
                 original, parked = self.stale_namesake
-                if parked.exists() and not original.exists():
+                if os.path.lexists(parked) and not os.path.lexists(original):
                     os.rename(parked, original)
                 self.stale_namesake = None
+                self.save_journal()
             if self.moved:
-                holder = self.new_tree_at or self.new_tree
-                for name in self.moved:
+                holder = self.new_tree_at or self.new_tree or svc.next_dir
+                for name in list(self.moved):
                     src = holder / name
                     dst = svc.live_dir / name
-                    if dst.exists():
-                        shutil.rmtree(dst)
+                    if os.path.lexists(dst):
+                        raise UpdateError(f"{dst} exists while {src} still holds the moved copy")
                     os.rename(src, dst)
-                self._log(f"moved back: {', '.join(self.moved)}")
-                self.moved = []
+                    self.moved.remove(name)
+                    self.save_journal()
+                self._log("state dirs moved back")
             if self.new_tree_at is not None and self.new_tree_at == svc.next_dir and failed_phase != "fetch":
                 self._log(f"{svc.next_dir.name} left in place for inspection")
-            elif failed_phase == "fetch" and svc.next_dir.exists():
+            elif failed_phase == "fetch" and svc.next_dir.exists() and \
+                    not state_dirs_present(svc.next_dir, svc.state_dirs()):
                 shutil.rmtree(svc.next_dir, ignore_errors=True)
             if self.pip_touched:
                 self._restore_packages()
@@ -834,16 +1141,17 @@ class _Transition:
                 svc.wait_healthy()
         except Exception as e:  # noqa: BLE001
             self._log(f"ROLLBACK FAILED: {e}")
-            svc._finish(self.epoch, "failed", self._manual_instructions(failed_phase, reason, e))
+            svc._finish(self.epoch, "failed", self._manual_instructions(headline, e, new_running=new_running))
             return
+        self.clear_journal()
         outcome = "is running again" if self.stopped else "was not touched and is still running"
-        svc._finish(
-            self.epoch, "rolled_back",
-            f"Update failed at {failed_phase}: {reason}; ComfyUI {self.old_version} {outcome}.",
-        )
+        svc._finish(self.epoch, "rolled_back", f"{headline}; ComfyUI {self.old_version} {outcome}.")
 
     def _restore_packages(self) -> None:
         svc = self.svc
+        if not self.snapshot:
+            self._log("no package snapshot recorded; packages left as they are")
+            return
         now = svc.installed_packages(list(self.snapshot))
         downgrade = [f"{n}=={v}" for n, v in self.snapshot.items() if v and now.get(n) != v]
         added = [n for n, v in self.snapshot.items() if not v and now.get(n)]
@@ -853,16 +1161,21 @@ class _Transition:
         if added:
             self._log(f"left installed (were absent before): {', '.join(added)}")
 
-    def _manual_instructions(self, failed_phase: str, reason: str, rollback_error: Exception) -> str:
+    def _manual_instructions(self, headline: str, rollback_error: Exception, *, new_running: bool) -> str:
         svc = self.svc
         pins = " ".join(f"{n}=={v}" for n, v in self.snapshot.items() if v)
+        comfy_state = (
+            "The new ComfyUI may still be running: stop it from the Plugins page first."
+            if new_running else "ComfyUI is stopped."
+        )
         return (
-            f"Update failed at {failed_phase}: {reason}. Rolling back also failed: {rollback_error}. "
-            f"ComfyUI is stopped. Old tree: {self.old_tree_at}. New tree: {self.new_tree_at or self.new_tree}. "
+            f"{headline}. Rolling back also failed: {rollback_error}. {comfy_state} "
+            f"Old tree: {self.old_tree_at}. New tree: {self.new_tree_at or self.new_tree}. "
             f"To recover by hand: move {', '.join(self.moved) or 'no'} state dir(s) back into the old tree, "
             f"rename the old tree to {svc.live_dir}, run "
-            f"'{svc.python} -m pip install {pins}' , restore {svc.stamp_path} to its previous content "
-            f"(or delete it), then start ComfyUI from the Plugins page. Log: {svc.log_path}"
+            f"'{svc.python} -m pip install {pins}', restore {svc.stamp_path} to its previous content "
+            f"(or delete it), then start ComfyUI from the Plugins page. The Repair action retries these "
+            f"steps from {svc.journal_path}. Log: {svc.log_path}"
         )
 
 

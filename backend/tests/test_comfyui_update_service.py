@@ -104,9 +104,12 @@ class FakeController:
         self.calls = []
         self.start_fail = False
         self.start_fail_once = False
+        self.stop_fail_after = None  # fail every stop after this many stops
 
     def stop(self):
         self.calls.append("stop")
+        if self.stop_fail_after is not None and self.calls.count("stop") > self.stop_fail_after:
+            return {"success": False, "error": "process still running"}
         self.running = False
         return {"success": True}
 
@@ -312,7 +315,10 @@ def test_update_succeeds_end_to_end(world):
     assert cus.read_tree_version(live) == NEW
     for d in ("models", "custom_nodes", "user", "output"):
         assert (live / d / f"{d}.marker").read_text() == d, d
-    assert (live / "input" / "input.marker").exists()  # the clone's own input/ stays
+    # The clone's placeholder state dirs were stripped; missing ones are recreated empty.
+    assert (live / "input").is_dir() and not (live / "input" / "input.marker").exists()
+    assert (live / "temp").is_dir()
+    assert not (world.root / ".update_job.json").exists()
     prev = world.root / f"ComfyUI.prev-{OLD}"
     assert cus.read_tree_version(prev) == OLD and not (prev / "models").exists()
     assert not (world.root / "ComfyUI.next").exists()
@@ -339,11 +345,38 @@ def test_update_keeps_only_one_previous_tree(world):
     assert [p.name for p in world.root.glob("ComfyUI.prev-*")] == [f"ComfyUI.prev-{OLD}"]
 
 
-def test_stale_next_tree_is_replaced(world):
-    (world.root / "ComfyUI.next").mkdir()
+def test_stale_bare_clone_is_replaced(world):
+    make_tree(world.root / "ComfyUI.next", "0.38.0", NEW_REQS)
     (world.root / "ComfyUI.next" / "junk").write_text("")
-    assert world.svc.start(background=False)["state"] == "succeeded"
+    status = world.svc.start(background=False)
+    assert status["state"] == "succeeded"
+    assert any("removing stale bare clone ComfyUI.next" in line for line in status["log_tail"])
     assert not (world.root / "ComfyUI.next").exists()
+    assert cus.read_tree_version(world.root / "ComfyUI") == NEW
+
+
+def test_next_tree_holding_state_is_set_aside_never_deleted(world):
+    stale = make_tree(world.root / "ComfyUI.next", "0.38.0", NEW_REQS, state=("models",))
+    (stale / "models" / "big.safetensors").write_text("weights")
+    with pytest.raises(UpdateRefused, match=r"ComfyUI.next held models and was set aside as .*ComfyUI.next.stale-"):
+        world.svc.start(background=False)
+    parked = [p for p in world.root.iterdir() if p.name.startswith("ComfyUI.next.stale-")]
+    assert len(parked) == 1
+    assert (parked[0] / "models" / "big.safetensors").read_text() == "weights"
+    assert not (world.root / "ComfyUI.next").exists()
+    assert world.controller.calls == []
+    assert_live_is_old(world)
+    # A second attempt proceeds and leaves the parked tree alone.
+    assert world.svc.start(background=False)["state"] == "succeeded"
+    assert (parked[0] / "models" / "big.safetensors").exists()
+
+
+def test_older_prev_tree_holding_state_is_kept(world):
+    kept = make_tree(world.root / "ComfyUI.prev-0.31.0", "0.31.0", OLD_REQS, state=("user",))
+    status = world.svc.start(background=False)
+    assert status["state"] == "succeeded"
+    assert (kept / "user" / "user.marker").exists()
+    assert any("keeping ComfyUI.prev-0.31.0: it holds user" in line for line in status["log_tail"])
 
 
 # ── rollback at each phase ─────────────────────────────────────────────
@@ -482,6 +515,177 @@ def test_restore_previous_rolls_back_on_pip_failure(world):
     assert (live / "models" / "models.marker").exists()
     assert cus.read_tree_version(world.root / f"ComfyUI.prev-{OLD}") == OLD
     assert world.runner.packages["comfy-kitchen"] == "0.2.37"
+
+
+def test_state_dir_move_failing_mid_loop_rolls_back(world, monkeypatch):
+    real_rename = os.rename
+
+    def flaky(src, dst):
+        if Path(src).name == "custom_nodes" and Path(dst).parent.name == "ComfyUI.next":
+            raise OSError(28, "No space left on device")
+        real_rename(src, dst)
+
+    monkeypatch.setattr(cus.os, "rename", flaky)
+    status = world.svc.start(background=False)
+    assert status["state"] == "rolled_back"
+    assert status["message"].startswith("Update failed at swap: [Errno 28]")
+    assert world.controller.calls == ["stop", "start"]
+    assert_live_is_old(world)
+    assert not (world.root / ".update_job.json").exists()
+
+
+def test_stop_failing_during_rollback_leaves_trees_alone(world):
+    world.http.missing_nodes = {"QwenImage21Cache"}
+    world.controller.stop_fail_after = 1
+    status = world.svc.start(background=False)
+    assert status["state"] == "failed"
+    msg = status["message"]
+    assert msg.startswith("Update failed at post-check:")
+    assert "could not stop the new ComfyUI: process still running" in msg
+    assert "The new ComfyUI may still be running: stop it from the Plugins page first." in msg
+    assert cus.read_tree_version(world.root / "ComfyUI") == NEW  # nothing renamed under a running server
+    assert (world.root / "ComfyUI" / "models" / "models.marker").exists()
+    assert cus.read_tree_version(world.root / f"ComfyUI.prev-{OLD}") == OLD
+    assert (world.root / ".update_job.json").exists()  # repair can pick it up
+    assert world.svc.status()["state"] == "needs_repair"
+
+
+def test_dangling_state_symlink_travels(world):
+    live = world.root / "ComfyUI"
+    (live / "temp").symlink_to(world.root / "nowhere")
+    assert world.svc.start(background=False)["state"] == "succeeded"
+    assert os.path.islink(live / "temp") and os.readlink(live / "temp") == str(world.root / "nowhere")
+
+
+class _Crash(BaseException):
+    """Escapes every except Exception, like a kill or power loss would."""
+
+
+def crash_between_tree_renames(world, monkeypatch):
+    real_rename = os.rename
+
+    def crashing(src, dst):
+        if Path(src) == world.root / "ComfyUI.next" and Path(dst) == world.root / "ComfyUI":
+            raise _Crash()
+        real_rename(src, dst)
+
+    monkeypatch.setattr(cus.os, "rename", crashing)
+    with pytest.raises(_Crash):
+        world.svc.start(background=False)
+    monkeypatch.setattr(cus.os, "rename", real_rename)
+    cus.reset_status()  # the process died; a new one starts with an idle status
+    assert not (world.root / "ComfyUI").exists()
+    assert (world.root / f"ComfyUI.prev-{OLD}" / "main.py").exists()
+    assert (world.root / "ComfyUI.next" / "models" / "models.marker").exists()
+
+
+def test_crash_between_renames_needs_repair_and_repair_restores(world, monkeypatch):
+    crash_between_tree_renames(world, monkeypatch)
+    journal = json.loads((world.root / ".update_job.json").read_text())
+    assert journal["phase"] == "swap" and journal["stopped"] is True
+    assert journal["moved"] == ["models", "custom_nodes", "user", "output"]
+    assert journal["old_tree_at"].endswith(f"ComfyUI.prev-{OLD}")
+    assert journal["snapshot"]["comfy-kitchen"] == "0.2.31"
+
+    fresh = ComfyUIUpdateService(
+        world.root, python=Path("/fake/venv/bin/python"), controller=world.controller,
+        base_url="http://127.0.0.1:8188", runner=world.runner, http_get=world.http,
+        busy_probe=lambda: None, disk_usage=lambda p: SimpleNamespace(free=100e9),
+        log_path=world.log, invalidate_caches=lambda: None, sleep=lambda s: None,
+        health_timeout_s=0, health_poll_s=0,
+    )
+    needs = fresh.needs_repair()
+    assert needs.startswith("A ComfyUI update was interrupted at swap: old tree at ")
+    assert f"ComfyUI.prev-{OLD}" in needs and "ComfyUI.next" in needs
+    assert "models, custom_nodes, user, output" in needs
+    assert fresh.status()["state"] == "needs_repair" and fresh.status()["message"] == needs
+    assert fresh.check()["needs_repair"] == needs
+    with pytest.raises(UpdateRefused, match="Repair the interrupted job first"):
+        fresh.start(background=False)
+    with pytest.raises(UpdateRefused, match="Repair the interrupted job first"):
+        fresh.restore_previous(background=False)
+
+    world.controller.calls.clear()
+    status = fresh.repair(background=False)
+    assert status["state"] == "rolled_back", status
+    assert status["message"] == f"Repaired a update interrupted at swap; ComfyUI {OLD} is running again."
+    assert world.controller.calls == ["start"]
+    assert_live_is_old(world)
+    assert not (world.root / ".update_job.json").exists()
+    assert fresh.status()["state"] == "rolled_back"
+    assert cus.read_tree_version(world.root / "ComfyUI.next") == NEW
+    with pytest.raises(UpdateRefused, match="nothing to repair"):
+        fresh.repair(background=False)
+
+
+def test_repair_without_a_journal_reads_the_disk(world, monkeypatch):
+    crash_between_tree_renames(world, monkeypatch)
+    (world.root / ".update_job.json").unlink()
+    needs = world.svc.needs_repair()
+    assert needs.startswith(f"{world.root / 'ComfyUI'} is missing while ComfyUI.prev-{OLD}, ComfyUI.next exist(s)")
+    world.controller.calls.clear()
+    status = world.svc.repair(background=False)
+    assert status["state"] == "rolled_back", status
+    assert world.controller.calls == ["start"]
+    assert cus.read_tree_version(world.root / "ComfyUI") == OLD
+    for d in ("models", "custom_nodes", "user", "output"):
+        assert (world.root / "ComfyUI" / d / f"{d}.marker").exists(), d
+    assert world.svc.needs_repair() is None
+
+
+def test_repair_is_refused_when_the_disk_is_ambiguous(world):
+    live = world.root / "ComfyUI"
+    live.rename(world.root / f"ComfyUI.prev-{OLD}")
+    make_tree(world.root / "ComfyUI.prev-0.31.0", "0.31.0", OLD_REQS)
+    assert world.svc.needs_repair()
+    with pytest.raises(UpdateRefused, match="Cannot repair without a journal.*2 kept tree"):
+        world.svc.repair(background=False)
+
+
+# ── the plugin-manager controller's gate handling ─────────────────────
+
+class FakeManager:
+    def __init__(self, answers):
+        self.answers = list(answers)
+        self.calls = []
+
+    def start_plugin(self, plugin_id):
+        self.calls.append(("start", plugin_id))
+        return self.answers.pop(0) if self.answers else {"success": True}
+
+    def stop_plugin(self, plugin_id, *, cancel_video_jobs=True):
+        self.calls.append(("stop", plugin_id, cancel_video_jobs))
+        return self.answers.pop(0) if self.answers else {"success": True}
+
+
+def test_controller_waits_for_a_gpu_holder_to_release():
+    busy = {"success": False, "gated": True, "error": "GPU is busy with 'audio_foundry'", "cooldown_remaining": 8.0}
+    slept = []
+    manager = FakeManager([busy, busy, {"success": True, "message": "started"}])
+    ctl = cus.PluginManagerController(sleep=slept.append, gpu_poll_s=5.0, gpu_wait_s=600.0, manager=manager)
+    assert ctl.start() == {"success": True, "message": "started"}
+    assert slept == [5.0, 5.0]
+    assert manager.calls == [("start", "comfyui")] * 3
+
+
+def test_controller_reports_a_gpu_holder_that_never_releases():
+    busy = {"success": False, "gated": True, "error": "GPU is busy with 'lora_trainer'", "cooldown_remaining": 8.0}
+    slept = []
+    manager = FakeManager([busy] * 50)
+    ctl = cus.PluginManagerController(sleep=slept.append, gpu_poll_s=5.0, gpu_wait_s=20.0, manager=manager)
+    result = ctl.start()
+    assert result == {"success": False, "error": "the GPU is still held by 'lora_trainer' after 20 s"}
+    assert slept == [5.0] * 4
+
+
+def test_controller_sleeps_through_a_cooldown_and_stops_without_cancelling_jobs():
+    cooling = {"success": False, "gated": True, "error": "Plugin 'comfyui' cooling down", "cooldown_remaining": 2.5}
+    slept = []
+    manager = FakeManager([cooling, {"success": True}])
+    ctl = cus.PluginManagerController(sleep=slept.append, manager=manager)
+    assert ctl.stop() == {"success": True}
+    assert slept == [3.0]
+    assert manager.calls == [("stop", "comfyui", False)] * 2
 
 
 # ── status ─────────────────────────────────────────────────────────────

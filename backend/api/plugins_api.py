@@ -520,14 +520,29 @@ def comfyui_update_start():
 
 @plugins_bp.route("/comfyui/update/status", methods=["GET"])
 def comfyui_update_status():
-    """The current or last update job."""
-    from backend.services.comfyui_update_service import get_status
+    """The current or last update job; ``needs_repair`` when one was interrupted."""
+    from backend.services.comfyui_update_service import get_update_service
 
     try:
-        return success_response(data=get_status())
+        return success_response(data=get_update_service().status())
     except Exception as e:
         logger.error(f"ComfyUI update status failed: {e}", exc_info=True)
         return error_response(str(e), 500, "COMFYUI_UPDATE_STATUS_ERROR")
+
+
+@plugins_bp.route("/comfyui/update/repair", methods=["POST"])
+def comfyui_update_repair():
+    """Walk an interrupted update back to the old tree; 202 with status, 409 with the refusal."""
+    from backend.services.comfyui_update_service import UpdateRefused, get_update_service
+
+    try:
+        status = get_update_service().repair()
+        return success_response(data=status, message="ComfyUI repair started", status_code=202)
+    except UpdateRefused as e:
+        return error_response(str(e), 409, "COMFYUI_UPDATE_REFUSED")
+    except Exception as e:
+        logger.error(f"ComfyUI repair failed to start: {e}", exc_info=True)
+        return error_response(str(e), 500, "COMFYUI_UPDATE_ERROR")
 
 
 @plugins_bp.route("/comfyui/update/restore-previous", methods=["POST"])

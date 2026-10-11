@@ -66,7 +66,9 @@ def test_all_venv_dirs_excluded(svc, path):
     "plugins/comfyui/.custom_nodes_installed",
     # trees the ComfyUI updater keeps beside the live one
     "plugins/comfyui/ComfyUI.next/main.py",
+    "plugins/comfyui/ComfyUI.next.stale-1760000000/models/x.safetensors",
     "plugins/comfyui/ComfyUI.prev-0.33.0/comfy/float.py",
+    "plugins/comfyui/.update_job.json",
 ])
 def test_real_artifacts_still_excluded(svc, path):
     assert svc.should_exclude_file(path) is True, f"{path} should be excluded but was not"
