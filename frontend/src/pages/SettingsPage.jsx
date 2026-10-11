@@ -388,7 +388,7 @@ const SettingsPage = () => {
   const [mcpStatus, setMcpStatus] = useState(null);
   const [confineToolPaths, setConfineToolPaths] = useState(false);
   const [musicDirectorySaved, setMusicDirectorySaved] = useState("");
-  // "rules" clears rules the chat learned; "log" empties the behaviour log file.
+  // "rules" clears rules marked LEARNED; "log" empties the behaviour log file.
   const [learningClear, setLearningClear] = useState(null);
   const [learningBusy, setLearningBusy] = useState(false);
   const [editProfile, setEditProfile] = useState(null);
@@ -3641,7 +3641,7 @@ const SettingsPage = () => {
           kind="destructive"
           onClick={() => setLearningClear("rules")}
           disabled={isLoading}
-          tooltip="Deletes every rule the chat learned on its own; rules you wrote stay"
+          tooltip="Deletes every rule marked as learned; rules you wrote stay"
         >
           Clear learned rules
         </ActionButton>
@@ -4060,7 +4060,7 @@ const SettingsPage = () => {
         }
         description={
           learningClear === "rules"
-            ? "Deletes every rule marked as learned, the ones the chat added on its own from corrections and preferences."
+            ? "Deletes every rule marked as learned: the ones shipped in the rule bundle, and any saved by the /saverule command. The chat does not add rules on its own."
             : "Empties the behaviour log file that Behaviour learning reads to adapt replies. Learning starts again from nothing."
         }
         keeps={

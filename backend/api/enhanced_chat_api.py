@@ -698,7 +698,8 @@ VOICE INTERACTION MODE: You are responding to voice chat, so be extra conversati
             # When disabled (default), skip the DB lookups and fall through to
             # the hardcoded fallback template below.
             from backend.utils.settings_utils import get_rules_enabled
-            if get_rules_enabled():
+            rules_on = get_rules_enabled()
+            if rules_on:
                 base_template, rule_id = rule_utils.get_active_system_prompt(
                     "enhanced_chat",
                     db.session,
@@ -800,10 +801,13 @@ You have real-time web search capabilities enabled. When users ask questions tha
             # Build final context string
             context_str = "\n\n".join(context_parts) if context_parts else "No additional context available."
 
-            # Apply template with context (this will be used by the chat engine's system message)
-            # The template includes the anti-fabrication rules and proper formatting
+            # {rules_str} carries the active rules block when the Rules switch is
+            # on and a rule applies; the fixed line otherwise.
+            rules_str = ""
+            if rules_on:
+                rules_str = rule_utils.get_chat_rules_block(model_name).strip()
             final_prompt = base_template.format(
-                rules_str="BULLETPROOF ANTI-FABRICATION SYSTEM ACTIVE",
+                rules_str=rules_str or "BULLETPROOF ANTI-FABRICATION SYSTEM ACTIVE",
                 context_str=context_str,
                 query_str="[USER QUERY WILL BE PROVIDED SEPARATELY]"
             )

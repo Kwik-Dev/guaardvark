@@ -5708,11 +5708,13 @@ class UnifiedChatEngine:
         return bool(UnifiedChatEngine._REALTIME_KEYWORD_RE.search(msg_lower))
 
     def _load_rules(self, model_name: str) -> str:
-        """Load system prompt rules from database (thread-safe with app context).
+        """The persona and active rules block for the system prompt.
 
         Gated by the global SettingsPage → A.I. Features → Rules toggle.
         When disabled (default), skip DB lookups entirely and return the
-        hardcoded prompt — no warnings, no RulesPage coupling.
+        hardcoded prompt — no warnings, no RulesPage coupling. With it on,
+        the active persona rule (or the hardcoded prompt) is followed by the
+        rules block ``rule_utils.get_chat_rules_block`` builds for the model.
         """
         default_prompt = "You are a helpful AI assistant. Be accurate, concise, and honest."
         try:
@@ -5738,7 +5740,11 @@ class UnifiedChatEngine:
                     )
                 if text:
                     logger.info(f"Loaded rule ID {rule_id} for unified chat")
-                    return text
+                persona = text or default_prompt
+                rules_block = rule_utils.get_chat_rules_block(model_name)
+                if rules_block:
+                    return f"{persona}\n\n{rules_block.strip()}"
+                return persona
             finally:
                 if ctx:
                     ctx.pop()

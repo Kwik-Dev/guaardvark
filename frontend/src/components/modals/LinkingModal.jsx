@@ -198,12 +198,17 @@ const LinkingModal = ({
     setIsLoading(true);
     setError(null);
     try {
-      await apiUpdateLinks(
+      const result = await apiUpdateLinks(
         primaryEntityType,
         primaryEntityId,
         activeTabConfig.entityType,
         Array.from(checkedItemIds),
       );
+      // A helper that reports failure as a value instead of throwing must
+      // not be announced as success.
+      if (result && result.success === false) {
+        throw new Error(result.error || "Failed to save links.");
+      }
       if (onLinksUpdated) onLinksUpdated();
       onClose(true);
     } catch (err) {

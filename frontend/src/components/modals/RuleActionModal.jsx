@@ -1,8 +1,7 @@
 // frontend/src/components/modals/RuleActionModal.jsx
-// Version 4.0.0: Intelligent auto-detection and simplified UX
-// - Removed Level and Type dropdowns (auto-detected)
-// - Smart detection: COMMAND (has command), SYSTEM (qa_default/global), PROMPT (others)
-// - Cleaner UI with better organization and user experience
+// No Level or Type dropdowns: a new rule's level and type are derived from the
+// form (COMMAND when it has a command label, SYSTEM for the two system prompt
+// names, PROMPT otherwise); an existing rule keeps the pair it was stored with.
 
 import CloseIcon from "@mui/icons-material/Close";
 import LinkIcon from "@mui/icons-material/Link";
@@ -31,27 +30,78 @@ import * as apiService from "../../api";
 
 const ALL_MODELS_VALUE = "__ALL__";
 
-// Auto-detect rule type based on content and name
-const detectRuleType = (formData) => {
-  const name = formData.name?.toLowerCase() || "";
-  const hasCommand = formData.command_label?.trim();
-
-  if (hasCommand) return "COMMAND";
-  if (name === "qa_default" || name === "global_default_chat_system_prompt")
-    return "SYSTEM";
-  return "PROMPT";
+// Database type and level for a NEW rule, derived from the form. An existing
+// rule keeps the level and type it was stored with (see effectiveTypeAndLevel):
+// the chat engine looks rows up by them (qa_default must stay QA_TEMPLATE at
+// SYSTEM, SYSTEM and LEARNED rows must keep their level), so re-deriving them
+// from the name on every save silently broke retrieval.
+const deriveTypeAndLevel = (formData) => {
+  const name = formData.name?.trim().toLowerCase() || "";
+  if (formData.command_label?.trim()) {
+    return { type: "COMMAND_RULE", level: "USER_GLOBAL" };
+  }
+  if (name === "qa_default") {
+    return { type: "QA_TEMPLATE", level: "SYSTEM" };
+  }
+  if (LOOKED_UP_NAMES.includes(name)) {
+    return { type: "PROMPT_TEMPLATE", level: "SYSTEM" };
+  }
+  return { type: "PROMPT_TEMPLATE", level: "USER_GLOBAL" };
 };
 
-// Convert display type to database type and level
-const getDbTypeAndLevel = (displayType, _isSystemPrompt = false) => {
-  switch (displayType) {
-    case "COMMAND":
-      return { type: "COMMAND_RULE", level: "USER_GLOBAL" };
-    case "SYSTEM":
-      return { type: "PROMPT_TEMPLATE", level: "SYSTEM" };
-    default:
-      return { type: "PROMPT_TEMPLATE", level: "USER_GLOBAL" };
+// Rules the engine finds by name (rule_utils.PROMPT_SLOT_RULE_NAMES and the
+// QA template): renaming one would leave the lookup empty, so the name of an
+// existing one is read-only here.
+export const LOOKED_UP_NAMES = [
+  "global_default_chat_system_prompt",
+  "enhanced_chat",
+  "qa_default",
+];
+
+// An existing rule keeps its stored level and type; type is nullable, so a
+// null stays null (and is left out of the save) rather than being derived.
+export const effectiveTypeAndLevel = (formData, ruleData) => {
+  if (ruleData?.id && ruleData.level) {
+    return { type: ruleData.type || null, level: ruleData.level };
   }
+  return deriveTypeAndLevel(formData);
+};
+
+// Label and hint of the big text field, by the type this save will store.
+export const contentFieldFor = (type) => {
+  switch (type) {
+    case "PROMPT_TEMPLATE":
+    case "SYSTEM_PROMPT":
+      return {
+        label: "Prompt Template",
+        helperText: "Enter the prompt template with {placeholders} as needed",
+      };
+    case "QA_TEMPLATE":
+      return {
+        label: "QA Template",
+        helperText:
+          "The answer-from-context template; keep {context_str} and {query_str}",
+      };
+    case "COMMAND_RULE":
+      return {
+        label: "Command Prompt",
+        helperText:
+          "The prompt the command runs; {{args}} is replaced by what follows the command",
+      };
+    default:
+      return {
+        label: "Rule Content",
+        helperText: "Define the rule logic or content",
+      };
+  }
+};
+
+// The badge shown in the dialog: COMMAND, SYSTEM, LEARNED or PROMPT.
+const displayKind = ({ type, level }) => {
+  if (type === "COMMAND_RULE") return "COMMAND";
+  if (level === "SYSTEM") return "SYSTEM";
+  if (level === "LEARNED") return "LEARNED";
+  return "PROMPT";
 };
 
 const RuleActionModal = ({
@@ -83,6 +133,8 @@ const RuleActionModal = ({
       is_active: ruleData?.is_active !== false,
       project_id: ruleData?.project_id || null,
       client_id: ruleData?.client_id || null,
+      level: ruleData?.level || null,
+      type: ruleData?.type || null,
     };
     setFormData(initialData);
   }, [ruleData]);
@@ -102,20 +154,24 @@ const RuleActionModal = ({
             );
           }
           const names = Array.isArray(fetchedApiModels)
-            ? fetchedApiModels.map((m) => m.name)
+            ? fetchedApiModels.map((m) => m.name).filter(Boolean)
             : [];
           setModelOptions([ALL_MODELS_VALUE, ...new Set(names)]);
+          if (names.length === 0) {
+            setModelFetchError(
+              "No installed models were listed (is Ollama running?). " +
+                "Only All Models can be chosen; models already set on this rule are kept."
+            );
+          }
         } catch (err) {
           console.error("RuleActionModal: Failed to fetch models:", err);
+          // Local-first: no made-up model names when the local list is
+          // unavailable. The rule's existing targets stay selectable as-is.
           setModelFetchError(
-            `Failed to load models: ${err.message}. Using default list.`
+            `Could not load the installed model list: ${err.message}. ` +
+              "Only All Models can be chosen; models already set on this rule are kept."
           );
-          setModelOptions([
-            ALL_MODELS_VALUE,
-            "gpt-4",
-            "gpt-3.5-turbo",
-            "claude-2",
-          ]);
+          setModelOptions([ALL_MODELS_VALUE]);
         } finally {
           setIsLoadingModels(false);
         }
@@ -148,19 +204,19 @@ const RuleActionModal = ({
 
   const handleSave = () => {
     if (onSave) {
-      const detectedType = detectRuleType(formData);
+      const { type, level } = effectiveTypeAndLevel(formData, ruleData);
 
-      if (detectedType === "COMMAND" && !formData.command_label?.trim()) {
+      if (type === "COMMAND_RULE" && !formData.command_label?.trim()) {
         alert("Command is required for command rules.");
         return;
       }
 
-      const { type, level } = getDbTypeAndLevel(detectedType);
       const dataToSave = {
         ...formData,
         type,
         level,
       };
+      if (type === null) delete dataToSave.type;
 
       if (ruleData?.id) {
         dataToSave.id = ruleData.id;
@@ -193,8 +249,16 @@ const RuleActionModal = ({
     }
   };
 
-  // Get current detected type for display
-  const detectedType = detectRuleType(formData);
+  // What this save will store: the stored level/type for an existing rule,
+  // the derived pair for a new one.
+  const effective = effectiveTypeAndLevel(formData, ruleData);
+  const detectedType = displayKind(effective);
+  const commandRequired = effective.type === "COMMAND_RULE";
+  // The type is fixed after creation, so an existing non-command rule cannot
+  // take a command label; a command rule must keep one.
+  const commandLocked = !isNewRule && !commandRequired;
+  const nameLocked =
+    !isNewRule && LOOKED_UP_NAMES.includes(ruleData?.name || "");
   const getTypeDisplayInfo = (type) => {
     switch (type) {
       case "COMMAND":
@@ -209,6 +273,17 @@ const RuleActionModal = ({
           color: theme.palette.error.main,
           description: "Core system prompt",
         };
+      case "LEARNED":
+        // A learned row with a reference_id was written by the /saverule
+        // command of the /api/query endpoint, which the chat page does not
+        // call; one without came from the rule bundle.
+        return {
+          label: "LEARNED",
+          color: theme.palette.info.main,
+          description: ruleData?.reference_id
+            ? "Saved by /saverule on the /api/query endpoint"
+            : "Learned rule shipped in the rule bundle",
+        };
       default:
         return {
           label: "PROMPT",
@@ -219,6 +294,7 @@ const RuleActionModal = ({
   };
 
   const typeInfo = getTypeDisplayInfo(detectedType);
+  const contentField = contentFieldFor(effective.type);
 
   return (
     <Dialog
@@ -260,8 +336,13 @@ const RuleActionModal = ({
                   onChange={handleChange}
                   fullWidth
                   required
-                  autoFocus
-                  helperText="A unique and descriptive name"
+                  autoFocus={!nameLocked}
+                  disabled={nameLocked}
+                  helperText={
+                    nameLocked
+                      ? "The chat engine looks this rule up by name, so the name cannot change"
+                      : "A unique and descriptive name"
+                  }
                 />
               </Grid>
               <Grid
@@ -311,6 +392,8 @@ const RuleActionModal = ({
                   </Typography>
                   <Typography variant="caption" color="text.secondary">
                     {typeInfo.description}
+                    {!isNewRule &&
+                      ` (${effective.level} / ${effective.type || "no type"}, kept on save)`}
                   </Typography>
                 </Box>
               </Grid>
@@ -323,15 +406,17 @@ const RuleActionModal = ({
                   fullWidth
                   size="small"
                   placeholder="/your-command"
+                  disabled={commandLocked}
                   helperText={
-                    detectedType === "COMMAND"
-                      ? "Required for command rules"
-                      : "Leave empty for prompt templates"
+                    commandLocked
+                      ? "Type is fixed after creation; create a new rule to add a command"
+                      : commandRequired && !isNewRule
+                        ? "Required; the type is fixed after creation"
+                        : commandRequired
+                          ? "Required for command rules"
+                          : "Leave empty for prompt templates"
                   }
-                  error={
-                    detectedType === "COMMAND" &&
-                    !formData.command_label?.trim()
-                  }
+                  error={commandRequired && !formData.command_label?.trim()}
                 />
               </Grid>
             </Grid>
@@ -340,11 +425,7 @@ const RuleActionModal = ({
           {/* Content */}
           <Grid item xs={12}>
             <TextField
-              label={
-                formData.type === "PROMPT_TEMPLATE"
-                  ? "Prompt Template"
-                  : "Rule Content"
-              }
+              label={contentField.label}
               name="rule_text"
               value={formData.rule_text || ""}
               onChange={handleChange}
@@ -353,11 +434,7 @@ const RuleActionModal = ({
               maxRows={20}
               fullWidth
               required
-              helperText={
-                formData.type === "PROMPT_TEMPLATE"
-                  ? "Enter the prompt template with {placeholders} as needed"
-                  : "Define the rule logic or content"
-              }
+              helperText={contentField.helperText}
             />
           </Grid>
 
@@ -461,8 +538,7 @@ const RuleActionModal = ({
             isSaving ||
             !formData.name?.trim() ||
             !formData.rule_text?.trim() ||
-            (detectRuleType(formData) === "COMMAND" &&
-              !formData.command_label?.trim())
+            (commandRequired && !formData.command_label?.trim())
           }
         >
           {isSaving ? "Saving..." : isNewRule ? "Create" : "Save"}

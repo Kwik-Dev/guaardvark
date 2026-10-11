@@ -1,11 +1,11 @@
 # backend/api/entity_links_api.py
 # Comprehensive Entity Linking API for Many-to-Many Relationships
-# Handles linking between Documents, Tasks, Clients, and Projects
+# Handles linking between Documents, Tasks, Clients, Projects and Rules
 
 import logging
 from flask import Blueprint, request, jsonify, current_app
 from sqlalchemy.exc import SQLAlchemyError
-from backend.models import db, Document, Task, Client, Project
+from backend.models import db, Document, Task, Client, Project, Rule
 from backend.tools.knowledge_tools import _contains
 
 logger = logging.getLogger(__name__)
@@ -15,10 +15,32 @@ entity_links_bp = Blueprint("entity_links", __name__, url_prefix="/api/entity-li
 # Entity type mapping for validation and querying
 ENTITY_MODELS = {
     "document": Document,
-    "task": Task, 
+    "task": Task,
     "client": Client,
-    "project": Project
+    "project": Project,
+    "rule": Rule,
 }
+
+
+def _set_many_to_many(collection, model, linked_ids):
+    """Make a dynamic many-to-many collection hold exactly `linked_ids`.
+
+    Returns the ids that do not exist so the caller can refuse the request
+    instead of silently linking fewer rows than asked.
+    """
+    wanted = {int(i) for i in linked_ids}
+    found = {row.id: row for row in db.session.query(model).filter(model.id.in_(wanted)).all()} if wanted else {}
+    missing = sorted(wanted - set(found))
+    if missing:
+        return missing
+    current = {row.id: row for row in collection.all()}
+    for row_id, row in current.items():
+        if row_id not in wanted:
+            collection.remove(row)
+    for row_id, row in found.items():
+        if row_id not in current:
+            collection.append(row)
+    return []
 
 def get_entity_by_type_and_id(entity_type, entity_id):
     """Get an entity by type and ID with validation."""
@@ -59,6 +81,14 @@ def serialize_entity(entity, entity_type):
             "id": entity.id,
             "name": entity.name,
             "description": entity.description
+        }
+    elif entity_type == "rule":
+        return {
+            "id": entity.id,
+            "name": entity.name,
+            "level": entity.level,
+            "type": entity.type,
+            "is_active": entity.is_active,
         }
     return {"id": entity.id}
 
@@ -114,7 +144,11 @@ def get_entity_links(entity_type, entity_id):
                 links["clients"] = [serialize_entity(entity.client_ref, "client")]
             else:
                 links["clients"] = []
-        
+
+        elif entity_type == "rule":
+            # Rules link to projects through project_rules_association
+            links["projects"] = [serialize_entity(proj, "project") for proj in entity.linked_projects]
+
         return jsonify({
             "success": True,
             "entity_type": entity_type,
@@ -187,7 +221,18 @@ def update_entity_links(entity_type, entity_id, link_type):
                 Project.client_id == entity_id,
                 ~Project.id.in_(linked_ids)
             ).update({"client_id": None})
-            
+
+        elif entity_type == "rule" and link_type == "projects":
+            # Many-to-many through project_rules_association
+            missing = _set_many_to_many(entity.linked_projects, Project, linked_ids)
+            if missing:
+                return jsonify({"error": f"Unknown project ids: {missing}"}), 404
+
+        elif entity_type == "project" and link_type == "rules":
+            missing = _set_many_to_many(entity.linked_rules, Rule, linked_ids)
+            if missing:
+                return jsonify({"error": f"Unknown rule ids: {missing}"}), 404
+
         else:
             return jsonify({
                 "error": f"Link type {link_type} not supported for {entity_type}"
@@ -226,7 +271,7 @@ def get_linkable_entities(entity_type):
             pattern = _contains(search_term)
             if entity_type == "document":
                 query = query.filter(model.filename.ilike(pattern, escape="\\"))
-            elif entity_type in ["task", "project"]:
+            elif entity_type in ["task", "project", "rule"]:
                 query = query.filter(model.name.ilike(pattern, escape="\\"))
             elif entity_type == "client":
                 query = query.filter(model.name.ilike(pattern, escape="\\"))
