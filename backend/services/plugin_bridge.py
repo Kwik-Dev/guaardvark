@@ -354,6 +354,24 @@ def _stop_blocked_reason(plugin_id: str) -> Optional[str]:
     return None
 
 
+def _is_external(plugin_id: str) -> bool:
+    """The Ollama card's "I run Ollama myself: never start or stop it" switch.
+    An external plugin is never claimed, started or stopped by the orchestrator."""
+    if plugin_id != "ollama":
+        return False
+    try:
+        from backend.plugins.plugin_manager import ollama_is_external
+        return ollama_is_external()
+    except Exception:
+        return False
+
+
+# Plugins whose external-refusal has been logged, so a route change does not
+# repeat it. A claim made before the switch was turned on is dropped on the
+# first refusal; after that nothing retries.
+_external_logged: Set[str] = set()
+
+
 def _stop_plugin(plugin_id: str, *, reason: str) -> Dict[str, Any]:
     pm = _plugin_manager()
     if not _is_running(plugin_id):
@@ -367,6 +385,17 @@ def _stop_plugin(plugin_id: str, *, reason: str) -> Dict[str, Any]:
     res = pm.stop_plugin(plugin_id)
     if res.get("success"):
         logger.info("plugin_bridge: stopped %s (%s)", plugin_id, reason)
+    elif res.get("external"):
+        with _state_lock:
+            _orchestrator_claims.discard(plugin_id)
+            first = plugin_id not in _external_logged
+            _external_logged.add(plugin_id)
+        if first:
+            logger.info(
+                "plugin_bridge: %s is marked external (never started or stopped by Guaardvark); "
+                "leaving it running and dropping the orchestrator's claim (%s)",
+                plugin_id, reason,
+            )
     else:
         logger.warning("plugin_bridge: stop %s failed: %s", plugin_id, res.get("error"))
     return res
@@ -391,6 +420,8 @@ def _resolve_gpu_conflict(needed: Set[str]) -> List[Dict[str, Any]]:
             actions.append({"action": "gpu_swap_stop", "plugin_id": pid})
         elif res.get("blocked_by_job"):
             actions.append({"action": "gpu_swap_blocked", "plugin_id": pid, "error": res.get("error")})
+        elif res.get("external"):
+            actions.append({"action": "gpu_swap_left_external", "plugin_id": pid})
     return actions
 
 
@@ -626,6 +657,8 @@ def prepare_plugins_for_route(route: str) -> Dict[str, Any]:
                         "plugin_id": pid,
                         "error": res.get("error"),
                     })
+                elif res.get("external"):
+                    actions.append({"action": "left_external", "plugin_id": pid})
 
     actions.extend(_resolve_gpu_conflict(needed))
 
@@ -637,6 +670,15 @@ def prepare_plugins_for_route(route: str) -> Dict[str, Any]:
                 else:
                     actions.append({"action": "user_controlled_stopped", "plugin_id": plugin_id})
                 continue
+
+        # The user's own Ollama: used when it answers, never claimed, so no
+        # later route change tries to stop it, and never started here.
+        if _is_external(plugin_id):
+            actions.append({
+                "action": "external_running" if _is_running(plugin_id) else "external_stopped",
+                "plugin_id": plugin_id,
+            })
+            continue
 
         if _is_running(plugin_id):
             with _state_lock:

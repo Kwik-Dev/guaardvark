@@ -120,6 +120,8 @@ mkdir -p "$SCRIPT_DIR/.start_cache"
 # shellcheck source=scripts/lib/start_lock.sh
 . "$SCRIPT_DIR/scripts/lib/start_lock.sh"
 . "$SCRIPT_DIR/scripts/lib/venv_pins.sh"
+# shellcheck source=scripts/lib/ollama_lifecycle.sh
+. "$SCRIPT_DIR/scripts/lib/ollama_lifecycle.sh"   # ollama_flag_on
 if [ -f "$START_PID_FILE" ]; then
     _prev_pid=$(cat "$START_PID_FILE" 2>/dev/null)
     if [ "$(start_lock_guard_decision "$_prev_pid")" = "live" ]; then
@@ -2284,7 +2286,7 @@ fi
 OLLAMA_PLUGIN_JSON="$SCRIPT_DIR/plugins/ollama/plugin.json"
 OLLAMA_ENABLED=$(plugin_effective_enabled "ollama" "$OLLAMA_PLUGIN_JSON")
 
-if [ "${GUAARDVARK_OLLAMA_EXTERNAL:-0}" = 1 ] && [ "$OLLAMA_ENABLED" != "False" ]; then
+if ollama_flag_on "${GUAARDVARK_OLLAMA_EXTERNAL:-}" && [ "$OLLAMA_ENABLED" != "False" ]; then
     # External Ollama: the user runs it; start.sh only checks that it answers.
     if curl -sf --max-time 3 http://127.0.0.1:11434/ >/dev/null 2>&1; then
         vader_success "Using external Ollama on 127.0.0.1:11434 (GUAARDVARK_OLLAMA_EXTERNAL=1; never started or stopped by these scripts)"

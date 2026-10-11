@@ -73,7 +73,6 @@ import { getGpuStatus } from '../api/gpuService';
 import OllamaLifecycleSection from '../components/settings/OllamaLifecycleSection';
 
 // ── Constants ──────────────────────────────────────────────────────────
-const TOTAL_VRAM_MB = 16384; // 16GB
 const STATUS_CONFIG = {
   running: { color: 'success', icon: HealthyIcon, label: 'Running' },
   stopped: { color: 'default', icon: StopIcon, label: 'Stopped' },
@@ -90,22 +89,24 @@ const PLUGIN_COLORS = {
   gpu_embedding: '#ff6d00',
 };
 
-// A plugin is "GPU-heavy" — and thus mutually exclusive with other heavy
-// plugins (only one heavy GPU service at a time on a 16 GB card) — when its
-// manifest VRAM estimate crosses this line. Driven by vram_estimate_mb so new
-// plugins are covered automatically: ollama (8 GB), comfyui (6 GB),
-// audio_foundry (10 GB), lora_trainer (18 GB) qualify; light GPU users
-// (vision ~2 GB, upscaling ~1.5 GB) and CPU-only plugins fall below it and
-// never trigger the swap prompt. Groundwork for the future 3-mode "gear" selector.
-const GPU_HEAVY_THRESHOLD_MB = 3000;
-const isGpuHeavy = (plugin) => (plugin?.vram_estimate_mb || 0) >= GPU_HEAVY_THRESHOLD_MB;
+// A plugin is "GPU-heavy", and so mutually exclusive with the other heavy
+// ones, when the backend says so: `gpu_exclusive` in the listing comes from
+// GPU_EXCLUSIVE_PLUGIN_IDS in backend/plugins/plugin_manager.py, the same set
+// the operation gate and the route orchestrator use. A local copy drifted
+// from it (a VRAM threshold flagged plugins the gate did not).
+const isGpuHeavy = (plugin) => Boolean(plugin?.gpu_exclusive);
 
 // ── VRAM Budget Bar ────────────────────────────────────────────────────
 const VramBudgetBar = ({ plugins, gpuVram }) => {
-  const totalMb = gpuVram?.total_mb || TOTAL_VRAM_MB;
+  // The GPU query (/api/gpu/memory/status, then gpu:status pushes) is the only
+  // source for these numbers. When it has not answered, or the backend
+  // reports a failed query (null numbers), the card says "unknown" for the
+  // total and for free VRAM instead of assuming a card size or printing 0.
+  const totalMb = Number(gpuVram?.total_mb) || 0;
+  const vramKnown = totalMb > 0;
   const usedMb = gpuVram?.used_mb || 0;
-  const freeMb = gpuVram?.free_mb ?? (totalMb - usedMb);
-  const usedPct = (usedMb / totalMb) * 100;
+  const freeMb = vramKnown ? (gpuVram?.free_mb ?? totalMb - usedMb) : null;
+  const usedPct = vramKnown ? (usedMb / totalMb) * 100 : 0;
 
   const activePlugins = plugins.filter(
     (p) => p.status === 'running' && p.vram_estimate_mb > 0
@@ -130,13 +131,16 @@ const VramBudgetBar = ({ plugins, gpuVram }) => {
               variant="outlined"
             />
           )}
-          <Typography variant="body2" color="text.secondary">
-            {(usedMb / 1024).toFixed(1)} / {(totalMb / 1024).toFixed(1)} GB
+          <Typography variant="body2" color="text.secondary" data-testid="vram-totals">
+            {vramKnown
+              ? `${(usedMb / 1024).toFixed(1)} / ${(totalMb / 1024).toFixed(1)} GB`
+              : 'total unknown — no answer from the GPU query'}
           </Typography>
         </Stack>
       </Box>
 
       {/* Live usage bar */}
+      {vramKnown && (
       <Box
         sx={{
           height: 24,
@@ -180,11 +184,12 @@ const VramBudgetBar = ({ plugins, gpuVram }) => {
           })}
         </Box>
       </Box>
+      )}
 
       {/* Legend + free VRAM */}
       <Stack direction="row" spacing={2} sx={{ mt: 1 }} flexWrap="wrap" useFlexGap>
         <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>
-          {(freeMb / 1024).toFixed(1)} GB free
+          {freeMb != null ? `${(freeMb / 1024).toFixed(1)} GB free` : 'free VRAM unknown'}
         </Typography>
         {activePlugins.map((p) => (
           <Box key={p.id} sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
@@ -385,6 +390,15 @@ const PluginCard = ({ plugin, onAction, onConfigOpen, showMessage }) => {
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
           {plugin.description || 'No description available.'}
         </Typography>
+
+        {/* Why the plugin is not (fully) ours to use: another install's copy
+            holding the port, a tool its start script could not find. The
+            backend sets it (status_message) and clears it on the next start. */}
+        {plugin.status_message && (
+          <Alert severity="warning" variant="outlined" sx={{ mb: 2 }} data-testid={`plugin-status-message-${plugin.id}`}>
+            {plugin.status_message}
+          </Alert>
+        )}
 
         <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mb: 1 }}>
           <Chip size="small" label={`v${plugin.version}`} variant="outlined" />
@@ -869,8 +883,12 @@ const PluginsPage = () => {
           ));
         }
 
-        // After stopping ComfyUI, offer to restart Ollama once socket/HTTP state settles.
-        if (action === 'stop' && pluginId === 'comfyui') {
+        // After ComfyUI goes down, offer to bring Ollama back once socket/HTTP
+        // state settles: the route orchestrator stops Ollama to make room for
+        // ComfyUI (plugin_bridge GPU swap), which leaves it enabled but not
+        // running. The switch and the context menu send 'disable' (which stops
+        // the service first); 'stop' is kept for callers that only stop.
+        if ((action === 'stop' || action === 'disable') && pluginId === 'comfyui') {
           setTimeout(async () => {
             const list = (await fetchPlugins()) || plugins;
             const ollamaPlugin = list.find((p) => p.id === 'ollama');

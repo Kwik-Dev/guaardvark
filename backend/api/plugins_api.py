@@ -3,6 +3,7 @@
 
 import collections
 import logging
+import re
 import subprocess
 from pathlib import Path
 
@@ -33,6 +34,9 @@ PLUGIN_LOG_CANDIDATES: dict[str, list[str]] = {
     "vision_pipeline": ["vision_pipeline.log"],
     "upscaling": ["upscaling.log"],
     "audio_foundry": ["audio_foundry.log"],
+    # The trainer daemon's stderr (plugins/lora_trainer/real_trainer.py),
+    # then the plain name as a fallback.
+    "lora_trainer": ["lora_trainer_daemon.log", "lora_trainer.log"],
 }
 
 
@@ -41,6 +45,18 @@ def _tail_text_file(path: Path, lines: int) -> tuple[str, int]:
         tail = collections.deque(f, maxlen=lines)
     log_text = "".join(tail)
     return log_text, len(tail)
+
+
+# journalctl -o short-iso: "<iso time> <hostname> <unit>[<pid>]: <message>".
+# The Logs panel shows every line in the browser, so the hostname goes; the
+# time stays, since Ollama's own lines do not all carry one.
+_JOURNAL_PREFIX = re.compile(r"^(\S+) \S+ \S+?\[\d+\]: ")
+
+
+def _strip_journal_host(text: str) -> str:
+    """``2026-10-10T18:43:33-04:00 box ollama[1840771]: msg`` becomes
+    ``2026-10-10T18:43:33-04:00 msg``; other lines are left as they are."""
+    return "\n".join(_JOURNAL_PREFIX.sub(r"\1 ", line) for line in text.splitlines())
 
 
 def _read_plugin_log_text(plugin_id: str, lines: int) -> tuple[str, int, str]:
@@ -71,8 +87,8 @@ def _read_plugin_log_text(plugin_id: str, lines: int) -> tuple[str, int, str]:
                 check=False,
             )
             if result.returncode == 0 and result.stdout.strip():
-                rows = result.stdout.splitlines()
-                return result.stdout, len(rows), "journalctl:ollama"
+                text = _strip_journal_host(result.stdout)
+                return text + "\n", len(text.splitlines()), "journalctl:ollama"
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
             pass
 
@@ -392,12 +408,18 @@ def update_plugin_config(plugin_id):
 
 @plugins_bp.route("/refresh", methods=["POST"])
 def refresh_plugins():
-    """Refresh plugin registry by rescanning plugins directory."""
+    """Refresh plugin registry by rescanning plugins directory.
+
+    Kills nothing and starts nothing. The boot-time path
+    (PluginManager._init_plugin_status) also kills processes found on
+    disabled plugins' ports and restores the last running set; a refresh the
+    user clicked must do neither. The only write is to the persisted running
+    set, which may gain an answering service and never loses one.
+    """
     try:
         manager = get_plugin_manager()
-        discovered = manager.registry.refresh()
-        manager._init_plugin_status()  # Reinitialize status
-        
+        discovered = manager.reload()
+
         return success_response(
             data={
                 "discovered": discovered,

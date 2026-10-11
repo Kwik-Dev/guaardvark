@@ -6,7 +6,8 @@
 #   stop_ollama "$mode" "$PIDS_DIR/ollama.pid"           # sets $ollama_killed
 #
 # Modes:
-#   keep   touch nothing (--keep-ollama, or GUAARDVARK_OLLAMA_KEEP_RUNNING=1 in the environment)
+#   keep   touch nothing (--keep-ollama, or GUAARDVARK_OLLAMA_KEEP_RUNNING=1 in the environment;
+#          1/true/yes/on all count, see ollama_flag_on)
 #   owned  stop only the instance start.sh launched, named by the PID file (the default)
 #   all    also stop user-owned `ollama serve` processes, the systemd service and any
 #          unresponsive holder of port 11434 (--all)
@@ -18,9 +19,18 @@ ollama_log() {
     if command -v vader_info >/dev/null 2>&1; then vader_info "$1"; else echo "  · $1"; fi
 }
 
+# True for "1", "true", "yes" or "on" in any case: the set the backend accepts
+# (backend/plugins/plugin_manager.py, ollama_is_external). Settings writes "1".
+ollama_flag_on() {
+    case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+        1|true|yes|on) return 0 ;;
+    esac
+    return 1
+}
+
 ollama_stop_mode() {
     local flag_all="${1:-0}" flag_keep="${2:-0}"
-    if [ "$flag_keep" = 1 ] || [ "${GUAARDVARK_OLLAMA_KEEP_RUNNING:-0}" = 1 ]; then
+    if [ "$flag_keep" = 1 ] || ollama_flag_on "${GUAARDVARK_OLLAMA_KEEP_RUNNING:-}"; then
         echo keep
     elif [ "$flag_all" = 1 ]; then
         echo all
