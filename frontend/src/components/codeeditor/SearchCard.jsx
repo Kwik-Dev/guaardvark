@@ -11,6 +11,7 @@ import {
   ListItemText,
   Typography,
   Chip,
+  Tooltip,
 } from "@mui/material";
 import {
   Search,
@@ -18,6 +19,7 @@ import {
 } from "@mui/icons-material";
 
 import DashboardCardWrapper from "../dashboard/DashboardCardWrapper";
+import { replaceInTabs } from "./searchReplace";
 
 const SearchCard = React.forwardRef(
   (
@@ -30,12 +32,27 @@ const SearchCard = React.forwardRef(
       searchResults,
       setSearchResults,
       openTabs,
+      setOpenTabs,
       ...props
     },
     ref
   ) => {
     const [searchTerm, setSearchTerm] = useState("");
     const [replaceTerm, setReplaceTerm] = useState("");
+    const [replaceNote, setReplaceNote] = useState("");
+
+    // Replace every match of the search term in the open, editable tabs.
+    const handleReplaceAll = useCallback(() => {
+      if (!searchTerm.trim() || !setOpenTabs) return;
+      const { tabs, replaced, files } = replaceInTabs(openTabs, searchTerm, replaceTerm);
+      if (replaced === 0) {
+        setReplaceNote(`No matches for "${searchTerm}" in the open files`);
+        return;
+      }
+      setOpenTabs(tabs);
+      setSearchResults([]);
+      setReplaceNote(`Replaced ${replaced} match${replaced === 1 ? '' : 'es'} in ${files} file${files === 1 ? '' : 's'} (unsaved)`);
+    }, [searchTerm, replaceTerm, openTabs, setOpenTabs, setSearchResults]);
 
     const handleSearch = useCallback(() => {
       if (!searchTerm.trim() || !openTabs || !Array.isArray(openTabs)) return;
@@ -95,14 +112,24 @@ const SearchCard = React.forwardRef(
               placeholder="Replace with..."
               value={replaceTerm}
               onChange={(e) => setReplaceTerm(e.target.value)}
+              onKeyPress={(e) => e.key === 'Enter' && handleReplaceAll()}
               InputProps={{
                 endAdornment: (
-                  <IconButton size="small">
-                    <FindReplace fontSize="small" />
-                  </IconButton>
+                  <Tooltip title={searchTerm.trim() ? "Replace all in open files" : "Type a search term first"}>
+                    <span>
+                      <IconButton size="small" onClick={handleReplaceAll} disabled={!searchTerm.trim()} aria-label="Replace all in open files">
+                        <FindReplace fontSize="small" />
+                      </IconButton>
+                    </span>
+                  </Tooltip>
                 )
               }}
             />
+            {replaceNote && (
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+                {replaceNote}
+              </Typography>
+            )}
           </Box>
 
           <Box sx={{ flex: 1, overflow: 'auto' }}>

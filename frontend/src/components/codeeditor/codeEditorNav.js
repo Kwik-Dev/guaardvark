@@ -55,3 +55,20 @@ export function findDocumentTab(tabs, doc) {
     (tab) => (doc.id != null && tab.documentId === doc.id) || (doc.filePath && tab.filePath === doc.filePath),
   );
 }
+
+/**
+ * The toolbar action an editor shortcut asks for: Ctrl/Cmd+R run,
+ * Ctrl/Cmd+Shift+F format, F5 debug, Ctrl/Cmd+B build. Null for anything
+ * else. Only the editor card listens for these, so Ctrl+R elsewhere on the
+ * page still reloads the browser.
+ */
+export function editorActionForShortcut(event) {
+  if (!event || event.altKey) return null;
+  const k = String(event.key).toLowerCase();
+  if (k === "f5" && !hasCtrl(event) && !event.shiftKey) return "debug";
+  if (!hasCtrl(event)) return null;
+  if (event.shiftKey) return k === "f" ? "format" : null;
+  if (k === "r") return "run";
+  if (k === "b") return "build";
+  return null;
+}

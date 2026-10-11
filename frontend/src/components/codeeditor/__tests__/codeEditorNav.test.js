@@ -5,6 +5,7 @@ import { render } from "@testing-library/react";
 import ReactGridLayout from "react-grid-layout/legacy";
 import {
   cardForShortcut,
+  editorActionForShortcut,
   findCardElement,
   findDocumentTab,
   isFindSymbolShortcut,
@@ -87,5 +88,25 @@ describe("jumping to a symbol", () => {
     expect(findDocumentTab(tabs, { id: 9 })).toBe(1);
     expect(findDocumentTab(tabs, { id: 3, filePath: "src/a.py" })).toBe(0);
     expect(findDocumentTab(tabs, { id: 3, filePath: "src/c.py" })).toBe(-1);
+  });
+});
+
+describe("editor toolbar shortcuts", () => {
+  it("maps Ctrl+R, Ctrl+Shift+F, F5 and Ctrl+B to run, format, debug and build", () => {
+    expect(editorActionForShortcut(key("r", { ctrlKey: true }))).toBe("run");
+    expect(editorActionForShortcut(key("R", { metaKey: true }))).toBe("run");
+    expect(editorActionForShortcut(key("F", { ctrlKey: true, shiftKey: true }))).toBe("format");
+    expect(editorActionForShortcut(key("F5"))).toBe("debug");
+    expect(editorActionForShortcut(key("b", { ctrlKey: true }))).toBe("build");
+  });
+
+  it("leaves every other key, and Alt or Shift variants, to the browser and Monaco", () => {
+    expect(editorActionForShortcut(key("r"))).toBe(null);
+    expect(editorActionForShortcut(key("r", { ctrlKey: true, shiftKey: true }))).toBe(null);
+    expect(editorActionForShortcut(key("r", { ctrlKey: true, altKey: true }))).toBe(null);
+    expect(editorActionForShortcut(key("f", { ctrlKey: true }))).toBe(null);
+    expect(editorActionForShortcut(key("F5", { ctrlKey: true }))).toBe(null);
+    expect(editorActionForShortcut(key("s", { ctrlKey: true }))).toBe(null);
+    expect(editorActionForShortcut(null)).toBe(null);
   });
 });
