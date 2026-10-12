@@ -20,6 +20,15 @@ from backend.utils.path_guard import PathEscapesRoot, contained
 logger = logging.getLogger(__name__)
 
 
+def _duration_words(seconds: float) -> str:
+    """A timer's length as a person says it: "40 minutes", "3 hours"."""
+    minutes = max(1, round(seconds / 60))
+    if minutes >= 60 and minutes % 60 == 0:
+        hours = minutes // 60
+        return f"{hours} hour{'s' if hours != 1 else ''}"
+    return f"{minutes} minute{'s' if minutes != 1 else ''}"
+
+
 def _atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
     """Write JSON atomically so readers never see a truncated/empty file."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -523,7 +532,7 @@ class UnifiedProgressSystem:
         self._cancel_timeout_timer(process_id)
         
         # Schedule new timeout timer
-        timeout_timer = threading.Timer(timeout_seconds, self._timeout_stuck_process, args=[process_id])
+        timeout_timer = threading.Timer(timeout_seconds, self._timeout_stuck_process, args=[process_id, timeout_seconds])
         timeout_timer.daemon = True
         timeout_timer.start()
         self._timeout_timers[f"{process_id}_timeout"] = timeout_timer
@@ -723,7 +732,7 @@ class UnifiedProgressSystem:
         except Exception as e:
             logger.error(f"Failed to finish file tracking for {process_id}: {e}")
     
-    def _timeout_stuck_process(self, process_id: str):
+    def _timeout_stuck_process(self, process_id: str, timeout_seconds: Optional[float] = None):
         """Handle timeout for stuck processes"""
         with self._lock:
             # Check if process still exists before timing it out
@@ -734,7 +743,8 @@ class UnifiedProgressSystem:
             logger.warning(f"Process {process_id} timed out - marking as error")
         
         # Call error_process outside the lock to avoid deadlock
-        self.error_process(process_id, "Process timed out after 5 minutes")
+        waited = f" after {_duration_words(timeout_seconds)}" if timeout_seconds else ""
+        self.error_process(process_id, f"Process timed out{waited} without progress")
     
     def _cleanup_process(self, process_id: str):
         """Clean up completed processes from memory and file system"""
