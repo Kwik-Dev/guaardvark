@@ -318,8 +318,26 @@ def _count_active_video_render_jobs(max_age_s: float = 1800.0) -> int:
         return 0
 
 
+def manual_stop_blocked_reason(plugin_id: str) -> Optional[str]:
+    """Why a stop a person asked for must wait, or None.
+
+    Only where stopping would end a job that cannot be resumed: an upscale
+    queued or running in this backend. ComfyUI keeps its own rule (a person's
+    stop cancels its video batches first).
+    """
+    if plugin_id == "upscaling":
+        from backend.services.upscale_supervisor import stop_blocked_reason
+
+        reason = stop_blocked_reason()
+        if reason:
+            return f"{reason}; cancel it or let it finish first"
+    return None
+
+
 def _stop_blocked_reason(plugin_id: str) -> Optional[str]:
     """Return a human reason if an active job blocks stopping this plugin."""
+    if plugin_id == "upscaling":
+        return manual_stop_blocked_reason(plugin_id)
     if plugin_id == "comfyui":
         n = _count_active_video_render_jobs()
         if n > 0:
@@ -335,6 +353,9 @@ def _stop_blocked_reason(plugin_id: str) -> Optional[str]:
             return None
 
         kind = holder.get("kind")
+        # An upscale holds the gate as video_render but runs in its own service.
+        if str(holder.get("native_id") or "").startswith("upscale:"):
+            return None
         # ComfyUI / video_editor back VIDEO_RENDER and production pipelines.
         if plugin_id in ("comfyui", "video_editor") and kind in (
             JobKind.VIDEO_RENDER.value,
