@@ -83,9 +83,9 @@ def cancel_lora_train(subject_id: int) -> dict:
     if job_id:
         try:
             from backend.utils.unified_progress_system import get_unified_progress
-            get_unified_progress().cancel_process(job_id, reason="Cancelled by user")
+            get_unified_progress().cancel_process(job_id, "Cancelled by user")
         except Exception:
-            pass
+            log.warning("cancel_lora_train: could not mark job %s cancelled", job_id, exc_info=True)
 
     s.training_status = "failed"
     s.training_error = "Cancelled by user"
