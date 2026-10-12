@@ -47,6 +47,10 @@ _cancel_flags: dict = {}  # job_id -> threading.Event
 # before A's upscale_image call gets the loaded model. Video jobs already
 # serialise through `_job_queue`; this lock covers the sync image paths.
 _image_upscale_lock = threading.Lock()
+# The model a queued job is using, set while it runs (under the lock above). A
+# sync request for another model is refused instead of swapping the model out
+# from under the job, which left both models on the card.
+_job_model: Optional[str] = None
 
 # Single-worker queue. The GPU is one resource — running N jobs in parallel
 # just means everyone fights for VRAM and the model swaps. So we serialize:
@@ -232,6 +236,36 @@ def _ensure_model(model_name: Optional[str] = None) -> str:
     return name
 
 
+def _claim_job_model(model_name: Optional[str]):
+    """Load a queued job's model and hold it until `_release_job_model`.
+
+    Returns (model, scale). Sync requests for another model get 409 meanwhile.
+    """
+    global _job_model
+    with _image_upscale_lock:
+        name = _ensure_model(model_name)
+        _job_model = name
+        return _model_manager.get_model(), (_model_manager.scale or 4)
+
+
+def _release_job_model() -> None:
+    global _job_model
+    with _image_upscale_lock:
+        _job_model = None
+
+
+def _sync_model(model_name: Optional[str]) -> str:
+    """`_ensure_model` for a sync request; call with `_image_upscale_lock` held."""
+    name = model_name or _default_model()
+    if _job_model is not None and name != _job_model:
+        raise HTTPException(
+            409,
+            f"A queued upscale job is using {_job_model}; this request asks for {name}. "
+            "Try again when the job finishes.",
+        )
+    return _ensure_model(name)
+
+
 def _require_installed(model_name: Optional[str]) -> str:
     """The model a request will use, refused with 409 when it is not installed.
 
@@ -413,9 +447,7 @@ def _run_video_job(
         total_frames = info["nb_frames"]
         in_w, in_h = info["width"], info["height"]
 
-        _ensure_model(model_name)
-        model = _model_manager.get_model()
-        model_scale = _model_manager.scale or 4
+        model, model_scale = _claim_job_model(model_name)
 
         outscale = scale if scale else float(model_scale)
         out_w = int(in_w * outscale)
@@ -509,6 +541,7 @@ def _run_video_job(
         _job_manager.fail_job(job_id, error=str(e))
         _send_callback("upscale:job_failed", {"job_id": job_id, "error": str(e)})
     finally:
+        _release_job_model()
         _cancel_flags.pop(job_id, None)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -546,9 +579,7 @@ def _run_image_batch_job(
             if free_mb < 500:
                 raise RuntimeError(f"Insufficient VRAM: {free_mb:.0f}MB free, need ~500MB minimum")
 
-        _ensure_model(model_name)
-        model = _model_manager.get_model()
-        model_scale = _model_manager.scale or 4
+        model, model_scale = _claim_job_model(model_name)
 
         tile_size = 400
         if _config.max_tile_size != "auto":
@@ -622,6 +653,7 @@ def _run_image_batch_job(
         _job_manager.fail_job(job_id, error=str(e))
         _send_callback("upscale:job_failed", {"job_id": job_id, "error": str(e)})
     finally:
+        _release_job_model()
         _cancel_flags.pop(job_id, None)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -692,7 +724,7 @@ def upscale_image_endpoint(req: ImageUpscaleRequest, request: Request):
     # Serialise model swap + upscale together — see `_image_upscale_lock`
     # comment near the globals for the race we're avoiding.
     with _image_upscale_lock:
-        name = _ensure_model(req.model)
+        name = _sync_model(req.model)
         model = _model_manager.get_model()
         model_scale = _model_manager.scale or 4
 
@@ -738,7 +770,7 @@ async def upscale_image_upload(
 
     # See `_image_upscale_lock` comment — same race as /upscale/image.
     with _image_upscale_lock:
-        name = _ensure_model(model)
+        name = _sync_model(model)
         mdl = _model_manager.get_model()
         model_scale = _model_manager.scale or 4
 
