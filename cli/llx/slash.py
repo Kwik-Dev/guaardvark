@@ -1334,8 +1334,7 @@ class SlashRouter:
         from llx.local_tools import run_command
         target = " ".join(args).strip() or None
         if target:
-            res = run_command(f"git diff -- {target}", cwd=self._state.get("cwd"))
-            self._console.print(res.get("output", ""))
+            res = run_command(["git", "diff", "--", target], cwd=self._state.get("cwd"))
         else:
             # last recorded edit
             mem = self._state.get("working_memory") or {}
@@ -1343,7 +1342,17 @@ class SlashRouter:
             if last and last.get("path"):
                 self._console.print(f"[llx.dim]Last edit target was {last['path']}[/llx.dim]")
             res = run_command("git diff --stat", cwd=self._state.get("cwd"))
-            self._console.print(res.get("output", "(no git diff)"))
+        out = (res.get("output") or "").strip()
+        if not res.get("success"):
+            text = res.get("error") or out
+            if "not a git repository" in text.lower():
+                self._console.print("[llx.dim](not a git repository)[/llx.dim]")
+            else:
+                self._console.print(text or "(git diff failed)", markup=False, highlight=False)
+        elif not out:
+            self._console.print("[llx.dim](no git diff)[/llx.dim]")
+        else:
+            self._console.print(res["output"], markup=False, highlight=False)
 
     def _cmd_apply(self, args: list[str]):
         self._console.print("[llx.dim]/apply is currently an alias for confirming the last /edit. Use /edit directly.[/llx.dim]")
