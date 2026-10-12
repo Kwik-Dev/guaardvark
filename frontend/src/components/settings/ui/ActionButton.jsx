@@ -30,7 +30,8 @@ const kindSx = (theme, kind) => {
     case "link":
       return {
         bgcolor: "transparent",
-        color: theme.palette.primary.light,
+        // primary.light reads on dark themes; on white it is too pale (2.8:1).
+        color: theme.palette.mode === "light" ? theme.palette.primary.main : theme.palette.primary.light,
         px: 0.75,
         minWidth: 0,
         "&:hover": { bgcolor: alpha(theme.palette.primary.main, 0.08) },
