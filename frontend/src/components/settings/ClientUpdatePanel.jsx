@@ -283,17 +283,19 @@ const ClientUpdatePanel = ({ masterUrl, _masterApiKey, isEnabled }) => {
           <Typography variant="h6">Code Updates</Typography>
         </Box>
         <Tooltip title="Check for updates">
-          <IconButton
-            onClick={checkForUpdates}
-            disabled={updateStatus.checking}
-            size="small"
-          >
-            {updateStatus.checking ? (
-              <CircularProgress size={20} />
-            ) : (
-              <RefreshIcon />
-            )}
-          </IconButton>
+          <span>
+            <IconButton
+              onClick={checkForUpdates}
+              disabled={updateStatus.checking}
+              size="small"
+            >
+              {updateStatus.checking ? (
+                <CircularProgress size={20} />
+              ) : (
+                <RefreshIcon />
+              )}
+            </IconButton>
+          </span>
         </Tooltip>
       </Box>
 

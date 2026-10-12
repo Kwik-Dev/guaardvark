@@ -989,9 +989,11 @@ ${currentTab.content}
                 </Tooltip>
               )}
               <Tooltip title="Save (Ctrl+S)">
-                <IconButton size="small" onClick={handleSave} disabled={!currentTab}>
-                  <SaveIcon fontSize="small" />
-                </IconButton>
+                <span>
+                  <IconButton size="small" onClick={handleSave} disabled={!currentTab}>
+                    <SaveIcon fontSize="small" />
+                  </IconButton>
+                </span>
               </Tooltip>
               <Tooltip title="Run Code">
                 <span>

@@ -485,20 +485,22 @@ export const PluginCard = ({ plugin, onAction, onConfigOpen, showMessage }) => {
 
           {cameraAvailable && (
             <Tooltip title={cameraActive ? 'Stop Camera' : 'Start Camera'}>
-              <IconButton
-                size="small"
-                color={cameraActive ? 'primary' : 'default'}
-                onClick={handleCameraToggle}
-                disabled={cameraLoading}
-              >
-                {cameraLoading ? (
-                  <CircularProgress size={20} />
-                ) : cameraActive ? (
-                  <CameraOnIcon />
-                ) : (
-                  <CameraOffIcon />
-                )}
-              </IconButton>
+              <span>
+                <IconButton
+                  size="small"
+                  color={cameraActive ? 'primary' : 'default'}
+                  onClick={handleCameraToggle}
+                  disabled={cameraLoading}
+                >
+                  {cameraLoading ? (
+                    <CircularProgress size={20} />
+                  ) : cameraActive ? (
+                    <CameraOnIcon />
+                  ) : (
+                    <CameraOffIcon />
+                  )}
+                </IconButton>
+              </span>
             </Tooltip>
           )}
 
@@ -509,9 +511,11 @@ export const PluginCard = ({ plugin, onAction, onConfigOpen, showMessage }) => {
           </Tooltip>
 
           <Tooltip title="Settings">
-            <IconButton size="small" onClick={() => onConfigOpen(plugin)} disabled={isLoading}>
-              <SettingsIcon />
-            </IconButton>
+            <span>
+              <IconButton size="small" onClick={() => onConfigOpen(plugin)} disabled={isLoading}>
+                <SettingsIcon />
+              </IconButton>
+            </span>
           </Tooltip>
 
           <Tooltip title={expanded ? 'Less' : 'More'}>

@@ -1918,18 +1918,20 @@ const InterconnectorSettings = () => {
                             <TableCell align="right">
                               <Box display="flex" gap={1} justifyContent="flex-end" alignItems="center">
                                 <Tooltip title="Test connection to client">
-                                  <IconButton
-                                    size="small"
-                                    onClick={() => handleTestClientConnection(node.node_id, node.node_name)}
-                                    disabled={isTesting}
-                                    color={testResult?.success ? "success" : testResult?.success === false ? "error" : "default"}
-                                  >
-                                    {isTesting ? (
-                                      <CircularProgress size={16} />
-                                    ) : (
-                                      <NetworkIcon fontSize="small" />
-                                    )}
-                                  </IconButton>
+                                  <span>
+                                    <IconButton
+                                      size="small"
+                                      onClick={() => handleTestClientConnection(node.node_id, node.node_name)}
+                                      disabled={isTesting}
+                                      color={testResult?.success ? "success" : testResult?.success === false ? "error" : "default"}
+                                    >
+                                      {isTesting ? (
+                                        <CircularProgress size={16} />
+                                      ) : (
+                                        <NetworkIcon fontSize="small" />
+                                      )}
+                                    </IconButton>
+                                  </span>
                                 </Tooltip>
                                 {testResult && (
                                   <Tooltip title={testResult.message}>

@@ -187,9 +187,11 @@ export default function FixesModal({ open, onClose, showMessage }) {
         </Typography>
         <Box sx={{ flex: 1 }} />
         <Tooltip title="Refresh">
-          <IconButton size="small" onClick={fetchFixes} disabled={loading}>
-            <RefreshIcon fontSize="small" />
-          </IconButton>
+          <span>
+            <IconButton size="small" onClick={fetchFixes} disabled={loading}>
+              <RefreshIcon fontSize="small" />
+            </IconButton>
+          </span>
         </Tooltip>
         <IconButton
           size="small"

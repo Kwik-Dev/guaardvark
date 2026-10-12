@@ -425,14 +425,16 @@ export default function TrainingFloater({ open, onClose, _onNavigateAway }) {
               </Box>
               <Box sx={{ display: 'flex', gap: 0.25, alignItems: 'center' }}>
                 <Tooltip title="Delete demo">
-                  <IconButton
-                    size="small"
-                    onClick={(e) => handleDeleteDemo(demo, e)}
-                    disabled={loading}
-                    sx={{ p: 0.25 }}
-                  >
-                    <CloseIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
-                  </IconButton>
+                  <span>
+                    <IconButton
+                      size="small"
+                      onClick={(e) => handleDeleteDemo(demo, e)}
+                      disabled={loading}
+                      sx={{ p: 0.25 }}
+                    >
+                      <CloseIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
+                    </IconButton>
+                  </span>
                 </Tooltip>
                 <Tooltip title="Save & edit in Training page">
                   <IconButton
@@ -444,14 +446,16 @@ export default function TrainingFloater({ open, onClose, _onNavigateAway }) {
                   </IconButton>
                 </Tooltip>
                 <Tooltip title="Agent attempts this demo">
-                  <IconButton
-                    size="small"
-                    onClick={() => handleAttempt(demo)}
-                    disabled={loading || mode !== 'idle'}
-                    sx={{ p: 0.25 }}
-                  >
-                    <PlayArrowIcon sx={{ fontSize: 18 }} />
-                  </IconButton>
+                  <span>
+                    <IconButton
+                      size="small"
+                      onClick={() => handleAttempt(demo)}
+                      disabled={loading || mode !== 'idle'}
+                      sx={{ p: 0.25 }}
+                    >
+                      <PlayArrowIcon sx={{ fontSize: 18 }} />
+                    </IconButton>
+                  </span>
                 </Tooltip>
               </Box>
             </Box>
@@ -741,15 +745,17 @@ export default function TrainingFloater({ open, onClose, _onNavigateAway }) {
         {/* Stop button always visible in header when recording — even when collapsed */}
         {mode === 'recording' && (
           <Tooltip title="Stop Recording">
-            <IconButton
-              className="header-btn"
-              size="small"
-              onClick={handleStopRecording}
-              disabled={loading}
-              sx={{ p: 0.25, mr: 0.25 }}
-            >
-              <StopIcon sx={{ fontSize: 16, color: 'error.main' }} />
-            </IconButton>
+            <span>
+              <IconButton
+                className="header-btn"
+                size="small"
+                onClick={handleStopRecording}
+                disabled={loading}
+                sx={{ p: 0.25, mr: 0.25 }}
+              >
+                <StopIcon sx={{ fontSize: 16, color: 'error.main' }} />
+              </IconButton>
+            </span>
           </Tooltip>
         )}
         <Tooltip title={kbdForwarding ? 'Keyboard → Agent: ON (click to stop)' : 'Send keyboard to Agent Screen'}>

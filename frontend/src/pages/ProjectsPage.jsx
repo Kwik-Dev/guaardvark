@@ -601,28 +601,32 @@ function ProjectsPage() {
                       <TableCell>{formatDate(project.updated_at)}</TableCell>
                       <TableCell align="right" sx={{ pr: 2 }}>
                         <Tooltip title="Edit Project">
-                          <IconButton
-                            size="small"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleOpenEditDialog(project);
-                            }}
-                            disabled={isSaving}
-                          >
-                            <EditIcon fontSize="small" />
-                          </IconButton>
+                          <span>
+                            <IconButton
+                              size="small"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleOpenEditDialog(project);
+                              }}
+                              disabled={isSaving}
+                            >
+                              <EditIcon fontSize="small" />
+                            </IconButton>
+                          </span>
                         </Tooltip>
                         <Tooltip title="Delete Project">
-                          <IconButton
-                            size="small"
-                            onClick={(e) => handleOpenDeleteDialog(project, e)}
-                            disabled={isSaving}
-                          >
-                            <CloseIcon
-                              fontSize="small"
-                              sx={{ color: "text.secondary" }}
-                            />
-                          </IconButton>
+                          <span>
+                            <IconButton
+                              size="small"
+                              onClick={(e) => handleOpenDeleteDialog(project, e)}
+                              disabled={isSaving}
+                            >
+                              <CloseIcon
+                                fontSize="small"
+                                sx={{ color: "text.secondary" }}
+                              />
+                            </IconButton>
+                          </span>
                         </Tooltip>
                       </TableCell>
                     </TableRow>

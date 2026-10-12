@@ -816,15 +816,17 @@ const ClientActionModal = ({
           {isEditMode && (
             // MODIFIED: Changed IconButton to Button for Delete
             <Tooltip title="Delete this client">
-              <Button
-                variant="text"
-                color="inherit"
-                onClick={handleDeleteClick}
-                disabled={isSaving}
-                size="small"
-              >
-                Delete
-              </Button>
+              <span>
+                <Button
+                  variant="text"
+                  color="inherit"
+                  onClick={handleDeleteClick}
+                  disabled={isSaving}
+                  size="small"
+                >
+                  Delete
+                </Button>
+              </span>
             </Tooltip>
           )}
           {isEditMode &&
