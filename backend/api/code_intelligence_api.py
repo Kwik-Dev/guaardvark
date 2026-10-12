@@ -978,6 +978,7 @@ def refactor_code():
 
         code_content = data.get('content', '')
         refactor_type = data.get('refactorType', 'optimize')
+        rules_cutoff = data.get('rulesCutoff', False) or data.get('bypassRules', False)
         language = data.get('language', 'javascript')
         file_path = data.get('filePath', 'untitled')
 
