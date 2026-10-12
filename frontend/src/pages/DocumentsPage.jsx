@@ -2185,6 +2185,10 @@ const DocumentsPage = () => {
   const contextMenuFolderWindow = contextMenuItem && contextMenuType === 'folder'
     ? windows.find(w => w.folderId === contextMenuItem.id) || null
     : null;
+  // The open window whose title bar was right-clicked: its menu adds Minimize and Close.
+  const contextMenuTitleWindow = contextMenuExtras?.windowId
+    ? windows.find(w => w.id === contextMenuExtras.windowId && w.state !== 'folded') || null
+    : null;
 
   if (loading) {
     return (
@@ -2618,6 +2622,7 @@ const DocumentsPage = () => {
                         openFile(file, extras);
                       }}
                       onContextMenu={(e, item, type, extras) => handleContextMenu(e, item, type, 'window', extras)}
+                      onTitleContextMenu={(e) => handleContextMenu(e, window.folder, 'folder', 'desktop', { windowId: window.id })}
                       onFocusContext={setActiveContext}
                       refreshKey={folderRefreshKeys[window.folderId] || 0}
                       folderColors={folderIdToColor}
@@ -2649,9 +2654,12 @@ const DocumentsPage = () => {
         onIndex={contextMenuItem?.source_type === 'live_repo' ? undefined : handleIndex}
         onReviewWithAgent={contextMenuItem?.source_type === 'live_repo' ? handleReviewWithAgent : undefined}
         onOpenWindow={contextMenuFolderWindow
-          ? () => handleFolderExpand(contextMenuFolderWindow.id)
+          ? (contextMenuFolderWindow.state === 'folded' ? () => handleFolderExpand(contextMenuFolderWindow.id) : undefined)
           : contextMenuType === 'folder' ? contextMenuExtras?.openInPlace : undefined}
         openLabel={contextMenuFolderWindow ? 'Open in Window' : 'Open'}
+        onToggleMinimize={contextMenuTitleWindow ? () => handleToggleMinimize(contextMenuTitleWindow.id) : undefined}
+        minimizeLabel={contextMenuTitleWindow?.state === 'minimized' ? 'Restore' : 'Minimize'}
+        onCloseWindow={contextMenuTitleWindow ? () => handleWindowClose(contextMenuTitleWindow.id) : undefined}
         isImage={contextMenuItem && contextMenuType === 'file' && isImageFile(contextMenuItem.filename || contextMenuItem.name || '')}
         isCode={contextMenuItem && contextMenuType === 'file' && isCodeFile(contextMenuItem.filename || contextMenuItem.name || '')}
         isPdf={contextMenuItem && contextMenuType === 'file' && isPdfFile(contextMenuItem.filename || contextMenuItem.name || '')}

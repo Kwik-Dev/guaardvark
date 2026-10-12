@@ -4,6 +4,7 @@
 // - Title bar with folder name
 // - Close button, minimize/maximize
 // - Double-click header to minimize/maximize
+// - Right-click header for the folder's own menu
 // - Theme-based alternate background color
 
 import React, { useState, useEffect, useCallback } from "react";
@@ -16,11 +17,11 @@ import {
   IconButton,
   Chip,
 } from "@mui/material";
-import { Close as CloseIcon } from "@mui/icons-material";
+import { Close as CloseIcon, FolderOutlined } from "@mui/icons-material";
 import { useTheme, alpha } from "@mui/material/styles";
 
 const FolderWindowWrapper = React.forwardRef(
-  ({ title, children, isMinimized, onToggleMinimize, onClose, onDrop, onDragOver, titleBarActions, isRepository, ...props }, ref) => {
+  ({ title, children, isMinimized, onToggleMinimize, onClose, onTitleContextMenu, folderColor, onDrop, onDragOver, titleBarActions, isRepository, ...props }, ref) => {
     const [clickTimeout, setClickTimeout] = useState(null);
     const [_lastClickTime, setLastClickTime] = useState(0);
     const [_clickCount, setClickCount] = useState(0);
@@ -105,6 +106,11 @@ const FolderWindowWrapper = React.forwardRef(
         return prevTime === 0 || timeDiff >= 500 ? currentTime : prevTime;
       });
     }, [onToggleMinimize]);
+
+    const handleTitleContextMenu = useCallback((e) => {
+      if (!onTitleContextMenu || !e.currentTarget.contains(e.target)) return;
+      onTitleContextMenu(e);
+    }, [onTitleContextMenu]);
 
     // Cleanup timeout on unmount
     useEffect(() => {
@@ -200,8 +206,12 @@ const FolderWindowWrapper = React.forwardRef(
             },
           }}
           onMouseDown={handleMouseDown}
+          onContextMenu={handleTitleContextMenu}
           className="folder-window-drag-handle" // Drag handle for react-grid-layout
         >
+          <FolderOutlined
+            sx={{ fontSize: 16, mr: 0.75, flexShrink: 0, color: folderColor || theme.palette.primary.main, pointerEvents: "none" }}
+          />
           {/* Window title */}
           <Typography
             variant="h6"
@@ -279,6 +289,8 @@ FolderWindowWrapper.propTypes = {
   isMinimized: PropTypes.bool,
   onToggleMinimize: PropTypes.func,
   onClose: PropTypes.func,
+  onTitleContextMenu: PropTypes.func,
+  folderColor: PropTypes.string,
   onDrop: PropTypes.func,
   onDragOver: PropTypes.func,
   titleBarActions: PropTypes.node,

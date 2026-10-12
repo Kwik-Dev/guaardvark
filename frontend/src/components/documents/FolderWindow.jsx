@@ -21,6 +21,7 @@ const FolderWindow = React.forwardRef(({
   onSelectionChange,
   onItemsMove,
   onContextMenu,
+  onTitleContextMenu,
   onDragStart,
   onDrop,
   onFolderOpen,
@@ -113,6 +114,8 @@ const FolderWindow = React.forwardRef(({
       isMinimized={isMinimized}
       onToggleMinimize={onToggleMinimize}
       onClose={onClose}
+      onTitleContextMenu={onTitleContextMenu}
+      folderColor={folderColors[folder.id]}
       onDrop={onDrop}
       onDragOver={(e) => e.preventDefault()}
       titleBarActions={titleBarActions}
@@ -179,6 +182,7 @@ FolderWindow.propTypes = {
   onSelectionChange: PropTypes.func,
   onItemsMove: PropTypes.func,
   onContextMenu: PropTypes.func,
+  onTitleContextMenu: PropTypes.func,
   onDragStart: PropTypes.func,
   onDrop: PropTypes.func,
   onFolderOpen: PropTypes.func,
