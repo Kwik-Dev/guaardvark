@@ -785,7 +785,7 @@ const OutreachPage = () => {
 
       <Box sx={{
         display: "grid",
-        gridTemplateColumns: { xs: "1fr", lg: "320px 1fr 320px" },
+        gridTemplateColumns: { xs: "minmax(0, 1fr)", lg: "320px minmax(0, 1fr) 320px" },
         gap: 2,
         alignItems: "start",
       }}>
@@ -1391,7 +1391,7 @@ const OutreachPage = () => {
           )}
           <Box sx={{
             display: "grid",
-            gridTemplateColumns: { xs: "1fr", md: "260px 1fr" },
+            gridTemplateColumns: { xs: "minmax(0, 1fr)", md: "260px minmax(0, 1fr)" },
             gap: 2,
           }}>
             {/* Metadata column */}
