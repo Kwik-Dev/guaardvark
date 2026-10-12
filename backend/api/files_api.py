@@ -1973,17 +1973,6 @@ def start_bulk_import():
         import uuid
         job_id = str(uuid.uuid4())
 
-        # Store job info
-        job_data = {
-            "job_id": job_id,
-            "status": "queued",
-            "message": "Bulk import job queued",
-            "progress": 0,
-            "stats": {},
-            "created_at": datetime.datetime.now().isoformat(),
-        }
-        set_job_status(job_id, job_data)
-
         # Extract parameters. A folder id names one exact folder at any depth;
         # a bare name is found or created at the top level, as before. A name
         # with a slash is a path and must name an existing folder: matched by
@@ -2006,6 +1995,17 @@ def start_bulk_import():
             target_folder_id, target_folder = target.id, target.path
         else:
             target_folder_id = None
+
+        # Store job info
+        job_data = {
+            "job_id": job_id,
+            "status": "queued",
+            "message": "Bulk import job queued",
+            "progress": 0,
+            "stats": {},
+            "created_at": datetime.datetime.now().isoformat(),
+        }
+        set_job_status(job_id, job_data)
         project_id = data.get("project_id")
         client_id = data.get("client_id")
         website_id = data.get("website_id")

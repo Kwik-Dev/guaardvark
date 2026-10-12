@@ -400,10 +400,14 @@ class UpscaleSupervisor:
         try:
             from backend.utils.unified_progress_system import ProcessType, get_unified_progress
 
-            get_unified_progress().create_process(
+            ups = get_unified_progress()
+            ups.create_process(
                 ProcessType.UPSCALE, job.label, process_id=job.id,
                 additional_data={"kind": job.kind, "model": job.model, "vram_mb": job.vram_mb},
             )
+            # Activity's Cancel reaches the job even while it waits on a long step
+            # (service start, freeing memory) and its record is cleaned up meanwhile.
+            ups.on_cancel(job.id, job.cancel.set)
         except Exception as e:  # noqa: BLE001
             logger.warning("upscale progress record for %s not created: %s", job.id, e)
 

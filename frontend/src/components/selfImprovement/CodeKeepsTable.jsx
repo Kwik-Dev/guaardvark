@@ -53,7 +53,7 @@ export default function CodeKeepsTable({ keeps, onDecide }) {
             </TableRow>
           </TableHead>
           <TableBody>
-            {codeKeeps.map((fix) => (
+            {keeps.map((fix) => (
               <TableRow key={fix.id}>
                 <TableCell>{fix.fix_description}</TableCell>
                 <TableCell>
