@@ -1242,6 +1242,19 @@ const UpscalingPage = ({ embedded = false }) => {
                           </Box>
                         </Stack>
 
+                        {/* What an active job is doing: queued, waiting for the GPU and for whom, upscaling. */}
+                        {job.message && (job.status === "pending" || job.status === "running") && (
+                          <Typography
+                            variant="caption"
+                            color="text.secondary"
+                            display="block"
+                            sx={{ mt: 1 }}
+                            data-testid="upscale-job-message"
+                          >
+                            {job.message}
+                          </Typography>
+                        )}
+
                         {/* Progress bar for running jobs */}
                         {job.status === "running" && (
                           <Box sx={{ mt: 1.5 }}>
