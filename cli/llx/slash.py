@@ -480,27 +480,29 @@ class SlashRouter:
 
     def _cmd_config(self, args: list[str]):
         """Show or set configuration values."""
-        from llx.config import load_config, save_config
+        from llx.config import effective_settings, load_config, mask_secret, resolve_server_url, save_config
 
         config = load_config()
+        # The settings this session actually uses, with where each came from;
+        # the server is the session's, which --server may have set.
+        server = self._state.get("server")
+        resolved, source = resolve_server_url()
+        rows = effective_settings(server or resolved, source if (not server or server == resolved) else "command line --server")
 
         if not args:
-            # Show all config
-            output.print_kv(
-                {k: str(v) for k, v in config.items()},
-                title="Configuration",
-            )
+            output.print_kv({name: f"{value}  ({where})" for name, value, where in rows},
+                            title="Configuration (in use)")
             return
 
         key = args[0]
 
         if len(args) == 1:
             # Show single key
-            val = config.get(key)
-            if val is None:
+            row = next((r for r in rows if r[0] == key), None)
+            if row is None or row[1] in ("None", "not set"):
                 self._console.print(f"[llx.dim]{key} is not set[/llx.dim]")
             else:
-                output.print_kv({key: str(val)})
+                output.print_kv({key: f"{row[1]}  ({row[2]})"})
             return
 
         # Set key = value
@@ -517,7 +519,8 @@ class SlashRouter:
 
         config[key] = parsed
         save_config(config)
-        self._console.print(f"[llx.success]Set {key} = {parsed}[/llx.success]")
+        shown = mask_secret(parsed) if ("key" in key or "token" in key) and parsed else parsed
+        self._console.print(f"[llx.success]Set {key} = {shown}[/llx.success]")
 
     def _cmd_theme(self, args: list[str]):
         """List or switch CLI themes."""
