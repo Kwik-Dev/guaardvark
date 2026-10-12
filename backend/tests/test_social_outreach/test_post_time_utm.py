@@ -9,17 +9,17 @@ from unittest.mock import MagicMock, patch
 from backend.services.social_outreach import persona
 
 
-def test_apply_utm_tags_tags_user_edited_link():
+def test_apply_utm_tags_tags_user_edited_link(outreach_profile):
     """A draft edited via OutreachPage's 'Insert site URL' (bare URL) gets tagged."""
-    user_edited = "Try https://guaardvark.com — does the things you'd expect."
+    user_edited = "Try https://example.com — does the things you'd expect."
     tagged = persona.apply_utm_tags(user_edited, platform="reddit", campaign="v253")
     assert "utm_source=reddit" in tagged
     assert "utm_campaign=v253" in tagged
 
 
-def test_apply_utm_tags_tags_hand_typed_link():
+def test_apply_utm_tags_tags_hand_typed_link(outreach_profile):
     """A draft where the user hand-typed the URL also gets tagged."""
-    hand_typed = "Made with https://guaardvark.com (local-first AI)."
+    hand_typed = "Made with https://example.com (local-first AI)."
     tagged = persona.apply_utm_tags(hand_typed, platform="discord", campaign="v253")
     assert "utm_source=discord" in tagged
 
@@ -55,13 +55,13 @@ def test_record_post_endpoint_tags_posted_text(monkeypatch):
     client = app.test_client()
     resp = client.post(
         "/api/social-outreach/record-post",
-        json={"platform": "reddit", "posted_text": "Try https://guaardvark.com"},
+        json={"platform": "reddit", "posted_text": "Try https://example.com"},
     )
 
     assert resp.status_code == 200
-    assert captured.get("text") == "Try https://guaardvark.com"
+    assert captured.get("text") == "Try https://example.com"
     assert captured.get("kw", {}).get("platform") == "reddit"
     assert captured.get("kw", {}).get("campaign") == "v253"
     # The fake_apply mutated the text — log_outreach_event got the tagged version.
     assert log_calls, "expected log_outreach_event to be called"
-    assert log_calls[0]["posted_text"] == "Try https://guaardvark.com?utm_marker=ran"
+    assert log_calls[0]["posted_text"] == "Try https://example.com?utm_marker=ran"

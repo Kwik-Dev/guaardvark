@@ -13,7 +13,7 @@ import logging
 from typing import Any
 
 from backend.models import Task, db
-from backend.services.social_outreach import kill_switch, persona
+from backend.services.social_outreach import kill_switch, profile
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +77,10 @@ def queue_outreach_run(
     if link_url:
         workflow_config["link_url"] = link_url.strip()
     elif task_type == "social_outreach_share":
-        workflow_config["link_url"] = persona.SITE_URL
+        # No site in the profile: the executor skips the pass with the reason.
+        site = profile.site_url()
+        if site:
+            workflow_config["link_url"] = site
     if batch_size is not None:
         workflow_config["batch_size"] = max(1, min(int(batch_size), 25))
     if keyword_profiles:
@@ -153,7 +156,7 @@ def _task_description(platform: str, workflow_config: dict[str, Any]) -> str:
         subreddit = workflow_config.get("subreddit") or "next target from social_outreach_targets.json"
         return f"Discover and draft a Reddit Outreach comment for {subreddit}."
     if platform in ("self_share", "share"):
-        return "Draft a Guaardvark self-share link post through the supervised Outreach pipeline."
+        return "Draft a self-share link post through the supervised Outreach pipeline."
     if platform in ("youtube", "youtube_recon"):
         profiles = workflow_config.get("keyword_profiles") or ["configured profiles"]
         draft = " then draft" if workflow_config.get("chain_draft") else ""

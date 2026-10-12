@@ -111,7 +111,7 @@ class TestParseDecision(unittest.TestCase):
         self.assertTrue(decision.task_complete)
 
     def test_parse_done_with_weak_proof_and_prior_verified_step(self):
-        """Documents + lightly exercises the grounding + advisory done path (core of the GOTHAM RISING fix).
+        """Documents + lightly exercises the grounding + advisory done path (core of the grounded-proof fix).
         has_recent_verified + grounding from ActionStep.result + advisory (non-failed) handling live in
         execute_task done block (see 820-904 area + hoisted detection + proof grounding). The parser
         surfaces success_proof; full advisory contract + "done (advisory...)" emit exercised via e2e mocks
@@ -124,7 +124,7 @@ class TestParseDecision(unittest.TestCase):
         prior_step = ActionStep(
             iteration=0,
             scene_description="youtube search results with thumbnails",
-            action=AgentAction(action_type="click", target_description="GOTHAM RISING video thumbnail"),
+            action=AgentAction(action_type="click", target_description="first video thumbnail"),
             result={"success": True, "verified": True, "post_action_effect": "verified", "verifier": "servo_region_dpc"},
             failed=False,
         )

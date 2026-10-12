@@ -25,7 +25,7 @@ import json
 import logging
 from typing import Optional
 
-from backend.services.social_outreach import audit, external_grader, gates, persona
+from backend.services.social_outreach import audit, external_grader, gates, persona, profile
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ MIN_GRADE = 0.7
 draft-comment endpoint uses for the would_post gate so we stay consistent."""
 
 MIN_REPLY_GRADE = 0.6
-"""Looser threshold for replies on Guaardvark's own videos — the rubric in
+"""Looser threshold for replies on the account's own videos — the rubric in
 REPLY_TO_OWN_VIDEO_SYSTEM_BLOCK is different (we're not asking "would a
 stranger flag this as promo?", we're asking "is this a real engagement?"),
 so 0.6+ posts there. Set just below MIN_GRADE rather than equal to it to
@@ -154,16 +154,16 @@ class ContentAgent:
                         or "(unspecified)",
                         "link_url": payload.get("link_url")
                         or payload.get("share_link")
-                        or persona.SITE_URL,
+                        or profile.site_url(),
                     },
                     mode="share",
                     feature_hint=feature_hint,
                 )
             else:
                 thread_context = _build_thread_context(payload)
-                # YouTube outbound comments market the GitHub repo on relevant
-                # videos (Ollama, ComfyUI, voice, coding agents, …). Reddit
-                # comments stay soft-mention unless a caller opts in.
+                # YouTube outbound comments carry the profile's repo (or site)
+                # link on relevant videos. Reddit comments stay soft-mention
+                # unless a caller opts in.
                 is_youtube = (row.platform or "").strip().lower() == "youtube"
                 result = persona.draft_outreach_text(
                     platform=row.platform,
@@ -171,7 +171,7 @@ class ContentAgent:
                     mode="comment",
                     feature_hint=feature_hint,
                     include_link=is_youtube,
-                    link_url=persona.GITHUB_URL if is_youtube else None,
+                    link_url=profile.cta_url("youtube") if is_youtube else None,
                 )
         except Exception as e:
             logger.warning("ContentAgent.draft_candidate %s: persona call raised: %s", audit_id, e)
@@ -182,7 +182,10 @@ class ContentAgent:
         grade = float(result.get("grade") or 0.0)
 
         if not draft_text:
-            audit.mark_rejected(audit_id, "empty draft from LLM")
+            # The persona says why when it made no draft at all (nothing to
+            # promote, no link to give); otherwise the model declined.
+            why = (result.get("reason") or "").strip() if grade == 0.0 else ""
+            audit.mark_rejected(audit_id, f"empty draft: {why}" if why else "empty draft from LLM")
             return {"status": "rejected", "grade": grade, "reason": "empty_draft"}
 
         grade_threshold = MIN_REPLY_GRADE if row.action == "reply" else MIN_GRADE
@@ -220,7 +223,7 @@ class ContentAgent:
                 "external": ext,
             }
 
-        # UTM-tag any guaardvark.com links the LLM wrote, same as the
+        # UTM-tag any links to the profile's own hosts, same as the
         # existing /draft-comment endpoint does. Tagging at the draft
         # boundary catches every URL — including ones the user may later
         # edit into the draft via the UI. (For replies this is a no-op

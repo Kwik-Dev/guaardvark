@@ -1341,7 +1341,7 @@ class AgentControlService:
 
                     # Ground success_proof from prior successful (servo-verified) step when the
                     # model provided none or a trivial one. Re-uses the last target_description
-                    # (e.g. "GOTHAM RISING video thumbnail") + verified effect already recorded
+                    # (e.g. "first video thumbnail") + verified effect already recorded
                     # in ActionStep.result. This gives the subsequent _wait_until_visible (or
                     # advisory path) a concrete, history-backed string instead of forcing the
                     # model to perfectly re-phrase the visible state. Mirrors how expected_effect
@@ -1402,8 +1402,8 @@ class AgentControlService:
                     # goal not leading to termination): if the latest click (see
                     # _task_has_verified_click) had servo DPC (or equivalent) `verified`
                     # or post_action_effect indicating real visible change (e.g. the exact
-                    # GOTHAM RISING thumbnail click that achieved the goal per user +
-                    # step-1 [OK]), then the semantic verify on the *model's* proof is
+                    # thumbnail click that achieved the goal per user + step-1 [OK]),
+                    # then the semantic verify on the *model's* proof is
                     # treated as advisory only. A proof grounded from history never is.
                     # This re-uses the documented contract for slow expected_effect
                     # verifies (1085: "keeping click as OK; next SEE will observe actual
@@ -3422,7 +3422,7 @@ class AgentControlService:
     )
     _DONE_RULE = (
         "done rule: when action=\"done\", success_proof MUST describe the visible state that proves the task is complete (e.g. \"cursor inside text area\", \"comment now visible in thread\"). Empty or generic (\"n/a\", \"task done\") is rejected. This rule applies to all models and paths.\n"
-        "When your most recent history step shows [OK] for a concrete target (e.g. \"GOTHAM RISING video thumbnail [OK]\" or servo DPC verified change), base the success_proof directly on that target + \"now visible/achieved\". Prior servo-verified clicks are strong evidence the goal state is real; use them to ground your proof rather than re-inventing a description."
+        "When your most recent history step shows [OK] for a concrete target (e.g. \"first video thumbnail [OK]\" or servo DPC verified change), base the success_proof directly on that target + \"now visible/achieved\". Prior servo-verified clicks are strong evidence the goal state is real; use them to ground your proof rather than re-inventing a description."
     )
     _SCHEMA_FULL = (
         "{\"status\": \"IN_PROGRESS|COMPLETE\", \"action\": \"click|right_click|type|hotkey|scroll|wait|done|navigate|tool\", \"target_description\": \"...\", \"text\": \"literal value only\", \"keys\": [\"ctrl\",\"t\"], \"scroll_amount\": -5, \"url\": \"https://...\", \"reasoning\": \"why\", \"expected_effect\": \"visible result after this action\", \"success_proof\": \"visible state proving done (only when action=done)\", \"tool_name\": \"optional for action=tool\", \"tool_params\": {}}"

@@ -23,7 +23,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from backend.services.agent_tools import BaseTool, ToolParameter, ToolResult
-from backend.services.social_outreach import audit, kill_switch, persona, transitions
+from backend.services.social_outreach import audit, kill_switch, persona, profile, transitions
 from backend.utils.backend_http import BackendError, is_mcp_transport, request_json
 
 logger = logging.getLogger(__name__)
@@ -251,7 +251,7 @@ class OutreachDraftPostTool(BaseTool):
         "description) or target_url (we'll scout it — for YouTube URLs, scrapes the video "
         "title + description). mode='share' drafts a Reddit link post: platform must be "
         "reddit, share_target is the subreddit (e.g. 'r/SideProject') and share_link is "
-        "optional (defaults to guaardvark.com). "
+        "optional (defaults to the site URL in the outreach profile). "
         "The draft lands in the queue at status='drafted' for human approval — nothing "
         "posts until the user approves it on the Approvals page (Outreach tab). For a post "
         "to the user's own connected accounts (Discord webhook, Bluesky, Mastodon, Telegram) "
@@ -285,7 +285,7 @@ class OutreachDraftPostTool(BaseTool):
         ),
         "share_link": ToolParameter(
             name="share_link", type="string", required=False,
-            description="Link to share; defaults to https://guaardvark.com",
+            description="Link to share; defaults to the site URL in the outreach profile",
         ),
         "tone": ToolParameter(
             name="tone", type="string", required=False,
@@ -305,8 +305,8 @@ class OutreachDraftPostTool(BaseTool):
         "include_link": ToolParameter(
             name="include_link", type="bool", required=False,
             description=(
-                "Comment mode only. When true, the draft carries a link: the "
-                "GitHub repo for YouTube, guaardvark.com for other platforms. "
+                "Comment mode only. When true, the draft carries a link from the "
+                "outreach profile: the repo for YouTube, the site for other platforms. "
                 "The persona is asked to work it in; if it leaves it out, the "
                 "link is appended on its own line. The persona is told to grade "
                 "below 0.7 when the link cannot be made to feel natural; the "
@@ -365,7 +365,7 @@ class OutreachDraftPostTool(BaseTool):
             target_url = f"{REDDIT_BASE}/r/{subreddit}"
             context = {
                 "target": f"r/{subreddit}",
-                "link_url": (kwargs.get("share_link") or persona.SITE_URL),
+                "link_url": (kwargs.get("share_link") or profile.site_url()),
             }
         else:
             thread_context = (kwargs.get("thread_context") or "").strip()

@@ -34,7 +34,7 @@ from typing import Any, Dict, Optional
 
 from flask import Blueprint, jsonify, request
 
-from backend.services.social_outreach import audit, external_grader, gates, kill_switch, persona
+from backend.services.social_outreach import audit, external_grader, gates, kill_switch, persona, profile
 from backend.utils.hosts import host_matches
 
 logger = logging.getLogger(__name__)
@@ -305,7 +305,7 @@ def draft_comment():
         "task_id": 42,                 # optional, links audit row to celery task
         "mode": "comment"|"share",     # default "comment"
         "share_target": "r/SideProject",  # required for share mode
-        "share_link": "https://guaardvark.com",  # required for share mode
+        "share_link": "https://example.com",  # share mode; defaults to the profile's site
         "relevance_unchecked": true,   # optional: the thread-fit judge could not run
     }
     Returns: {draft, grade, reason, audit_id, would_post, gates}
@@ -329,7 +329,7 @@ def draft_comment():
     if mode == "share":
         context = {
             "target": body.get("share_target") or "(unspecified)",
-            "link_url": body.get("share_link") or persona.SITE_URL,
+            "link_url": body.get("share_link") or profile.site_url(),
         }
     else:
         thread_context = body.get("thread_context", "")
@@ -428,19 +428,46 @@ def draft_comment():
 
 @social_outreach_bp.get("/snippets")
 def get_snippets():
-    """Pre-built copy blocks for the snippet bank in the Drafting zone.
-    Read-only — these are the canonical Guaardvark pitches + marketing links."""
+    """Copy blocks for the snippet bank in the Drafting zone, read from the
+    local profile: empty on a fresh install until "What you promote" is filled."""
+    current = profile.load()
     return jsonify({
-        "pitch": persona.GUAARDVARK_PITCH,
-        "site_url": persona.SITE_URL,
-        "github_url": persona.GITHUB_URL,
-        "gotham_rising_url": persona.GOTHAM_RISING_URL,
-        "short_a_url": persona.SHORT_RH0_URL,
-        "short_b_url": persona.SHORT_YRO_URL,
-        "marketing_videos": list(persona.MARKETING_VIDEOS),
-        "feature_blurbs": persona.FEATURE_BLURBS,
+        "configured": current.is_configured(),
+        "name": current.name,
+        "pitch": current.pitch,
+        "site_url": current.site_url,
+        "repo_url": current.repo_url,
+        "videos": current.videos,
+        "feature_blurbs": current.feature_blurbs(),
         "tones": list(persona.TONE_GUIDES.keys()),
     })
+
+
+# --- "What you promote" profile --------------------------------------------
+
+@social_outreach_bp.get("/profile")
+def get_profile():
+    """The local outreach profile (data/social_outreach/profile.json)."""
+    current = profile.load()
+    return jsonify({"profile": current.to_dict(), "configured": current.is_configured()})
+
+
+@social_outreach_bp.put("/profile")
+def put_profile():
+    """Replace the profile. Body: the profile object (see profile.py for the
+    fields); URLs must be http(s), lists and texts are capped. 400 with a plain
+    message when a value is not accepted."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "profile object required"}), 400
+    try:
+        saved = profile.save(body.get("profile", body))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except OSError as e:
+        logger.warning("outreach profile save failed: %s", e)
+        return jsonify({"error": f"could not write the profile: {e}"}), 500
+    return jsonify({"profile": saved.to_dict(), "configured": saved.is_configured()})
 
 
 @social_outreach_bp.post("/fetch-meta")
@@ -912,7 +939,7 @@ def record_post():
     if not platform:
         return jsonify({"error": "platform required"}), 400
 
-    # Belt-and-suspenders: tag any guaardvark.com URL in the recorded text
+    # Belt-and-suspenders: tag any URL to the profile's hosts in the recorded text
     # even if the caller forgot to. The actual POSTED bytes were already
     # tagged at the servo boundary (see reddit_outreach / self_share); this
     # ensures the audit log matches what went out.

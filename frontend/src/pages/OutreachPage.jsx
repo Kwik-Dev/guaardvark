@@ -40,6 +40,8 @@ import StopCircleIcon from "@mui/icons-material/StopCircle";
 import VisibilityIcon from "@mui/icons-material/Visibility";
 import AddCommentIcon from "@mui/icons-material/AddComment";
 import AddIcon from "@mui/icons-material/Add";
+import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+import EditIcon from "@mui/icons-material/Edit";
 import SaveIcon from "@mui/icons-material/Save";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
@@ -85,11 +87,46 @@ const PLATFORM_OPTIONS = [
 const HISTORY_STATUSES = ["posted", "aborted", "rejected", "unsupported"];
 
 const CHAT_EXAMPLES = [
-  "comment on youtube videos about Ollama",
-  "market Guaardvark on reddit about ComfyUI",
-  "/outreach youtube ollama",
+  "comment on youtube videos about local LLMs",
+  "find reddit threads about image generation and draft replies",
+  "/outreach youtube <topic>",
   "/outreach status",
 ];
+
+// The "What you promote" form, as the page edits it. Keywords are typed as
+// one comma-separated line per feature and split on save.
+const EMPTY_PROFILE_FORM = {
+  name: "",
+  pitch: "",
+  site_url: "",
+  repo_url: "",
+  account_handle: "",
+  videos: [],
+  features: [],
+};
+
+function profileToForm(p) {
+  return {
+    ...EMPTY_PROFILE_FORM,
+    ...(p || {}),
+    videos: (p?.videos || []).map((v) => ({ label: v.label || "", url: v.url || "" })),
+    features: (p?.features || []).map((f) => ({
+      key: f.key || "",
+      blurb: f.blurb || "",
+      keywords: (f.keywords || []).join(", "),
+    })),
+  };
+}
+
+function formToProfile(form) {
+  return {
+    ...form,
+    features: form.features.map((f) => ({
+      ...f,
+      keywords: f.keywords.split(",").map((k) => k.trim()).filter(Boolean),
+    })),
+  };
+}
 
 function countWords(text) {
   if (!text) return 0;
@@ -119,6 +156,11 @@ const OutreachPage = () => {
   const [tone, setTone] = useState("default");
   const [platform, setPlatform] = useState("reddit");
   const [snippets, setSnippets] = useState(null);
+  const [profile, setProfile] = useState(null);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [profileForm, setProfileForm] = useState(EMPTY_PROFILE_FORM);
+  const [profileBusy, setProfileBusy] = useState(false);
+  const [profileError, setProfileError] = useState(null);
   const [loadingQueue, setLoadingQueue] = useState(false);
   const [loadingSnippets, setLoadingSnippets] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -217,11 +259,21 @@ const OutreachPage = () => {
     }
   }, []);
 
+  const fetchProfile = useCallback(async () => {
+    try {
+      const out = await outreachApi.fetchProfile();
+      setProfile(out?.profile || null);
+    } catch (e) {
+      setError(`profile fetch failed: ${e.message}`);
+    }
+  }, []);
+
   useEffect(() => {
     fetchStatus();
     fetchQueue();
     fetchApproved();
     fetchSnippets();
+    fetchProfile();
     fetchHistory();
     const t = setInterval(() => {
       fetchStatus();
@@ -230,7 +282,52 @@ const OutreachPage = () => {
       fetchHistory();
     }, 15000);
     return () => clearInterval(t);
-  }, [fetchStatus, fetchQueue, fetchApproved, fetchSnippets, fetchHistory]);
+  }, [fetchStatus, fetchQueue, fetchApproved, fetchSnippets, fetchProfile, fetchHistory]);
+
+  const profileConfigured = Boolean(profile?.name && profile?.pitch);
+
+  const openProfileDialog = () => {
+    setProfileForm(profileToForm(profile));
+    setProfileError(null);
+    setProfileOpen(true);
+  };
+
+  const setProfileField = (field, value) => {
+    setProfileForm((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const setProfileRow = (list, index, field, value) => {
+    setProfileForm((prev) => ({
+      ...prev,
+      [list]: prev[list].map((row, i) => (i === index ? { ...row, [field]: value } : row)),
+    }));
+  };
+
+  const addProfileRow = (list, row) => {
+    setProfileForm((prev) => ({ ...prev, [list]: [...prev[list], row] }));
+  };
+
+  const removeProfileRow = (list, index) => {
+    setProfileForm((prev) => ({ ...prev, [list]: prev[list].filter((_, i) => i !== index) }));
+  };
+
+  const handleSaveProfile = async () => {
+    setProfileBusy(true);
+    setProfileError(null);
+    try {
+      const out = await outreachApi.saveProfile(formToProfile(profileForm));
+      setProfile(out?.profile || null);
+      setProfileOpen(false);
+      setInfo(out?.configured
+        ? "Profile saved. Drafts, links and snippets now come from it."
+        : "Profile saved. Add a name and a pitch before drafting: nothing is drafted without them.");
+      await fetchSnippets();
+    } catch (e) {
+      setProfileError(e.message);
+    } finally {
+      setProfileBusy(false);
+    }
+  };
 
   const selectQueueItem = (row) => {
     setSelected(row);
@@ -656,7 +753,7 @@ const OutreachPage = () => {
           <Tooltip title="Refresh">
             <IconButton
               size="small"
-              onClick={() => { fetchStatus(); fetchQueue(); fetchApproved(); fetchHistory(); fetchSnippets(); }}
+              onClick={() => { fetchStatus(); fetchQueue(); fetchApproved(); fetchHistory(); fetchSnippets(); fetchProfile(); }}
             >
               <RefreshIcon />
             </IconButton>
@@ -697,6 +794,55 @@ const OutreachPage = () => {
           <Paper sx={{ p: 2 }}>
             <Stack direction="row" alignItems="center" sx={{ mb: 1 }}>
               <Typography variant="subtitle2" sx={{ flex: 1 }}>
+                What you promote
+              </Typography>
+              {profile && (
+                <Button
+                  size="small"
+                  variant={profileConfigured ? "text" : "outlined"}
+                  startIcon={profileConfigured ? <EditIcon /> : <AddIcon />}
+                  onClick={openProfileDialog}
+                  sx={{ textTransform: "none", py: 0.25 }}
+                >
+                  {profileConfigured ? "Edit" : "Set up"}
+                </Button>
+              )}
+            </Stack>
+            {!profile ? (
+              <CircularProgress size={20} />
+            ) : profileConfigured ? (
+              <Stack spacing={0.5}>
+                <Typography variant="body2" sx={{ fontWeight: 600 }}>{profile.name}</Typography>
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden" }}
+                >
+                  {profile.pitch}
+                </Typography>
+                <Stack direction="row" spacing={0.5} sx={{ flexWrap: "wrap", gap: 0.5 }}>
+                  {profile.site_url && <Chip size="small" variant="outlined" label="site" sx={{ height: 18, fontSize: "0.65rem" }} />}
+                  {profile.repo_url && <Chip size="small" variant="outlined" label="repo" sx={{ height: 18, fontSize: "0.65rem" }} />}
+                  {profile.account_handle && <Chip size="small" variant="outlined" label={`@${profile.account_handle}`} sx={{ height: 18, fontSize: "0.65rem" }} />}
+                  <Chip size="small" variant="outlined" label={`${profile.videos?.length || 0} video${profile.videos?.length === 1 ? "" : "s"}`} sx={{ height: 18, fontSize: "0.65rem" }} />
+                  <Chip size="small" variant="outlined" label={`${profile.features?.length || 0} feature${profile.features?.length === 1 ? "" : "s"}`} sx={{ height: 18, fontSize: "0.65rem" }} />
+                </Stack>
+                {!profile.site_url && (
+                  <Typography variant="caption" color="warning.main">
+                    No site URL: self-share and linked comments are skipped until one is set.
+                  </Typography>
+                )}
+              </Stack>
+            ) : (
+              <Typography variant="body2" color="text.secondary">
+                Nothing to promote yet. Drafts, self-share and snippets stay empty until you add a name and a pitch.
+              </Typography>
+            )}
+          </Paper>
+
+          <Paper sx={{ p: 2 }}>
+            <Stack direction="row" alignItems="center" sx={{ mb: 1 }}>
+              <Typography variant="subtitle2" sx={{ flex: 1 }}>
                 Queue ({queue.length})
               </Typography>
               <Tooltip title="Start a new draft from scratch">
@@ -727,7 +873,7 @@ const OutreachPage = () => {
                   </Button>
                 </span>
               </Tooltip>
-              <Tooltip title="Scout YouTube for videos matching feature keyword profiles (Ollama, ComfyUI, voice, coding agents, …), then draft GitHub-linked comments into this queue">
+              <Tooltip title="Scout YouTube for videos matching your profile's feature keywords, then draft comments with your repo link into this queue">
                 <span style={{ flex: 1, minWidth: "30%" }}>
                   <Button
                     fullWidth
@@ -770,7 +916,7 @@ const OutreachPage = () => {
               inputProps={{ "aria-label": "Pass topics" }}
             />
             <Typography variant="caption" color="text.disabled" sx={{ display: "block", mb: 1, fontSize: "0.65rem" }}>
-              YouTube pass scouts feature categories then drafts comments with the GitHub link for your approval.
+              YouTube pass scouts your profile's feature keywords then drafts comments with your repo link for your approval.
             </Typography>
             {approved.length > 0 && (
               <Paper variant="outlined" sx={{ mb: 1, p: 1 }}>
@@ -890,28 +1036,40 @@ const OutreachPage = () => {
             <Typography variant="subtitle2" sx={{ mb: 1 }}>Snippet bank</Typography>
             {loadingSnippets ? (
               <CircularProgress size={20} />
-            ) : snippets ? (
+            ) : snippets && (snippets.pitch || snippets.site_url || snippets.repo_url || snippets.videos?.length || Object.keys(snippets.feature_blurbs || {}).length) ? (
               <Stack spacing={0.5}>
-                <Button size="small" variant="outlined" onClick={() => insertSnippet(snippets.pitch)}>Insert pitch</Button>
-                <Button size="small" variant="outlined" onClick={() => insertSnippet(snippets.site_url)}>Insert site URL</Button>
-                <Button size="small" variant="outlined" onClick={() => insertSnippet(snippets.github_url)}>Insert GitHub</Button>
-                <Button size="small" variant="outlined" onClick={() => insertSnippet(snippets.gotham_rising_url)}>Insert Gotham Rising demo</Button>
-                {snippets.short_a_url && (
-                  <Button size="small" variant="outlined" onClick={() => insertSnippet(snippets.short_a_url)}>Insert channel Short A</Button>
+                {snippets.pitch && (
+                  <Button size="small" variant="outlined" onClick={() => insertSnippet(snippets.pitch)}>Insert pitch</Button>
                 )}
-                {snippets.short_b_url && (
-                  <Button size="small" variant="outlined" onClick={() => insertSnippet(snippets.short_b_url)}>Insert channel Short B</Button>
+                {snippets.site_url && (
+                  <Button size="small" variant="outlined" onClick={() => insertSnippet(snippets.site_url)}>Insert site URL</Button>
                 )}
-                <Divider sx={{ my: 1 }} />
-                <Typography variant="caption" color="text.secondary">Feature blurbs</Typography>
-                {snippets.feature_blurbs && Object.entries(snippets.feature_blurbs).map(([k, v]) => (
-                  <Tooltip key={k} title={v} placement="left">
-                    <Button size="small" sx={{ justifyContent: "flex-start", textTransform: "none" }} onClick={() => insertSnippet(v)}>
-                      {k}
-                    </Button>
-                  </Tooltip>
+                {snippets.repo_url && (
+                  <Button size="small" variant="outlined" onClick={() => insertSnippet(snippets.repo_url)}>Insert repo URL</Button>
+                )}
+                {(snippets.videos || []).map((v, i) => (
+                  <Button key={`${v.url}-${i}`} size="small" variant="outlined" onClick={() => insertSnippet(v.url)}>
+                    Insert {v.label || `video ${i + 1}`}
+                  </Button>
                 ))}
+                {Object.keys(snippets.feature_blurbs || {}).length > 0 && (
+                  <>
+                    <Divider sx={{ my: 1 }} />
+                    <Typography variant="caption" color="text.secondary">Feature blurbs</Typography>
+                    {Object.entries(snippets.feature_blurbs).map(([k, v]) => (
+                      <Tooltip key={k} title={v} placement="left">
+                        <Button size="small" sx={{ justifyContent: "flex-start", textTransform: "none" }} onClick={() => insertSnippet(v)}>
+                          {k}
+                        </Button>
+                      </Tooltip>
+                    ))}
+                  </>
+                )}
               </Stack>
+            ) : snippets ? (
+              <Typography variant="body2" color="text.secondary">
+                Fill in "What you promote" to get snippets here.
+              </Typography>
             ) : (
               <Typography variant="body2" color="text.secondary">Snippets unavailable.</Typography>
             )}
@@ -1370,6 +1528,190 @@ const OutreachPage = () => {
             disabled={ndBusy || !ndBody.trim()}
           >
             {ndSeededId ? "Save (update seeded row)" : "Save draft"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* ── What you promote ────────────────────────────────────────── */}
+      <Dialog
+        open={profileOpen}
+        onClose={() => { if (!profileBusy) setProfileOpen(false); }}
+        maxWidth="md"
+        fullWidth
+      >
+        <DialogTitle sx={{ pb: 1 }}>
+          What you promote
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>
+            Stays on this machine (data/social_outreach/profile.json). Drafts cite only what is here; the pitch sheet in data/agent/PITCH.md, when present, takes precedence over the pitch and features.
+          </Typography>
+        </DialogTitle>
+        <DialogContent dividers>
+          {profileError && (
+            <Alert severity="error" sx={{ mb: 2 }} onClose={() => setProfileError(null)}>
+              {profileError}
+            </Alert>
+          )}
+          <Stack spacing={1.5}>
+            <Stack direction={{ xs: "column", md: "row" }} spacing={1.5}>
+              <TextField
+                size="small"
+                label="Name"
+                placeholder="What you call it"
+                value={profileForm.name}
+                onChange={(e) => setProfileField("name", e.target.value)}
+                fullWidth
+                inputProps={{ maxLength: 80 }}
+              />
+              <TextField
+                size="small"
+                label="Account handle"
+                placeholder="the account you post from, without @"
+                value={profileForm.account_handle}
+                onChange={(e) => setProfileField("account_handle", e.target.value)}
+                fullWidth
+                inputProps={{ maxLength: 80 }}
+              />
+            </Stack>
+            <TextField
+              size="small"
+              label="Pitch"
+              placeholder="One or two sentences on what it is and who it is for."
+              value={profileForm.pitch}
+              onChange={(e) => setProfileField("pitch", e.target.value)}
+              multiline
+              minRows={2}
+              maxRows={6}
+              fullWidth
+              inputProps={{ maxLength: 2000 }}
+            />
+            <Stack direction={{ xs: "column", md: "row" }} spacing={1.5}>
+              <TextField
+                size="small"
+                label="Site URL"
+                placeholder="https://"
+                value={profileForm.site_url}
+                onChange={(e) => setProfileField("site_url", e.target.value)}
+                fullWidth
+                helperText="Where comments and self-share posts point. Links to it get UTM tags."
+              />
+              <TextField
+                size="small"
+                label="Repo URL"
+                placeholder="https://"
+                value={profileForm.repo_url}
+                onChange={(e) => setProfileField("repo_url", e.target.value)}
+                fullWidth
+                helperText="Preferred over the site on YouTube."
+              />
+            </Stack>
+
+            <Divider />
+            <Stack direction="row" alignItems="center">
+              <Typography variant="subtitle2" sx={{ flex: 1 }}>Videos</Typography>
+              <Button
+                size="small"
+                startIcon={<AddIcon />}
+                disabled={profileForm.videos.length >= 20}
+                onClick={() => addProfileRow("videos", { label: "", url: "" })}
+                sx={{ textTransform: "none" }}
+              >
+                Add video
+              </Button>
+            </Stack>
+            {profileForm.videos.length === 0 && (
+              <Typography variant="caption" color="text.secondary">
+                Each one becomes an insert button in the snippet bank.
+              </Typography>
+            )}
+            {profileForm.videos.map((v, i) => (
+              <Stack key={`video-${i}`} direction="row" spacing={1} alignItems="flex-start">
+                <TextField
+                  size="small"
+                  label="Label"
+                  value={v.label}
+                  onChange={(e) => setProfileRow("videos", i, "label", e.target.value)}
+                  sx={{ width: { xs: "40%", md: 220 } }}
+                  inputProps={{ maxLength: 80 }}
+                />
+                <TextField
+                  size="small"
+                  label="URL"
+                  placeholder="https://"
+                  value={v.url}
+                  onChange={(e) => setProfileRow("videos", i, "url", e.target.value)}
+                  fullWidth
+                />
+                <Tooltip title="Remove">
+                  <IconButton size="small" onClick={() => removeProfileRow("videos", i)} sx={{ mt: 0.25 }}>
+                    <DeleteOutlineIcon fontSize="small" />
+                  </IconButton>
+                </Tooltip>
+              </Stack>
+            ))}
+
+            <Divider />
+            <Stack direction="row" alignItems="center">
+              <Typography variant="subtitle2" sx={{ flex: 1 }}>Features</Typography>
+              <Button
+                size="small"
+                startIcon={<AddIcon />}
+                disabled={profileForm.features.length >= 40}
+                onClick={() => addProfileRow("features", { key: "", blurb: "", keywords: "" })}
+                sx={{ textTransform: "none" }}
+              >
+                Add feature
+              </Button>
+            </Stack>
+            <Typography variant="caption" color="text.secondary">
+              The blurb is what a draft may say about the feature. Keywords (comma-separated, whole words) are what a thread has to mention for the scouts to pick it up; the first feature whose keyword matches wins, so list the specific ones first.
+            </Typography>
+            {profileForm.features.map((f, i) => (
+              <Stack key={`feature-${i}`} direction="row" spacing={1} alignItems="flex-start">
+                <TextField
+                  size="small"
+                  label="Key"
+                  placeholder="local_ai"
+                  value={f.key}
+                  onChange={(e) => setProfileRow("features", i, "key", e.target.value)}
+                  sx={{ width: { xs: "30%", md: 160 } }}
+                  inputProps={{ maxLength: 40 }}
+                />
+                <TextField
+                  size="small"
+                  label="Blurb"
+                  value={f.blurb}
+                  onChange={(e) => setProfileRow("features", i, "blurb", e.target.value)}
+                  fullWidth
+                  inputProps={{ maxLength: 300 }}
+                />
+                <TextField
+                  size="small"
+                  label="Keywords"
+                  placeholder="ollama, local llm"
+                  value={f.keywords}
+                  onChange={(e) => setProfileRow("features", i, "keywords", e.target.value)}
+                  sx={{ width: { xs: "40%", md: 260 } }}
+                />
+                <Tooltip title="Remove">
+                  <IconButton size="small" onClick={() => removeProfileRow("features", i)} sx={{ mt: 0.25 }}>
+                    <DeleteOutlineIcon fontSize="small" />
+                  </IconButton>
+                </Tooltip>
+              </Stack>
+            ))}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setProfileOpen(false)} disabled={profileBusy}>
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            startIcon={profileBusy ? <CircularProgress size={14} /> : <SaveIcon />}
+            onClick={handleSaveProfile}
+            disabled={profileBusy}
+          >
+            Save
           </Button>
         </DialogActions>
       </Dialog>
