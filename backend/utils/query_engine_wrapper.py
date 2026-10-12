@@ -11,6 +11,7 @@ engine from it.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Optional
 
 try:
@@ -26,6 +27,20 @@ except Exception:  # pragma: no cover - missing optional deps
     AutoMergingRetriever = Any  # type: ignore
 
 logger = logging.getLogger(__name__)
+
+# The same switch the chunker reads (enhanced_rag_chunking): by default only
+# leaf nodes are indexed and their parents are dropped.
+LEAF_NODES_ONLY_ENV = "GUAARDVARK_INDEX_LEAF_NODES_ONLY"
+
+
+def parents_indexed() -> bool:
+    """True when indexing keeps parent nodes in the docstore.
+
+    AutoMergingRetriever looks up the parent of every node it retrieves and
+    fails when that parent was never stored, so it is used only then; with
+    the default leaf-only index the plain retriever is the right one.
+    """
+    return os.environ.get(LEAF_NODES_ONLY_ENV, "true").lower() != "true"
 
 
 def _build_query_engine_from_retriever(
@@ -82,7 +97,8 @@ def get_query_engine(index: BaseIndex, **kwargs: Any) -> Optional[RetrieverQuery
 
     try:
         base_ret = index.as_retriever(similarity_top_k=10)
-        retriever = AutoMergingRetriever(base_ret, index.storage_context)
+        retriever = (AutoMergingRetriever(base_ret, index.storage_context)
+                     if parents_indexed() else base_ret)
     except Exception as exc:
         logger.error("Failed to create retriever from index: %s", exc, exc_info=True)
         return None
