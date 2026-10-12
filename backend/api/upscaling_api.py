@@ -115,19 +115,27 @@ def _proxy_post_download(path: str, json_data: dict):
 
 @upscaling_bp.route("/autostart", methods=["GET"])
 def autostart_policy():
-    """Whether a submitted job starts the service while it is down, so the page
-    only says it will when it will. Same checks as start_for_job, minus health."""
+    """Whether a submitted job starts the service while it is down, and if not
+    why, so the page only says it will when it will. Same checks as
+    start_for_job, minus health."""
     from backend.services.plugin_bridge import (
         _plugin_manager, auto_orchestrator_enabled, job_service_start_enabled,
     )
-    starts = job_service_start_enabled("upscale") and auto_orchestrator_enabled()
-    if starts:
+    why_not = None
+    if not job_service_start_enabled("upscale"):
+        why_not = "job_start_off"
+    elif not auto_orchestrator_enabled():
+        why_not = "orchestrator_off"
+    else:
         try:
             if _plugin_manager().state_store.get_user_enabled().get("upscaling") is False:
-                starts = False
+                why_not = "switched_off"
         except Exception:  # noqa: BLE001 - unknown preference: report the switches only
             pass
-    return success_response(data={"starts_on_job": starts}, message="Upscaling start policy")
+    return success_response(
+        data={"starts_on_job": why_not is None, "why_not": why_not},
+        message="Upscaling start policy",
+    )
 
 
 @upscaling_bp.route("/health", methods=["GET"])

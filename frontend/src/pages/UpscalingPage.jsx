@@ -46,7 +46,7 @@ import {
 } from "@mui/icons-material";
 import { useNavigate } from "react-router-dom";
 import * as upscalingService from "../api/upscalingService";
-import { listPlugins, startPlugin } from "../api/pluginsService";
+import { enablePlugin, listPlugins, startPlugin } from "../api/pluginsService";
 import lazyWithReload from "../utils/lazyWithReload";
 
 const UpscalingModelsModal = lazyWithReload(() =>
@@ -88,6 +88,7 @@ const UpscalingPage = ({ embedded = false }) => {
   // While the service is down: whether a submitted job starts it (the backend
   // decides; null until asked), and whether the Start button is waiting on it.
   const [startsOnJob, setStartsOnJob] = useState(null);
+  const [startPolicyWhyNot, setStartPolicyWhyNot] = useState(null);
   const [startingService, setStartingService] = useState(false);
 
   // Upload state — selectedFiles is an array so we can batch-queue a bunch at once
@@ -168,17 +169,32 @@ const UpscalingPage = ({ embedded = false }) => {
   useEffect(() => {
     if (serviceAvailable !== false) return;
     upscalingService.getAutostart()
-      .then((res) => setStartsOnJob(!!(res.data || res)?.starts_on_job))
+      .then((res) => {
+        const policy = res.data || res;
+        setStartsOnJob(!!policy?.starts_on_job);
+        setStartPolicyWhyNot(policy?.why_not || null);
+      })
       .catch(() => setStartsOnJob(false));
   }, [serviceAvailable]);
 
-  // The Plugins page's start, from here. Waits up to a minute for the service
-  // to answer so the models and GPU card fill in without a manual refresh.
+  // The Plugins page's Enable + Start, from here (upscaling ships disabled, and
+  // a disabled plugin refuses a plain start). Waits up to a minute for the
+  // service to answer so the models and GPU card fill in without a refresh.
   const handleStartService = async () => {
     setStartingService(true);
     setError("");
     try {
-      await startPlugin("upscaling");
+      const pluginsRes = await listPlugins();
+      const upscaling = (pluginsRes?.data?.plugins || []).find((p) => p.id === "upscaling");
+      if (upscaling?.status === "disabled") {
+        await enablePlugin("upscaling");
+      }
+      const started = await startPlugin("upscaling");
+      // A start held back by the GPU gate or a cooldown answers 200 with success=false.
+      if (started?.data?.success === false) {
+        setError(`The upscaling service did not start: ${started.message || started.data.error || "try again shortly"}`);
+        return;
+      }
       const deadline = Date.now() + 60000;
       let up = await checkService();
       while (!up && Date.now() < deadline) {
@@ -645,7 +661,9 @@ const UpscalingPage = ({ embedded = false }) => {
         >
           {startsOnJob
             ? "The upscaling service is stopped. It starts by itself when you upscale something, or you can start it now."
-            : "The upscaling service is stopped. Start it to upscale."}
+            : startPolicyWhyNot === "switched_off"
+              ? "Upscaling is switched off on the Plugins page. Start it here to upscale."
+              : "The upscaling service is stopped. Start it to upscale."}
         </Alert>
       )}
 
