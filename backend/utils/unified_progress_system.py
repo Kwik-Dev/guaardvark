@@ -493,7 +493,8 @@ class UnifiedProgressSystem:
         # Housekeeping timers must never keep the interpreter alive at exit.
         cleanup_timer.daemon = True
         cleanup_timer.start()
-        self._timeout_timers[f"{process_id}_cleanup"] = cleanup_timer
+        with self._lock:
+            self._timeout_timers[f"{process_id}_cleanup"] = cleanup_timer
 
     def apply_relayed_event(self, event_data: Dict[str, Any]) -> bool:
         """Bring this process's copy of a job up to date from an event another
@@ -557,16 +558,19 @@ class UnifiedProgressSystem:
         timeout_timer = threading.Timer(timeout_seconds, self._timeout_stuck_process, args=[process_id, timeout_seconds])
         timeout_timer.daemon = True
         timeout_timer.start()
-        self._timeout_timers[f"{process_id}_timeout"] = timeout_timer
+        with self._lock:
+            self._timeout_timers[f"{process_id}_timeout"] = timeout_timer
         
         logger.debug(f"Scheduled timeout timer for {process_id}: {timeout_seconds}s")
     
     def _cancel_timeout_timer(self, process_id: str):
         """Cancel timeout timer for a process"""
-        timeout_key = f"{process_id}_timeout"
-        if timeout_key in self._timeout_timers:
-            self._timeout_timers[timeout_key].cancel()
-            self._timeout_timers.pop(timeout_key, None)
+        # The relay thread, request threads and the timers themselves all change
+        # this dict; the lock is re-entrant, so callers already holding it are fine.
+        with self._lock:
+            timer = self._timeout_timers.pop(f"{process_id}_timeout", None)
+        if timer is not None:
+            timer.cancel()
             logger.debug(f"Cancelled timeout timer for {process_id}")
     
     def _emit_event(self, event: ProgressEvent):
@@ -782,15 +786,14 @@ class UnifiedProgressSystem:
                 self._cancel_listeners.pop(process_id, None)
                 logger.info(f"Cleaned up process from memory: {process_id}")
         
-        # Clean up all timers associated with this process
-        timers_to_remove = []
-        for timer_key in self._timeout_timers:
-            if timer_key.startswith(process_id):
-                self._timeout_timers[timer_key].cancel()
-                timers_to_remove.append(timer_key)
-        
-        for timer_key in timers_to_remove:
-            self._timeout_timers.pop(timer_key, None)
+        # Clean up this process's own timers: its exact keys, not a prefix match,
+        # which would also cancel the timers of a process whose id starts with this one.
+        with self._lock:
+            timers = [self._timeout_timers.pop(f"{process_id}{suffix}", None)
+                      for suffix in ("_timeout", "_cleanup")]
+        for timer in timers:
+            if timer is not None:
+                timer.cancel()
         
         # Also clean up file-based tracking
         if self._file_based_enabled and self._output_dir:
