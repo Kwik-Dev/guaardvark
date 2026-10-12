@@ -119,7 +119,9 @@ const TaskActionModal = ({
   // Progress integration
   const { _activeProcesses, getProcess } = useUnifiedProgress();
   
-  const isEditMode = !!taskData;
+  // Editing needs a saved task. taskData without an id is a template (New Job's
+  // quick actions): the form opens in create mode with its values filled in.
+  const isEditMode = Boolean(taskData?.id);
   const isFileGeneration = formData.type === "file_generation";
   const isCodeGeneration = formData.type === "code_generation";
   
@@ -289,21 +291,24 @@ const TaskActionModal = ({
           setBatchSize(workflowConfig.batch_size);
         }
       } else {
-        // Reset for create mode with smart defaults
+        // Create mode with smart defaults, or with a quick action's template
+        const template = taskData || {};
+        const type = template.type || "file_generation";
         const timestamp = new Date().toISOString().slice(0, 16).replace('T', '_').replace(/[-:]/g, '');
         setFormData({
           id: null,
-          name: "",
-          description: "",
-          type: "file_generation",
+          name: template.name || "",
+          description: template.description || "",
+          type,
           project_id: defaults?.project_id ?? "",
           client_name: defaults?.client_name ?? "",
           target_website: "",
-          output_filename: formData.type === "code_generation" ? `generated_file.jsx` : `content_${timestamp}.csv`,
+          output_filename: template.output_filename
+            || (type === "code_generation" ? `generated_file.jsx` : `content_${timestamp}.csv`),
           model_name: "",
           prompt_rule_id: null,
           page_count: 50,
-          auto_start_job: true,
+          auto_start_job: template.auto_start_job ?? true,
           client_id: defaults?.client_id ?? null,
           website_id: defaults?.website_id ?? null,
         });
