@@ -37,7 +37,9 @@ const KINDS = [
   { ext: ".docx", label: "Word (.docx)" },
   { ext: ".pdf", label: "PDF (.pdf)" },
 ];
-const PAIR_RATES = [1, 2, 3, 5, 8];
+// What the build aims for. "enough" is what a default fine-tune can use, with
+// headroom for the filter (the server says the number).
+const TARGETS = ["enough", 5000, 2000, "all"];
 const RULE_LABELS = {
   private_key: "Private keys",
   api_key: "API keys and tokens",
@@ -79,11 +81,25 @@ const skippedLine = (skipped) => {
   return parts.length ? `Skipped ${parts.join(", ")}.` : "";
 };
 
+const targetLabel = (value, estimate) => {
+  if (value === "enough") {
+    return estimate?.enough_to_train
+      ? `Enough to train (≈${estimate.enough_to_train.toLocaleString()})`
+      : "Enough to train";
+  }
+  if (value === "all") return "All passages";
+  return Number(value).toLocaleString();
+};
+
 const BuildFromFolderModal = ({ open, onClose, onStarted }) => {
   const [folder, setFolder] = useState("");
   const [pickerOpen, setPickerOpen] = useState(false);
   const [kinds, setKinds] = useState([".md", ".txt"]);
-  const [rate, setRate] = useState(3);
+  const [target, setTarget] = useState("enough");
+  // Files over the size limit: path -> words, as the checks have reported them,
+  // and the ones the person chose to include anyway.
+  const [largeFiles, setLargeFiles] = useState({});
+  const [includeLarge, setIncludeLarge] = useState([]);
   const [alsoIndex, setAlsoIndex] = useState(true);
   const [terms, setTerms] = useState("");
   const [check, setCheck] = useState(null);
@@ -107,6 +123,12 @@ const BuildFromFolderModal = ({ open, onClose, onStarted }) => {
   }, [open]);
 
   // Any change to what would be read makes the last check stale.
+  // Another folder: the size list and the inclusions were the old folder's.
+  const forgetLargeFiles = () => {
+    setLargeFiles({});
+    setIncludeLarge([]);
+  };
+
   const invalidate = () => {
     setCheck(null);
     setProbe(null);
@@ -114,7 +136,7 @@ const BuildFromFolderModal = ({ open, onClose, onStarted }) => {
     setProbeError(null);
   };
 
-  const body = () => ({ folder, kinds, pairs_per_1000_words: rate });
+  const body = () => ({ folder, kinds, target_pairs: target, include_large_files: includeLarge });
 
   const runCheck = async () => {
     setError(null);
@@ -124,6 +146,10 @@ const BuildFromFolderModal = ({ open, onClose, onStarted }) => {
       await saveScrubTerms(terms.split("\n"));
       const result = await checkFolderBuild(body());
       setCheck(result);
+      setLargeFiles((prev) => ({
+        ...prev,
+        ...Object.fromEntries((result.skipped?.large_files || []).map((f) => [f.source_path, f.words])),
+      }));
       setEstimate(result.estimate);
       setProbe(null);
       if (result.files > 0) {
@@ -196,6 +222,7 @@ const BuildFromFolderModal = ({ open, onClose, onStarted }) => {
               value={folder}
               onChange={(e) => {
                 setFolder(e.target.value);
+                forgetLargeFiles();
                 invalidate();
               }}
               placeholder="Choose a folder on the Guaardvark machine"
@@ -229,21 +256,29 @@ const BuildFromFolderModal = ({ open, onClose, onStarted }) => {
             <TextField
               select
               size="small"
-              label="Pairs per 1000 words"
-              value={rate}
-              onChange={(e) => {
-                setRate(Number(e.target.value));
-                invalidate();
-              }}
+              label="Pairs to generate"
+              value={target}
+              onChange={(e) => setTarget(e.target.value)}
               disabled={Boolean(busy)}
-              sx={{ minWidth: 200 }}
+              sx={{ minWidth: 260 }}
+              SelectProps={{ renderValue: (value) => targetLabel(value, estimate) }}
             >
-              {PAIR_RATES.map((n) => (
-                <MenuItem key={n} value={n}>
-                  {n}
-                  {n === 3 ? " (default)" : ""}
-                </MenuItem>
-              ))}
+              {TARGETS.map((value) => {
+                const choice = estimate?.choices?.[String(value)];
+                return (
+                  <MenuItem key={value} value={value}>
+                    <Box>
+                      <Typography variant="body2">{targetLabel(value, estimate)}</Typography>
+                      {choice && (
+                        <Typography variant="caption" color="text.secondary">
+                          {plural(choice.passages, "passage")}
+                          {choice.seconds != null ? `, ${formatDuration(choice.seconds)}` : ""}
+                        </Typography>
+                      )}
+                    </Box>
+                  </MenuItem>
+                );
+              })}
             </TextField>
             <SettingChip
               label="Also add to Files and index it for search"
@@ -296,6 +331,30 @@ const BuildFromFolderModal = ({ open, onClose, onStarted }) => {
                     {skippedLine(check.skipped)}
                   </Typography>
                 </Stack>
+                {Object.keys(largeFiles).length > 0 && (
+                  <Box>
+                    <Typography variant="body2">
+                      Left out as very large (tool output or word lists, not notes): include any that are notes, then
+                      Check again.
+                    </Typography>
+                    <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap sx={{ mt: 0.5 }}>
+                      {Object.entries(largeFiles).map(([path, words]) => (
+                        <SettingChip
+                          key={path}
+                          label={path.split("/").pop()}
+                          note={`${words.toLocaleString()} words`}
+                          tooltip={path}
+                          on={includeLarge.includes(path)}
+                          disabled={Boolean(busy)}
+                          onToggle={(on) => {
+                            setIncludeLarge((prev) => (on ? [...prev, path] : prev.filter((p) => p !== path)));
+                            invalidate();
+                          }}
+                        />
+                      ))}
+                    </Stack>
+                  </Box>
+                )}
                 {check.skipped?.credential_files?.length > 0 && (
                   <Alert severity="info">
                     Left out because their names say they hold a credential:{" "}
@@ -336,12 +395,17 @@ const BuildFromFolderModal = ({ open, onClose, onStarted }) => {
                     </Collapse>
                   </Box>
                 )}
-                {estimate && !nothingToRead && (
+                {estimate && !nothingToRead && (() => {
+                  const choice = estimate.choices?.[String(target)] || {
+                    passages: estimate.chunks, pairs_before_filter: estimate.pairs_before_filter, seconds: estimate.seconds,
+                  };
+                  return (
                   <Typography variant="body2">
-                    Estimate: {plural(estimate.chunks, "passage")}, about {estimate.pairs_before_filter} pairs before
-                    filtering
-                    {estimate.seconds != null
-                      ? `, ${formatDuration(estimate.seconds)} on ${probe?.model || "the local model"}`
+                    Estimate for {targetLabel(target, estimate)}: {plural(choice.passages, "passage")} of{" "}
+                    {estimate.passages_available?.toLocaleString()}, about {choice.pairs_before_filter.toLocaleString()} pairs
+                    before filtering
+                    {choice.seconds != null
+                      ? `, ${formatDuration(choice.seconds)} on ${probe?.model || "the local model"}`
                       : ""}
                     .
                     <Typography component="span" variant="caption" color="text.secondary">
@@ -351,7 +415,8 @@ const BuildFromFolderModal = ({ open, onClose, onStarted }) => {
                         : `Chunk size ${estimate.basis}.`}
                     </Typography>
                   </Typography>
-                )}
+                  );
+                })()}
                 {probeError && (
                   <Alert severity="warning">
                     {probeError}. The build needs the local chat model; start it from the chat model list, then Check
@@ -390,6 +455,7 @@ const BuildFromFolderModal = ({ open, onClose, onStarted }) => {
         onClose={() => setPickerOpen(false)}
         onSelect={(path) => {
           setFolder(path);
+          forgetLargeFiles();
           invalidate();
         }}
         initialPath={folder || "~"}
