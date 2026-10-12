@@ -546,6 +546,12 @@ const TaskActionModal = ({
       taskPayload.workflow_config = taskData.workflow_config;
     }
 
+    // A new task this form starts itself (below) is created queued. Both task
+    // schedulers run any pending task with no job_id within seconds, so a
+    // pending create followed by the start ran the task twice.
+    const startsHere = !isEditMode && (isFileGeneration || isCodeGeneration) && formData.auto_start_job;
+    if (startsHere) taskPayload.status = "queued";
+
     try {
       let createdTask;
       
@@ -556,7 +562,7 @@ const TaskActionModal = ({
       }
 
       // If this is a new task with auto-start enabled, start the job
-      if (!isEditMode && (isFileGeneration || isCodeGeneration) && formData.auto_start_job && createdTask) {
+      if (startsHere && createdTask) {
         setIsCreatingJob(true);
         try {
           if (isFileGeneration) {
@@ -566,6 +572,12 @@ const TaskActionModal = ({
           }
         } catch (jobError) {
           console.error("Failed to start job:", jobError);
+          // No scheduler takes a queued task, so mark it failed instead of leaving it waiting.
+          fetch(`/api/tasks/${createdTask.id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ status: "failed" }),
+          }).catch(() => {});
           setFormError(`Task created successfully, but failed to start job: ${jobError.message}`);
           setIsCreatingJob(false);
           return;
