@@ -249,6 +249,30 @@ def _queue_stopped(doc_id, job_id, dispatched, total, exc):
     }), 503
 
 
+def _dispatch_document(progress_system, index_document_task, doc):
+    """Queue one document of a batch under its own progress record.
+
+    The record is created here, in the web process, because the Activity list
+    reads this process's records and the Redis relay only updates ones it
+    holds; the worker continues it under the same id. The batch's own record
+    only counts what was queued. Returns the TaskNotStarted that stopped the
+    dispatch, or None.
+    """
+    job_id = progress_system.create_process(
+        ProcessType.INDEXING,
+        f"Indexing document {doc.id}: {doc.filename}",
+        {"document_id": doc.id},
+    )
+    doc.indexing_job_id = job_id
+    db.session.commit()
+    try:
+        index_document_task.apply_async((doc.id, job_id), queue='indexing')
+    except TaskNotStarted as e:
+        mark_progress_not_started(job_id, e)
+        return e
+    return None
+
+
 def _get_all_document_ids_recursive(folder_id):
     """Get all document IDs from a folder and all its subfolders recursively."""
     doc_ids = [d.id for d in DBDocument.query.filter_by(folder_id=folder_id).all()]
@@ -340,13 +364,13 @@ def trigger_bulk_indexing():
                     logger.debug(f"Hash check failed for doc {doc_id}, will re-index: {e}")
 
             update_document_status(doc.id, "INDEXING")
-            try:
-                index_document_task.apply_async((doc.id, job_id), queue='indexing')
-            except TaskNotStarted as e:
-                return _queue_stopped(doc.id, job_id, dispatched, len(all_doc_ids), e)
+            stopped = _dispatch_document(progress_system, index_document_task, doc)
+            if stopped:
+                return _queue_stopped(doc.id, job_id, dispatched, len(all_doc_ids), stopped)
             dispatched += 1
 
-        logger.info(f"Bulk indexing: dispatched {dispatched} tasks, skipped {skipped} unchanged, under job {job_id}")
+        progress_system.complete_process(job_id, f"Queued {dispatched} for indexing, {skipped} unchanged")
+        logger.info(f"Bulk indexing: dispatched {dispatched} tasks, skipped {skipped} unchanged (batch job {job_id})")
 
         # Auto-trigger repository analysis for folders with enough code files
         from backend.utils.code_chunker import CODE_LANGUAGE_MAP
@@ -464,13 +488,13 @@ def resume_pending_indexing():
             if not doc:
                 continue
             update_document_status(doc.id, "INDEXING")
-            try:
-                index_document_task.apply_async((doc.id, job_id), queue='indexing')
-            except TaskNotStarted as e:
-                return _queue_stopped(doc.id, job_id, dispatched, len(doc_ids), e)
+            stopped = _dispatch_document(progress_system, index_document_task, doc)
+            if stopped:
+                return _queue_stopped(doc.id, job_id, dispatched, len(doc_ids), stopped)
             dispatched += 1
 
-        logger.info(f"Resume pending: dispatched {dispatched} indexing tasks under job {job_id}")
+        progress_system.complete_process(job_id, f"Queued {dispatched} for indexing")
+        logger.info(f"Resume pending: dispatched {dispatched} indexing tasks (batch job {job_id})")
 
         return jsonify({
             "message": f"Resumed indexing for {dispatched} pending/error documents.",

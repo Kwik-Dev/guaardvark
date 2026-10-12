@@ -134,7 +134,9 @@ def evict_audio_foundry_backends() -> list:
             except (requests.RequestException, ValueError) as e:
                 log.warning("audio_foundry evict %s failed (non-fatal): %s", intent, e)
         if unloaded:
-            log.info("Reclaim: audio_foundry unloaded %s", ", ".join(unloaded))
+            # WARNING, as for the upscaler: backend.log keeps WARNING and up
+            # unless BACKEND_LOG_LEVEL lowers it.
+            log.warning("Reclaim: audio_foundry unloaded %s to make room on the GPU", ", ".join(unloaded))
         return unloaded
     except Exception as e:  # noqa: BLE001
         log.warning("audio_foundry eviction failed (non-fatal): %s", e)
