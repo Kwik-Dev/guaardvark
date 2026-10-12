@@ -386,15 +386,15 @@ class SemanticIntentClassifier:
         # Export to ONNX if requested
         if export_onnx:
             try:
-                cls._export_to_onnx(model, output_dir)
+                cls._export_to_onnx(model, output_dir, base_model, allow_download)
             except Exception as e:
                 logger.warning(f"ONNX export failed: {e}")
 
         return cls(str(output_dir))
 
     @staticmethod
-    def _export_to_onnx(model, output_dir: Path):
-        """Export SetFit model to ONNX format."""
+    def _export_to_onnx(model, output_dir: Path, base_model: str, allow_download: bool = False):
+        """Export SetFit model to ONNX format, with the tokenizer of the base it was trained from."""
         try:
             import torch
             from transformers import AutoTokenizer
@@ -406,7 +406,7 @@ class SemanticIntentClassifier:
 
             # Create dummy input
             tokenizer = AutoTokenizer.from_pretrained(
-                "sentence-transformers/all-MiniLM-L6-v2",
+                base_model,
                 local_files_only=not allow_download,
             )
             dummy_input = tokenizer(
