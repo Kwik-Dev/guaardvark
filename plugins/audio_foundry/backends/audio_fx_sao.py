@@ -21,6 +21,10 @@ from typing import Any
 
 from backends.base import AudioBackend, GenerationResult
 
+# The files Install leaves out: stable-audio-tools' own checkpoints and the card
+# image. Keep in step with the stable-audio-open entry in the backend's catalog.
+INSTALL_SKIPS = ["model.ckpt", "model.safetensors", "vae_model.ckpt", "*.png"]
+
 logger = logging.getLogger(__name__)
 
 
@@ -132,11 +136,19 @@ class StableAudioOpenBackend(AudioBackend):
 
         require_hub_files(self.MODEL_ID, ["model_index.json"], "Sound FX")
         try:
-            pipe = StableAudioPipeline.from_pretrained(
+            # Install fetches the diffusers layout and skips the repo's original
+            # checkpoints (backend/services/audio_foundry_models.py). Loaded by
+            # repo id, huggingface_hub compares the cache with the repo's whole
+            # file list and refuses the snapshot as incomplete, so resolve the
+            # folder with the same skips and load from there.
+            from huggingface_hub import snapshot_download
+
+            local_dir = snapshot_download(
                 self.MODEL_ID,
-                torch_dtype=dtype,
                 local_files_only=True,
+                ignore_patterns=INSTALL_SKIPS,
             )
+            pipe = StableAudioPipeline.from_pretrained(local_dir, torch_dtype=dtype)
         except WeightsNotInstalled:
             raise
         except OSError as e:
