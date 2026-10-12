@@ -723,7 +723,7 @@ function ProjectsPage() {
                   helperText="Select existing client or type a new name to create one."
                   error={
                     !formClientValue &&
-                    formName.trim() /* Only show error if trying to save */
+                    Boolean(formName.trim()) /* Only show error if trying to save */
                   }
                 />
               )}
