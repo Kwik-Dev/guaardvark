@@ -766,7 +766,7 @@ const TrainingPage = () => {
       </Alert>
       <Paper elevation={2}>
         <Box sx={{ borderBottom: 1, borderColor: "divider" }}>
-          <Tabs value={activeTab} onChange={(e, v) => setActiveTab(v)}>
+          <Tabs value={activeTab} onChange={(e, v) => setActiveTab(v)} variant="scrollable" scrollButtons="auto" allowScrollButtonsMobile>
             <Tab icon={<SchoolIcon />} iconPosition="start" label="Demonstrations" />
             <Tab icon={<StorageIcon />} iconPosition="start" label="Datasets" />
             <Tab icon={<WorkIcon />} iconPosition="start" label="Jobs" />
