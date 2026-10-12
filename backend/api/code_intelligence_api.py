@@ -939,7 +939,7 @@ Provide:
 Make the explanation clear and educational."""
 
                 try:
-                    session_id = f"offline-explanation-{datetime.now().timestamp()}"
+                    session_id = f"offline-explain-{int(datetime.now().timestamp() * 1000)}"
                     response = send_chat_message_internal(
                         session_id=session_id,
                         user_message=explanation_prompt,
