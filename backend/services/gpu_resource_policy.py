@@ -98,6 +98,7 @@ def evict_ollama_models() -> bool:
 
 
 _AUDIO_FOUNDRY_URL = "http://127.0.0.1:8206"
+_UPSCALING_URL = "http://127.0.0.1:8202"
 
 
 def evict_audio_foundry_backends() -> list:
@@ -138,6 +139,44 @@ def evict_audio_foundry_backends() -> list:
     except Exception as e:  # noqa: BLE001
         log.warning("audio_foundry eviction failed (non-fatal): %s", e)
         return []
+
+
+def evict_upscaler_model(keep: Optional[str] = None) -> Optional[str]:
+    """Ask the upscaling service to unload its model. Never raises.
+
+    The service holds its model and CUDA context in its own process, where no
+    other reclaim reaches: a single image left its whole peak on the card (2140
+    MiB with 4x-UltraSharp at 1024x1024, measured 2026-10-12). Its /evict
+    refuses while a job runs or waits, so a live upscale is never cut off.
+    ``keep`` names the model an upscale about to run will use; that one stays.
+    Returns the model unloaded, or None.
+    """
+    try:
+        import requests
+
+        from backend.utils.sidecar_guard import read_internal_token
+
+        try:
+            from backend.api.upscaling_api import UPSCALING_URL as base
+        except Exception:  # noqa: BLE001
+            base = _UPSCALING_URL
+        token = read_internal_token("upscaling")
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        try:
+            status = requests.get(f"{base}/status", headers=headers, timeout=(1.0, 5.0)).json()
+        except (requests.RequestException, ValueError):
+            return None  # service not running
+        loaded = status.get("model_loaded")
+        if not loaded or (keep and loaded == keep) or status.get("busy"):
+            return None
+        resp = requests.post(f"{base}/evict", headers=headers, timeout=(1.0, 30.0))
+        if resp.ok and resp.json().get("unloaded"):
+            log.info("Reclaim: upscaler unloaded %s", loaded)
+            return loaded
+        return None
+    except Exception as e:  # noqa: BLE001
+        log.warning("upscaler eviction failed (non-fatal): %s", e)
+        return None
 
 
 def reclaim_in_process_vram(needed_mb: int = 0) -> int:
@@ -251,14 +290,19 @@ def reclaim_gpu(
     free_comfyui: bool = False,
     in_process: bool = False,
     needed_mb: int = 0,
+    upscale_model: Optional[str] = None,
 ) -> None:
-    """Run the requested VRAM reclaims before a render uses the card. Best-effort."""
+    """Run the requested VRAM reclaims before a render uses the card. Best-effort.
+
+    ``upscale_model`` is the model an upscale about to run will use; the
+    upscaling service keeps it loaded."""
     if evict_ollama:
         evict_ollama_models()
     if free_comfyui:
         free_comfyui_vram()
     if in_process:
         evict_audio_foundry_backends()
+        evict_upscaler_model(keep=upscale_model)
         reclaim_in_process_vram(needed_mb)
 
 
@@ -672,6 +716,7 @@ def gpu_session(
     vram_reserve_mb: int = 0,
     cancel_event=None,
     image_model: Optional[str] = None,
+    upscale_model: Optional[str] = None,
     on_wait=None,
 ) -> Iterator[bool]:
     """Claim the GPU for a unit of work — exclusivity + VRAM reclaim/budget in one place.
@@ -691,6 +736,8 @@ def gpu_session(
 
     An image pipeline kept loaded after a batch is unloaded first, unless
     ``image_model`` names the model it holds (the job will render with it).
+    ``upscale_model`` does the same for the upscaling service's model when the
+    reclaim reaches it.
 
     A refusal raised after the claim releases the gate without its post-release
     cooldown: nothing touched the card. Teardown runs in reverse order and before
@@ -788,6 +835,7 @@ def gpu_session(
                             free_comfyui=free_comfyui,
                             in_process=True,
                             needed_mb=vram_estimate_mb,
+                            upscale_model=upscale_model,
                         )
                         # Every resident answers its eviction before the memory
                         # is actually back: ComfyUI acks /free early, and Ollama's

@@ -47,6 +47,12 @@ _cancel_flags: dict = {}  # job_id -> threading.Event
 # before A's upscale_image call gets the loaded model. Video jobs already
 # serialise through `_job_queue`; this lock covers the sync image paths.
 _image_upscale_lock = threading.Lock()
+# The model a queued job is using, set while it runs (under the lock above). A
+# sync request for another model is refused instead of swapping the model out
+# from under the job, which left both models on the card.
+_job_model: Optional[str] = None
+# The job the worker is running, for /status and /evict.
+_running_job_id: Optional[str] = None
 
 # Single-worker queue. The GPU is one resource — running N jobs in parallel
 # just means everyone fights for VRAM and the model swaps. So we serialize:
@@ -232,6 +238,44 @@ def _ensure_model(model_name: Optional[str] = None) -> str:
     return name
 
 
+def _claim_job_model(model_name: Optional[str]):
+    """Load a queued job's model and hold it until `_release_job_model`.
+
+    Returns (model, scale). Sync requests for another model get 409 meanwhile.
+    """
+    global _job_model
+    with _image_upscale_lock:
+        name = _ensure_model(model_name)
+        _job_model = name
+        return _model_manager.get_model(), (_model_manager.scale or 4)
+
+
+def _release_job_model() -> None:
+    global _job_model
+    with _image_upscale_lock:
+        _job_model = None
+
+
+def _free_cache_unless_job() -> None:
+    """Return the allocator cache after a sync image. The queued path does this
+    at the end of each job; a still kept its whole peak (2140 MiB with
+    4x-UltraSharp on a 1024x1024 image, measured 2026-10-12) until the next one."""
+    if torch.cuda.is_available() and _job_model is None:
+        torch.cuda.empty_cache()
+
+
+def _sync_model(model_name: Optional[str]) -> str:
+    """`_ensure_model` for a sync request; call with `_image_upscale_lock` held."""
+    name = model_name or _default_model()
+    if _job_model is not None and name != _job_model:
+        raise HTTPException(
+            409,
+            f"A queued upscale job is using {_job_model}; this request asks for {name}. "
+            "Try again when the job finishes.",
+        )
+    return _ensure_model(name)
+
+
 def _require_installed(model_name: Optional[str]) -> str:
     """The model a request will use, refused with 409 when it is not installed.
 
@@ -355,11 +399,13 @@ def _start_image_batch_job(
 def _job_worker():
     """Single consumer for the job queue. Runs one job at a time so the GPU
     isn't fighting itself."""
+    global _running_job_id
     while True:
         task = _job_queue.get()
         if task is None:
             break
         job_id = task["job_id"]
+        _running_job_id = job_id
         try:
             if task["kind"] == "image_batch":
                 _run_image_batch_job(
@@ -379,6 +425,8 @@ def _job_worker():
             # The runners already record failure into the job manager; this is a
             # last-resort log so a worker crash doesn't kill the loop.
             logger.exception(f"Worker crashed processing {job_id}: {e}")
+        finally:
+            _running_job_id = None
 
 
 def _run_video_job(
@@ -413,9 +461,7 @@ def _run_video_job(
         total_frames = info["nb_frames"]
         in_w, in_h = info["width"], info["height"]
 
-        _ensure_model(model_name)
-        model = _model_manager.get_model()
-        model_scale = _model_manager.scale or 4
+        model, model_scale = _claim_job_model(model_name)
 
         outscale = scale if scale else float(model_scale)
         out_w = int(in_w * outscale)
@@ -509,6 +555,7 @@ def _run_video_job(
         _job_manager.fail_job(job_id, error=str(e))
         _send_callback("upscale:job_failed", {"job_id": job_id, "error": str(e)})
     finally:
+        _release_job_model()
         _cancel_flags.pop(job_id, None)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -546,9 +593,7 @@ def _run_image_batch_job(
             if free_mb < 500:
                 raise RuntimeError(f"Insufficient VRAM: {free_mb:.0f}MB free, need ~500MB minimum")
 
-        _ensure_model(model_name)
-        model = _model_manager.get_model()
-        model_scale = _model_manager.scale or 4
+        model, model_scale = _claim_job_model(model_name)
 
         tile_size = 400
         if _config.max_tile_size != "auto":
@@ -622,6 +667,7 @@ def _run_image_batch_job(
         _job_manager.fail_job(job_id, error=str(e))
         _send_callback("upscale:job_failed", {"job_id": job_id, "error": str(e)})
     finally:
+        _release_job_model()
         _cancel_flags.pop(job_id, None)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -692,7 +738,7 @@ def upscale_image_endpoint(req: ImageUpscaleRequest, request: Request):
     # Serialise model swap + upscale together — see `_image_upscale_lock`
     # comment near the globals for the race we're avoiding.
     with _image_upscale_lock:
-        name = _ensure_model(req.model)
+        name = _sync_model(req.model)
         model = _model_manager.get_model()
         model_scale = _model_manager.scale or 4
 
@@ -710,6 +756,7 @@ def upscale_image_endpoint(req: ImageUpscaleRequest, request: Request):
             two_pass=req.two_pass if req.two_pass is not None else False,
             face_enhance=req.face_enhance if req.face_enhance is not None else False,
         )
+    _free_cache_unless_job()
 
     if not _atomic_imwrite(req.output_path, output):
         raise HTTPException(500, f"Could not write image: {req.output_path}")
@@ -738,7 +785,7 @@ async def upscale_image_upload(
 
     # See `_image_upscale_lock` comment — same race as /upscale/image.
     with _image_upscale_lock:
-        name = _ensure_model(model)
+        name = _sync_model(model)
         mdl = _model_manager.get_model()
         model_scale = _model_manager.scale or 4
 
@@ -754,6 +801,7 @@ async def upscale_image_upload(
             sharpen=sharpen, denoise_strength=denoise_strength, two_pass=two_pass,
             face_enhance=face_enhance,
         )
+    _free_cache_unless_job()
 
     import tempfile
     tmp_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
@@ -823,6 +871,45 @@ def upscale_video_endpoint(req: VideoUpscaleRequest, request: Request):
         double_fps=req.double_fps if req.double_fps is not None else False,
     )
     return job
+
+
+@app.get("/status")
+def status():
+    """What this service holds on the GPU and whether it is working. The
+    backend reads it before asking /evict for the memory."""
+    loaded = _model_manager.current_model_name if _model_manager and _model_manager.is_loaded else None
+    return {
+        "model_loaded": loaded,
+        "busy": _running_job_id is not None or _image_upscale_lock.locked(),
+        "running_job": _running_job_id,
+        "queued": _job_queue.qsize() if _job_queue is not None else 0,
+        "reserved_mb": int(torch.cuda.memory_reserved() // (1024 * 1024)) if torch.cuda.is_available() else 0,
+    }
+
+
+@app.post("/evict")
+def evict(request: Request):
+    """Unload the model and return its memory, unless a job runs or waits.
+
+    The backend calls this when another GPU job is short of memory. A busy
+    service answers unloaded: false, so a running upscale is never cut off.
+    """
+    verify_token(request)
+    if _running_job_id is not None or (_job_queue is not None and _job_queue.qsize()):
+        return {"unloaded": False, "reason": "a job is running or queued"}
+    if not _image_upscale_lock.acquire(blocking=False):
+        return {"unloaded": False, "reason": "an image is being upscaled"}
+    try:
+        name = _model_manager.current_model_name if _model_manager.is_loaded else None
+        if name is None:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            return {"unloaded": False, "reason": "no model loaded"}
+        _model_manager.unload()
+        logger.info(f"Evicted model {name} on request")
+        return {"unloaded": True, "model": name}
+    finally:
+        _image_upscale_lock.release()
 
 
 @app.get("/jobs")

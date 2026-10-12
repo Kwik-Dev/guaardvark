@@ -190,6 +190,11 @@ def start_plugin(plugin_id):
 def stop_plugin(plugin_id):
     """Stop a plugin."""
     try:
+        from backend.services.plugin_bridge import manual_stop_blocked_reason
+
+        blocked = manual_stop_blocked_reason(plugin_id)
+        if blocked:
+            return error_response(blocked, 409, "PLUGIN_STOP_BLOCKED")
         manager = get_plugin_manager()
         result = manager.stop_plugin(plugin_id)
 
@@ -222,6 +227,11 @@ def stop_plugin(plugin_id):
 def restart_plugin(plugin_id):
     """Restart a plugin."""
     try:
+        from backend.services.plugin_bridge import manual_stop_blocked_reason
+
+        blocked = manual_stop_blocked_reason(plugin_id)
+        if blocked:
+            return error_response(blocked, 409, "PLUGIN_RESTART_BLOCKED")
         manager = get_plugin_manager()
         result = manager.restart_plugin(plugin_id)
         
@@ -268,6 +278,11 @@ def enable_plugin(plugin_id):
 def disable_plugin(plugin_id):
     """Disable a plugin (stops it first if running)."""
     try:
+        from backend.services.plugin_bridge import manual_stop_blocked_reason
+
+        blocked = manual_stop_blocked_reason(plugin_id)
+        if blocked:
+            return error_response(blocked, 409, "PLUGIN_DISABLE_BLOCKED")
         manager = get_plugin_manager()
         result = manager.disable_plugin(plugin_id)
         

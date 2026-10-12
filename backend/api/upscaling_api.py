@@ -6,6 +6,7 @@ protected routes check is read from data/.upscaling_internal_secret
 (backend/utils/sidecar_guard.py), never from a reply.
 """
 
+import contextlib
 import io
 import logging
 import os
@@ -18,6 +19,7 @@ from flask import Blueprint, request as flask_request, send_file
 from werkzeug.security import safe_join
 from werkzeug.utils import secure_filename
 
+from backend.services import upscale_supervisor
 from backend.utils.response_utils import success_response, error_response
 from backend.utils.secret_redaction import redact_fields
 from backend.utils.sidecar_guard import read_internal_token
@@ -61,6 +63,13 @@ def _start_upscaling_for_job():
     if ok:
         return None
     return error_response(f"Upscaling service not running ({why})", 503)
+
+
+def _gpu_turn(model: Optional[str]):
+    """The GPU turn a synchronous upscale holds; none when the escape hatch is off."""
+    if upscale_supervisor.enabled():
+        return upscale_supervisor.get_supervisor().single_gpu_turn(model)
+    return contextlib.nullcontext()
 
 
 def _proxy_get(path: str, timeout: int = UPSCALING_TIMEOUT):
@@ -202,6 +211,14 @@ def upscale_video():
     # Remove None values (but keep two_pass even if False)
     payload = {k: v for k, v in payload.items() if v is not None}
 
+    if upscale_supervisor.enabled():
+        job, refusal, status = upscale_supervisor.get_supervisor().submit(
+            "video", "/upscale/video", payload, os.path.basename(input_path)
+        )
+        if refusal:
+            return error_response(refusal, status)
+        return success_response(data=job, message="Upscale job queued")
+
     down = _start_upscaling_for_job()
     if down:
         return down
@@ -215,6 +232,11 @@ def upscale_video():
 def list_jobs():
     """List all upscale jobs."""
     data, status = _proxy_get("/jobs")
+    if upscale_supervisor.enabled():
+        service_jobs = data if status == 200 and isinstance(data, list) else []
+        merged = upscale_supervisor.get_supervisor().merge_job_list(service_jobs)
+        if status == 200 or merged:
+            return success_response(data=merged, message="Jobs retrieved")
     if status == 200:
         return success_response(data=data, message="Jobs retrieved")
     return error_response(data.get("error", "Failed to list jobs"), status)
@@ -223,6 +245,9 @@ def list_jobs():
 @upscaling_bp.route("/jobs/<job_id>", methods=["GET"])
 def get_job(job_id):
     """Get upscale job status."""
+    job = upscale_supervisor.get_supervisor().get_job(job_id)
+    if job is not None:
+        return success_response(data=job, message="Job status retrieved")
     data, status = _proxy_get(f"/jobs/{job_id}")
     if status == 200:
         return success_response(data=data, message="Job status retrieved")
@@ -232,6 +257,9 @@ def get_job(job_id):
 @upscaling_bp.route("/jobs/<job_id>", methods=["DELETE"])
 def cancel_job(job_id):
     """Cancel an upscale job."""
+    queued = upscale_supervisor.get_supervisor().cancel(job_id)
+    if queued is not None:
+        return success_response(data=queued, message="Job cancelled")
     try:
         resp = requests.delete(
             f"{UPSCALING_URL}/jobs/{job_id}",
@@ -251,6 +279,7 @@ def cancel_job(job_id):
 @upscaling_bp.route("/jobs", methods=["DELETE"])
 def clear_finished_jobs():
     """Clear finished/failed/cancelled jobs from history. Active jobs untouched."""
+    upscale_supervisor.get_supervisor().clear_finished()
     try:
         resp = requests.delete(
             f"{UPSCALING_URL}/jobs",
@@ -289,13 +318,14 @@ def preview_upscale():
     if down:
         return down
     try:
-        resp = requests.post(
-            f"{UPSCALING_URL}/upscale/image/upload",
-            files=files,
-            data={k: v for k, v in data.items() if v},
-            headers=_auth_headers(),
-            timeout=60,
-        )
+        with _gpu_turn(data.get("model")):
+            resp = requests.post(
+                f"{UPSCALING_URL}/upscale/image/upload",
+                files=files,
+                data={k: v for k, v in data.items() if v},
+                headers=_auth_headers(),
+                timeout=60,
+            )
         if resp.status_code == 200:
             return send_file(
                 io.BytesIO(resp.content),
@@ -308,6 +338,8 @@ def preview_upscale():
             return error_response(_proxy_error(err_json, "Failed to upscale preview"), resp.status_code)
         except Exception:
             return error_response(f"Upscaling failed: {resp.text}", resp.status_code)
+    except upscale_supervisor.UpscaleGpuBusy as e:
+        return error_response(str(e), 409)
     except requests.ConnectionError:
         return error_response("Upscaling service not running", 503)
     except Exception as e:
@@ -451,7 +483,11 @@ def upscale_image():
     down = _start_upscaling_for_job()
     if down:
         return down
-    data, status = _proxy_post("/upscale/image", payload, timeout=UPSCALING_IMAGE_TIMEOUT)
+    try:
+        with _gpu_turn(payload.get("model")):
+            data, status = _proxy_post("/upscale/image", payload, timeout=UPSCALING_IMAGE_TIMEOUT)
+    except upscale_supervisor.UpscaleGpuBusy as e:
+        return error_response(str(e), 409)
     if status == 200:
         return success_response(
             data={
@@ -487,6 +523,18 @@ def upscale_images():
         "suffix": "upscaled",
         **_image_options_from_form(flask_request.form),
     }
+
+    if upscale_supervisor.enabled():
+        label = staged[0].name if len(staged) == 1 else f"{len(staged)} images"
+        job, refusal, status = upscale_supervisor.get_supervisor().submit(
+            "image_batch", "/upscale/images", payload, label
+        )
+        if refusal:
+            return error_response(refusal, status)
+        return success_response(
+            data={**job, "queued": len(staged), "rejected": rejected},
+            message=f"Queued {len(staged)} image(s) for upscaling",
+        )
 
     down = _start_upscaling_for_job()
     if down:
@@ -581,6 +629,17 @@ def upload_and_upscale():
     double_fps = flask_request.form.get("double_fps")
     if double_fps and double_fps.lower() in ("true", "1", "yes"):
         payload["double_fps"] = True
+
+    if upscale_supervisor.enabled():
+        job, refusal, status = upscale_supervisor.get_supervisor().submit(
+            "video", "/upscale/video", payload, filename
+        )
+        if refusal:
+            return error_response(refusal, status)
+        return success_response(
+            data={**job, "output_path": str(output_path)},
+            message="Upload received, upscale job queued",
+        )
 
     down = _start_upscaling_for_job()
     if down:
