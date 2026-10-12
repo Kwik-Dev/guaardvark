@@ -59,6 +59,7 @@ import PageLayout from '../components/layout/PageLayout';
 import CharacterPicker from '../components/filmcrew/CharacterPicker';
 import ImageLightbox from '../components/images/ImageLightbox';
 import BatchHistoryCard from '../components/images/BatchHistoryCard';
+import PromptTokenCounter from '../components/images/PromptTokenCounter';
 import GpuGateBanner from '../components/common/GpuGateBanner';
 import useJobsGate from '../hooks/useJobsGate';
 import { formatUiError } from '../utils/uiError';
@@ -1639,6 +1640,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                       }
                     }}
                   />
+                  <PromptTokenCounter prompts={finalPrompts} model={params.model} sx={{ mt: -1.5, mb: 1 }} />
                   <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
                     Whole text = 1 prompt. Quantity duplicates it exactly for multiple images.
                   </Typography>
@@ -1668,6 +1670,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                       }
                     }}
                   />
+                  <PromptTokenCounter prompts={finalPrompts} model={params.model} sx={{ mt: -1.5, mb: 1 }} />
                   <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
                     <Typography variant="caption" color="text.secondary">
                       {uniquePromptCount} prompts ready for generation (bulk mode)

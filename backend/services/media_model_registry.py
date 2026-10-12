@@ -195,20 +195,29 @@ IMAGE_FAMILY_SPECS: dict[str, dict[str, Any]] = {
     # for one 1024 image on a 32 GB box). Slopes calibrated 2026-08-04 on a
     # 16 GB 4070 Ti SUPER, sequential offload with VAE tiling: 1448^2 peak
     # 12467 MB, 2048^2 peak 9534 MB.
+    # max_prompt_tokens: how much of a prompt the offline pipeline encodes
+    # (chat template included); the tokenizer drops the rest without a warning.
+    # The diffusers default is 512. 1024 measured 2026-10-12 on a 16 GB card,
+    # 1344x768, 9 steps, three seeds, same prompt and seed at 512 and 1024: five
+    # objects named after token 512 appeared on 3/3 seeds at 1024 and 0/3 at 512,
+    # with the same composition and no visible quality loss; a prompt under 512
+    # gave the same picture (pixel-level noise only); ~0.3 s more, no VRAM change.
+    # The transformer's caption positions run to 1536; nothing above 1024 tested.
     "zimage": {
         "max_side": 2688, "max_pixel_area": 2048 * 2048, "min_side": 256, "dimension_alignment": 16,
         "width": 1024, "height": 1024, "default_steps": 9, "min_steps": 2, "cfg_when_unset": 0.0,
-        "prompt_style": "natural", "engine": "offline",
+        "prompt_style": "natural", "engine": "offline", "max_prompt_tokens": 1024,
         "vram_mb": 11000, "ram_gb": 21.0, "vram_slope_mb_per_mp": 500, "ram_slope_gb_per_mp": 1.0,
     },
     # Krea 2: native 2K, same canvas as Z-Image. The family row is Turbo
     # (8 steps, CFG-free); Raw overrides below. Model-offload peak ~14 GB on a
     # 16 GB card (2026-07-11); sequential offload on cards up to 18 GB peaks at
     # ~10 GB. Also an LLM encoder (Qwen3-VL) but not A/B'd, so "tags".
+    # max_prompt_tokens 512 is the Krea2Pipeline default; longer has not been tried.
     "krea2": {
         "max_side": 2688, "max_pixel_area": 2048 * 2048, "min_side": 256, "dimension_alignment": 16,
         "width": 1024, "height": 1024, "default_steps": 8, "cfg_when_unset": 0.0,
-        "prompt_style": "tags", "engine": "offline",
+        "prompt_style": "tags", "engine": "offline", "max_prompt_tokens": 512,
         "vram_mb": 14000, "vram_mb_sequential": 10000, "ram_gb": 24.0,
         "vram_slope_mb_per_mp": 1000, "ram_slope_gb_per_mp": 1.0,
     },

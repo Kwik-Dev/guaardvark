@@ -122,7 +122,7 @@ class TestLongContextTokenBudget(unittest.TestCase):
         )
         self.assertTrue(enhanced.startswith(user_prompt))
         tokens = len(_FakeTokenizer()(enhanced).input_ids)
-        self.assertLessEqual(tokens, self.gen._LONG_CONTEXT_TOKEN_LIMIT)
+        self.assertLessEqual(tokens, self.gen._prompt_token_limit("krea2"))
 
     def test_priority_phrases_survive_over_style_boilerplate(self):
         user_prompt = "a man wearing " + " ".join(f"garment{i}" for i in range(478))
