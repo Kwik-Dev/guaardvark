@@ -277,7 +277,7 @@ const AudioFoundryModelsModal = ({
               {m.hf_repo && (
                 <Typography
                   variant="caption"
-                  sx={{ display: "block", color: "text.disabled", fontFamily: "monospace", mt: 0.25 }}
+                  sx={{ display: "block", color: "text.secondary", fontFamily: "monospace", mt: 0.25 }}
                 >
                   {m.hf_repo}
                 </Typography>

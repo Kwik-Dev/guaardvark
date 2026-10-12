@@ -2300,10 +2300,10 @@ const DocumentsPage = () => {
               }}
             >
               <BrandLogo size={64} sx={{ opacity: 0.4 }} />
-              <Typography variant="h6" color="text.disabled">
+              <Typography variant="h6" color="text.secondary">
                 No documents yet
               </Typography>
-              <Typography variant="body2" color="text.disabled">
+              <Typography variant="body2" color="text.secondary">
                 Drag files here or right-click to create a folder
               </Typography>
             </Box>

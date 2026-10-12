@@ -915,7 +915,7 @@ const OutreachPage = () => {
               sx={{ mb: 1, "& .MuiFormHelperText-root": { fontSize: "0.65rem", mx: 0 } }}
               inputProps={{ "aria-label": "Pass topics" }}
             />
-            <Typography variant="caption" color="text.disabled" sx={{ display: "block", mb: 1, fontSize: "0.65rem" }}>
+            <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1, fontSize: "0.65rem" }}>
               YouTube pass scouts your profile's feature keywords then drafts comments with your repo link for your approval.
             </Typography>
             {approved.length > 0 && (
@@ -1333,11 +1333,11 @@ const OutreachPage = () => {
                             {row.target_url} <OpenInNewIcon fontSize="inherit" />
                           </Link>
                         ) : (
-                          <Typography variant="caption" color="text.disabled" sx={{ flex: 1 }}>
+                          <Typography variant="caption" color="text.secondary" sx={{ flex: 1 }}>
                             (no target url)
                           </Typography>
                         )}
-                        <Typography variant="caption" color="text.disabled">
+                        <Typography variant="caption" color="text.secondary">
                           #{row.id}
                         </Typography>
                       </Stack>

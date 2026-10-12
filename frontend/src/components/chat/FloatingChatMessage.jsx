@@ -166,7 +166,7 @@ const FloatingChatMessage = ({ message, msg, formatTime }) => {
             variant="caption"
             sx={{
               fontSize: "0.65rem",
-              color: "text.disabled",
+              color: "text.secondary",
               mt: 0.25,
               px: 0.5,
             }}
@@ -279,7 +279,7 @@ const FloatingChatMessage = ({ message, msg, formatTime }) => {
           variant="caption"
           sx={{
             fontSize: "0.65rem",
-            color: "text.disabled",
+            color: "text.secondary",
             mt: 0.25,
             px: 0.5,
           }}

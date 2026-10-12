@@ -1469,7 +1469,7 @@ const ContinuousVoiceChat = React.forwardRef(({
             Click the microphone button or press Spacebar to start listening
           </Typography>
           {wakeWordEnabled && (
-            <Typography variant="body2" color="text.disabled" sx={{ mt: 1 }}>
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
               Wake word mode is enabled — listener will start in passive mode
             </Typography>
           )}

@@ -3179,7 +3179,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                         <Typography variant="caption" noWrap title={dateStr ? `${rawName} · ${dateStr}` : rawName} sx={{ fontWeight: 500, display: 'block' }}>
                           {label}
                         </Typography>
-                        <Typography variant="caption" color="text.disabled" sx={{ fontSize: '0.65rem' }}>
+                        <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.65rem' }}>
                           {dateStr}
                         </Typography>
                       </Box>
