@@ -100,7 +100,9 @@ const BuildFromFolderModal = ({ open, onClose, onStarted }) => {
   // and the ones the person chose to include anyway.
   const [largeFiles, setLargeFiles] = useState({});
   const [includeLarge, setIncludeLarge] = useState([]);
-  const [alsoIndex, setAlsoIndex] = useState(true);
+  // Off by default: the copy is a Bulk Import of the whole folder, which does not
+  // apply this build's skips (credential-named files, copied packages, huge files).
+  const [alsoIndex, setAlsoIndex] = useState(false);
   const [terms, setTerms] = useState("");
   const [check, setCheck] = useState(null);
   const [probe, setProbe] = useState(null);
@@ -285,7 +287,7 @@ const BuildFromFolderModal = ({ open, onClose, onStarted }) => {
               on={alsoIndex}
               onToggle={setAlsoIndex}
               disabled={Boolean(busy)}
-              tooltip="Copies the folder into Files (your originals stay where they are) and indexes it, so chat can answer from the notes themselves. Files keeps the notes as they are; only the training data is scrubbed."
+              tooltip="Copies the whole folder into Files as it is (your originals stay where they are) and indexes it, so chat can answer from the notes themselves. The copy does not skip what the training build leaves out (files named like keys or passwords, copied packages, very large files) and is not scrubbed; only the training data is."
             />
           </Stack>
 

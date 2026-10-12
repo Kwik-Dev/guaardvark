@@ -59,6 +59,11 @@ PER_FILE_MIN = 4
 FILTER_HEADROOM = 1.25
 # A chunk's size before the probe has measured one; the chunker's own target.
 ASSUMED_WORDS_PER_CHUNK = 250
+# A passage shorter than this is joined to the next one from the same file. The
+# indexing chunker splits notes at every heading, so on a real notes folder on
+# 2026-10-12 18 % of its 31,141 chunks were under 50 words and 37 % under 100:
+# fragments too short to ask a question that needs the passage to answer.
+MIN_PASSAGE_WORDS = 120
 
 # Filter bounds. Answers must share this much of their content words with the
 # text they came from (two passages for multi-hop, a summary paraphrases more).
@@ -257,8 +262,27 @@ def prepare(folder: str, kinds, terms: Optional[list[str]] = None,
     }
 
 
+def _join_short(texts: list[str]) -> list[str]:
+    """Join each passage under MIN_PASSAGE_WORDS to the ones after it in the same
+    file until it reaches that size; a short tail joins the passage before it."""
+    joined: list[str] = []
+    current = ""
+    for text in texts:
+        current = f"{current}\n\n{text}" if current else text
+        if _words(current) >= MIN_PASSAGE_WORDS:
+            joined.append(current)
+            current = ""
+    if current:
+        if joined:
+            joined[-1] = f"{joined[-1]}\n\n{current}"
+        else:
+            joined.append(current)
+    return joined
+
+
 def chunk_docs(docs: list[dict], limit: Optional[int] = None) -> list[dict]:
-    """Chunks as indexing makes them, each with its file and hash."""
+    """Chunks as indexing makes them, short ones joined (_join_short), each with
+    its file and hash."""
     from llama_index.core import Document as LlamaDocument
     from backend.utils.enhanced_rag_chunking import EnhancedRAGChunker
 
@@ -267,6 +291,7 @@ def chunk_docs(docs: list[dict], limit: Optional[int] = None) -> list[dict]:
     for doc in docs:
         nodes = chunker.chunk_documents([LlamaDocument(text=doc["text"], metadata={})], strategy_name="auto")
         texts = [n.get_content() for n in (nodes or []) if getattr(n, "text", None)] or [doc["text"][:2000]]
+        texts = _join_short(texts)
         for i, text in enumerate(texts):
             chunks.append({
                 "source_path": doc["source_path"],
@@ -373,9 +398,13 @@ def estimate(prepared: dict, per_1000: float, probe: Optional[dict] = None, targ
     and there is no time; the probe measures both."""
     measured = bool(probe and probe.get("words_per_chunk"))
     words_per_chunk = probe["words_per_chunk"] if measured else ASSUMED_WORDS_PER_CHUNK
-    per_file = {d["source_path"]: max(1, math.ceil(d["words"] / words_per_chunk)) for d in prepared["docs"]}
+    if measured and probe.get("passages_per_file"):
+        per_file = dict(probe["passages_per_file"])
+        per_passage = probe.get("pairs_per_passage") or pairs_per_passage(round(words_per_chunk), per_1000)
+    else:
+        per_file = {d["source_path"]: max(1, math.ceil(d["words"] / words_per_chunk)) for d in prepared["docs"]}
+        per_passage = pairs_per_passage(round(words_per_chunk), per_1000)
     available = sum(per_file.values())
-    per_passage = pairs_per_passage(round(words_per_chunk), per_1000)
     seconds_per = probe.get("seconds_per_chunk") if probe else None
 
     def plan(target_pairs):
@@ -384,7 +413,8 @@ def estimate(prepared: dict, per_1000: float, probe: Optional[dict] = None, targ
         else:
             _, taken, _ = _selection_counts(per_file, min(available, math.ceil(target_pairs / per_passage)))
             passages = sum(taken.values())
-        out = {"target_pairs": target_pairs, "passages": passages, "pairs_before_filter": passages * per_passage}
+        out = {"target_pairs": target_pairs, "passages": passages,
+               "pairs_before_filter": round(passages * per_passage)}
         if seconds_per:
             out["seconds"] = round(passages * seconds_per)
         return out
@@ -405,24 +435,39 @@ def estimate(prepared: dict, per_1000: float, probe: Optional[dict] = None, targ
     }
 
 
-def probe_timing(prepared: dict, per_1000: float, generator: Optional[PairGenerator] = None) -> dict:
-    """Generate (and throw away) the pairs of a few chunks to measure the time."""
-    chunks = chunk_docs(prepared["docs"], limit=PROBE_CHUNKS)
-    if not chunks:
+def probe_timing(prepared: dict, per_1000: float, generator: Optional[PairGenerator] = None,
+                 target="enough") -> dict:
+    """Generate (and throw away) the pairs of a few passages to measure the time.
+
+    The whole folder is chunked, so the passage counts are real rather than
+    projected from a few passages, and the timed passages are spread over the
+    ones a build of `target` would choose: the first passages of one file are
+    not a fair sample of a folder (one transcript's short turns timed 48 words
+    a passage on a folder whose passages average 212)."""
+    all_chunks = chunk_docs(prepared["docs"])
+    if not all_chunks:
         return {"chunks": 0, "reason": "nothing to read in the folder"}
+    chosen, _ = select_passages(all_chunks, resolve_target(target), per_1000)
+    pool = chosen or all_chunks
+    step = max(1, len(pool) // PROBE_CHUNKS)
+    sample = pool[::step][:PROBE_CHUNKS]
     generator = generator or PairGenerator()
     started = time.monotonic()
     pairs = 0
-    for chunk in chunks:
+    for chunk in sample:
         pairs += len(_pairs_for_chunk(generator, chunk, per_1000, 0))
     seconds = time.monotonic() - started
     model = getattr(generator._llm, "model", None)
+    per_file = Counter(c["source_path"] for c in all_chunks)
     return {
-        "chunks": len(chunks),
+        "chunks": len(sample),
         "pairs": pairs,
         "seconds": round(seconds, 1),
-        "seconds_per_chunk": round(seconds / len(chunks), 1),
-        "words_per_chunk": round(sum(c["words"] for c in chunks) / len(chunks), 1),
+        "seconds_per_chunk": round(seconds / len(sample), 1),
+        "words_per_chunk": round(sum(c["words"] for c in all_chunks) / len(all_chunks), 1),
+        "pairs_per_passage": round(sum(pairs_per_passage(c["words"], per_1000) for c in all_chunks)
+                                   / len(all_chunks), 2),
+        "passages_per_file": dict(per_file),
         "model": model,
     }
 
