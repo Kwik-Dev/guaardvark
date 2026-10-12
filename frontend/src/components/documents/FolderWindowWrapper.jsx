@@ -66,8 +66,11 @@ const FolderWindowWrapper = React.forwardRef(
     const headerBg = alpha(theme.palette.primary.main, 0.08);
     const textColor = theme.palette.text.primary;
 
-    // Handle double-click detection for minimize/maximize
-    const handleMouseDown = useCallback((_e) => {
+    // Handle double-click detection for minimize/maximize. Only left presses on
+    // the bar itself count: not a right-click, not the bar's buttons, and not
+    // events bubbling through React from a dialog the bar opened.
+    const handleMouseDown = useCallback((e) => {
+      if (e.button !== 0 || !e.currentTarget.contains(e.target) || e.target.closest("button")) return;
       const currentTime = Date.now();
 
       setLastClickTime(prevTime => {

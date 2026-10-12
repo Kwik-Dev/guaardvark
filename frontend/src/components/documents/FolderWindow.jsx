@@ -3,10 +3,11 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import PropTypes from 'prop-types';
-import { ToggleButtonGroup, ToggleButton, Tooltip, Box, Accordion, AccordionSummary, AccordionDetails, Chip, Typography } from '@mui/material';
-import { ViewList as ViewListIcon, ViewModule as ViewModuleIcon, ViewComfy as ViewComfyIcon, ExpandMore as ExpandMoreIcon } from '@mui/icons-material';
+import { ToggleButtonGroup, ToggleButton, Tooltip, Box } from '@mui/material';
+import { ViewList as ViewListIcon, ViewModule as ViewModuleIcon, ViewComfy as ViewComfyIcon } from '@mui/icons-material';
 import FolderWindowWrapper from './FolderWindowWrapper';
 import FolderContents from './FolderContents';
+import CodeRepoDashboard from './CodeRepoDashboard';
 import BreadcrumbNav from '../filesystem/BreadcrumbNav';
 import { persistListingView, readStoredListingView } from './folderViewPolicy';
 
@@ -75,31 +76,34 @@ const FolderWindow = React.forwardRef(({
   };
 
   const titleBarActions = (
-    <ToggleButtonGroup
-      value={viewMode}
-      exclusive
-      onChange={handleViewModeToggle}
-      size="small"
-      sx={{ mr: 0.5 }}
-    >
-      <ToggleButton value="list" size="small" sx={{ minWidth: 'auto', px: 0.5 }}>
-        <Tooltip title="List View">
-          <ViewListIcon sx={{ fontSize: '14px' }} />
-        </Tooltip>
-      </ToggleButton>
-      <ToggleButton value="grid" size="small" sx={{ minWidth: 'auto', px: 0.5 }}>
-        <Tooltip title="Grid View">
-          <ViewModuleIcon sx={{ fontSize: '14px' }} />
-        </Tooltip>
-      </ToggleButton>
-      {hasMedia && (
-        <ToggleButton value="media" size="small" sx={{ minWidth: 'auto', px: 0.5 }}>
-          <Tooltip title="Media View">
-            <ViewComfyIcon sx={{ fontSize: '14px' }} />
+    <>
+      <CodeRepoDashboard folder={folder} />
+      <ToggleButtonGroup
+        value={viewMode}
+        exclusive
+        onChange={handleViewModeToggle}
+        size="small"
+        sx={{ mr: 0.5 }}
+      >
+        <ToggleButton value="list" size="small" sx={{ minWidth: 'auto', px: 0.5 }}>
+          <Tooltip title="List View">
+            <ViewListIcon sx={{ fontSize: '14px' }} />
           </Tooltip>
         </ToggleButton>
-      )}
-    </ToggleButtonGroup>
+        <ToggleButton value="grid" size="small" sx={{ minWidth: 'auto', px: 0.5 }}>
+          <Tooltip title="Grid View">
+            <ViewModuleIcon sx={{ fontSize: '14px' }} />
+          </Tooltip>
+        </ToggleButton>
+        {hasMedia && (
+          <ToggleButton value="media" size="small" sx={{ minWidth: 'auto', px: 0.5 }}>
+            <Tooltip title="Media View">
+              <ViewComfyIcon sx={{ fontSize: '14px' }} />
+            </Tooltip>
+          </ToggleButton>
+        )}
+      </ToggleButtonGroup>
+    </>
   );
 
   return (
@@ -123,41 +127,6 @@ const FolderWindow = React.forwardRef(({
             rootPath={folder.path}
             onNavigate={handleNavigateToPath}
           />
-        </Box>
-      )}
-
-      {!isMinimized && folder.is_repository && folder.repo_metadata && (
-        <Box sx={{ px: 1, pb: 1 }}>
-          <Accordion defaultExpanded={false} sx={{ boxShadow: 'none', '&:before': { display: 'none' } }}>
-            <AccordionSummary expandIcon={<ExpandMoreIcon />} sx={{ minHeight: 32, '& .MuiAccordionSummary-content': { my: 0.5 } }}>
-              <Typography variant="caption" sx={{ display: 'flex', alignItems: 'center', gap: 0.5, fontWeight: 'bold' }}>
-                Repository Analysis
-              </Typography>
-            </AccordionSummary>
-            <AccordionDetails sx={{ pt: 0 }}>
-              {folder.repo_metadata.frameworks?.length > 0 && (
-                <Box sx={{ mb: 1, display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
-                  {folder.repo_metadata.frameworks.map(fw => (
-                    <Chip key={fw} label={fw} size="small" color="primary" variant="outlined" />
-                  ))}
-                </Box>
-              )}
-              {folder.repo_metadata.languages && (
-                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
-                  Languages: {Object.entries(folder.repo_metadata.languages)
-                    .sort(([,a], [,b]) => b - a)
-                    .slice(0, 5)
-                    .map(([ext, count]) => `${ext} (${count})`)
-                    .join(', ')}
-                </Typography>
-              )}
-              {folder.description && (
-                <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', maxHeight: 200, overflow: 'auto', fontSize: '0.75rem' }}>
-                  {folder.description}
-                </Typography>
-              )}
-            </AccordionDetails>
-          </Accordion>
         </Box>
       )}
 
