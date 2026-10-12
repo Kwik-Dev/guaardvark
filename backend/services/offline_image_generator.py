@@ -2327,14 +2327,15 @@ class OfflineImageGenerator:
 
         enhanced_prompt = f"{prompt}, {', '.join(unique_enhancements)}"
 
-        # Long-context encoders (Krea2/Z-Image) hard-cap at 512 tokens and the
-        # tokenizer truncates SILENTLY — on long user prompts the tail that fell
-        # off was exactly the coherence/subject guards appended above. Re-fit so
-        # the user's prompt always survives intact and suffixes are kept in
-        # priority order only while they still fit.
-        if (family or "").lower() in self._LONG_CONTEXT_FAMILIES:
+        # Long-context encoders (Krea2/Z-Image) encode a fixed number of tokens
+        # and the tokenizer truncates SILENTLY — on long user prompts the tail
+        # that fell off was exactly the coherence/subject guards appended above.
+        # Re-fit so the user's prompt always survives intact and suffixes are
+        # kept in priority order only while they still fit.
+        fam = (family or "").lower()
+        if self._prompt_token_limit(fam):
             enhanced_prompt = self._fit_enhancements_to_token_budget(
-                prompt, enhancements, enhanced_prompt
+                prompt, enhancements, enhanced_prompt, fam
             )
         logger.debug(
             f"Image prompt enhancement complete (enhanced_prompt_len={len(enhanced_prompt)})"
@@ -2393,28 +2394,32 @@ class OfflineImageGenerator:
         style_config = self.style_configs.get(style, self.style_configs.get("realistic", {}))
         return prompt, style_config.get("negative_prompt", "") or ""
 
-    # Krea2Pipeline / Z-Image default max_sequence_length. Their tokenizers
-    # truncate anything past this without a warning.
-    _LONG_CONTEXT_FAMILIES = ("krea2", "zimage")
-    _LONG_CONTEXT_TOKEN_LIMIT = 512
+    @staticmethod
+    def _prompt_token_limit(family: Optional[str]) -> Optional[int]:
+        """Tokens the family's offline pipeline encodes (``max_prompt_tokens`` on
+        its registry row); its tokenizer drops anything past it without a
+        warning. None for families with no declared cap."""
+        from backend.services.prompt_token_budget import max_prompt_tokens
+        return max_prompt_tokens(family) if family else None
 
-    def _count_prompt_tokens(self, text: str) -> int:
+    def _count_prompt_tokens(self, text: str, family: str = "") -> int:
         """Token count via the loaded pipeline's tokenizer when available;
-        conservative prose estimate otherwise (~1.5 tokens/word — measured 1.34
-        on real long prompts, so the estimate errs toward trimming earlier)."""
+        conservative prose estimate otherwise."""
+        from backend.services.prompt_token_budget import count_prompt_tokens, estimate_prompt_tokens
         tokenizer = getattr(getattr(self, "_pipeline", None), "tokenizer", None)
         if tokenizer is not None:
             try:
-                return len(tokenizer(text).input_ids)
+                return count_prompt_tokens(family, text, tokenizer)
             except Exception:
                 pass
-        return int(len(text.split()) * 1.5) + 1
+        return estimate_prompt_tokens(text)
 
     def _fit_enhancements_to_token_budget(
         self,
         prompt: str,
         prioritized_enhancements: List[Tuple[int, str]],
         fused_prompt: str,
+        family: str,
     ) -> str:
         """Keep prompt + suffixes within the long-context encoder budget.
 
@@ -2422,11 +2427,11 @@ class OfflineImageGenerator:
         greedily in priority order (subject/coherence guards first, style
         boilerplate last) while the total still fits.
         """
-        budget = self._LONG_CONTEXT_TOKEN_LIMIT
-        if self._count_prompt_tokens(fused_prompt) <= budget:
+        budget = self._prompt_token_limit(family)
+        if self._count_prompt_tokens(fused_prompt, family) <= budget:
             return fused_prompt
 
-        if self._count_prompt_tokens(prompt) >= budget:
+        if self._count_prompt_tokens(prompt, family) >= budget:
             logger.warning(
                 "User prompt alone is at/over the %d-token encoder limit "
                 "(%d words) — enhancement suffixes skipped and the prompt tail "
@@ -2444,7 +2449,7 @@ class OfflineImageGenerator:
                 if not p_clean or p_clean.lower() in seen:
                     continue
                 candidate = f"{prompt}, {', '.join(kept + [p_clean])}"
-                if self._count_prompt_tokens(candidate) > budget:
+                if self._count_prompt_tokens(candidate, family) > budget:
                     continue
                 seen.add(p_clean.lower())
                 kept.append(p_clean)
@@ -3003,6 +3008,7 @@ Negative Prompt: {negative_prompt}""",
                             num_inference_steps=request.num_inference_steps,
                             guidance_scale=request.guidance_scale,
                             generator=generator,
+                            max_sequence_length=self._prompt_token_limit(family),
                             **_watchdog_kwargs,
                         )
                     if self._device == "cuda":
@@ -3889,6 +3895,7 @@ Negative Prompt: {negative_prompt}""",
                     if family == 'zimage':
                         # Z-Image is bf16 flow-matching — no autocast; CFG distilled out.
                         call_kwargs["negative_prompt"] = None
+                        call_kwargs["max_sequence_length"] = self._prompt_token_limit(family)
                         output = self._img2img_pipeline(**call_kwargs)
                     elif self._device == "cuda":
                         _ac_dtype = (
