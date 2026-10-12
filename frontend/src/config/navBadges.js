@@ -6,7 +6,6 @@
 // navigation and returns { badgeKey: count }.
 import { useEffect, useMemo, useState } from "react";
 import { selfImprovementService } from "../api/selfImprovementService";
-import { waitingFixCount } from "../components/selfImprovement/fixStatus";
 
 // The pending-fixes list is a plain read (no key needed from the browser);
 // a fix changes state only when a person acts on it, so a slow poll is enough.
@@ -19,9 +18,9 @@ export const useNavBadgeCounts = () => {
     let alive = true;
     const read = () =>
       selfImprovementService
-        .listPendingFixes({ limit: 100 })
+        .countWaitingFixes()
         .then((res) => {
-          if (alive) setPendingFixes(waitingFixCount(res?.data));
+          if (alive) setPendingFixes(Number(res?.data?.waiting) || 0);
         })
         .catch(() => {});
     read();

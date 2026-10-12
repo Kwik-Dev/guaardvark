@@ -10,7 +10,7 @@ import subprocess
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Set
+from typing import Optional, Dict, Any, List, Set, Callable
 from enum import Enum
 import threading
 import time
@@ -222,6 +222,9 @@ class UnifiedProgressSystem:
         self._file_based_enabled = True
         self._socketio_enabled = True
         self._timeout_timers: Dict[str, threading.Timer] = {}
+        # Called once when a process is cancelled (Activity's Cancel), for an owner
+        # that cannot poll often enough to see the record before it is cleaned up.
+        self._cancel_listeners: Dict[str, Callable[[], None]] = {}
         self._gpu_monitor = GPUMonitor()
         self._gpu_monitoring_enabled = True
 
@@ -415,8 +418,21 @@ class UnifiedProgressSystem:
         message: str = "Cancelled",
         additional_data: Optional[Dict[str, Any]] = None
     ) -> bool:
-        """Cancel a process"""
-        return self._finish_process(process_id, ProcessStatus.CANCELLED, message, additional_data)
+        """Cancel a process, and tell its cancel listener if it has one."""
+        cancelled = self._finish_process(process_id, ProcessStatus.CANCELLED, message, additional_data)
+        with self._lock:
+            listener = self._cancel_listeners.pop(process_id, None)
+        if cancelled and listener:
+            try:
+                listener()
+            except Exception as e:  # a listener must not fail the cancel
+                logger.warning(f"Cancel listener for {process_id} failed: {e}")
+        return cancelled
+
+    def on_cancel(self, process_id: str, callback: Callable[[], None]) -> None:
+        """Call `callback` once if `process_id` is cancelled before it is cleaned up."""
+        with self._lock:
+            self._cancel_listeners[process_id] = callback
     
     def _finish_process(
         self,
@@ -763,6 +779,7 @@ class UnifiedProgressSystem:
                     return
                 self._active_processes.pop(process_id, None)
                 self._process_history.pop(process_id, None)
+                self._cancel_listeners.pop(process_id, None)
                 logger.info(f"Cleaned up process from memory: {process_id}")
         
         # Clean up all timers associated with this process

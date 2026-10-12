@@ -177,7 +177,8 @@ class RecondAgent:
         if not kill_switch.is_enabled():
             report["reason"] = "kill_switch_off"
             return report
-        if not profile.feature_blurbs():
+        # Keywords alone are enough to match a thread; a blurb is optional.
+        if not profile.load().features:
             report["reason"] = NO_FEATURES_REASON
             return report
 
@@ -332,7 +333,8 @@ class RecondAgent:
         if not kill_switch.is_enabled():
             report["reason"] = "kill_switch_off"
             return report
-        if not profile.feature_blurbs():
+        # Keywords alone are enough to match a thread; a blurb is optional.
+        if not profile.load().features:
             report["reason"] = NO_FEATURES_REASON
             return report
 

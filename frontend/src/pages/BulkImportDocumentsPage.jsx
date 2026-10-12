@@ -185,15 +185,23 @@ const BulkImportDocumentsPage = () => {
       if (isTerminalStatus(status?.status)) writeJson(JOB_KEY, null);
       return status;
     } catch (err) {
+      // Only a 404 ends it: the server no longer keeps the job. A dropped
+      // connection or a restarting backend is temporary, so the import stays
+      // tracked (and resumable) and the next poll tries again.
+      if (err.status !== 404) {
+        setJob((prev) =>
+          prev && prev.jobId === jobId
+            ? { ...prev, message: "Can't reach the server right now; still checking this import…" }
+            : prev);
+        return null;
+      }
       writeJson(JOB_KEY, null);
       setJob((prev) =>
         prev && prev.jobId === jobId
           ? {
             ...prev,
             status: "error",
-            message: err.status === 404
-              ? "This import's status is no longer kept (the server keeps it for an hour). Its files are in Files."
-              : err.message || "Could not read the import's status",
+            message: "This import's status is no longer kept (the server keeps it for an hour). Its files are in Files.",
           }
           : prev);
       return null;
@@ -280,7 +288,13 @@ const BulkImportDocumentsPage = () => {
   // ── Browser uploads ───────────────────────────────────────────────────────
 
   const stage = async (staging) => {
-    const staged = await staging;
+    let staged;
+    try {
+      staged = await staging;
+    } catch (err) {
+      showMessage(`Could not read what was dropped: ${err?.message || "unknown error"}`, "error");
+      return;
+    }
     if (staged.files.length === 0) {
       const why = [skippedPhrase(staged.skipped), staged.tooLarge.length ? plural(staged.tooLarge.length, "file") + " over 100 MB" : ""]
         .filter(Boolean)

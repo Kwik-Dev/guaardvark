@@ -199,6 +199,19 @@ def trigger_check():
         return error_response(str(e), 500)
 
 
+# Fixes a person still has to act on (FixesModal's proposed/triaged/approved groups).
+WAITING_FIX_STATUSES = ("proposed", "triaged", "approved")
+
+
+@self_improvement_bp.route("/pending-fixes/count", methods=["GET"])
+def count_pending_fixes():
+    """How many fixes wait on a person, counted in the database (the list route
+    returns at most 100, so a count taken from it stops at 100)."""
+    from backend.models import db, PendingFix
+    waiting = db.session.query(PendingFix).filter(PendingFix.status.in_(WAITING_FIX_STATUSES)).count()
+    return success_response(data={"waiting": waiting})
+
+
 @self_improvement_bp.route("/pending-fixes", methods=["GET"])
 def list_pending_fixes():
     """List all pending fixes, optionally filtered by status."""

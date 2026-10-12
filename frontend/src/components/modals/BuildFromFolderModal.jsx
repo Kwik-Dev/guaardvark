@@ -104,6 +104,10 @@ const BuildFromFolderModal = ({ open, onClose, onStarted }) => {
   // apply this build's skips (credential-named files, copied packages, huge files).
   const [alsoIndex, setAlsoIndex] = useState(false);
   const [terms, setTerms] = useState("");
+  // "loading" | "loaded" | "failed". A list that failed to load is never saved
+  // over unless the person edits it, or Check would wipe the saved names.
+  const [termsState, setTermsState] = useState("loading");
+  const [termsEdited, setTermsEdited] = useState(false);
   const [check, setCheck] = useState(null);
   const [probe, setProbe] = useState(null);
   const [estimate, setEstimate] = useState(null);
@@ -119,9 +123,17 @@ const BuildFromFolderModal = ({ open, onClose, onStarted }) => {
     setEstimate(null);
     setError(null);
     setProbeError(null);
+    setTermsState("loading");
+    setTermsEdited(false);
     getScrubTerms()
-      .then((list) => setTerms(list.join("\n")))
-      .catch(() => setTerms(""));
+      .then((list) => {
+        setTerms(list.join("\n"));
+        setTermsState("loaded");
+      })
+      .catch(() => {
+        setTerms("");
+        setTermsState("failed");
+      });
   }, [open]);
 
   // Any change to what would be read makes the last check stale.
@@ -145,7 +157,9 @@ const BuildFromFolderModal = ({ open, onClose, onStarted }) => {
     setProbeError(null);
     setBusy("check");
     try {
-      await saveScrubTerms(terms.split("\n"));
+      if (termsState === "loaded" || termsEdited) {
+        await saveScrubTerms(terms.split("\n"));
+      }
       const result = await checkFolderBuild(body());
       setCheck(result);
       setLargeFiles((prev) => ({
@@ -293,10 +307,15 @@ const BuildFromFolderModal = ({ open, onClose, onStarted }) => {
 
           <TextField
             label="Words to scrub (one per line)"
-            helperText="Names of people, machines and clients. They become [name] in the training data. Saved on this machine when you press Check."
+            helperText={
+              termsState === "failed" && !termsEdited
+                ? "Your saved list could not be loaded. It stays as it is (and the check uses it) unless you type a new one here."
+                : "Names of people, machines and clients. They become [name] in the training data. Saved on this machine when you press Check."
+            }
             value={terms}
             onChange={(e) => {
               setTerms(e.target.value);
+              setTermsEdited(true);
               invalidate();
             }}
             multiline

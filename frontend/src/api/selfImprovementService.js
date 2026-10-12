@@ -51,6 +51,12 @@ export const selfImprovementService = {
     return handleResponse(res);
   },
 
+  // { waiting }: fixes still waiting on a person, counted on the server.
+  async countWaitingFixes() {
+    const res = await fetch(`${BASE_URL}/self-improvement/pending-fixes/count`);
+    return handleResponse(res);
+  },
+
   async listPendingFixes({ status, limit = 50 } = {}) {
     const params = new URLSearchParams();
     if (status) params.set("status", status);

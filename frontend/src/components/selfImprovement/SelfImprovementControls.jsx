@@ -7,7 +7,6 @@ import FixesModal from "../settings/FixesModal";
 import ScanProgressModal from "../settings/ScanProgressModal";
 import { ActionButton, Cluster, Hint, Line, Sep, SettingChip, StatusPill } from "../settings/ui";
 import { selfImprovementService } from "../../api/selfImprovementService";
-import { waitingFixCount } from "./fixStatus";
 
 export default function SelfImprovementControls() {
   const [siStatus, setSiStatus] = useState(null);
@@ -20,10 +19,10 @@ export default function SelfImprovementControls() {
   const fetchStatus = useCallback(async () => {
     const [statusRes, fixesRes] = await Promise.allSettled([
       selfImprovementService.getStatus(),
-      selfImprovementService.listPendingFixes({ limit: 100 }),
+      selfImprovementService.countWaitingFixes(),
     ]);
     if (statusRes.status === "fulfilled") setSiStatus(statusRes.value?.data);
-    if (fixesRes.status === "fulfilled") setWaitingFixes(waitingFixCount(fixesRes.value?.data));
+    if (fixesRes.status === "fulfilled") setWaitingFixes(Number(fixesRes.value?.data?.waiting) || 0);
   }, []);
 
   useEffect(() => {
