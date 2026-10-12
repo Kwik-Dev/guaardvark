@@ -34,6 +34,10 @@ def _contained(root, *parts) -> Path:
         return Path(candidate)
     raise ValueError(f"{candidate!r} is outside {root_abs!r}")
 
+# vram_mb: the most the upscaling service holds on the GPU while it runs a job
+# with the model (CUDA context included), which the backend books before it
+# submits one; vram_measured says what the figure came from. A model with no
+# figure is booked at UNMEASURED_VRAM_MB.
 MODEL_REGISTRY: List[Dict[str, Any]] = [
     {
         "name": "HAT-L_SRx4",
@@ -45,51 +49,78 @@ MODEL_REGISTRY: List[Dict[str, Any]] = [
         "name": "RealESRGAN_x4plus",
         "scale": 4,
         "size_mb": 64,
+        "vram_mb": 2200,
+        "vram_measured": "not measured (not installed where measured); RRDBNet with 23 blocks like 4x-UltraSharp, so its figure",
         "url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
     },
     {
         "name": "RealESRGAN_x2plus",
         "scale": 2,
         "size_mb": 64,
+        "vram_mb": 2200,
+        "vram_measured": "not measured (not installed where measured); the x4plus RRDBNet on a pixel-unshuffled input, so at most 4x-UltraSharp's figure",
         "url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth",
     },
     {
         "name": "RealESRGAN_x4plus_anime_6B",
         "scale": 4,
         "size_mb": 17,
+        "vram_mb": 2200,
+        "vram_measured": "not measured (not installed where measured); RRDBNet with 6 blocks, an upper bound from 4x-UltraSharp",
         "url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth",
     },
     {
         "name": "realesr-animevideov3",
         "scale": 4,
         "size_mb": 6,
+        "vram_mb": 800,
+        "vram_measured": "not measured (not installed where measured); RealESRGAN Compact like realesr-general-x4v3 with fewer layers, so at most its figure",
         "url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-animevideov3.pth",
     },
     {
         "name": "realesr-general-x4v3",
         "scale": 4,
         "size_mb": 6,
+        "vram_mb": 800,
+        "vram_measured": "752 MiB held after one 1024x1024 still (service total, CUDA context included; the job ended between samples); fp16, tile 400, a 16 GB consumer GPU, 2026-10-12",
         "url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth",
     },
     {
         "name": "4x-UltraSharp",
         "scale": 4,
         "size_mb": 67,
+        "vram_mb": 2200,
+        "vram_measured": "2142 MiB peak (service total, CUDA context included) over ten 1280x720 frames and 2140 on one 1024x1024 still; fp16, tile 400, a 16 GB consumer GPU, 2026-10-12",
         "url": "https://huggingface.co/Kim2091/UltraSharp/resolve/main/4x-UltraSharp.pth",
     },
     {
         "name": "4x_NMKD-Superscale-SP_178000_G",
         "scale": 4,
         "size_mb": 67,
+        "vram_mb": 2200,
+        "vram_measured": "not measured; ESRGAN with the same 16,697,987 parameters as 4x-UltraSharp (checked with spandrel), so the same figure",
         "url": "https://huggingface.co/gemasai/4x_NMKD-Superscale-SP_178000_G/resolve/main/4x_NMKD-Superscale-SP_178000_G.pth",
     },
     {
         "name": "4x_foolhardy_Remacri",
         "scale": 4,
         "size_mb": 67,
+        "vram_mb": 2200,
+        "vram_measured": "not measured; ESRGAN with the same 16,697,987 parameters as 4x-UltraSharp (checked with spandrel), so the same figure",
         "url": "https://huggingface.co/FacehugmanIII/4x_foolhardy_Remacri/resolve/main/4x_foolhardy_Remacri.pth",
     },
 ]
+
+
+# The largest measured figure above; HAT-L (a transformer, not installed where
+# the figures were measured) and user-dropped models may need more.
+UNMEASURED_VRAM_MB = 2200
+
+
+def vram_estimate_mb(name: str) -> int:
+    """What a job with ``name`` is booked at: its measured figure, else UNMEASURED_VRAM_MB."""
+    entry = _registry_entry(name)
+    return int((entry or {}).get("vram_mb") or UNMEASURED_VRAM_MB)
 
 
 def _registry_entry(name: str) -> Optional[Dict[str, Any]]:
@@ -152,6 +183,7 @@ class ModelManager:
                 "name": entry["name"],
                 "scale": entry["scale"],
                 "size_mb": entry["size_mb"],
+                "vram_mb": vram_estimate_mb(entry["name"]),
             }
             if self.is_downloaded(entry["name"]):
                 info["compiled"] = (
@@ -171,6 +203,7 @@ class ModelManager:
                         "name": name,
                         "scale": None,
                         "size_mb": size_mb,
+                        "vram_mb": UNMEASURED_VRAM_MB,
                         "compiled": self.compile_enabled and self.current_model_name == name,
                     })
         return {"downloaded": downloaded, "available": available}
