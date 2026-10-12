@@ -695,26 +695,45 @@ def start_task(task_id):
         if not task:
             return jsonify({"error": "Task not found"}), 404
 
-        # Validate that task can be started — revoke old celery task if re-running
-        if task.status in ["in-progress", "queued"]:
-            # Revoke the previous celery task to prevent double-retry loops
-            if task.celery_task_id:
-                try:
-                    from backend.celery_app import celery
-                    celery.control.revoke(task.celery_task_id, terminate=True, signal='SIGTERM')
-                    logger.info(f"Revoked previous celery task {task.celery_task_id} for task {task_id}")
-                except Exception as revoke_err:
-                    logger.warning(f"Failed to revoke previous celery task: {revoke_err}")
-            # Allow re-start instead of blocking
-
-        # Create job_id for the task
+        # One run at a time. The task schedulers run a pending task on their own,
+        # so a task another run holds (job_id set and queued or in progress) is
+        # refused, unless that run has been quiet for the stuck-task window, when
+        # it is restarted. The claim is one conditional UPDATE, like the
+        # schedulers', so a start and a scheduler cannot both take the same task.
         from datetime import timezone
+        from sqlalchemy import or_
+        from backend.tasks.task_scheduler_celery import STUCK_TASK_THRESHOLD_MINUTES
+        now = datetime.datetime.now(timezone.utc)
+        stale_before = now - datetime.timedelta(minutes=STUCK_TASK_THRESHOLD_MINUTES)
+        # Task has no celery_task_id column; the attribute exists only when this
+        # process set it, so read it with a default.
+        previous_celery_id = (getattr(task, "celery_task_id", None)
+                              if task.status in ("in-progress", "queued") else None)
         job_id = f"task_{task_id}"
-        task.job_id = job_id
-        task.status = "queued"  # Mark as queued, Celery will move to in-progress
-        task.updated_at = datetime.datetime.now(timezone.utc)
-
+        claimed = (
+            db.session.query(Task)
+            .filter(
+                Task.id == task_id,
+                or_(Task.job_id.is_(None),
+                    Task.status.notin_(("in-progress", "queued")),
+                    Task.updated_at < stale_before),
+            )
+            .update({"job_id": job_id, "status": "queued", "updated_at": now}, synchronize_session=False)
+        )
         db.session.commit()
+        if claimed != 1:
+            db.session.refresh(task)
+            return jsonify({"error": f"Task {task_id} is already running ({task.status}, {task.job_id}). "
+                                     f"Start it again once that run ends."}), 409
+        db.session.refresh(task)
+        if previous_celery_id:
+            # A stuck run being restarted: stop its Celery task so it cannot retry.
+            try:
+                from backend.celery_app import celery
+                celery.control.revoke(previous_celery_id, terminate=True, signal='SIGTERM')
+                logger.info(f"Revoked previous celery task {previous_celery_id} for task {task_id}")
+            except Exception as revoke_err:
+                logger.warning(f"Failed to revoke previous celery task: {revoke_err}")
 
         # Submit task to Celery queue
         try:
@@ -763,7 +782,10 @@ def start_task(task_id):
             from backend.services.task_scheduler import _execute_task
             import threading
 
+            # _execute_task claims only a pending task with no job_id; with the
+            # claim's job_id left in place the thread never ran it.
             task.status = "pending"
+            task.job_id = None
             db.session.commit()
 
             thread = threading.Thread(
