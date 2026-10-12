@@ -34,7 +34,14 @@ _RULES = [
         r"|AKIA[0-9A-Z]{16}"
         r"|AIza[0-9A-Za-z_\-]{35}"
         r"|xox[abprs]-[A-Za-z0-9\-]{10,}"
-        r"|hf_[A-Za-z0-9]{20,})"), "[key]"),
+        r"|hf_[A-Za-z0-9]{20,}"
+        r"|xai-[A-Za-z0-9]{20,})"), "[key]"),
+    # A BitLocker recovery key: eight groups of six digits.
+    ("recovery_key", re.compile(r"\b\d{6}(?:-\d{6}){7}\b"), "[key]"),
+    # A line holding only a GitHub-style recovery code (five hex, a hyphen,
+    # five hex). Other services' codes have no shape ordinary text never
+    # takes; files named for recovery codes are left out by name instead.
+    ("recovery_code", re.compile(r"^\s*[0-9a-fA-F]{5}-[0-9a-fA-F]{5}\s*$"), "[key]"),
     ("bearer_header", re.compile(r"(?i)\b(authorization:\s*bearer|bearer)\s+[A-Za-z0-9._~+/=\-]{12,}"), r"\1 [key]"),
     ("api_key_header", re.compile(r"(?i)\b(x-api-key\s*[:=]\s*['\"]?)[^\s'\"]{8,}"), r"\1[key]"),
     ("secret_assignment", re.compile(
