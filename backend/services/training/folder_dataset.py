@@ -290,6 +290,8 @@ def pairs_per_passage(chunk_words: int, per_1000: float) -> int:
     return questions_for(chunk_words, per_1000) + 1
 
 
+# One pass over ~8,000 varied rows covers more of a folder and overfits less
+# than three passes over the 2,700 that would fill the step cap three times.
 def enough_to_train() -> int:
     """Pairs a default fine-tune can use, plus headroom for the filter.
 
