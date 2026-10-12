@@ -129,6 +129,29 @@ def require_cuda() -> None:
         )
 
 
+def is_multimodal(base_model: str) -> bool:
+    """Whether a checkpoint carries image or audio towers beside its language
+    model (Gemma 4, for one), read from its config.json."""
+    try:
+        config = json.loads((Path(base_model) / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return bool(config.get("vision_config") or config.get("audio_config"))
+
+
+def text_tokenizer(tokenizer):
+    """The text tokenizer inside a multimodal checkpoint's processor, given
+    the processor's chat template when it has none of its own."""
+    from transformers import ProcessorMixin
+
+    if not isinstance(tokenizer, ProcessorMixin):
+        return tokenizer
+    inner = tokenizer.tokenizer
+    if not getattr(inner, "chat_template", None) and getattr(tokenizer, "chat_template", None):
+        inner.chat_template = tokenizer.chat_template
+    return inner
+
+
 def check_report() -> dict:
     """Library versions, CUDA, bf16 and the TRL interface this trainer uses.
 
@@ -209,6 +232,7 @@ def render_rows(rows, tokenizer):
     texts = []
     report = {"rows": len(rows), "used": 0, "skipped": 0, "text_rows": 0, "chat_rows": 0}
     template = getattr(tokenizer, "chat_template", None)
+    bos = _added_bos(tokenizer)
     for row in rows:
         fmt = dataset_formats.detect_format(row)
         if fmt == "text":
@@ -228,10 +252,25 @@ def render_rows(rows, tokenizer):
         text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
         if not isinstance(text, str):
             raise ValueError("The base model's chat template did not return text")
+        if bos and text.startswith(bos):
+            # The template writes BOS and encoding adds another; keep one.
+            text = text[len(bos):]
         texts.append(text)
         report["chat_rows"] += 1
     report["used"] = len(texts)
     return texts, report
+
+
+def _added_bos(tokenizer):
+    """The BOS text the tokenizer puts in front of every encoding, or None."""
+    bos, bos_id = getattr(tokenizer, "bos_token", None), getattr(tokenizer, "bos_token_id", None)
+    if not bos or bos_id is None:
+        return None
+    try:
+        ids = tokenizer(text="x", add_special_tokens=True)["input_ids"]
+    except Exception:
+        return None
+    return bos if list(ids[:1]) == [bos_id] else None
 
 
 def find_last_checkpoint(output_dir: Path) -> str:
@@ -410,24 +449,51 @@ def finetune(
     print(f"4-bit: {load_in_4bit}")
     print(f"Freeze Vision Tower: {freeze_vision}")
 
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=base_model,
-        max_seq_length=max_seq_length,
-        dtype=None,
-        load_in_4bit=load_in_4bit,
-    )
+    multimodal = is_multimodal(base_model)
+    if multimodal:
+        from unsloth import FastModel
+        print("Multimodal checkpoint: LoRA on the language layers only")
+        model, processor = FastModel.from_pretrained(
+            model_name=base_model,
+            max_seq_length=max_seq_length,
+            dtype=None,
+            load_in_4bit=load_in_4bit,
+        )
+        # The image and audio towers keep their weights and take no gradients.
+        model = FastModel.get_peft_model(
+            model,
+            r=lora_rank,
+            finetune_vision_layers=False,
+            finetune_language_layers=True,
+            finetune_attention_modules=True,
+            finetune_mlp_modules=True,
+            lora_alpha=lora_rank,
+            lora_dropout=0,
+            bias="none",
+            use_gradient_checkpointing=True,
+            random_state=42,
+        )
+        tokenizer = text_tokenizer(processor)
+    else:
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=base_model,
+            max_seq_length=max_seq_length,
+            dtype=None,
+            load_in_4bit=load_in_4bit,
+        )
+        processor = tokenizer
 
-    model = FastLanguageModel.get_peft_model(
-        model,
-        r=lora_rank,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                        "gate_proj", "up_proj", "down_proj"],
-        lora_alpha=lora_rank,
-        lora_dropout=0,
-        bias="none",
-        use_gradient_checkpointing=True,
-        random_state=42,
-    )
+        model = FastLanguageModel.get_peft_model(
+            model,
+            r=lora_rank,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                            "gate_proj", "up_proj", "down_proj"],
+            lora_alpha=lora_rank,
+            lora_dropout=0,
+            bias="none",
+            use_gradient_checkpointing=True,
+            random_state=42,
+        )
 
     import torch
     import gc
@@ -562,7 +628,7 @@ def finetune(
 
     print("\nSaving model...")
     model.save_pretrained(str(output_dir / "lora"))
-    tokenizer.save_pretrained(str(output_dir / "lora"))
+    processor.save_pretrained(str(output_dir / "lora"))
     if torch.cuda.is_available():
         print(f"Peak GPU memory: {torch.cuda.max_memory_allocated() / 1024**2:.0f} MB")
 

@@ -47,14 +47,36 @@ You are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>
 
 QWEN25_MARKERS = {"instruction": "<|im_start|>user\n", "response": "<|im_start|>assistant\n"}
 
-# revision: the branch a Download fetches. The commit it fetched is recorded on
-# this machine (see installed_revision) and training loads exactly that commit.
+# Gemma 4's turns, in Ollama's template language: "<|turn>role" ... "<turn|>",
+# with the assistant's role named "model" and no default system line.
+GEMMA4_OLLAMA_TEMPLATE = """{{- if .System }}<|turn>system
+{{ .System }}<turn|>
+{{ end }}
+{{- range $i, $_ := .Messages }}
+{{- $last := eq (len (slice $.Messages $i)) 1 }}
+{{- if eq .Role "user" }}<|turn>user
+{{ .Content }}<turn|>
+{{ else if eq .Role "assistant" }}<|turn>model
+{{ .Content }}{{ if not $last }}<turn|>
+{{ end }}
+{{- end }}
+{{- if and (ne .Role "assistant") $last }}<|turn>model
+{{ end }}
+{{- end }}"""
+
+GEMMA4_MARKERS = {"instruction": "<|turn>user\n", "response": "<|turn>model\n"}
+
+# revision: the branch or commit a Download fetches. The commit it fetched is
+# recorded on this machine (see installed_revision) and training loads exactly
+# that commit.
 # size_gb: the bf16 weights plus tokenizer files, approximate; the download's
 # progress is measured against it.
 # vram_mb: what a run is budgeted on the GPU at max_seq_length and
 # max_batch_size with LoRA rank 16; vram_measured says how it was arrived at.
 # export: "verified" once Export to Ollama has been run live for the model;
 # until then the Training page does not offer it.
+# trainable: False until a training run of the model has been measured on a
+# GPU; it can be downloaded, but no job is created for it. Left out means True.
 BASE_MODELS: tuple[dict[str, Any], ...] = (
     {
         "id": "Qwen/Qwen2.5-0.5B-Instruct",
@@ -102,6 +124,31 @@ BASE_MODELS: tuple[dict[str, Any], ...] = (
         "ollama_template": QWEN25_OLLAMA_TEMPLATE,
         "ollama_stop": ("<|im_end|>",),
     },
+    {
+        "id": "google/gemma-4-E4B-it",
+        "name": "Gemma 4 E4B Instruct",
+        "description": ("Google's Gemma 4 E4B. Training adapts its language layers; "
+                        "its image and audio parts are left as they are."),
+        "repo": "google/gemma-4-E4B-it",
+        "revision": "ee0ef6023621cff504d758262d4e04895a5af4a2",
+        "size_gb": 16.0,
+        "license": "Apache-2.0",
+        "architecture": "gemma4",
+        "max_seq_length": 2048,
+        "max_batch_size": 4,
+        "vram_mb": 14000,
+        "vram_measured": ("not measured: 14000 is a placeholder that lets a 16 GB card download "
+                          "it. A measured run sets vram_mb and load_in_4bit before training is "
+                          "offered."),
+        "load_in_4bit": False,
+        "trainable": False,
+        "response_markers": GEMMA4_MARKERS,
+        "vision": False,
+        "export": "unverified",
+        "ollama_tags": ("gemma4:e4b",),
+        "ollama_template": GEMMA4_OLLAMA_TEMPLATE,
+        "ollama_stop": ("<turn|>",),
+    },
 )
 
 # GPU memory a run leaves for the CUDA context and the desktop. Not measured.
@@ -141,6 +188,10 @@ def by_ollama_tag(tag: str) -> dict[str, Any] | None:
 def export_verified(model_id: Any) -> bool:
     entry = get(model_id)
     return bool(entry) and entry.get("export") == "verified"
+
+
+def trainable(entry: dict[str, Any]) -> bool:
+    return entry.get("trainable", True)
 
 
 # ---- what is on this machine ------------------------------------------------------
@@ -225,6 +276,7 @@ def model_status(entry: dict[str, Any], hardware: dict[str, Any]) -> dict[str, A
         "max_batch_size": entry["max_batch_size"], "vram_mb": entry["vram_mb"],
         "vram_measured": entry["vram_measured"], "vision": entry["vision"],
         "export_verified": entry.get("export") == "verified",
+        "trainable": trainable(entry),
         "installed": snapshot is not None,
         "revision": installed_revision(entry) if snapshot else None,
         "fits": fits, "fit_reason": fit_reason,
@@ -263,6 +315,9 @@ def refusal_for_job(model_id: Any, *, vision: bool = False) -> str | None:
         return f"{text or 'That'} is not a base model Guaardvark can fine-tune. Choose one of: {names}."
     if vision and not entry.get("vision"):
         return f"{entry['name']} is a text model; no vision base model is declared yet."
+    if not trainable(entry):
+        return (f"{entry['name']} is not offered for training yet: its GPU memory has not been "
+                f"measured on a training run.")
     fits, why = fit(entry)
     if not fits:
         return f"{entry['name']} does not fit this machine: {why}."

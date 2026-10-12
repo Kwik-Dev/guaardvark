@@ -476,6 +476,11 @@ const TrainingLibrariesModal = ({ open, onClose, showMessage, onChanged, onBaseM
                     secondary={
                       <>
                         {model.description}
+                        {model.trainable === false && (
+                          <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+                            Not offered for training yet: its GPU memory has not been measured.
+                          </Typography>
+                        )}
                         {!model.fits && (
                           <Typography variant="caption" color="warning.main" sx={{ display: "block" }}>
                             Does not fit: {model.fit_reason}
