@@ -1858,7 +1858,7 @@ def get_image_info(doc_id):
             "height": height,
             "mode": mode,
             "format": fmt,
-            "file_size": document.file_size,
+            "file_size": document.size,
         })
     except Exception as e:
         logger.error(f"Error getting image info: {e}", exc_info=True)
