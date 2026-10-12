@@ -10,6 +10,12 @@ export const getHealth = async () => {
   return handleResponse(response);
 };
 
+// { starts_on_job }: whether submitting a job starts the service while it is down.
+export const getAutostart = async () => {
+  const response = await fetch(`${BASE_URL}/autostart`, { method: "GET" });
+  return handleResponse(response);
+};
+
 export const getModels = async () => {
   const response = await fetch(`${BASE_URL}/models`, { method: "GET" });
   return handleResponse(response);

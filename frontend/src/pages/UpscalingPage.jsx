@@ -46,7 +46,7 @@ import {
 } from "@mui/icons-material";
 import { useNavigate } from "react-router-dom";
 import * as upscalingService from "../api/upscalingService";
-import { listPlugins } from "../api/pluginsService";
+import { listPlugins, startPlugin } from "../api/pluginsService";
 import lazyWithReload from "../utils/lazyWithReload";
 
 const UpscalingModelsModal = lazyWithReload(() =>
@@ -85,6 +85,10 @@ const UpscalingPage = ({ embedded = false }) => {
   const [serviceHealth, setServiceHealth] = useState(null);
   const [models, setModels] = useState({ downloaded: [], available: [] });
   const [modelsLoaded, setModelsLoaded] = useState(false);
+  // While the service is down: whether a submitted job starts it (the backend
+  // decides; null until asked), and whether the Start button is waiting on it.
+  const [startsOnJob, setStartsOnJob] = useState(null);
+  const [startingService, setStartingService] = useState(false);
 
   // Upload state — selectedFiles is an array so we can batch-queue a bunch at once
   const [dragActive, setDragActive] = useState(false);
@@ -140,6 +144,7 @@ const UpscalingPage = ({ embedded = false }) => {
   // Check the plugin manager first — if upscaling isn't running, we skip the
   // direct plugin calls entirely. Calling a disabled plugin's endpoints just
   // spams the console with 503s, even though the page handles them silently.
+  // Resolves to whether the service answered.
   const checkService = async () => {
     try {
       const pluginsRes = await listPlugins();
@@ -147,14 +152,46 @@ const UpscalingPage = ({ embedded = false }) => {
       const upscaling = plugins.find((p) => p.id === "upscaling");
       if (!upscaling || upscaling.status !== "running") {
         setServiceAvailable(false);
-        return;
+        return false;
       }
       const res = await upscalingService.getHealth();
       setServiceAvailable(true);
       setServiceHealth(res.data || res);
       fetchJobs();
+      return true;
     } catch {
       setServiceAvailable(false);
+      return false;
+    }
+  };
+
+  useEffect(() => {
+    if (serviceAvailable !== false) return;
+    upscalingService.getAutostart()
+      .then((res) => setStartsOnJob(!!(res.data || res)?.starts_on_job))
+      .catch(() => setStartsOnJob(false));
+  }, [serviceAvailable]);
+
+  // The Plugins page's start, from here. Waits up to a minute for the service
+  // to answer so the models and GPU card fill in without a manual refresh.
+  const handleStartService = async () => {
+    setStartingService(true);
+    setError("");
+    try {
+      await startPlugin("upscaling");
+      const deadline = Date.now() + 60000;
+      let up = await checkService();
+      while (!up && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        up = await checkService();
+      }
+      if (!up) {
+        setError("The upscaling service did not answer within a minute. Its log is on the Plugins page.");
+      }
+    } catch (e) {
+      setError(`Could not start the upscaling service: ${e.message || "unknown error"}`);
+    } finally {
+      setStartingService(false);
     }
   };
 
@@ -275,6 +312,14 @@ const UpscalingPage = ({ embedded = false }) => {
       });
     }, 2000);
   }, [fetchJobs, refreshHealth]);
+
+  // fetchJobs/startPolling captured while the service was down return early, so
+  // the job list and polling pick up here once it answers.
+  useEffect(() => {
+    if (!serviceAvailable) return;
+    fetchJobs();
+    startPolling();
+  }, [serviceAvailable, fetchJobs, startPolling]);
 
   // --- Drag & Drop ---
   const handleDragOver = useCallback((e) => {
@@ -456,7 +501,13 @@ const UpscalingPage = ({ embedded = false }) => {
     }
   };
 
-  const handleSubmit = () => (mediaKind === "image" ? handleUpscaleImages() : handleUpscale());
+  // A job submitted while the service is down starts it on the backend (when
+  // startsOnJob); afterwards the page loads its models, health and jobs.
+  const handleSubmit = async () => {
+    const wasDown = serviceAvailable === false;
+    await (mediaKind === "image" ? handleUpscaleImages() : handleUpscale());
+    if (wasDown) await checkService();
+  };
 
   const closeImageResult = () => {
     setImageResult((prev) => {
@@ -555,6 +606,7 @@ const UpscalingPage = ({ embedded = false }) => {
   const modelLoaded = serviceHealth?.model_loaded;
 
   const isImageMode = mediaKind === "image";
+  const canSubmit = !!serviceAvailable || (serviceAvailable === false && !!startsOnJob);
 
   const Wrapper = embedded ? React.Fragment : PageLayout;
   const wrapperProps = embedded ? {} : {
@@ -576,8 +628,24 @@ const UpscalingPage = ({ embedded = false }) => {
     <Wrapper {...wrapperProps}>
       {/* Service Status */}
       {serviceAvailable === false && (
-        <Alert severity="warning" sx={{ mb: 3 }}>
-          Upscaling service is not running. Start it from the Plugins page.
+        <Alert
+          severity={startsOnJob ? "info" : "warning"}
+          sx={{ mb: 3 }}
+          action={
+            <Button
+              color="inherit"
+              size="small"
+              onClick={handleStartService}
+              disabled={startingService || isUploading}
+              startIcon={startingService ? <CircularProgress size={14} color="inherit" /> : null}
+            >
+              {startingService ? "Starting..." : "Start now"}
+            </Button>
+          }
+        >
+          {startsOnJob
+            ? "The upscaling service is stopped. It starts by itself when you upscale something, or you can start it now."
+            : "The upscaling service is stopped. Start it to upscale."}
         </Alert>
       )}
 
@@ -900,12 +968,14 @@ const UpscalingPage = ({ embedded = false }) => {
                   size="large"
                   startIcon={isUploading ? <CircularProgress size={20} color="inherit" /> : <EnhanceIcon />}
                   onClick={handleSubmit}
-                  disabled={selectedFiles.length === 0 || isUploading || !serviceAvailable || noModelInstalled}
+                  disabled={selectedFiles.length === 0 || isUploading || startingService || !canSubmit || noModelInstalled}
                   fullWidth
                   sx={{ mt: 1 }}
                 >
                   {isUploading
-                    ? uploadProgress
+                    ? serviceAvailable === false && uploadProgress?.current === 1
+                      ? "Starting the upscaling service..."
+                      : uploadProgress
                       ? `Uploading ${uploadProgress.current}/${uploadProgress.total}...`
                       : "Uploading..."
                     : selectedFiles.length > 1
@@ -1052,7 +1122,7 @@ const UpscalingPage = ({ embedded = false }) => {
                       <Button
                         variant="contained"
                         onClick={handleGeneratePreview}
-                        disabled={isPreviewing || !serviceAvailable || noModelInstalled}
+                        disabled={isPreviewing || startingService || !canSubmit || noModelInstalled}
                       >
                         {isPreviewing ? "Generating..." : "Generate Preview"}
                       </Button>
