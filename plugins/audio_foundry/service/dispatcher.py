@@ -284,7 +284,6 @@ class Dispatcher:
         process and in the music daemon. Voice, then music, then an effect would
         otherwise stack them until a load runs out of memory.
         """
-        freed = False
         for other, loaded in self._backends.items():
             if other is intent or loaded is None or not loaded.is_loaded:
                 continue
@@ -292,17 +291,17 @@ class Dispatcher:
             if free is None or free >= vram_req + _HEADROOM_MB:
                 break
             if self.unload(other):
-                freed = True
+                # Hand the freed blocks back now, so the next reading sees them
+                # and the loop stops at the first unload that was enough.
+                try:
+                    import torch
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
                 logger.info(
                     "Unloaded %s to make room for %s (%d MB free, %d MB wanted)",
                     other.value, intent.value, free, vram_req,
                 )
-        if freed:
-            try:
-                import torch
-                torch.cuda.empty_cache()
-            except Exception:
-                pass
 
     def _load_with_orchestrator(self, intent: Intent, backend: AudioBackend) -> None:
         """Request VRAM, run load(), report load completion. Cleans up on failure."""

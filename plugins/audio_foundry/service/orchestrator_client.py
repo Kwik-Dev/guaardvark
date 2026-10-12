@@ -110,11 +110,14 @@ class OrchestratorClient:
             "/api/gpu/memory/evict",
             {"slot_id": slot_id},
             op="evict",
+            missing_ok=True,
         )
 
     # ------------------------------------------------------------------
 
-    def _post(self, path: str, payload: dict[str, Any], op: str) -> bool:
+    def _post(self, path: str, payload: dict[str, Any], op: str, missing_ok: bool = False) -> bool:
+        """missing_ok: a 404 means the orchestrator does not track the slot,
+        which is the outcome an evict wants, so it is not a failure."""
         try:
             key = backend_api_key(self._own_backend)
             response = httpx.post(
@@ -123,6 +126,9 @@ class OrchestratorClient:
                 headers={API_KEY_HEADER: key} if key else None,
                 timeout=self._timeout,
             )
+            if missing_ok and response.status_code == 404:
+                logger.debug("Orchestrator %s: slot not tracked", op)
+                return True
             response.raise_for_status()
             return True
         except httpx.HTTPError as e:
