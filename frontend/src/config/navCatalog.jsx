@@ -34,6 +34,7 @@ import MovieFilterIcon from "@mui/icons-material/MovieFilter";
 import LocalMoviesIcon from "@mui/icons-material/LocalMovies";
 import MusicVideoIcon from "@mui/icons-material/MusicVideo";
 import BubbleChartIcon from "@mui/icons-material/BubbleChart";
+import HealingIcon from "@mui/icons-material/Healing";
 import ScienceIcon from "@mui/icons-material/Science";
 import PhotoLibraryIcon from "@mui/icons-material/PhotoLibrary";
 import VideoCameraBackIcon from "@mui/icons-material/VideoCameraBack";
@@ -58,6 +59,7 @@ export const NAV_CHROME = Object.freeze({
 
 export const SIDEBAR_GROUPS = Object.freeze([
   "Main",
+  "Code",
   "Studio",
   "Management",
   "Configuration",
@@ -111,16 +113,6 @@ export const CORE_NAV_CATALOG = Object.freeze([
     stripOrder: 10,
   }),
   page({
-    id: "code-editor",
-    path: "/code-editor",
-    label: "Code Editor",
-    icon: <CodeIcon />,
-    sidebarGroup: "Main",
-    menu: "View",
-    workspace: "code",
-    stripOrder: 10,
-  }),
-  page({
     id: "files",
     path: "/documents",
     label: "Files",
@@ -149,6 +141,48 @@ export const CORE_NAV_CATALOG = Object.freeze([
     menu: "Library",
     workspace: "home",
     stripOrder: 20,
+  }),
+
+  page({
+    id: "code-editor",
+    path: "/code-editor",
+    label: "Code Editor",
+    icon: <CodeIcon />,
+    sidebarGroup: "Code",
+    menu: "View",
+    workspace: "code",
+    stripOrder: 10,
+  }),
+  page({
+    id: "swarm",
+    path: "/swarm",
+    label: "Swarm",
+    icon: <HiveIcon />,
+    sidebarGroup: "Code",
+    menu: "Agents",
+    workspace: "code",
+    stripOrder: 20,
+  }),
+  page({
+    id: "system-map",
+    path: "/system-map",
+    label: "System Map",
+    icon: <BubbleChartIcon />,
+    sidebarGroup: "Code",
+    menu: "View",
+    workspace: "code",
+    stripOrder: 30,
+  }),
+  page({
+    id: "self-improvement",
+    path: "/self-improvement",
+    label: "Self-improvement",
+    icon: <HealingIcon />,
+    sidebarGroup: "Code",
+    menu: "Agents",
+    workspace: "code",
+    stripOrder: 40,
+    badge: "pendingFixes",
   }),
 
   page({
@@ -374,16 +408,6 @@ export const CORE_NAV_CATALOG = Object.freeze([
     stripOrder: 30,
   }),
   page({
-    id: "swarm",
-    path: "/swarm",
-    label: "Swarm",
-    icon: <HiveIcon />,
-    sidebarGroup: "Configuration",
-    menu: "Agents",
-    workspace: "agents",
-    stripOrder: 40,
-  }),
-  page({
     id: "autoresearch",
     path: "/autoresearch",
     label: "Autoresearch",
@@ -423,16 +447,6 @@ export const CORE_NAV_CATALOG = Object.freeze([
     workspace: "agents",
     stripOrder: 70,
     badge: "pendingApprovals",
-  }),
-  page({
-    id: "system-map",
-    path: "/system-map",
-    label: "System Map",
-    icon: <BubbleChartIcon />,
-    sidebarGroup: "Configuration",
-    menu: "View",
-    workspace: "system",
-    stripOrder: 40,
   }),
   page({
     id: "settings",
