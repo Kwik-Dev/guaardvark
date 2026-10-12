@@ -38,7 +38,7 @@ from backend.services.training.pair_generator import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_KINDS = (".md", ".txt")
-ALL_KINDS = (".md", ".txt", ".html", ".docx")
+ALL_KINDS = (".md", ".txt", ".html", ".docx", ".pdf")
 DEFAULT_PAIRS_PER_1000_WORDS = 3
 MAX_PAIRS_PER_1000_WORDS = 20
 PROBE_CHUNKS = 3
@@ -85,17 +85,92 @@ def normalise_kinds(kinds) -> list[str]:
     return chosen or list(DEFAULT_KINDS)
 
 
+# Training-only rules on top of Bulk Import's: a folder of notes often holds
+# copied software too (a dependency tree, a virtual environment, a copied app
+# with its tokenizer files), whose .md and .txt files are not anyone's notes.
+# Folders pruned by name at any depth:
+PACKAGE_DIRS = {
+    "node_modules", "site-packages", "dist-packages", "vendor", "third_party", "third-party",
+    "bower_components", "build", "dist", "__pycache__", "venv", "virtualenv",
+}
+PACKAGE_DIR_SUFFIXES = (".egg-info", ".dist-info")
+# Files that sit among notes but are not notes: tokenizer vocabularies,
+# dependency pins, licences and package metadata.
+# Names only: a note called "license notes for the shop" stays.
+NOT_NOTES_NAME = re.compile(
+    r"^(?:"
+    r"(?i:merges|vocab|requirements|constraints)(?:[._-][\w.-]*)?\.(?i:txt)"
+    r"|(?i:licen[cs]e|copying|notice|authors)(?:[._-][A-Z0-9.]{1,15})?\.(?i:txt|md)"
+    r"|(?i:cmakelists|dependency_links|top_level|sources|entry_points|installed-files)\.(?i:txt)"
+    r")$")
+# Files whose names say they hold a credential. Left out whole and listed by
+# name, since their content cannot be trusted to match any scrub rule.
+CREDENTIAL_NAME = re.compile(
+    r"\b(?:api ?keys?|apikeys?|recovery (?:codes?|keys?)|passwords?|passwd|secrets?|tokens?"
+    r"|credentials?|bitlocker|private ?keys?)\b", re.I)
+
+
+def _package_dir(rel: str) -> Optional[str]:
+    """The topmost copied-software folder a file sits in, or None."""
+    parts = Path(rel).parts[:-1]
+    for i, part in enumerate(parts):
+        low = part.lower()
+        if low in PACKAGE_DIRS or low.endswith(PACKAGE_DIR_SUFFIXES):
+            return str(Path(*parts[:i + 1]))
+    return None
+
+
+def is_credential_name(name: str) -> bool:
+    return bool(CREDENTIAL_NAME.search(re.sub(r"[_\-.]+", " ", Path(name).stem)))
+
+
+def not_prose_reason(text: str) -> Optional[str]:
+    """Why a file's text is not prose to learn from (a token list, minified or
+    encoded text), or None. Cheap, on the first 50k characters."""
+    sample = text[:50000]
+    if not sample.strip():
+        return None
+    letters_spaces = sum(1 for c in sample if c.isalpha() or c.isspace())
+    if letters_spaces / len(sample) < 0.6:
+        return "mostly symbols or digits"
+    if any(len(line) > 1000 and line.count(" ") < len(line) * 0.02 for line in sample.splitlines()):
+        return "long unbroken lines"
+    lines = [line for line in sample.splitlines() if line.strip()]
+    if len(lines) >= 200:
+        short = sum(1 for line in lines if len(line.split()) <= 2)
+        sentences = len(re.findall(r"[.!?](?:\s|$)", sample))
+        if short / len(lines) > 0.9 and sentences < len(sample.split()) / 50:
+            return "a list of single words or tokens"
+    return None
+
+
 def scan(folder: str, kinds) -> tuple[list[tuple[str, str]], dict]:
     """(files, skipped): (full path, path relative to the folder) for each file
-    of the chosen kinds the Bulk Import rules let in."""
+    of the chosen kinds that Bulk Import's rules and the training rules above
+    let in. skipped["credential_files"] names the files left out for their name."""
     from backend.celery_tasks_isolated import _guaardvark_storage_dirs, scan_import_source
 
     kinds = normalise_kinds(kinds)
     storage_dir, upload_dir, backup_dir = _guaardvark_storage_dirs()
     found, skipped = scan_import_source(folder, set(kinds), storage_dir, upload_dir,
                                         backup_dir=backup_dir)
-    files = [(full, rel) for full, rel, name in found if os.path.splitext(name)[1].lower() in kinds]
-    skipped["other_kinds"] = len(found) - len(files)
+    skipped.update(other_kinds=0, package_files=0, not_notes=0, credential_names=0)
+    package_dirs, credential_files, files = set(), [], []
+    for full, rel, name in found:
+        if os.path.splitext(name)[1].lower() not in kinds:
+            skipped["other_kinds"] += 1
+        elif (package := _package_dir(rel)) is not None:
+            package_dirs.add(package)
+            skipped["package_files"] += 1
+        elif NOT_NOTES_NAME.match(name):
+            skipped["not_notes"] += 1
+        elif is_credential_name(name):
+            skipped["credential_names"] += 1
+            credential_files.append(rel)
+        else:
+            files.append((full, rel))
+    skipped["package_dirs"] = len(package_dirs)
+    skipped["credential_files"] = sorted(credential_files)
     return files, skipped
 
 
@@ -105,6 +180,12 @@ def read_text(path: str) -> str:
         from docx import Document
 
         return "\n".join(p.text for p in Document(path).paragraphs)
+    if suffix == ".pdf":
+        # The plain-text reader the indexer uses for PDFs (indexing_service's
+        # PDFReaderClass), not Docling: text only, and fast enough for a check.
+        from llama_index.readers.file import PDFReader
+
+        return "\n".join(doc.text for doc in PDFReader().load_data(file=Path(path)))
     with open(path, encoding="utf-8", errors="replace") as f:
         text = f.read()
     if suffix == ".html":
@@ -121,6 +202,7 @@ def _words(text: str) -> int:
 def prepare(folder: str, kinds, terms: Optional[list[str]] = None) -> dict:
     """Scan, read and scrub. Returns the scrubbed texts and the report parts."""
     files, skipped = scan(folder, kinds)
+    skipped["not_prose"] = 0
     scrubber = Scrubber(terms if terms is not None else load_terms(scrub_terms_path()))
     docs, unreadable = [], []
     for full, rel in files:
@@ -128,6 +210,13 @@ def prepare(folder: str, kinds, terms: Optional[list[str]] = None) -> dict:
             text = read_text(full)
         except Exception as e:
             unreadable.append(f"{rel}: {e}")
+            continue
+        if not text.strip():
+            if rel.lower().endswith(".pdf"):
+                unreadable.append(f"{rel}: no text layer")
+            continue
+        if not_prose_reason(text):
+            skipped["not_prose"] += 1
             continue
         clean = scrubber.scrub(text, rel)
         if clean.strip():
