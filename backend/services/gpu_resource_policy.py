@@ -171,7 +171,10 @@ def evict_upscaler_model(keep: Optional[str] = None) -> Optional[str]:
             return None
         resp = requests.post(f"{base}/evict", headers=headers, timeout=(1.0, 30.0))
         if resp.ok and resp.json().get("unloaded"):
-            log.info("Reclaim: upscaler unloaded %s", loaded)
+            # WARNING, not INFO: backend.log keeps WARNING and up unless
+            # BACKEND_LOG_LEVEL lowers it, and unloading another service's
+            # model is the line someone looks for when an upscale reloads.
+            log.warning("Reclaim: upscaler unloaded %s to make room on the GPU", loaded)
             return loaded
         return None
     except Exception as e:  # noqa: BLE001
