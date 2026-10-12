@@ -53,6 +53,7 @@ import {
   createDeviceProfile,
   updateDeviceProfile,
   deleteDeviceProfile,
+  getHardwareCapabilities,
   getBaseModels,
   exportToOllama,
   exportTrainingJobAnyway,
@@ -65,7 +66,7 @@ import { useTheme } from "@mui/material/styles";
 import axios from "axios";
 import TrainingDatasetModal from "../components/modals/TrainingDatasetModal";
 import NewTrainingJobModal from "../components/modals/NewTrainingJobModal";
-import DeviceProfileModal from "../components/modals/DeviceProfileModal";
+import DeviceProfileModal, { hardwareNote, profileFromHardware } from "../components/modals/DeviceProfileModal";
 import ParseJobModal from "../components/modals/ParseJobModal";
 import ExportQuantizationModal from "../components/modals/ExportQuantizationModal";
 import { useSnackbar } from "../components/common/SnackbarProvider";
@@ -298,6 +299,9 @@ const TrainingPage = () => {
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [jobModalOpen, setJobModalOpen] = useState(false);
   const [deviceModalOpen, setDeviceModalOpen] = useState(false);
+  // A new profile filled from this machine's detected hardware: {values, note}.
+  const [devicePrefill, setDevicePrefill] = useState(null);
+  const [detectingHardware, setDetectingHardware] = useState(false);
   const [parseModalOpen, setParseModalOpen] = useState(false);
   const [currentItem, setCurrentItem] = useState(null);
   // Starting values for a new dataset (a finished parse's output); kept in
@@ -601,12 +605,33 @@ const TrainingPage = () => {
 
   const handleOpenDeviceModal = (profile = null) => {
     setCurrentItem(profile);
+    setDevicePrefill(null);
     setDeviceModalOpen(true);
+  };
+
+  // Opens the Add form filled from /api/training/hardware; the person reviews
+  // it and saves, nothing is created here.
+  const handleCreateFromThisMachine = async () => {
+    setDetectingHardware(true);
+    try {
+      const hw = await getHardwareCapabilities();
+      setCurrentItem(null);
+      setDevicePrefill({
+        values: profileFromHardware(hw, deviceProfiles.map((p) => p.name)),
+        note: hardwareNote(hw),
+      });
+      setDeviceModalOpen(true);
+    } catch (err) {
+      showMessage(`Could not read this machine's hardware: ${err.message}`, "error");
+    } finally {
+      setDetectingHardware(false);
+    }
   };
 
   const handleCloseDeviceModal = () => {
     if (isSaving) return;
     setCurrentItem(null);
+    setDevicePrefill(null);
     setDeviceModalOpen(false);
   };
 
@@ -1113,14 +1138,29 @@ const TrainingPage = () => {
               mb={2}
             >
               <Typography variant="h6">Device Profiles</Typography>
-              <Button
-                variant="contained"
-                startIcon={<AddIcon />}
-                onClick={() => handleOpenDeviceModal(null)}
-              >
-                Add Profile
-              </Button>
+              <Box display="flex" gap={1}>
+                <Button
+                  variant="outlined"
+                  startIcon={detectingHardware ? <CircularProgress size={16} /> : <ComputerIcon />}
+                  onClick={handleCreateFromThisMachine}
+                  disabled={detectingHardware}
+                >
+                  Create from this machine
+                </Button>
+                <Button
+                  variant="contained"
+                  startIcon={<AddIcon />}
+                  onClick={() => handleOpenDeviceModal(null)}
+                >
+                  Add Profile
+                </Button>
+              </Box>
             </Box>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              A profile is optional on a training job. A job that uses one is refused at start if its batch size or
+              sequence length is above the profile&apos;s, or its base model needs more GPU memory than the profile has;
+              a job that does not set batch size or sequence length trains with the profile&apos;s.
+            </Typography>
             {profilesLoading ? (
               <Box display="flex" justifyContent="center" my={3}>
                 <CircularProgress />
@@ -1140,11 +1180,30 @@ const TrainingPage = () => {
                     </TableRow>
                   </TableHead>
                   <TableBody>
+                    {deviceProfiles.length === 0 && (
+                      <TableRow>
+                        <TableCell colSpan={7} align="center" sx={{ py: 4 }}>
+                          <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+                            No device profiles yet. Start from this machine&apos;s detected GPU and memory, then review
+                            the numbers before saving.
+                          </Typography>
+                          <Button
+                            variant="contained"
+                            size="small"
+                            startIcon={detectingHardware ? <CircularProgress size={14} color="inherit" /> : <ComputerIcon />}
+                            onClick={handleCreateFromThisMachine}
+                            disabled={detectingHardware}
+                          >
+                            Create from this machine
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    )}
                     {deviceProfiles.map((profile) => (
                       <TableRow key={profile.id} hover onContextMenu={(e) => rowMenu.open(e, { kind: "profile", item: profile })}>
                         <TableCell>{profile.name}</TableCell>
                         <TableCell>{profile.device_type || "-"}</TableCell>
-                        <TableCell>{profile.gpu_vram_mb ? `${profile.gpu_vram_mb / 1024}GB` : "N/A"}</TableCell>
+                        <TableCell>{profile.gpu_vram_mb ? `${(profile.gpu_vram_mb / 1024).toFixed(1)} GB` : "N/A"}</TableCell>
                         <TableCell>{profile.max_batch_size}</TableCell>
                         <TableCell>{profile.max_seq_length}</TableCell>
                         <TableCell>{profile.is_default ? <Chip label="Default" size="small" color="primary" /> : "-"}</TableCell>
@@ -1206,6 +1265,8 @@ const TrainingPage = () => {
           open={deviceModalOpen}
           onClose={handleCloseDeviceModal}
           profileData={currentItem}
+          prefill={devicePrefill?.values}
+          prefillNote={devicePrefill?.note}
           onSave={handleSaveDeviceProfile}
           isSaving={isSaving}
         />
