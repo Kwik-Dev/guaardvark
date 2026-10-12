@@ -8,6 +8,7 @@ available system resources before loading.
 
 import logging
 import os
+import warnings
 import re
 import threading
 import time
@@ -154,7 +155,11 @@ def _gpu_memory_mb() -> Optional[tuple]:
     if visible.isdigit():
         index = int(visible)
     try:
-        import pynvml
+        with warnings.catch_warnings():
+            # The pynvml wheel warns at import that it is deprecated in favour of
+            # nvidia-ml-py, which ships the same module; here it is only noise.
+            warnings.simplefilter("ignore", FutureWarning)
+            import pynvml
         pynvml.nvmlInit()
         try:
             info = pynvml.nvmlDeviceGetMemoryInfo(pynvml.nvmlDeviceGetHandleByIndex(index))
