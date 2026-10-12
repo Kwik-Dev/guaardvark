@@ -37,6 +37,20 @@ class Intent(str, Enum):
 _SLOT_PREFIX = "audio_foundry"
 # Default priority for audio backends — between embeddings (60) and chat-LLM (90).
 _DEFAULT_PRIORITY = 70
+# Room left above a backend's estimate before this plugin unloads its own others.
+_HEADROOM_MB = 512
+
+
+def _free_vram_mb() -> Optional[int]:
+    """Free memory on the card in MB, or None when it cannot be read."""
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return None
+        free, _total = torch.cuda.mem_get_info()
+        return int(free / 1024 / 1024)
+    except Exception:
+        return None
 
 
 class NotWired(NotImplementedError):
@@ -262,6 +276,34 @@ class Dispatcher:
 
     # ------------------------------------------------------------------
 
+    def _make_room(self, intent: Intent, vram_req: int) -> None:
+        """Unload this plugin's other idle backends while the card is short.
+
+        The orchestrator frees other services (Ollama, image pipelines) but for
+        this plugin's slots it only stops tracking them: the models stay in this
+        process and in the music daemon. Voice, then music, then an effect would
+        otherwise stack them until a load runs out of memory.
+        """
+        freed = False
+        for other, loaded in self._backends.items():
+            if other is intent or loaded is None or not loaded.is_loaded:
+                continue
+            free = _free_vram_mb()
+            if free is None or free >= vram_req + _HEADROOM_MB:
+                break
+            if self.unload(other):
+                freed = True
+                logger.info(
+                    "Unloaded %s to make room for %s (%d MB free, %d MB wanted)",
+                    other.value, intent.value, free, vram_req,
+                )
+        if freed:
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+
     def _load_with_orchestrator(self, intent: Intent, backend: AudioBackend) -> None:
         """Request VRAM, run load(), report load completion. Cleans up on failure."""
         slot_id = f"{_SLOT_PREFIX}:{intent.value}"
@@ -280,6 +322,7 @@ class Dispatcher:
         # Best-effort eviction. If the orchestrator is unreachable we still try
         # the load — it might just OOM, which the caller will see as a 500.
         self._orch.request_vram(slot_id, vram_req, _DEFAULT_PRIORITY, exclusive=exclusive)
+        self._make_room(intent, vram_req)
 
         try:
             import torch
