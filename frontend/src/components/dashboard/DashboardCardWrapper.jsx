@@ -15,7 +15,8 @@ import {
   IconButton,
   Tooltip,
 } from "@mui/material";
-import { useTheme } from "@mui/material/styles";
+import { ThemeProvider, useTheme } from "@mui/material/styles";
+import { foregroundFor, themeOnColor } from "../../theme/onColor";
 import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
 import { useNavigate } from "react-router-dom";
 import useContextMenu from "../../hooks/useContextMenu";
@@ -113,32 +114,17 @@ const DashboardCardWrapper = React.forwardRef(
     const cardId = restProps.id || i;
     const colorInputRef = useRef(null);
 
-    // Optimized color calculations - parse hex once and compute both properties
+    // A custom card colour: header text and the card body's theme follow it
+    // (black or white ink by WCAG contrast); without one the app theme stands.
     const colorData = useMemo(() => {
-      if (!cardColor) {
-        return {
-          isLight: false,
-          oppositeColor: theme.palette.text.primary
-        };
+      const fg = cardColor ? foregroundFor(cardColor) : null;
+      if (!fg) {
+        return { isLight: false, oppositeColor: theme.palette.text.primary };
       }
-
-      // Parse hex once for efficiency
-      let hex = cardColor.replace("#", "");
-      if (hex.length === 3) {
-        hex = hex.split("").map((h) => h + h).join("");
-      }
-      const r = parseInt(hex.substring(0, 2), 16);
-      const g = parseInt(hex.substring(2, 4), 16);
-      const b = parseInt(hex.substring(4, 6), 16);
-
-      // Calculate luminance and opposite color in one pass
-      const yiq = (r * 299 + g * 587 + b * 114) / 1000;
-      const isLight = yiq > 186;
-      // Use proper contrast: black text for light backgrounds, white text for dark backgrounds
-      const oppositeColor = isLight ? 'rgba(0, 0, 0, 0.87)' : 'rgba(255, 255, 255, 0.95)';
-
-      return { isLight, oppositeColor };
+      return { isLight: fg.mode === "light", oppositeColor: fg.text.primary };
     }, [cardColor, theme.palette.text.primary]);
+    const bodyTheme = useMemo(() => themeOnColor(cardColor), [cardColor]);
+    const onCardColor = (node) => (bodyTheme ? <ThemeProvider theme={bodyTheme}>{node}</ThemeProvider> : node);
 
     const _isLightColor = colorData.isLight;
     const getOppositeColor = colorData.oppositeColor;
@@ -239,7 +225,7 @@ const DashboardCardWrapper = React.forwardRef(
     };
 
     // Conditionally render content based on isMinimized
-    const cardContent = isMinimized ? null : (
+    const cardContent = isMinimized ? null : onCardColor(
       <>
         <Divider sx={{ mb: 0.5 }} /> {/* Reduced margin bottom from 1 to 0.5 */}
         <Box
@@ -364,7 +350,7 @@ const DashboardCardWrapper = React.forwardRef(
             {/* Custom title bar actions */}
             {titleBarActions && (
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                {titleBarActions}
+                {onCardColor(titleBarActions)}
               </Box>
             )}
 
@@ -425,7 +411,7 @@ const DashboardCardWrapper = React.forwardRef(
 
           {/* Compact summary shown in header area when minimized */}
           {isMinimized && minimizedContent && (
-            <Box sx={{ px: 1, py: 0.5 }}>{minimizedContent}</Box>
+            <Box sx={{ px: 1, py: 0.5 }}>{onCardColor(minimizedContent)}</Box>
           )}
 
           {/* Card Content */}
