@@ -693,13 +693,13 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
               label={`↑ ${tokenUsage.input_tokens.toLocaleString()} in`}
               size="small"
               variant="outlined"
-              sx={{ fontSize: "0.6rem", height: 18, color: "text.disabled", borderColor: "divider" }}
+              sx={{ fontSize: "0.6rem", height: 18, color: "text.secondary", borderColor: "divider" }}
             />
             <Chip
               label={`↓ ${tokenUsage.output_tokens.toLocaleString()} out`}
               size="small"
               variant="outlined"
-              sx={{ fontSize: "0.6rem", height: 18, color: "text.disabled", borderColor: "divider" }}
+              sx={{ fontSize: "0.6rem", height: 18, color: "text.secondary", borderColor: "divider" }}
             />
           </Box>
         )}

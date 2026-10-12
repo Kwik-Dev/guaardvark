@@ -355,7 +355,7 @@ const VoiceChatPopup = ({
                   variant="caption"
                   sx={{
                     fontSize: '0.7rem',
-                    color: 'text.disabled',
+                    color: 'text.secondary',
                     fontStyle: 'italic'
                   }}
                 >
@@ -414,7 +414,7 @@ const VoiceChatPopup = ({
             display: 'block',
             mt: 2,
             fontSize: '0.65rem',
-            color: 'text.disabled',
+            color: 'text.secondary',
             fontStyle: 'italic',
             textAlign: 'center'
           }}

@@ -491,7 +491,7 @@ const WebsitesPage = () => {
                           )}
                           <Typography
                             variant="caption"
-                            color="text.disabled"
+                            color="text.secondary"
                             display="block"
                             sx={{ mt: 1 }}
                           >

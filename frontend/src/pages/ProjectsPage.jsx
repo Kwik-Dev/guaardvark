@@ -495,7 +495,7 @@ function ProjectsPage() {
                               flexWrap: "wrap",
                               gap: 0.5,
                               fontSize: "0.75rem",
-                              color: "text.disabled",
+                              color: "text.secondary",
                             }}
                           >
                             <Typography variant="caption">

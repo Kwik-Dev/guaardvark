@@ -232,7 +232,7 @@ const ChatSessionDrawer = ({
                 noWrap
                 sx={{
                   display: "block",
-                  color: "text.disabled",
+                  color: "text.secondary",
                   pl: 3,
                   mt: 0.25,
                   fontStyle: "italic",
@@ -247,8 +247,8 @@ const ChatSessionDrawer = ({
               {/* Date/time */}
               <Tooltip title={formatDateTime(session.last_activity || session.created_at)}>
                 <Box sx={{ display: "flex", alignItems: "center", gap: 0.25 }}>
-                  <AccessTimeIcon sx={{ fontSize: 11, color: "text.disabled" }} />
-                  <Typography variant="caption" color="text.disabled" sx={{ fontSize: "0.7rem" }}>
+                  <AccessTimeIcon sx={{ fontSize: 11, color: "text.secondary" }} />
+                  <Typography variant="caption" color="text.secondary" sx={{ fontSize: "0.7rem" }}>
                     {formatRelative(session.last_activity || session.created_at)}
                   </Typography>
                 </Box>
@@ -324,7 +324,7 @@ const ChatSessionDrawer = ({
           sx={{
             px: 2.5, pt: 1.5, pb: 0.5,
             display: "block",
-            color: "text.disabled",
+            color: "text.secondary",
             letterSpacing: 1,
             fontSize: "0.65rem",
           }}
@@ -464,10 +464,10 @@ const ChatSessionDrawer = ({
       {/* Footer stats */}
       <Divider />
       <Box sx={{ px: 2, py: 1, display: "flex", justifyContent: "space-between" }}>
-        <Typography variant="caption" color="text.disabled">
+        <Typography variant="caption" color="text.secondary">
           {sessions.length} chat{sessions.length !== 1 ? "s" : ""}
         </Typography>
-        <Typography variant="caption" color="text.disabled">
+        <Typography variant="caption" color="text.secondary">
           {sessions.reduce((sum, s) => sum + (s.message_count || 0), 0)} messages
         </Typography>
       </Box>

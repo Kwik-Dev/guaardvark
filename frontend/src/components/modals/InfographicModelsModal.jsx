@@ -205,7 +205,7 @@ const InfographicModelsModal = ({ open, onClose, showMessage }) => {
                         </Typography>
                         <Typography
                           variant="caption"
-                          sx={{ display: "block", color: "text.disabled", fontFamily: "monospace", mt: 0.25 }}
+                          sx={{ display: "block", color: "text.secondary", fontFamily: "monospace", mt: 0.25 }}
                         >
                           {m.rel_path}
                         </Typography>

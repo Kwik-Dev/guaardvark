@@ -1628,10 +1628,10 @@ const ImagesPage = () => {
                   pointerEvents: 'none', opacity: 0.5, gap: 1,
                 }}>
                   <BrandLogo size={64} sx={{ opacity: 0.4 }} />
-                  <Typography variant="h6" color="text.disabled">
+                  <Typography variant="h6" color="text.secondary">
                     No images yet
                   </Typography>
-                  <Typography variant="body2" color="text.disabled">
+                  <Typography variant="body2" color="text.secondary">
                     Generate images from the Image Gen tab or right-click to create a folder
                   </Typography>
                 </Box>
@@ -2200,7 +2200,7 @@ const ImagesPage = () => {
                           {displayName}
                         </Typography>
                         {batch.start_time && (
-                          <Typography variant="caption" color="text.disabled" sx={{ fontSize: '0.6rem' }}>
+                          <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.6rem' }}>
                             {formatVideoTime(batch.start_time)}
                           </Typography>
                         )}
