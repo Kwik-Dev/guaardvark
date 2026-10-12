@@ -1425,6 +1425,55 @@ def analyze_prompt():
         return error_response(str(e), 500)
 
 
+@batch_image_bp.route("/prompt-tokens", methods=["POST"])
+def prompt_tokens():
+    """How many tokens a prompt uses out of what the chosen model reads.
+
+    ``limit`` is None when the model has no declared cap, or when it renders
+    through ComfyUI, whose tokenizers read the whole prompt; ``tokens`` is None
+    when the model's tokenizer is not on disk.
+    """
+    try:
+        if not service_available:
+            return error_response("Batch image generation service not available", 503)
+
+        data = request.get_json(silent=True) or {}
+        prompt = data.get("prompt")
+        if not isinstance(prompt, str):
+            return error_response("No prompt provided", 400)
+        model = str(data.get("model") or "auto").strip() or "auto"
+
+        gen = get_batch_image_generator().image_generator
+        if not gen:
+            return error_response("Image generator not initialized", 503)
+
+        from backend.services.prompt_token_budget import count_prompt_tokens, load_tokenizer, max_prompt_tokens
+        from backend.services.stills_pipeline import zimage_via_comfyui_enabled
+
+        key = model
+        if model.lower() == "auto":
+            preferred = gen.configured_default_for_auto()
+            key = preferred if preferred and gen.is_comfy_only_model(preferred) else gen._auto_select_model(prompt)
+        if not key:
+            return success_response({"model": None, "family": None, "tokens": None, "limit": None})
+
+        family = gen._model_family(key)
+        limit = max_prompt_tokens(family)
+        if family == "zimage" and zimage_via_comfyui_enabled():
+            limit = None
+        tokens = None
+        if limit:
+            tokenizer = load_tokenizer(gen._get_model_path(gen._resolve_model_ref(key)))
+            if tokenizer is not None:
+                tokens = count_prompt_tokens(family, prompt, tokenizer)
+
+        return success_response({"model": key, "family": family, "tokens": tokens, "limit": limit})
+
+    except Exception as e:
+        logger.error(f"Error counting prompt tokens: {e}")
+        return error_response(str(e), 500)
+
+
 @batch_image_bp.route("/enhance-prompt", methods=["POST"])
 def enhance_prompt():
     """Enhance a prompt with quality and consistency improvements."""
