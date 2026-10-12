@@ -163,6 +163,10 @@ def unified_chat():
         message = f"/{slash.lstrip('/')} {args}".strip() if slash else "direct tool"
 
     session_id = data.get("session_id") or str(uuid.uuid4())
+    from backend.utils.session_ids import session_id_refusal
+    _too_long = session_id_refusal(session_id)
+    if _too_long:
+        return jsonify({"error": _too_long}), 400
     is_voice_message = bool(data.get("is_voice_message", False))
     request_id = str(uuid.uuid4())
     project_id = data.get("project_id")
@@ -473,6 +477,10 @@ def direct_tool_sync():
         return jsonify({"success": False, "error": "tool or slash_command required"}), 400
 
     session_id = data.get("session_id") or "cli_direct"
+    from backend.utils.session_ids import session_id_refusal
+    _too_long = session_id_refusal(session_id)
+    if _too_long:
+        return jsonify({"error": _too_long}), 400
 
     # Sanitize image prompts at the API boundary so CLI /imagine and browser
     # direct-tool share the same pure-visual text (and never hit NameError on

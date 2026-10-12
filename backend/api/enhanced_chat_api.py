@@ -4494,6 +4494,10 @@ def enhanced_chat():
 
         data = request.get_json()
         session_id = data.get('session_id')
+        from backend.utils.session_ids import session_id_refusal
+        _too_long = session_id_refusal(session_id)
+        if _too_long:
+            return error_response(_too_long, 400)
         message = data.get('message')
 
         logger.info(
@@ -4614,6 +4618,10 @@ def enhanced_chat_stream():
 
         data = request.get_json()
         session_id = data.get('session_id')
+        from backend.utils.session_ids import session_id_refusal
+        _too_long = session_id_refusal(session_id)
+        if _too_long:
+            return error_response(_too_long, 400)
         message = data.get('message')
         use_rag = data.get('use_rag', True)
         debug_mode = data.get('debug', False)
@@ -5293,6 +5301,10 @@ def vision_generate_image():
 
         data = request.get_json()
         session_id = data.get('session_id')
+        from backend.utils.session_ids import session_id_refusal
+        _too_long = session_id_refusal(session_id)
+        if _too_long:
+            return error_response(_too_long, 400)
         prompt = data.get('prompt')
         style = data.get('style', 'realistic')
         size = data.get('size', [512, 512])
