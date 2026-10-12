@@ -41,22 +41,33 @@ def resolve_backend_url(explicit: str | None = None) -> str:
     return f"http://localhost:{port}"
 
 
-def backend_api_key() -> str:
+def backend_url_is_own(explicit: str | None = None) -> bool:
+    """True when resolve_backend_url falls back to this checkout's backend:
+    no URL in config.yaml and none in GUAARDVARK_BACKEND_URL."""
+    return not explicit and not os.environ.get("GUAARDVARK_BACKEND_URL")
+
+
+def backend_api_key(own_backend: bool = True) -> str:
     """The key the backend's protected routes ask for, or "".
 
     The same rule as backend/utils/backend_http.py (sidecars do not import the
-    backend): this checkout's .env first, read on every call because Settings →
-    Access rewrites it, then GUAARDVARK_API_KEY from the environment. With a key
-    set, the backend refuses the GPU memory routes from this machine too.
+    backend). For this checkout's own backend, its .env comes first, read on
+    every call because Settings → Access rewrites it; for a backend configured
+    elsewhere, only GUAARDVARK_API_KEY from the environment, never this
+    checkout's key. With a key set, the backend refuses the GPU memory routes
+    from this machine too.
     """
-    value = ""
-    try:
-        for line in CHECKOUT_ENV.read_text().splitlines():
-            if line.startswith("GUAARDVARK_API_KEY="):
-                value = line.split("=", 1)[1].strip().strip("'\"")
-    except OSError:
-        pass
-    return value or (os.environ.get("GUAARDVARK_API_KEY") or "").strip()
+    if own_backend:
+        value = ""
+        try:
+            for line in CHECKOUT_ENV.read_text().splitlines():
+                if line.startswith("GUAARDVARK_API_KEY="):
+                    value = line.split("=", 1)[1].strip().strip("'\"")
+        except OSError:
+            pass
+        if value:
+            return value
+    return (os.environ.get("GUAARDVARK_API_KEY") or "").strip()
 
 
 def load_config() -> dict[str, Any]:

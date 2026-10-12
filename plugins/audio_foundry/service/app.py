@@ -127,7 +127,7 @@ _config = load_config()
 _gpu_cfg = _config.get("runtime", {}).get("gpu", {})
 _reg_cfg = _config.get("runtime", {}).get("registration", {})
 _orch_client = OrchestratorClient(
-    backend_url=resolve_backend_url(_reg_cfg.get("backend_url")),
+    backend_url=_reg_cfg.get("backend_url"),
     enabled=_gpu_cfg.get("orchestrator_enabled", True),
 )
 

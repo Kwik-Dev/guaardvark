@@ -18,7 +18,7 @@ from typing import Any
 
 import httpx
 
-from service.config_loader import API_KEY_HEADER, backend_api_key, resolve_backend_url
+from service.config_loader import API_KEY_HEADER, backend_api_key, backend_url_is_own, resolve_backend_url
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,7 @@ class OrchestratorClient:
         enabled: bool = True,
     ) -> None:
         self._url = resolve_backend_url(backend_url).rstrip("/")
+        self._own_backend = backend_url_is_own(backend_url)
         self._timeout = float(timeout_s)
         # Env var hard-disables regardless of constructor arg — for tests.
         if os.environ.get(_ENV_DISABLE) == "1":
@@ -115,7 +116,7 @@ class OrchestratorClient:
 
     def _post(self, path: str, payload: dict[str, Any], op: str) -> bool:
         try:
-            key = backend_api_key()
+            key = backend_api_key(self._own_backend)
             response = httpx.post(
                 f"{self._url}{path}",
                 json=payload,
