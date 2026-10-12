@@ -68,6 +68,7 @@ const AutoresearchPage = lazyWithReload(() => import("./pages/AutoresearchPage")
 const OutreachPage = lazyWithReload(() => import("./pages/OutreachPage"));
 const VoiceChatPage = lazyWithReload(() => import("./pages/VoiceChatPage"));
 const SystemMapPage = lazyWithReload(() => import("./pages/SystemMapPage"));
+const SelfImprovementPage = lazyWithReload(() => import("./pages/SelfImprovementPage"));
 const FilmCrewPage = lazyWithReload(() => import("./pages/FilmCrewPage"));
 const MusicVideoPage = lazyWithReload(() => import("./pages/MusicVideoPage"));
 const CastStudioPage = lazyWithReload(() => import("./pages/CastStudioPage"));
@@ -703,6 +704,16 @@ const AppContainer = () => {
                           <AppLayout>
                             <ErrorBoundary>
                               <SystemMapPage />
+                            </ErrorBoundary>
+                          </AppLayout>
+                        }
+                      />
+                      <Route
+                        path="/self-improvement"
+                        element={
+                          <AppLayout>
+                            <ErrorBoundary>
+                              <SelfImprovementPage />
                             </ErrorBoundary>
                           </AppLayout>
                         }

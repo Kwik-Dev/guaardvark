@@ -28,6 +28,7 @@ import { filterNavGroups, landingRouteFor } from "../../config/profile";
 import { longestActivePath } from "../../config/navCatalog";
 import { extensionNavGroups } from "../../extensions";
 import { usePendingApprovals } from "../../hooks/usePendingApprovals";
+import { useNavBadgeCounts } from "../../config/navBadges";
 import BarChartIcon from "@mui/icons-material/BarChart";
 import DesktopWindowsIcon from "@mui/icons-material/DesktopWindows";
 import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
@@ -67,9 +68,9 @@ const Sidebar = () => {
   const agentScreenOpen = useAppStore((s) => s.agentScreenOpen);
   const setAgentScreenOpen = useAppStore((s) => s.setAgentScreenOpen);
   const isBelowMd = useMediaQuery(theme.breakpoints.down("md"));
-  // Live counts for nav items that declare a `badge` key.
+  // Live counts for nav items that declare a `badge` key, as the Workspaces bar has them.
   const { count: pendingApprovals } = usePendingApprovals();
-  const badgeCounts = { pendingApprovals };
+  const badgeCounts = { pendingApprovals, ...useNavBadgeCounts() };
 
   useEffect(() => {
     if (isBelowMd && isExpanded) {
