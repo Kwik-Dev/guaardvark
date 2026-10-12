@@ -20,6 +20,15 @@ from backend.utils.path_guard import PathEscapesRoot, contained
 logger = logging.getLogger(__name__)
 
 
+def _duration_words(seconds: float) -> str:
+    """A timer's length as a person says it: "40 minutes", "3 hours"."""
+    minutes = max(1, round(seconds / 60))
+    if minutes >= 60 and minutes % 60 == 0:
+        hours = minutes // 60
+        return f"{hours} hour{'s' if hours != 1 else ''}"
+    return f"{minutes} minute{'s' if minutes != 1 else ''}"
+
+
 def _atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
     """Write JSON atomically so readers never see a truncated/empty file."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -452,7 +461,13 @@ class UnifiedProgressSystem:
         
         # Cancel any existing timeout timers since process is now finished
         self._cancel_timeout_timer(process_id)
-        
+        self._schedule_cleanup(process_id)
+
+        logger.info(f"Finished progress process: {process_id} ({status.value})")
+        return True
+
+    def _schedule_cleanup(self, process_id: str):
+        """Drop a finished process from memory and disk after a short delay."""
         # BUG FIX: Reduced cleanup delay from 30s to 5s
         # The 30s delay caused periodic frontend syncs (every 30s) to pull stale
         # completed jobs back into activeProcesses, preventing ProgressFooterBar from hiding
@@ -462,8 +477,53 @@ class UnifiedProgressSystem:
         cleanup_timer.daemon = True
         cleanup_timer.start()
         self._timeout_timers[f"{process_id}_cleanup"] = cleanup_timer
-        
-        logger.info(f"Finished progress process: {process_id} ({status.value})")
+
+    def apply_relayed_event(self, event_data: Dict[str, Any]) -> bool:
+        """Bring this process's copy of a job up to date from an event another
+        process published (the Redis relay in app.py).
+
+        A job created here and continued in a Celery worker (an upload's
+        indexing) is otherwise only updated in the worker, and the copy here
+        stays at its last value until its timeout marks it as an error. Only a
+        job this process already holds and has not finished is touched, and
+        nothing is emitted or published, so the relay cannot loop. The relay
+        also hears this process's own events; applying them again changes
+        nothing. A worker's "start" for a job held here is its re-creation of
+        the same id and is skipped.
+        """
+        process_id = str(event_data.get("job_id") or "")
+        try:
+            status = ProcessStatus(event_data.get("status"))
+        except ValueError:
+            return False
+        if not process_id or status == ProcessStatus.START:
+            return False
+        terminal = status in (ProcessStatus.COMPLETE, ProcessStatus.ERROR, ProcessStatus.CANCELLED)
+
+        with self._lock:
+            current = self._active_processes.get(process_id)
+            if current is None or current.status in (
+                    ProcessStatus.COMPLETE, ProcessStatus.ERROR, ProcessStatus.CANCELLED):
+                return False
+            progress = event_data.get("progress")
+            event = ProgressEvent(
+                process_id=process_id,
+                progress=int(progress) if isinstance(progress, (int, float)) else current.progress,
+                message=event_data.get("message") or current.message,
+                status=status,
+                process_type=current.process_type,
+                additional_data=current.additional_data,
+            )
+            self._active_processes[process_id] = event
+            self._process_history.setdefault(process_id, []).append(event)
+            # Timers change under the same lock, so a request thread finishing
+            # or updating the job cannot interleave with them.
+            if terminal:
+                self._cancel_timeout_timer(process_id)
+                self._schedule_cleanup(process_id)
+            else:
+                ttl = 10800.0 if event.process_type == ProcessType.VIDEO_RENDER else 2400.0
+                self._schedule_timeout_timer(process_id, ttl)
         return True
     
     def _schedule_timeout_timer(self, process_id: str, timeout_seconds: float):
@@ -472,7 +532,7 @@ class UnifiedProgressSystem:
         self._cancel_timeout_timer(process_id)
         
         # Schedule new timeout timer
-        timeout_timer = threading.Timer(timeout_seconds, self._timeout_stuck_process, args=[process_id])
+        timeout_timer = threading.Timer(timeout_seconds, self._timeout_stuck_process, args=[process_id, timeout_seconds])
         timeout_timer.daemon = True
         timeout_timer.start()
         self._timeout_timers[f"{process_id}_timeout"] = timeout_timer
@@ -672,7 +732,7 @@ class UnifiedProgressSystem:
         except Exception as e:
             logger.error(f"Failed to finish file tracking for {process_id}: {e}")
     
-    def _timeout_stuck_process(self, process_id: str):
+    def _timeout_stuck_process(self, process_id: str, timeout_seconds: Optional[float] = None):
         """Handle timeout for stuck processes"""
         with self._lock:
             # Check if process still exists before timing it out
@@ -683,7 +743,8 @@ class UnifiedProgressSystem:
             logger.warning(f"Process {process_id} timed out - marking as error")
         
         # Call error_process outside the lock to avoid deadlock
-        self.error_process(process_id, "Process timed out after 5 minutes")
+        waited = f" after {_duration_words(timeout_seconds)}" if timeout_seconds else ""
+        self.error_process(process_id, f"Process timed out{waited} without progress")
     
     def _cleanup_process(self, process_id: str):
         """Clean up completed processes from memory and file system"""

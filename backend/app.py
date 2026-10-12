@@ -809,6 +809,14 @@ def _initialize_app_components(app):
                                     socketio.emit('job_progress', event_data, to='global_progress', namespace='/')
                                 except (json.JSONDecodeError, KeyError) as e:
                                     app.logger.warning(f"Bad progress message from Redis: {e}")
+                                    continue
+                                # A job created here and continued in a worker (an
+                                # upload's indexing) is updated here too, so
+                                # /api/jobs/active shows where it really is.
+                                try:
+                                    get_unified_progress().apply_relayed_event(event_data)
+                                except Exception as e:
+                                    app.logger.warning(f"Could not apply relayed progress: {e}")
                     except Exception as e:
                         app._redis_healthy = False
                         app.logger.warning(f"Redis progress relay lost (will reconnect): {e}")
