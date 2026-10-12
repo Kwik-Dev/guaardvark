@@ -165,7 +165,7 @@ COMMAND_META: dict[str, str] = {
     "tool": "Directly invoke a backend tool by name",
     "context": "Show current working context (files, todos, git, tools)",
     "suggest": "Suggest relevant tools for current context (active file, todos)",
-    "analyze": "Analyze project/site (explore build.py, CSS, GUAARDVARK.md, create todos)",
+    "analyze": "Analyze project/site (explore build.py, CSS, create todos; writes GUAARDVARK.md if missing)",
     "init": "Recursively scan current project root and auto-create/update GUAARDVARK.md with agent findings",
     "load": "Load a skill / .md instructions file (e.g. load skill path/to/SKILL.md) and inject for session context",
     "skills": "List SKILL.md files in the project and ~/.guaardvark/skills",

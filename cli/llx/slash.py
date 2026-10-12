@@ -1591,7 +1591,7 @@ class SlashRouter:
         self._console.print("\n[llx.dim]Use /context for state, /tools for full list.[/llx.dim]")
 
     def _cmd_analyze(self, args: list[str]):
-        """Analyze a project/site (especially for CSS/styling improvements). Takes initiative: explores structure, reviews build.py, finds CSS, loads GUAARDVARK.md, creates todos."""
+        """Analyze a project/site (especially for CSS/styling improvements). Takes initiative: explores structure, reviews build.py, finds CSS, writes GUAARDVARK.md when the project has none (never overwrites one; /init --force rewrites it), loads it, creates todos."""
         from llx.utils import populate_project_context, find_project_root
         from llx.local_tools import read_file
         from llx.working_memory import normalize_working_memory, apply_todos
@@ -1608,7 +1608,8 @@ class SlashRouter:
                 from llx.utils import generate_and_write_guaardvark_md
                 gen_res = generate_and_write_guaardvark_md(root, force=False)
                 if gen_res.get("status") == "created":
-                    self._console.print(f"[llx.success]Auto-created GUAARDVARK.md at {gen_res.get('path')}[/llx.success]")
+                    self._console.print(f"[llx.success]Wrote GUAARDVARK.md at {gen_res.get('path')} (the project had none; "
+                                        f"/init --force rewrites it)[/llx.success]")
                     populate_project_context(mem, root)  # reload
             except Exception as e:
                 self._console.print(f"[llx.dim]Could not auto-create GUAARDVARK.md: {e}[/llx.dim]")
