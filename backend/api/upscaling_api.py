@@ -53,12 +53,15 @@ def _start_upscaling_for_job():
     """None when a job may be submitted; else the 503 response to return.
 
     Starts the upscaling plugin first when it is down, unless
-    GUAARDVARK_JOB_SERVICE_START=0. Health, model and job-list routes never
-    start it.
+    GUAARDVARK_JOB_SERVICE_START=0; then a down service is refused here,
+    before a single image takes (and maybe frees memory for) a GPU turn it
+    cannot use. Health, model and job-list routes never start it.
     """
     from backend.services.plugin_bridge import job_service_start_enabled, start_for_job
     if not job_service_start_enabled("upscale"):
-        return None
+        if _upscaling_up():
+            return None
+        return error_response("Upscaling service not running (automatic start is off)", 503)
     ok, why = start_for_job("upscale", "generating", is_up=_upscaling_up)
     if ok:
         return None
