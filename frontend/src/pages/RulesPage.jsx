@@ -339,7 +339,7 @@ const RulesPage = () => {
   };
 
   const handleDuplicateRule = async (rule) => {
-    const { _id, _created_at, _updated_at, ...fields } = rule;
+    const { id: _id, created_at: _created_at, updated_at: _updated_at, ...fields } = rule;
     let newCommandLabel = fields.command_label || "";
     if (newCommandLabel) {
       newCommandLabel = `${newCommandLabel}_copy_${Math.floor(Math.random() * 10000)}`;
