@@ -278,7 +278,6 @@ const CodeEditorPage = () => {
   };
 
   const {
-    RGL_WIDTH_PROP_PX,
     CONTAINER_PADDING_PX,
     CARD_MARGIN_PX,
     COLS_COUNT,
@@ -303,20 +302,6 @@ const CodeEditorPage = () => {
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
   }, [measureContainer]);
-
-  const outerBoxWidth = useMemo(() => {
-    if (containerSize.width && containerSize.width > 0) {
-      return containerSize.width;
-    }
-    return RGL_WIDTH_PROP_PX + 2 * CONTAINER_PADDING_PX;
-  }, [containerSize.width, RGL_WIDTH_PROP_PX, CONTAINER_PADDING_PX]);
-
-  const gridWidth = useMemo(() => {
-    if (containerSize.width && containerSize.width > 0) {
-      return Math.max(containerSize.width - 2 * CONTAINER_PADDING_PX, 1);
-    }
-    return RGL_WIDTH_PROP_PX;
-  }, [containerSize.width, CONTAINER_PADDING_PX, RGL_WIDTH_PROP_PX]);
 
   const maxRows = useMemo(() => {
     if (!containerSize.height) return null;
@@ -1445,10 +1430,13 @@ const CodeEditorPage = () => {
           </MuiAlert>
         )}
 
+        {/* The grid takes the width it is given: WidthProvider measures this
+            box (sidebar toggles included) and layouts are in columns, so
+            saved layouts scale. A pixel min-width here would hold the page
+            at that width and the measurement with it. */}
         <Box
           sx={{
-            width: outerBoxWidth ? `${outerBoxWidth}px` : "100%",
-            minWidth: outerBoxWidth ? `${outerBoxWidth}px` : "100%",
+            width: "100%",
             overflow: "none",
             "& .react-grid-item": {
               transition: "transform 0.2s ease-out !important",
@@ -1473,7 +1461,6 @@ const CodeEditorPage = () => {
             }}
             cols={COLS_COUNT}
             rowHeight={ROW_HEIGHT_PX}
-            width={gridWidth}
             containerPadding={[CONTAINER_PADDING_PX / 10, CONTAINER_PADDING_PX / 10]}
             margin={[CARD_MARGIN_PX / 20, CARD_MARGIN_PX / 20]}
             isDraggable
