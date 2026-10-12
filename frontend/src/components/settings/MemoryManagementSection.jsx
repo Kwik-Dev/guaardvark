@@ -22,6 +22,8 @@ import {
   Tooltip,
 } from "@mui/material";
 import CloseIcon from "@mui/icons-material/Close";
+import BlockIcon from "@mui/icons-material/Block";
+import ArchiveOutlinedIcon from "@mui/icons-material/ArchiveOutlined";
 import AddIcon from "@mui/icons-material/Add";
 import SearchIcon from "@mui/icons-material/Search";
 import MemoryIcon from "@mui/icons-material/Memory";
@@ -74,6 +76,44 @@ const parseLesson = (memory) => {
   } catch {
     return null;
   }
+};
+
+// Words too common to tell two memories apart.
+const COMMON_WORDS = new Set([
+  "the", "and", "for", "with", "that", "this", "are", "was", "were", "has", "have", "had",
+  "not", "but", "you", "your", "user", "users", "from", "into", "when", "then", "than",
+  "its", "his", "her", "their", "they", "them", "our", "use", "uses", "used", "should",
+]);
+
+// Share of the shorter memory's words the other must hold, and the fewest
+// shared words, before the two count as saying the same thing. Two words
+// minimum keeps one common term ("docker") from pairing unrelated memories.
+const SIMILAR_SHARE = 0.75;
+const SIMILAR_MIN_SHARED = 2;
+
+const memoryWords = (text) =>
+  new Set(
+    ((text || "").toLowerCase().match(/[a-z0-9]+/g) || []).filter((w) => w.length > 2 && !COMMON_WORDS.has(w)),
+  );
+
+/**
+ * Loaded memories that read like `memory`, the ones Merge Duplicate offers.
+ * Lesson summaries hold JSON steps, so they are never merged into.
+ */
+const similarMemories = (memory, memories) => {
+  const words = memoryWords(memory?.content);
+  if (!memory || words.size === 0) return [];
+  return memories.filter((m) => {
+    if (String(m.id) === String(memory.id) || m.source === "lesson_summary") return false;
+    const other = memoryWords(m.content);
+    let shared = 0;
+    for (const w of words) if (other.has(w)) shared += 1;
+    const smaller = Math.min(words.size, other.size);
+    if (smaller === 0) return false;
+    // The same words (a one-word memory and its copy too), or most of them.
+    if (shared === words.size && shared === other.size) return true;
+    return shared >= SIMILAR_MIN_SHARED && shared / smaller >= SIMILAR_SHARE;
+  });
 };
 
 // `title`/`icon` default to the section heading the Settings page expects.
@@ -291,7 +331,8 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
     setMergePickerOpen(true);
   };
 
-  const mergeCandidates = memories.filter((m) => String(m.id) !== String(editTarget?.id));
+  // Merge is offered only when another loaded memory reads like this one.
+  const mergeCandidates = editTarget ? similarMemories(editTarget, memories) : [];
   const mergeTarget = memories.find((m) => String(m.id) === String(mergeTargetId));
 
   const confirmMerge = async () => {
@@ -468,7 +509,7 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
                 <TableCell sx={{ fontWeight: 700, fontSize: "0.7rem", width: 90 }}>Rank</TableCell>
                 <TableCell sx={{ fontWeight: 700, fontSize: "0.7rem", width: 100 }}>Status</TableCell>
                 <TableCell sx={{ fontWeight: 700, fontSize: "0.7rem" }}>Tags</TableCell>
-                <TableCell sx={{ fontWeight: 700, fontSize: "0.7rem", width: 120 }} align="right"></TableCell>
+                <TableCell sx={{ fontWeight: 700, fontSize: "0.7rem", width: 120, whiteSpace: "nowrap" }} align="right"></TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
@@ -535,27 +576,37 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
                         ))}
                       </Box>
                     </TableCell>
-                    <TableCell align="right" onClick={(e) => e.stopPropagation()}>
+                    <TableCell align="right" sx={{ whiteSpace: "nowrap" }} onClick={(e) => e.stopPropagation()}>
                       {memory.status !== "active" && (
                         <Button size="small" color="success" onClick={() => handleStatusChange(memory, "active")}>
                           Restore
                         </Button>
                       )}
-                      <Button
-                        size="small"
-                        onClick={() => handleStatusChange(memory, "archived")}
-                        disabled={memory.status === "archived"}
-                      >
-                        Archive
-                      </Button>
-                      <Button
-                        size="small"
-                        color="warning"
-                        onClick={() => handleStatusChange(memory, "wrong")}
-                        disabled={memory.status === "wrong"}
-                      >
-                        Wrong
-                      </Button>
+                      <Tooltip title={memory.status === "archived" ? "Archived" : "Archive"}>
+                        <span>
+                          <IconButton
+                            size="small"
+                            aria-label="Archive memory"
+                            onClick={() => handleStatusChange(memory, "archived")}
+                            disabled={memory.status === "archived"}
+                          >
+                            <ArchiveOutlinedIcon fontSize="small" />
+                          </IconButton>
+                        </span>
+                      </Tooltip>
+                      <Tooltip title={memory.status === "wrong" ? "Marked wrong" : "Mark wrong"}>
+                        <span>
+                          <IconButton
+                            size="small"
+                            color="warning"
+                            aria-label="Mark memory wrong"
+                            onClick={() => handleStatusChange(memory, "wrong")}
+                            disabled={memory.status === "wrong"}
+                          >
+                            <BlockIcon fontSize="small" />
+                          </IconButton>
+                        </span>
+                      </Tooltip>
                       <IconButton
                         size="small"
                         aria-label="delete"
@@ -716,9 +767,11 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
           >
             Delete
           </Button>
-          <ActionButton onClick={handleMergeDuplicate} disabled={savingEdit}>
-            Merge Duplicate
-          </ActionButton>
+          {mergeCandidates.length > 0 && (
+            <ActionButton onClick={handleMergeDuplicate} disabled={savingEdit}>
+              Merge Duplicate
+            </ActionButton>
+          )}
           <Button onClick={() => setEditTarget(null)} disabled={savingEdit}>Cancel</Button>
           <Button
             onClick={handleSavePlainEdit}
@@ -739,7 +792,7 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
         <DialogTitle>Merge into another memory</DialogTitle>
         <DialogContent>
           <Hint sx={{ display: "block", mb: 1.5 }}>
-            Pick the memory to keep. This one is appended to it, then archived.
+            These memories read like this one. Pick the one to keep: this one is appended to it, then archived.
           </Hint>
           {mergeCandidates.length === 0 ? (
             <Typography variant="body2" color="text.secondary">
