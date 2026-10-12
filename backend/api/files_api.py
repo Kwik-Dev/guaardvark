@@ -1044,7 +1044,19 @@ def upload_file():
         # Validate folder_path if provided
         if folder_path and not ensure_path_is_safe(folder_path):
             return error_response("Invalid folder path", 400, "INVALID_PATH")
-        
+
+        # Bulk Import's browser uploads ask for the rules a server-folder
+        # import applies (no hidden folders or files, no credential files),
+        # checked on the names as sent. Other callers are unaffected.
+        if request.form.get("import_rules") == "bulk":
+            from backend.utils.path_safety import import_refusal
+
+            relative_path = request.form.get("relative_path", "")
+            refusal = import_refusal(file.filename) or (
+                import_refusal(relative_path) if relative_path else None)
+            if refusal:
+                return error_response(refusal, 400, "IMPORT_RULES_REFUSED")
+
         # Parse metadata
         try:
             metadata = json.loads(metadata_str) if metadata_str else {}
@@ -1972,12 +1984,28 @@ def start_bulk_import():
         }
         set_job_status(job_id, job_data)
 
-        # Extract parameters
-        target_folder = data.get("target_folder") or ""
-        if target_folder:
-            target_folder = target_folder.strip() or "Imports"
+        # Extract parameters. A folder id names one exact folder at any depth;
+        # a bare name is found or created at the top level, as before. A name
+        # with a slash is a path and must name an existing folder: matched by
+        # name it used to create a stray top-level folder called "A/B".
+        target_folder_id = data.get("target_folder_id")
+        target_folder = (data.get("target_folder") or "").strip() or "Imports"
+        if target_folder_id not in (None, ""):
+            try:
+                target = db.session.get(Folder, int(target_folder_id))
+            except (TypeError, ValueError):
+                target = None
+            if not target:
+                return error_response("The folder to import into was not found", 404, "TARGET_NOT_FOUND")
+            target_folder_id, target_folder = target.id, target.path
+        elif "/" in target_folder:
+            stored = target_folder.strip("/")
+            target = Folder.query.filter(Folder.path.in_([stored, f"/{stored}"])).first()
+            if not target:
+                return error_response(f"There is no folder at {target_folder}", 404, "TARGET_NOT_FOUND")
+            target_folder_id, target_folder = target.id, target.path
         else:
-            target_folder = "Imports"
+            target_folder_id = None
         project_id = data.get("project_id")
         client_id = data.get("client_id")
         website_id = data.get("website_id")
@@ -1996,7 +2024,11 @@ def start_bulk_import():
             job_data["message"] = "Starting bulk import..."
             set_job_status(job_id, job_data)
 
-            # Submit task
+            # The folder id goes only when set, so a request naming the folder
+            # by name still runs on a worker that predates the keyword.
+            options = {"queue": "indexing"}
+            if target_folder_id:
+                options["kwargs"] = {"target_folder_id": target_folder_id}
             task = bulk_import_documents_task.apply_async(
                 args=(
                     job_id,
@@ -2009,7 +2041,7 @@ def start_bulk_import():
                     force_copy,
                     dry_run,
                 ),
-                queue="indexing"
+                **options,
             )
 
             job_data["celery_task_id"] = task.id

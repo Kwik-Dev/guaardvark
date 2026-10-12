@@ -683,7 +683,7 @@ def _skipped_summary(skipped):
 
 def bulk_import_documents_task(job_id, source_path, target_folder, project_id=None, 
                                client_id=None, website_id=None, reindex_missing=True, 
-                               force_copy=True, dry_run=False):
+                               force_copy=True, dry_run=False, target_folder_id=None):
     """
     Bulk import documents from a source directory without Flask dependencies.
     
@@ -697,6 +697,8 @@ def bulk_import_documents_task(job_id, source_path, target_folder, project_id=No
         reindex_missing: Whether to reindex documents that aren't indexed
         force_copy: Copy files (default) rather than move them out of the source
         dry_run: If True, don't actually import, just report what would be done
+        target_folder_id: The exact folder to import into; when given,
+            target_folder is only its path and is not looked up by name
     
     Returns:
         Dict with job status and statistics
@@ -757,7 +759,20 @@ def bulk_import_documents_task(job_id, source_path, target_folder, project_id=No
         # Find or create Folder record in database
         folder_id = None
         folder_path_for_db = None
-        if target_folder:
+        if target_folder_id:
+            session = get_db_session()
+            try:
+                folder_row = session.execute(text("SELECT id, path FROM folders WHERE id = :id"),
+                                             {"id": target_folder_id}).fetchone()
+            finally:
+                session.close()
+            if not folder_row:
+                error_msg = "The folder to import into no longer exists"
+                logger.error(f"{error_msg}: id {target_folder_id}")
+                update_job_status("error", error_msg, 0)
+                return {'error': error_msg, 'job_id': job_id}
+            folder_id, folder_path_for_db = folder_row
+        elif target_folder:
             # Normalize folder path (ensure it starts with /)
             folder_path_for_db = target_folder if target_folder.startswith('/') else f"/{target_folder}"
             

@@ -1758,6 +1758,14 @@ const DocumentsPage = () => {
     });
   }, [contextMenuItem, navigate]);
 
+  // Bulk Import with this folder as the one to import into.
+  const handleBulkImportHere = useCallback(() => {
+    const item = contextMenuItem;
+    setContextMenu(null);
+    if (!item || !Number.isInteger(item.id)) return;
+    navigate(`/documents/bulk-import?into=${encodeURIComponent(item.path)}&into_id=${item.id}`);
+  }, [contextMenuItem, navigate]);
+
   const handleReviewWithAgent = useCallback(async () => {
     const item = contextMenuItem;
     if (!item || item.source_type !== 'live_repo') {
@@ -2182,6 +2190,21 @@ const DocumentsPage = () => {
   }, [windows, windowLayout, windowColors, windowZIndex, maxZIndex, saveWindowState, snapToGrid, resolvedIconPositions, iconPositions]);
 
   // Top-level folders own a window; folders inside a window do not.
+  // ?open=<folder path> (Bulk Import's Open Files) opens the window of the
+  // top-level folder that holds it, then leaves the address as it was.
+  const openParam = searchParams.get('open');
+  useEffect(() => {
+    if (!openParam || loading) return;
+    const top = openParam.replace(/^\/+/, '').split('/')[0];
+    const win = windows.find((w) => String(w.folder?.path || '').replace(/^\/+/, '') === top);
+    if (win && win.state === 'folded') handleFolderExpand(win.id);
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.delete('open');
+      return next;
+    }, { replace: true });
+  }, [openParam, loading, windows, handleFolderExpand, setSearchParams]);
+
   const contextMenuFolderWindow = contextMenuItem && contextMenuType === 'folder'
     ? windows.find(w => w.folderId === contextMenuItem.id) || null
     : null;
@@ -2653,6 +2676,7 @@ const DocumentsPage = () => {
         onColorChange={handleColorChange}
         onIndex={contextMenuItem?.source_type === 'live_repo' ? undefined : handleIndex}
         onReviewWithAgent={contextMenuItem?.source_type === 'live_repo' ? handleReviewWithAgent : undefined}
+        onBulkImportHere={contextMenuType === 'folder' && contextMenuItem?.source_type !== 'live_repo' ? handleBulkImportHere : undefined}
         onOpenWindow={contextMenuFolderWindow
           ? (contextMenuFolderWindow.state === 'folded' ? () => handleFolderExpand(contextMenuFolderWindow.id) : undefined)
           : contextMenuType === 'folder' ? contextMenuExtras?.openInPlace : undefined}

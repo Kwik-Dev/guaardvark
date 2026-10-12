@@ -27,6 +27,7 @@ const DocumentsContextMenu = ({
   onCloseWindow,
   onOpenInCodeEditor,
   onReviewWithAgent,
+  onBulkImportHere,
   hasClipboard = false,
   _hasSelection = false,
   contextType = 'desktop', // 'desktop', 'folder', 'file'
@@ -155,6 +156,7 @@ const DocumentsContextMenu = ({
         )}
         {onRename && <MenuItem onClick={select(onRename)}>Rename</MenuItem>}
         {onProperties && <MenuItem onClick={select(onProperties)}>Properties</MenuItem>}
+        {onBulkImportHere && <MenuItem onClick={select(onBulkImportHere)}>Bulk import into this folder…</MenuItem>}
         {onIndex && (
           <>
             <Divider />

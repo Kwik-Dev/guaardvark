@@ -7,7 +7,8 @@ point anywhere. These helpers resolve symlinks and compare path components.
 
 import fnmatch
 import os
-from typing import Iterable
+import re
+from typing import Iterable, Optional
 
 # Files an agent should never read or list the contents of, even inside an
 # allowed directory (they hold credentials for the whole installation).
@@ -52,6 +53,29 @@ def is_within(path: str, roots: Iterable[str], base: str = None) -> bool:
 def is_sensitive(path: str) -> bool:
     name = os.path.basename(str(path).rstrip("/")).lower()
     return any(fnmatch.fnmatchcase(name, p) for p in SENSITIVE_PATTERNS)
+
+
+def import_refusal(relative_path: str) -> Optional[str]:
+    """Why a bulk import does not take a file, from its path relative to the
+    import, or None when it may.
+
+    The rules scan_import_source applies to a server folder, for a file that
+    arrives by name instead (a browser upload): nothing inside a hidden folder,
+    no hidden file, no credential or secret file. Check the name as sent,
+    before secure_filename turns ".env" into "env".
+    """
+    parts = [p for p in re.split(r"[\\/]+", str(relative_path or "")) if p not in ("", ".")]
+    if not parts:
+        return "The file has no name"
+    if ".." in parts:
+        return "The file's path leaves its folder"
+    if any(p.startswith(".") for p in parts[:-1]):
+        return "Files inside hidden folders are not imported"
+    if parts[-1].startswith("."):
+        return "Hidden files are not imported"
+    if is_sensitive(parts[-1]):
+        return "Credential and secret files are not imported"
+    return None
 
 
 def safe_join(base: str, *parts: str) -> str:
