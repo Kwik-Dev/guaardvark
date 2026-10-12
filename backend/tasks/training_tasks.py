@@ -6,6 +6,7 @@ import os
 import random
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -952,12 +953,79 @@ class ExportNotVerified(RuntimeError):
 
 def export_refusal(base_model: str, lora_path: str = None):
     """Why a job's adapter may not be exported yet, or None. Export stays off
-    for a base model until it has been run live and its entry says verified."""
+    for a base model until it has been run live and its entry says verified,
+    and on an Ollama version measured unable to import the merged model."""
     from backend.services import training_base_models
-    if training_base_models.export_verified(base_model):
-        return None
     where = f" The trained adapter stays at {lora_path}." if lora_path else ""
-    return f"Export to Ollama is not verified for {base_model} yet.{where}"
+    if not training_base_models.export_verified(base_model):
+        return f"Export to Ollama is not verified for {base_model} yet.{where}"
+    blocked = ollama_import_refusal()
+    if blocked:
+        return f"{blocked}{where}"
+    return None
+
+
+def _unsupported_import_reason(version: str) -> str:
+    return (f"Export to Ollama cannot run with the installed Ollama {version}: it imports a "
+            "trained (safetensors) model only through its MLX engine, which does not take "
+            "this model on this system.")
+
+
+# What each Ollama version measured here does with the merged safetensors folder
+# an export registers (`ollama create --quantize <level>` on <run>/merged). A
+# version that cannot import it is refused before the merge, with its reason;
+# a version not listed is tried, as before.
+OLLAMA_SAFETENSORS_IMPORT = {
+    "0.40.1": {
+        "imports": False,
+        "reason": _unsupported_import_reason("0.40.1"),
+        "measured": (
+            "2026-10-12, Linux with an NVIDIA GPU, Qwen2.5-1.5B merged with a LoRA adapter "
+            "(merge 9.5 s, 2.9 GB): --quantize q4_K_M refused as unsupported (it takes int4, "
+            "int8, nvfp4, mxfp4, mxfp8); int4 and unquantised refused with 'unsupported MLX "
+            "architecture: Qwen2ForCausalLM'; --force only wrote a client-side copy the "
+            "server never listed."
+        ),
+    },
+}
+# The two refusals that measurement saw, mapped to the same plain reason when an
+# unlisted version answers with them.
+_OLLAMA_IMPORT_ERRORS = ("unsupported --quantize", "unsupported MLX architecture")
+_OLLAMA_VERSION_MAX_AGE_S = 60.0
+_ollama_version = {"at": None, "version": None}
+
+
+def ollama_server_version():
+    """The running Ollama server's version from its /api/version, or None when
+    it does not answer. Asked at most once a minute."""
+    now = time.monotonic()
+    if _ollama_version["at"] is not None and now - _ollama_version["at"] < _OLLAMA_VERSION_MAX_AGE_S:
+        return _ollama_version["version"]
+    version = None
+    try:
+        import requests
+        from backend.utils.ollama_resource_manager import get_ollama_base_url
+        version = requests.get(f"{get_ollama_base_url()}/api/version", timeout=3).json().get("version")
+    except Exception as e:  # noqa: BLE001 — an unknown version keeps today's behaviour
+        logger.debug(f"Ollama version not read: {e}")
+    _ollama_version.update(at=now, version=version)
+    return version
+
+
+def ollama_create_error(tail: str) -> str:
+    """The job error for a failed `ollama create`: an import refusal measured
+    here gets the plain reason (Ollama's own text kept after it)."""
+    if any(marker in tail for marker in _OLLAMA_IMPORT_ERRORS):
+        return f"{_unsupported_import_reason(ollama_server_version() or 'here')} ({tail})"
+    return f"ollama create failed: {tail}"
+
+
+def ollama_import_refusal():
+    """Why the installed Ollama cannot take a merged export, or None (also when its version is unknown or unmeasured)."""
+    entry = OLLAMA_SAFETENSORS_IMPORT.get(ollama_server_version() or "")
+    if entry and not entry["imports"]:
+        return entry["reason"]
+    return None
 
 
 # Ollama's spelling of each quantization the export form offers, for
@@ -1041,6 +1109,9 @@ def _create_from_merged(job_id: str, model_dir: Path, merged: Path, model_name: 
     entry = training_base_models.get(base_model)
     if entry is None:
         raise ValueError(f"{base_model} is not a declared base model; its chat template is unknown.")
+    blocked = ollama_import_refusal()
+    if blocked:
+        raise RuntimeError(blocked)
     if quantization not in OLLAMA_QUANTIZE:
         offered = ", ".join(sorted(OLLAMA_QUANTIZE))
         raise ValueError(f"Ollama cannot quantize a merged model to {quantization}; choose one of {offered}.")
@@ -1057,8 +1128,7 @@ def _create_from_merged(job_id: str, model_dir: Path, merged: Path, model_name: 
     result = subprocess.run(command, capture_output=True, text=True, cwd=str(model_dir),
                             timeout=MERGE_TIME_LIMIT_SECONDS)
     if result.returncode != 0:
-        tail = (result.stderr or result.stdout or "").strip()[-500:]
-        raise RuntimeError(f"ollama create failed: {tail}")
+        raise RuntimeError(ollama_create_error((result.stderr or result.stdout or "").strip()[-500:]))
     return {"ollama_model_name": model_name, "quantization": level or "f16"}
 
 

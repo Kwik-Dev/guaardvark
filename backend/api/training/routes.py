@@ -80,9 +80,15 @@ def _cancel(job) -> bool:
 
 def _job_dict(job) -> dict:
     """The job as the Training page reads it, with whether its base model's
-    export to Ollama has been verified (the page offers Export only then)."""
+    export to Ollama has been verified (the page offers Export only then) and,
+    when it has, why the installed Ollama cannot take it (export_blocked)."""
     from backend.services import training_base_models
-    return {**job.to_dict(), "export_verified": training_base_models.export_verified(job.base_model)}
+    verified = training_base_models.export_verified(job.base_model)
+    blocked = None
+    if verified:
+        from backend.tasks.training_tasks import ollama_import_refusal
+        blocked = ollama_import_refusal()
+    return {**job.to_dict(), "export_verified": verified, "export_blocked": blocked}
 
 
 def _put_back(job, before, what: str, exc: Exception):
@@ -915,6 +921,12 @@ def export_anyway(job_id):
             )
         if not job.lora_path or not Path(job.lora_path).exists():
             return error_response(f"LoRA adapter path not found: {job.lora_path}", 400)
+
+        # Releasing a run for an export that cannot run would only change its status.
+        from backend.tasks.training_tasks import export_refusal
+        refusal = export_refusal(job.base_model, job.lora_path)
+        if refusal:
+            return error_response(refusal, 409, "EXPORT_NOT_VERIFIED")
 
         data = request.get_json(silent=True) or {}
         config = json.loads(job.config_json) if job.config_json else {}

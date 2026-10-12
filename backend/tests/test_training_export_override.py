@@ -66,6 +66,14 @@ def verified(monkeypatch):
     return state
 
 
+@pytest.fixture(autouse=True)
+def ollama_version(monkeypatch):
+    """The Ollama server's version as the export reads it; unmeasured unless a test says."""
+    state = {"version": None}
+    monkeypatch.setattr(tt, "ollama_server_version", lambda: state["version"])
+    return state
+
+
 @pytest.fixture
 def dispatched(monkeypatch):
     """Records what the routes would send to the worker."""
@@ -345,3 +353,68 @@ def test_a_level_ollama_cannot_quantize_to_is_refused_with_the_choices(client, t
     assert ollama_cli == []
     assert _row(pk).status == "failed"
 
+
+# ---- an Ollama measured unable to import the merged model ----------------------------
+
+def test_no_export_starts_on_an_ollama_that_cannot_import(client, dispatched, tmp_path, ollama_version):
+    ollama_version["version"] = "0.40.1"
+    pk, _ = _held_job(tmp_path, status="completed")
+
+    for path in (f"/api/training/jobs/{pk}/export", f"/api/training/jobs/{pk}/export-to-ollama"):
+        response = client.post(path, json={"model_name": "mine"})
+        assert response.status_code == 409, path
+        assert "installed Ollama 0.40.1" in response.get_json()["error"]["message"]
+    assert dispatched.chains == [] and dispatched.tasks == []
+    assert _row(pk).status == "completed"
+
+
+def test_a_held_run_is_not_released_for_an_export_that_cannot_run(client, dispatched, tmp_path, ollama_version):
+    ollama_version["version"] = "0.40.1"
+    pk, _ = _held_job(tmp_path)
+
+    response = client.post(f"/api/training/jobs/{pk}/export-anyway", json={})
+
+    assert response.status_code == 409
+    assert "installed Ollama 0.40.1" in response.get_json()["error"]["message"]
+    assert _row(pk).status == tt.WORSE_THAN_BASE
+    assert "export_override" not in json.loads(_row(pk).config_json)
+
+
+def test_the_export_task_refuses_before_merging_on_that_ollama(client, tmp_path, merge, ollama_version):
+    ollama_version["version"] = "0.40.1"
+    pk, model_dir = _trained_job(tmp_path)
+
+    with pytest.raises(tt.ExportNotVerified, match="installed Ollama 0.40.1"):
+        tt.export_gguf_task.run("trained", str(model_dir), "q4_k_m")
+
+    assert merge.calls == []
+    assert _row(pk).status == "completed" and _row(pk).pipeline_stage == "training"
+
+
+def test_import_refuses_on_that_ollama_without_calling_it(client, tmp_path, merge, ollama_cli, ollama_version):
+    pk, model_dir = _trained_job(tmp_path)
+    tt.export_gguf_task.run("trained", str(model_dir), "q4_k_m")
+    ollama_version["version"] = "0.40.1"
+
+    with pytest.raises(RuntimeError, match="installed Ollama 0.40.1"):
+        tt.import_ollama_task.run("trained", str(model_dir), "my-model")
+
+    assert ollama_cli == []
+
+
+@pytest.mark.parametrize("tail", [
+    'Error: unsupported --quantize "q4_K_M": supported types are int4, int8, nvfp4, mxfp4, mxfp8',
+    'Error: unsupported MLX architecture: model "Qwen2ForCausalLM"',
+])
+def test_both_import_refusals_read_as_the_plain_reason(ollama_version, tail):
+    ollama_version["version"] = "0.41.0"  # an unmeasured version answering the same way
+
+    message = tt.ollama_create_error(tail)
+
+    assert message.startswith("Export to Ollama cannot run with the installed Ollama 0.41.0")
+    assert tail in message
+
+
+def test_any_other_ollama_failure_keeps_its_text(ollama_version):
+    assert tt.ollama_create_error("Error: no space left on device") == (
+        "ollama create failed: Error: no space left on device")
