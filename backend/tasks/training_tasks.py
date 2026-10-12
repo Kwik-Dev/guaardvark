@@ -296,11 +296,19 @@ def build_folder_dataset_task(self, job_id: str, folder: str, kinds=None,
                                   f"{len(chunks)} of them from {selection['files_contributing']} files...")
 
         generator = PairGenerator()
+        row_written = {"progress": None, "at": 0.0}
 
         def on_progress(done, total, pairs):
-            _emit_progress(job_id, 8 + 84 * done // max(1, total),
-                           f"Writing pairs: chunk {done} of {total}, {pairs} pairs so far",
-                           metrics={"chunks_done": done, "chunks": total, "pairs": pairs})
+            progress = 8 + 84 * done // max(1, total)
+            metrics = {"chunks_done": done, "chunks": total, "pairs": pairs}
+            _emit_progress(job_id, progress, f"Writing pairs: chunk {done} of {total}, {pairs} pairs so far",
+                           metrics=metrics)
+            # Activity and the Jobs table read the row; write it when the
+            # percent moves, and every 30 s so the pair count stays current.
+            now = time.monotonic()
+            if progress != row_written["progress"] or now - row_written["at"] >= 30:
+                row_written.update(progress=progress, at=now)
+                _update_job_status(job_id, progress=progress, metrics_json=json.dumps(metrics))
 
         pairs = fd.generate(chunks, pairs_per_1000_words, generator,
                             should_stop=_job_stop_check(job_id), on_progress=on_progress)
