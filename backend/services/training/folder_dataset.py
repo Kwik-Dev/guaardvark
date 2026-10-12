@@ -228,7 +228,13 @@ def prepare(folder: str, kinds, terms: Optional[list[str]] = None,
     include_large = set(include_large or ())
     skipped["not_prose"] = 0
     skipped["large_files"] = []
-    scrubber = Scrubber(terms if terms is not None else load_terms(scrub_terms_path()))
+    terms = terms if terms is not None else load_terms(scrub_terms_path())
+    scrubber = Scrubber(terms)
+    # File names carry the same names as the text (a client's name in a memo's
+    # name), and a summary question quotes the file name, so the path a doc
+    # carries into chunks, questions and row metadata is scrubbed too. Its own
+    # scrubber keeps the report's counts about the text.
+    path_scrubber = Scrubber(terms)
     docs, unreadable = [], []
     for full, rel in files:
         try:
@@ -249,7 +255,7 @@ def prepare(folder: str, kinds, terms: Optional[list[str]] = None,
             continue
         clean = scrubber.scrub(text, rel)
         if clean.strip():
-            docs.append({"source_path": rel, "text": clean, "words": _words(clean)})
+            docs.append({"source_path": path_scrubber.scrub(rel), "text": clean, "words": _words(clean)})
     return {
         "folder": folder,
         "kinds": normalise_kinds(kinds),
