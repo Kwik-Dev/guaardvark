@@ -96,6 +96,7 @@ _HOLDER_ID_LABELS = (
     ("video:music3:", "a song"),         # comfyui_music_generator
     ("editor_", "a video render"),       # video_render_tasks
     ("router:", "a video render"),       # video_generation_router
+    ("upscale:", "an upscale"),          # upscale_supervisor
 )
 _HOLDER_KIND_LABELS = {
     "video_render": "another job",
