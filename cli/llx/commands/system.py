@@ -1,5 +1,7 @@
 import os
+import re
 import subprocess
+import sys
 import typer
 
 from llx.client import get_client, LlxError, LlxConnectionError
@@ -160,6 +162,9 @@ def stop(
     raise typer.Exit(result.returncode)
 
 
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
 def doctor(
     path: str | None = typer.Option(None, "--path", "-p", help="Project path (default: GUAARDVARK_ROOT or cwd)"),
     repair: bool = typer.Option(False, "--repair", "-r", help="Run repair instead of check"),
@@ -177,7 +182,14 @@ def doctor(
         output.print_error(f"System manager not found at {manager_script}")
         raise typer.Exit(1)
     cmd = [manager_script, "repair" if repair else "check", target]
-    result = subprocess.run(cmd)
+    if sys.stdout.isatty() and not os.environ.get("NO_COLOR"):
+        result = subprocess.run(cmd)
+    else:
+        # system-manager colours its output unconditionally; strip that for
+        # pipes, files and NO_COLOR.
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        sys.stdout.write(_ANSI_ESCAPE.sub("", result.stdout))
+        sys.stderr.write(_ANSI_ESCAPE.sub("", result.stderr))
     raise typer.Exit(result.returncode)
 
 
