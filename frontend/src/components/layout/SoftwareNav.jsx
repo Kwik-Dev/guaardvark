@@ -27,6 +27,7 @@ import {
   workspaceBadge,
 } from "../../config/navCatalog";
 import { useNavBadgeCounts } from "../../config/navBadges";
+import NavCount from "./NavCount";
 import { usePendingApprovals } from "../../hooks/usePendingApprovals";
 import SystemMetricsModal from "../modals/SystemMetricsModal";
 import AgentScreenViewer from "../agent/AgentScreenViewer";
@@ -211,13 +212,8 @@ const SoftwareNav = () => {
                   aria-current={active ? "page" : undefined}
                   sx={barButtonSx(theme, { active, accent: theme.palette.primary.main })}
                 >
-                  {count > 0 ? (
-                    <Badge badgeContent={count} color="warning" sx={{ "& .MuiBadge-badge": { fontSize: "0.6rem" } }}>
-                      {workspace.label}
-                    </Badge>
-                  ) : (
-                    workspace.label
-                  )}
+                  {workspace.label}
+                  {count > 0 && <NavCount count={count} />}
                 </ButtonBase>
               );
               return button;
@@ -334,14 +330,9 @@ const SoftwareNav = () => {
                     },
                   }}
                 >
-                  {count > 0 ? (
-                    <Badge badgeContent={count} color="warning">
-                      {item.icon}
-                    </Badge>
-                  ) : (
-                    item.icon
-                  )}
+                  {item.icon}
                   {item.label}
+                  {count > 0 && <NavCount count={count} />}
                 </ButtonBase>
               );
             })}
