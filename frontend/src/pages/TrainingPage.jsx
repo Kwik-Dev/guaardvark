@@ -74,6 +74,7 @@ import useContextMenu from "../hooks/useContextMenu";
 import { useUnifiedProgress } from "../contexts/UnifiedProgressContext";
 import { useStatus } from "../contexts/StatusContext";
 import PageLayout from "../components/layout/PageLayout";
+import { useAppStore } from "../stores/useAppStore";
 import {
   createFormSync,
   dirtyFields,
@@ -235,6 +236,8 @@ const TrainingPage = () => {
   const { activeProcesses } = useUnifiedProgress();
   const { activeModel, isLoadingModel, modelError } = useStatus();
   const theme = useTheme();
+  // The Interactive Trainer is the app-wide floating window that records demonstrations.
+  const setTrainerOpen = useAppStore((state) => state.setTrainerOpen);
   const [searchParams, setSearchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState(() => TAB_INDEX[searchParams.get("tab")] ?? 0);
 
@@ -769,9 +772,18 @@ const TrainingPage = () => {
                     {demonstrations.length === 0 ? (
                       <TableRow>
                         <TableCell colSpan={7} align="center" sx={{ py: 4 }}>
-                          <Typography variant="body2" color="text.secondary">
-                            No demonstrations yet. Use the Interactive Trainer on the Settings page to record one.
+                          <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+                            No demonstrations yet. Record one with the Interactive Trainer: show the agent a task on
+                            its screen and the steps are saved here.
                           </Typography>
+                          <Button
+                            variant="contained"
+                            size="small"
+                            startIcon={<SchoolIcon />}
+                            onClick={() => setTrainerOpen(true)}
+                          >
+                            Open Interactive Trainer
+                          </Button>
                         </TableCell>
                       </TableRow>
                     ) : (

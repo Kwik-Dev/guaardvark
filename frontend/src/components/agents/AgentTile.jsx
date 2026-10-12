@@ -33,6 +33,15 @@ export function agentHelp(agent) {
   );
 }
 
+/** One word or phrase for the table's Status column: why it cannot run, or Ready. */
+export function agentStatus(agent) {
+  if (!agent.enabled) return "Off";
+  if (agent.unavailable_reason) return agent.unavailable_reason;
+  const missing = (agent.tools_missing || []).length;
+  if (missing) return `${missing} tool${missing === 1 ? "" : "s"} missing`;
+  return "Ready";
+}
+
 /** The tile's second line: why it cannot run, or its tool count, limit, model and edits. */
 export function agentSub(agent) {
   if (!agent.enabled) return "Off";
@@ -60,6 +69,7 @@ const AgentTile = ({ agent, onOpen, onContextMenu }) => (
     sx={{ display: "grid", minWidth: 0 }}
   >
     <DashboardTile
+      size="large"
       label={agent.name}
       help={agentHelp(agent)}
       tone={agentTone(agent)}

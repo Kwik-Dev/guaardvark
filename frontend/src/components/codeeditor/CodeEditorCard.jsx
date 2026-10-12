@@ -47,6 +47,8 @@ import { revealEditorLine } from "./codeEditorNav";
 import { createAiHoverProvider, readAiHoverPreference, writeAiHoverPreference } from "./aiHover";
 import { saveTargetFor, saveRefusal, loadedTab, tabDisplayName, TAB_LOAD } from "./tabOrigin";
 import { bindEditorActions, modelPathFor, disposeTabModels } from "./editorBindings";
+import { readDroppedCodeFiles, dropNotice as noticeForDrop } from "./droppedCode";
+import { dragCarriesFiles, snapshotDrop } from "../../utils/droppedFiles";
 
 // Monaco command behind the lightbulb actions (Fix with AI, Explain, Optimize):
 // each sends the lines under the marker or selection to the chat card.
@@ -82,6 +84,11 @@ const CodeEditorCard = React.forwardRef(
     const [renameValue, setRenameValue] = useState("");
     const renameInputRef = useRef(null);
     const [previewDialogOpen, setPreviewDialogOpen] = useState(false);
+    // A file dragged in from the computer: the overlay while it hovers, the
+    // line saying what opened (or did not) after it lands.
+    const [fileDragActive, setFileDragActive] = useState(false);
+    const [dropNotice, setDropNotice] = useState(null);
+    const dragDepthRef = useRef(0);
     const { startProcess, completeProcess, errorProcess } = useUnifiedProgress();
     const theme = useTheme();
     const monaco = useMonaco();
@@ -700,6 +707,59 @@ ${currentTab.content}
       });
     }, [setOpenTabs, setActiveTabIndex]);
 
+    const openDroppedFiles = useCallback(async (snapshot) => {
+      const result = await readDroppedCodeFiles(snapshot);
+      if (result.tabs.length) {
+        setOpenTabs(prev => {
+          const newTabs = [...prev, ...result.tabs];
+          setActiveTabIndex(newTabs.length - 1);
+          return newTabs;
+        });
+      }
+      setDropNotice(noticeForDrop(result));
+    }, [setOpenTabs, setActiveTabIndex]);
+
+    // File drags are handled in the capture phase, before Monaco sees them,
+    // so a dropped file opens in its own tab instead of landing in the text.
+    const handleFileDragEnter = useCallback((event) => {
+      if (!dragCarriesFiles(event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      dragDepthRef.current += 1;
+      setFileDragActive(true);
+    }, []);
+
+    const handleFileDragOver = useCallback((event) => {
+      if (!dragCarriesFiles(event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.dataTransfer.dropEffect = 'copy';
+    }, []);
+
+    const handleFileDragLeave = useCallback((event) => {
+      if (!dragCarriesFiles(event)) return;
+      event.stopPropagation();
+      dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+      if (dragDepthRef.current === 0) setFileDragActive(false);
+    }, []);
+
+    const handleFileDrop = useCallback((event) => {
+      if (!dragCarriesFiles(event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      dragDepthRef.current = 0;
+      setFileDragActive(false);
+      // The browser empties dataTransfer once this handler returns.
+      openDroppedFiles(snapshotDrop(event.dataTransfer));
+    }, [openDroppedFiles]);
+
+    // An "opened" notice clears itself; one that left files out stays until closed.
+    useEffect(() => {
+      if (dropNotice?.severity !== 'info') return undefined;
+      const timer = setTimeout(() => setDropNotice(null), 10000);
+      return () => clearTimeout(timer);
+    }, [dropNotice]);
+
     // The page owns Run (it also drives the header button and the Output card).
     const handleRunCode = useCallback(() => {
       if (currentTab?.content && onRun) onRun();
@@ -813,7 +873,50 @@ ${currentTab.content}
         style={style}
         {...props}
       >
-        <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+        <Box
+          data-testid="code-editor-drop-zone"
+          sx={{ height: '100%', display: 'flex', flexDirection: 'column', position: 'relative' }}
+          onDragEnterCapture={handleFileDragEnter}
+          onDragOverCapture={handleFileDragOver}
+          onDragLeaveCapture={handleFileDragLeave}
+          onDropCapture={handleFileDrop}
+        >
+          {fileDragActive && (
+            <Box
+              data-testid="code-editor-drop-overlay"
+              sx={{
+                position: 'absolute',
+                inset: 4,
+                zIndex: 5,
+                pointerEvents: 'none',
+                border: '2px dashed',
+                borderColor: 'primary.main',
+                borderRadius: 1,
+                bgcolor: 'background.default',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 0.5,
+              }}
+            >
+              <Typography variant="h6">Drop to open in a new tab</Typography>
+              <Typography variant="body2" color="text.secondary">
+                Opens an unsaved copy; your file is not changed
+              </Typography>
+            </Box>
+          )}
+          {dropNotice && (
+            <Box sx={{ position: 'absolute', left: 8, right: 8, bottom: 8, zIndex: 4 }}>
+              <Alert
+                severity={dropNotice.severity}
+                data-testid="code-editor-drop-notice"
+                onClose={() => setDropNotice(null)}
+              >
+                {dropNotice.text}
+              </Alert>
+            </Box>
+          )}
           {/* Tabs and Controls */}
           <Box sx={{
             borderBottom: 1,
@@ -981,8 +1084,11 @@ ${currentTab.content}
                 <Typography variant="h6" color="text.secondary">
                   No files open
                 </Typography>
-                <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                  Open a file from the File Tree or create a new one
+                <Typography variant="body2" color="text.secondary" sx={{ textAlign: 'center' }}>
+                  Open a file from the File Tree, create a new one, or drop a code file here
+                </Typography>
+                <Typography variant="caption" color="text.secondary" sx={{ mb: 2, textAlign: 'center', maxWidth: 420 }}>
+                  A dropped file opens as an unsaved copy. Save keeps it in this browser; the file on your computer is not changed.
                 </Typography>
                 <Tooltip title="Create New File">
                   <IconButton
