@@ -52,7 +52,7 @@ For high-impact clicks (launch, submit, comment, modal dismiss), set expected_ef
 scroll_amount: wheel notches, negative scrolls DOWN, positive scrolls UP (e.g. -5 = down 5). type sends keys to whatever has focus: click the text field first, in the step before you type.
 
 done rule: when action="done", success_proof MUST describe the visible state that proves the task is complete (e.g. "cursor inside text area", "comment now visible in thread"). Empty or generic ("n/a", "task done") is rejected. This rule applies to all models and paths.
-When your most recent history step shows [OK] for a concrete target (e.g. "GOTHAM RISING video thumbnail [OK]" or servo DPC verified change), base the success_proof directly on that target + "now visible/achieved". Prior servo-verified clicks are strong evidence the goal state is real; use them to ground your proof rather than re-inventing a description.
+When your most recent history step shows [OK] for a concrete target (e.g. "first video thumbnail [OK]" or servo DPC verified change), base the success_proof directly on that target + "now visible/achieved". Prior servo-verified clicks are strong evidence the goal state is real; use them to ground your proof rather than re-inventing a description.
 
 Reply ONLY with JSON:
 {"status": "IN_PROGRESS|COMPLETE", "action": "click|right_click|type|hotkey|scroll|wait|done|navigate|tool", "target_description": "...", "text": "literal value only", "keys": ["ctrl","t"], "scroll_amount": -5, "url": "https://...", "reasoning": "why", "expected_effect": "visible result after this action", "success_proof": "visible state proving done (only when action=done)", "tool_name": "optional for action=tool", "tool_params": {}}

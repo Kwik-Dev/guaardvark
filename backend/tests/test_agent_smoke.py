@@ -61,4 +61,4 @@ def test_type_text_in_chat(agent_service_and_screen):
 
 
 def test_open_youtube_search(agent_service_and_screen):
-    _run_task(agent_service_and_screen, "youtube Gotham Rising")
+    _run_task(agent_service_and_screen, "youtube open source demo")
