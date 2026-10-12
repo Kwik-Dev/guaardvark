@@ -11,6 +11,7 @@ from typing import Callable
 
 import click
 import typer
+from rich.markup import escape
 
 from llx import output
 from llx.command_catalog import COMMAND_META, COMMAND_TREE, suggest_command
@@ -109,12 +110,14 @@ class SlashRouter:
             if code not in (0, None):
                 msg = str(e).strip()
                 if msg:
-                    self._console.print(f"[llx.error]{msg}[/llx.error]")
+                    self._console.print(f"[llx.error]{escape(msg)}[/llx.error]")
         except SystemExit as e:
             if e.code not in (0, None):
                 self._console.print(f"[llx.error]Command failed (exit {e.code})[/llx.error]")
         except Exception as e:
-            self._console.print(f"[llx.error]Error in /{cmd}: {e}[/llx.error]")
+            # Escaped: an error carrying markup-like text (git's usage, a path in
+            # brackets) would otherwise raise here and end the REPL.
+            self._console.print(f"[llx.error]Error in /{escape(cmd)}: {escape(str(e))}[/llx.error]")
 
         return True
 
@@ -279,7 +282,7 @@ class SlashRouter:
             except Exception as e:
                 msg = str(e).strip()
                 if msg:
-                    self._console.print(f"[llx.error]Error: {msg}[/llx.error]")
+                    self._console.print(f"[llx.error]Error: {escape(msg)}[/llx.error]")
 
         self._commands[name] = handler
 
@@ -322,11 +325,11 @@ class SlashRouter:
             except click.ClickException as e:
                 msg = str(e).strip()
                 if msg:
-                    self._console.print(f"[llx.error]{msg}[/llx.error]")
+                    self._console.print(f"[llx.error]{escape(msg)}[/llx.error]")
             except Exception as e:
                 msg = str(e).strip()
                 if msg:
-                    self._console.print(f"[llx.error]Error: {msg}[/llx.error]")
+                    self._console.print(f"[llx.error]Error: {escape(msg)}[/llx.error]")
 
         self._commands[name] = handler
 
