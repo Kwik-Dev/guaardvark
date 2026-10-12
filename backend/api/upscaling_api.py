@@ -50,12 +50,12 @@ def _upscaling_up() -> bool:
 def _start_upscaling_for_job():
     """None when a job may be submitted; else the 503 response to return.
 
-    Starts the upscaling plugin first when it is down and
-    GUAARDVARK_JOB_SERVICE_START is on. Health, model and job-list routes never
+    Starts the upscaling plugin first when it is down, unless
+    GUAARDVARK_JOB_SERVICE_START=0. Health, model and job-list routes never
     start it.
     """
     from backend.services.plugin_bridge import job_service_start_enabled, start_for_job
-    if not job_service_start_enabled():
+    if not job_service_start_enabled("upscale"):
         return None
     ok, why = start_for_job("upscale", "generating", is_up=_upscaling_up)
     if ok:
@@ -111,6 +111,23 @@ def _proxy_post_download(path: str, json_data: dict):
         return {"error": "Model download timed out"}, 504
     except Exception as e:
         return {"error": str(e)}, 500
+
+
+@upscaling_bp.route("/autostart", methods=["GET"])
+def autostart_policy():
+    """Whether a submitted job starts the service while it is down, so the page
+    only says it will when it will. Same checks as start_for_job, minus health."""
+    from backend.services.plugin_bridge import (
+        _plugin_manager, auto_orchestrator_enabled, job_service_start_enabled,
+    )
+    starts = job_service_start_enabled("upscale") and auto_orchestrator_enabled()
+    if starts:
+        try:
+            if _plugin_manager().state_store.get_user_enabled().get("upscaling") is False:
+                starts = False
+        except Exception:  # noqa: BLE001 - unknown preference: report the switches only
+            pass
+    return success_response(data={"starts_on_job": starts}, message="Upscaling start policy")
 
 
 @upscaling_bp.route("/health", methods=["GET"])

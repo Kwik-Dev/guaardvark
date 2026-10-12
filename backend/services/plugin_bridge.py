@@ -430,11 +430,17 @@ def _resolve_gpu_conflict(needed: Set[str]) -> List[Dict[str, Any]]:
 # Video renders start ComfyUI through prepare_video_model regardless.
 JOB_SERVICE_START_ENV = "GUAARDVARK_JOB_SERVICE_START"
 
+# Job contexts that start their service while GUAARDVARK_JOB_SERVICE_START is
+# unset. Upscaling is here because its page offered no way in but the Plugins
+# page; set the variable to 0 to turn it off, or to 1 to turn it on for all.
+JOB_SERVICE_START_DEFAULT_ON = frozenset({"upscale"})
 
-def job_service_start_enabled() -> bool:
-    return os.environ.get(JOB_SERVICE_START_ENV, "0").strip().lower() in (
-        "1", "true", "yes", "on",
-    )
+
+def job_service_start_enabled(context: Optional[str] = None) -> bool:
+    raw = os.environ.get(JOB_SERVICE_START_ENV, "").strip().lower()
+    if not raw:
+        return context in JOB_SERVICE_START_DEFAULT_ON
+    return raw in ("1", "true", "yes", "on")
 
 
 def _stage_wait_s(context: str, stage: str) -> float:
@@ -463,7 +469,7 @@ def start_for_job(context: str, stage: str, *, is_up, wait_s: Optional[float] = 
     """
     if is_up():
         return True, ""
-    if not job_service_start_enabled():
+    if not job_service_start_enabled(context):
         return False, f"automatic start is off ({JOB_SERVICE_START_ENV})"
     if not auto_orchestrator_enabled():
         return False, "automatic start is off (GUAARDVARK_PLUGIN_AUTO_ORCHESTRATOR=0)"
