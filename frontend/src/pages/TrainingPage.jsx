@@ -991,8 +991,8 @@ const TrainingPage = () => {
                   return (
                     <Card key={job.id} sx={{ mb: 2 }} onContextMenu={(e) => rowMenu.open(e, { kind: "job", item: job })}>
                       <CardContent>
-                        <Box display="flex" justifyContent="space-between" alignItems="start" mb={1}>
-                          <Box>
+                        <Box display="flex" justifyContent="space-between" alignItems="start" mb={1} flexWrap="wrap" gap={1}>
+                          <Box sx={{ minWidth: 0, flex: "1 1 220px" }}>
                             <Typography variant="h6">{job.name || job.job_id}</Typography>
                             <Typography variant="caption" color="text.secondary">
                               {job.base_model
@@ -1000,7 +1000,7 @@ const TrainingPage = () => {
                                 : job.config?.input_path || ""}
                             </Typography>
                           </Box>
-                          <Box display="flex" gap={1} alignItems="center">
+                          <Box display="flex" gap={1} alignItems="center" flexWrap="wrap">
                             <Chip
                               label={job.status}
                               color={getStatusColor(job.status)}
