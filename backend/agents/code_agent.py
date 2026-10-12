@@ -513,7 +513,6 @@ __all__ = [
     'run_llm_self_edit',
     'read_code',
     'search_code',
-    'edit_code',
     'list_files',
     'verify_change'
 ]

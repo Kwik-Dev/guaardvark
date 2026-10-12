@@ -989,7 +989,7 @@ def _initialize_app_components(app):
                 symbol_id, "route", endpoint, module, MODE_FLASK_ROUTE,
             )
         except Exception:  # never fail a request over an audit record
-            logger.warning("Failed to record route liveness (non-fatal)", exc_info=True)
+            logger_module.warning("Failed to record route liveness (non-fatal)", exc_info=True)
             pass
         return response
 
