@@ -18,8 +18,9 @@ class _FakeClient:
             return {"data": {"folders": [{"name": "a"}], "documents": [{"id": 1, "filename": "x.txt"}]}}
         if endpoint == "/api/projects":
             return {"data": [{"id": 1, "name": "P1", "client": {"name": "C1"}, "document_count": 1, "task_count": 2}]}
-        if endpoint == "/api/meta/active_jobs":
-            return {"active_jobs": [{"id": "j1", "name": "Job 1", "type": "index", "status": "running"}]}
+        if endpoint == "/api/jobs/active":
+            return {"jobs": [{"id": "training:1", "label": "Job 1", "kind": "training", "status": "running",
+                              "progress": 40.0}]}
         if endpoint == "/api/entity-indexing/status":
             return {"entity_counts": {"clients": 3, "projects": 4}}
         if endpoint.startswith("/api/settings/"):
@@ -60,7 +61,7 @@ def test_jobs_list_json_envelope(monkeypatch):
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     assert payload["status"] == "success"
-    assert "jobs" in payload["data"]
+    assert [j["id"] for j in payload["data"]["jobs"]] == ["training:1"]
 
 
 def test_settings_list_json_envelope(monkeypatch):

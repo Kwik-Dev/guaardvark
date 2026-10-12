@@ -21,28 +21,31 @@ def jobs_list(
     server: str = typer.Option(None, "--server", "-s"),
     json_out: bool = typer.Option(False, "--json", "-j"),
 ):
-    """List recent jobs."""
+    """List active jobs, by the ids `jobs status` reads."""
     server = server or get_global_server()
     json_out = json_out or get_global_json()
     output.set_json_mode(json_out)
     try:
         client = get_client(server)
-        data = client.get("/api/meta/active_jobs")
-        jobs = data.get("active_jobs", [])
+        # The unified job registry: every id it lists resolves at /api/jobs/<id>,
+        # which `jobs status` reads (the progress list's ids did not).
+        data = client.get("/api/jobs/active")
+        jobs = (data.get("jobs") if isinstance(data, dict) else data) or []
         if not isinstance(jobs, list):
-            jobs = [jobs] if jobs else []
+            jobs = [jobs]
 
         if json_out or output.is_pipe():
             output.print_json({"status": "success", "data": {"jobs": jobs}})
             return
 
         rows = [{
-            "id": j.get("task_id", j.get("id", "")),
-            "name": j.get("name", ""),
-            "type": j.get("type", ""),
+            "id": j.get("id", ""),
+            "name": j.get("label", ""),
+            "type": j.get("kind", ""),
             "status": j.get("status", ""),
+            "progress": f"{j['progress']:.0f}%" if isinstance(j.get("progress"), (int, float)) else "",
         } for j in jobs]
-        output.print_table(rows, columns=["id", "name", "type", "status"], title="Jobs")
+        output.print_table(rows, columns=["id", "name", "type", "status", "progress"], title="Jobs")
 
     except LlxConnectionError as e:
         output.print_error(str(e), code="CONNECTION_ERROR")
