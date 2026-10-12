@@ -185,7 +185,7 @@ def create_celery_app():
                 'options': {'queue': 'default'},
             },
             # YouTube reply-scrape recon is intentionally NOT scheduled until
-            # recon._fetch_recent_replies_to_guaardvark is implemented (stub
+            # recon._fetch_recent_replies_to_own_comments is implemented (stub
             # returns []). Fire on demand via /run-pass or hand-seed via
             # recon.enqueue_youtube_reply_candidate.
             # Reap outreach rows stuck at status=processing after worker kill.

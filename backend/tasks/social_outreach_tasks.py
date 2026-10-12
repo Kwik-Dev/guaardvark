@@ -197,13 +197,13 @@ def tick_recon_youtube(self) -> dict:
 @shared_task(name="social_outreach.tick_recon_youtube_replies", bind=True)
 def tick_recon_youtube_replies(self) -> dict:
     """Beat tick — scan the channel's own YouTube videos for new replies to
-    Guaardvark's comments. Emits status="candidate" rows with action="reply"
+    the account's comments. Emits status="candidate" rows with action="reply"
     that the Content agent drafts a response for, the grader scores, and
     tick_process_approved_drafts dispatches through post_youtube_reply_via_servo.
 
     Read-only: no servo, no posting. Same kill-switch gate as other recon
     ticks. NOT scheduled in celery_app beat until
-    recon._fetch_recent_replies_to_guaardvark is implemented (stub returns []).
+    recon._fetch_recent_replies_to_own_comments is implemented (stub returns []).
     Fire on demand via /run-pass or hand-seed via
     recon.enqueue_youtube_reply_candidate(...).
 
@@ -220,9 +220,9 @@ def tick_recon_youtube_replies(self) -> dict:
 def tick_self_share(self) -> dict:
     """Beat tick — pick next share sub + URL, draft a supervised link post.
 
-    Rotates `reddit.share_urls` (GitHub, channel Shorts, site) via Redis
-    round-robin so successive ticks market different assets. Falls back to
-    `reddit.default_share_url` then persona.SITE_URL / GITHUB_URL.
+    Rotates `reddit.share_urls` via Redis round-robin so successive ticks
+    market different assets. Falls back to `reddit.default_share_url`, then
+    the profile's site; with none of those the tick is skipped.
     """
     skipped = _skip_if_kill_switch_off()
     if skipped:
@@ -233,7 +233,7 @@ def tick_self_share(self) -> dict:
     sub = _next_target("reddit_share", subs)
     if not sub:
         return {"skipped": True, "reason": "no_targets"}
-    from backend.services.social_outreach.persona import GITHUB_URL, SITE_URL
+    from backend.services.social_outreach import profile
     share_urls = [
         u.strip() for u in (reddit.get("share_urls") or [])
         if isinstance(u, str) and u.strip()
@@ -241,7 +241,9 @@ def tick_self_share(self) -> dict:
     if share_urls:
         link_url = _next_target("reddit_share_url", share_urls) or share_urls[0]
     else:
-        link_url = (reddit.get("default_share_url") or "").strip() or GITHUB_URL or SITE_URL
+        link_url = (reddit.get("default_share_url") or "").strip() or profile.site_url()
+    if not link_url:
+        return {"skipped": True, "reason": profile.no_link_reason()}
     from backend.services.social_outreach.self_share import SelfShareLoop
     return _with_app_context(SelfShareLoop().run_one_pass, sub, link_url)
 
@@ -463,7 +465,7 @@ def tick_process_approved_drafts(self) -> dict:
                     # with it" comment that left rows in limbo.
                     _give_up(row.id, reason)
             elif action == "share":
-                from backend.services.social_outreach.persona import SITE_URL
+                from backend.services.social_outreach import profile
                 payload = {}
                 try:
                     payload = json.loads(row.draft_text or "{}")
@@ -478,11 +480,14 @@ def tick_process_approved_drafts(self) -> dict:
                 m = re.search(r"/r/([^/]+)", row.target_url or "")
                 subreddit = m.group(1) if m else ""
 
-                # Read link_url from the draft payload — falls back to SITE_URL
-                # only for legacy rows drafted before we started storing it.
-                link_url = (payload.get("link_url") or "").strip() or SITE_URL
-                
-                if subreddit and title:
+                # Read link_url from the draft payload — falls back to the
+                # profile's site only for legacy rows drafted before we started
+                # storing it.
+                link_url = (payload.get("link_url") or "").strip() or profile.site_url()
+
+                if not link_url:
+                    transitions.abort_in_flight(row.id, profile.no_link_reason())
+                elif subreddit and title:
                     success, reason = _submit_post_via_servo(
                         subreddit, title, link_url, before_submit=before_submit,
                     )

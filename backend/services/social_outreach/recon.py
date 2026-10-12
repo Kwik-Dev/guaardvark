@@ -21,7 +21,7 @@ import logging
 import re
 from typing import Optional
 
-from backend.services.social_outreach import audit, external_grader, kill_switch, persona
+from backend.services.social_outreach import audit, external_grader, kill_switch, persona, profile
 from backend.services.social_outreach.reddit_outreach import (
     REDDIT_BASE,
     fetch_hot_threads,
@@ -44,6 +44,11 @@ DEFAULT_CANDIDATES_PER_PASS = 3
 """How many candidates a single pass will emit at most. Recon is cheap so we
 can be greedy, but keep it small enough that human review of the queue stays
 tractable."""
+
+NO_FEATURES_REASON = "no_features_configured"
+"""Report reason when the outreach profile lists no features: the keyword
+filter has nothing to match, so a pass would skip every thread as irrelevant.
+Add features with keywords under "What you promote" on the Outreach page."""
 
 MIN_RELEVANCE_GRADE = 0.5
 """Threshold for the LLM relevance judge. The keyword filter is regex-only and
@@ -81,7 +86,7 @@ def topic_matches_text(text: str, topic_filters: Optional[list[str]]) -> bool:
     one, appears in ``text`` as a whole word.
 
     Used so NL phrases like "market on reddit about ComfyUI" actually constrain
-    which hot threads become candidates (after the structural RELEVANCE_KEYWORDS
+    which hot threads become candidates (after the profile keyword
     match). A cheap pre-filter; the thread-fit judge decides. Empty/None
     filters → pass-through (legacy behavior).
     """
@@ -172,6 +177,9 @@ class RecondAgent:
         if not kill_switch.is_enabled():
             report["reason"] = "kill_switch_off"
             return report
+        if not profile.feature_blurbs():
+            report["reason"] = NO_FEATURES_REASON
+            return report
 
         rules = fetch_subreddit_rules(subreddit)
         if rules is None:
@@ -209,7 +217,7 @@ class RecondAgent:
                 continue
 
             # NL topic filter (optional) — e.g. "ComfyUI" from chat intent.
-            # Structural RELEVANCE_KEYWORDS already passed; this narrows further.
+            # The profile keyword match already passed; this narrows further.
             blob = f"{thread.title} {thread.selftext or ''}"
             if not topic_matches_text(blob, topic_filters):
                 report["skipped_topic"] += 1
@@ -323,6 +331,9 @@ class RecondAgent:
 
         if not kill_switch.is_enabled():
             report["reason"] = "kill_switch_off"
+            return report
+        if not profile.feature_blurbs():
+            report["reason"] = NO_FEATURES_REASON
             return report
 
         blocked = web_access_block_reason("scout YouTube for outreach")
@@ -479,8 +490,8 @@ class RecondAgent:
         monitored_videos: Optional[list[str]] = None,
         max_candidates: int = DEFAULT_CANDIDATES_PER_PASS,
     ) -> dict:
-        """Scout the agent's own YouTube videos for replies left under Guaardvark's
-        comments. Emits candidate rows with action="reply" so the Content agent
+        """Scout the agent's own YouTube videos for replies left under the
+        account's own comments. Emits candidate rows with action="reply" so the Content agent
         can draft a response and the dispatcher can route it through
         post_youtube_reply_via_servo.
 
@@ -504,7 +515,7 @@ class RecondAgent:
             }
 
         Implementation note (2026-05-13 marble-block pass):
-          The `_fetch_recent_replies_to_guaardvark(video_url)` helper is
+          The `_fetch_recent_replies_to_own_comments(video_url, handle)` helper is
           stubbed — it returns [] until the servo-driven scrape is wired
           in the next chip-the-rough-edges pass. The scout still runs
           safely (it just emits 0 candidates on every tick) and the
@@ -527,6 +538,11 @@ class RecondAgent:
             report["reason"] = "kill_switch_off"
             return report
 
+        handle = profile.load().account_handle
+        if not handle:
+            report["reason"] = "no_account_handle"
+            return report
+
         if monitored_videos is None:
             monitored_videos = _load_monitored_videos()
         if not monitored_videos:
@@ -545,7 +561,7 @@ class RecondAgent:
                 continue
             report["videos_scanned"] += 1
 
-            replies = _fetch_recent_replies_to_guaardvark(video_url)
+            replies = _fetch_recent_replies_to_own_comments(video_url, handle)
             if not replies:
                 report["skipped_no_replies"] += 1
                 continue
@@ -685,13 +701,14 @@ def _short_text_hash(text: str) -> str:
     return hashlib.sha1(sample).hexdigest()[:8]
 
 
-def _fetch_recent_replies_to_guaardvark(video_url: str) -> list[dict]:
-    """Return any new replies left under Guaardvark's comments on `video_url`.
+def _fetch_recent_replies_to_own_comments(video_url: str, handle: str) -> list[dict]:
+    """Return any new replies left under the account's comments on `video_url`.
 
     Each item: {"parent_text": str, "incoming_text": str, "incoming_author": str}.
+    ``handle`` is the profile's account handle, the "@name" the comments carry.
 
     STUB — next pass: drive the agent to the video page, find each
-    "@guaardvark" comment, read the replies thread under it via the
+    "@<handle>" comment, read the replies thread under it via the
     dom_metadata_extractor, diff against last-seen state to surface only
     new incoming replies. Until then this returns [] and the scout reports
     skipped_no_replies for every monitored video, which is a clean no-op

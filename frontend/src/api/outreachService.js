@@ -45,6 +45,18 @@ export function fetchSnippets() {
   return request("/snippets");
 }
 
+// The local "what you promote" profile behind drafts, links and snippets.
+export function fetchProfile() {
+  return request("/profile");
+}
+
+export function saveProfile(profile) {
+  return request("/profile", {
+    method: "PUT",
+    body: JSON.stringify({ profile }),
+  });
+}
+
 export function enableOutreach() {
   return request("/enable", { method: "POST" });
 }
@@ -139,6 +151,8 @@ export default {
   fetchApproved,
   fetchAudit,
   fetchSnippets,
+  fetchProfile,
+  saveProfile,
   enableOutreach,
   killOutreach,
   stopAllPosting,

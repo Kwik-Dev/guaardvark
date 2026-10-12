@@ -22,6 +22,11 @@ from backend.services.social_outreach.reddit_outreach import RedditThread
 
 
 @pytest.fixture(autouse=True)
+def _profile_with_keywords(outreach_profile):
+    """The keyword filter reads the profile's features; "ollama" maps to local_ai."""
+
+
+@pytest.fixture(autouse=True)
 def mock_relevance_grader():
     """Default-mock the LLM relevance scorer to skipped=True so existing tests
     don't depend on Ollama. Tests that care about the gate override locally."""
@@ -437,7 +442,7 @@ def test_scout_youtube_emits_candidate_with_expected_fields(app):
         assert row.grade_score == pytest.approx(1.0)
         import json
         payload = json.loads(row.draft_text)
-        assert payload["feature_hint"] == "local_ai"  # "ollama" matches RELEVANCE_KEYWORDS
+        assert payload["feature_hint"] == "local_ai"  # "ollama" is a local_ai keyword in the profile
         assert payload["stage"] == "recon"
         assert payload["video_id"] == "AGAETsxjg0o"
         assert "Ollama" in payload["title"]

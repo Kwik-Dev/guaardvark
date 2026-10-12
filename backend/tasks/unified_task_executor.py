@@ -559,6 +559,7 @@ def execute_unified_task(self, task_id: int):
                 elif task_type == 'social_outreach_share':
                     subreddit = (wf.get('subreddit') or '').strip()
                     link_url = (wf.get('link_url') or '').strip()
+                    from backend.services.social_outreach import profile
                     if not subreddit or not link_url:
                         from backend.tasks.social_outreach_tasks import _load_targets, _next_target
                         targets = _load_targets()
@@ -567,10 +568,11 @@ def execute_unified_task(self, task_id: int):
                             subs = reddit_targets.get("share_subs") or []
                             subreddit = _next_target("reddit_share", subs) or ''
                         if not link_url:
-                            from backend.services.social_outreach.persona import SITE_URL
-                            link_url = reddit_targets.get("default_share_url") or SITE_URL
+                            link_url = reddit_targets.get("default_share_url") or profile.site_url()
                     if not subreddit:
                         output = {"skipped": True, "reason": "no_targets"}
+                    elif not link_url:
+                        output = {"skipped": True, "reason": profile.no_link_reason()}
                     else:
                         update_progress(35, f"Running Outreach self-share for r/{subreddit}")
                         from backend.services.social_outreach.self_share import SelfShareLoop

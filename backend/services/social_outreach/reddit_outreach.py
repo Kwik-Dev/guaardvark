@@ -34,7 +34,17 @@ from backend.services.social_outreach.transitions import WITHDRAWN_BEFORE_SUBMIT
 logger = logging.getLogger(__name__)
 
 
-REDDIT_USER_AGENT = "guaardvark-outreach/0.1 (by /u/guaardvark) - local AI workstation"
+
+def reddit_user_agent() -> str:
+    """Reddit asks for a UA that names the software and the account behind it;
+    the account comes from the outreach profile and is left out when unset."""
+    from backend.services.social_outreach import profile
+    from backend.utils.update_state import read_disk_version
+    by = profile.load().account_handle
+    by_part = f" (by /u/{by})" if by else ""
+    return f"guaardvark-outreach/{read_disk_version() or '0'}{by_part} - local AI workstation"
+
+
 # Browser UA used when attaching the agent Firefox session cookies. Reddit's
 # datacenter IP block (403 HTML interstitial) often still allows cookie-authed
 # requests that look like a real logged-in browser.
@@ -445,7 +455,7 @@ def _http_get_json(url: str, retries: int = 1) -> Optional[dict]:
     """
     cookie_jar = _load_reddit_cookies_from_firefox()
     headers = {
-        "User-Agent": REDDIT_BROWSER_USER_AGENT if cookie_jar else REDDIT_USER_AGENT,
+        "User-Agent": REDDIT_BROWSER_USER_AGENT if cookie_jar else reddit_user_agent(),
         "Accept": "application/json",
     }
     try:

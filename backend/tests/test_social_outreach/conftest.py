@@ -20,6 +20,36 @@ def _agent_browser_left_alone(monkeypatch):
 
 
 @pytest.fixture
+def outreach_profile(tmp_path, monkeypatch):
+    """A filled "what you promote" profile in a temp file, so the drafter has
+    something to promote and the scouts have keywords to match."""
+    from backend.services.social_outreach import profile
+
+    monkeypatch.setenv(profile.PROFILE_PATH_ENV, str(tmp_path / "profile.json"))
+    return profile.save({
+        "name": "Example App",
+        "pitch": "A local-first AI workstation. Your machine, your data.",
+        "site_url": "https://example.com",
+        "repo_url": "https://github.com/example/app",
+        "account_handle": "example",
+        "videos": [{"label": "Demo", "url": "https://www.youtube.com/watch?v=abcdefghijk"}],
+        "features": [
+            {"key": "rag", "blurb": "search your own documents offline", "keywords": ["rag", "retrieval"]},
+            {"key": "video_gen", "blurb": "video generation on one desktop GPU", "keywords": ["video gen", "text2video"]},
+            {"key": "local_ai", "blurb": "everything runs locally, no cloud", "keywords": ["ollama", "local llm", "local ai"]},
+        ],
+    })
+
+
+@pytest.fixture
+def empty_outreach_profile(tmp_path, monkeypatch):
+    """No profile file at all: a fresh install."""
+    from backend.services.social_outreach import profile
+
+    monkeypatch.setenv(profile.PROFILE_PATH_ENV, str(tmp_path / "profile.json"))
+
+
+@pytest.fixture
 def app():
     """Flask app with in-memory database."""
     app = Flask(__name__)
