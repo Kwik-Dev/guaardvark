@@ -1021,16 +1021,18 @@ const FloatingChatCard = () => {
                 }}
               />
               <Tooltip title="Attach file or image">
-                <IconButton
-                  className="floating-chat-btn"
-                  onClick={() => fileRef.current?.click()}
-                  disabled={isSending}
-                  size="small"
-                  aria-label="Attach file or image"
-                  sx={{ p: 0.25, color: "text.secondary" }}
-                >
-                  <AttachFileIcon sx={{ fontSize: 16 }} />
-                </IconButton>
+                <span>
+                  <IconButton
+                    className="floating-chat-btn"
+                    onClick={() => fileRef.current?.click()}
+                    disabled={isSending}
+                    size="small"
+                    aria-label="Attach file or image"
+                    sx={{ p: 0.25, color: "text.secondary" }}
+                  >
+                    <AttachFileIcon sx={{ fontSize: 16 }} />
+                  </IconButton>
+                </span>
               </Tooltip>
               <TextField
                 size="small"

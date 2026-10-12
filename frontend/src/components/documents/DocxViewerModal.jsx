@@ -78,9 +78,11 @@ const DocxViewerModal = ({ open, onClose, file }) => {
         </Box>
         <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
           <Tooltip title="Download original">
-            <IconButton size="small" onClick={handleDownload} disabled={!fileUrl}>
-              <DownloadIcon fontSize="small" />
-            </IconButton>
+            <span>
+              <IconButton size="small" onClick={handleDownload} disabled={!fileUrl}>
+                <DownloadIcon fontSize="small" />
+              </IconButton>
+            </span>
           </Tooltip>
           <IconButton size="small" onClick={onClose}>
             <CloseIcon fontSize="small" />

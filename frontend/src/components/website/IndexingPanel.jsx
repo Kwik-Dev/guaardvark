@@ -257,9 +257,11 @@ const IndexingPanel = ({ website, onFeedback }) => {
             </Select>
           </FormControl>
           <Tooltip title="Refresh log">
-            <IconButton size="small" onClick={loadSubmissions} disabled={logLoading}>
-              <RefreshIcon fontSize="small" />
-            </IconButton>
+            <span>
+              <IconButton size="small" onClick={loadSubmissions} disabled={logLoading}>
+                <RefreshIcon fontSize="small" />
+              </IconButton>
+            </span>
           </Tooltip>
         </Stack>
 

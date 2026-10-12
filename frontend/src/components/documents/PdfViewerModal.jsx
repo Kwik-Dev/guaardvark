@@ -59,9 +59,11 @@ const PdfViewerModal = ({ open, onClose, file }) => {
         </Box>
         <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
           <Tooltip title="Open in new tab">
-            <IconButton size="small" onClick={handleOpenInNewTab} disabled={!fileUrl}>
-              <OpenInNewIcon fontSize="small" />
-            </IconButton>
+            <span>
+              <IconButton size="small" onClick={handleOpenInNewTab} disabled={!fileUrl}>
+                <OpenInNewIcon fontSize="small" />
+              </IconButton>
+            </span>
           </Tooltip>
           <IconButton size="small" onClick={onClose}>
             <CloseIcon fontSize="small" />

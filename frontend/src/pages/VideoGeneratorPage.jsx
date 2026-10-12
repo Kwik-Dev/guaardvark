@@ -581,10 +581,14 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       setPromptStyle(offeredStyles[0] || "none");
     }
   }, [offeredStyles, promptStyle]);
+  // Null when the model declares no speed profiles (the registry sends {}),
+  // so the control is hidden; otherwise always one of the declared names.
   const activeSpeedProfile = useMemo(() => {
-    const profiles = modelCaps?.speed_profiles;
-    if (!profiles) return null;
-    return profiles[advancedParams.speed_profile] ? advancedParams.speed_profile : "standard";
+    const profiles = modelCaps?.speed_profiles || {};
+    const names = Object.keys(profiles);
+    if (!names.length) return null;
+    if (profiles[advancedParams.speed_profile]) return advancedParams.speed_profile;
+    return profiles.standard ? "standard" : names[0];
   }, [modelCaps, advancedParams.speed_profile]);
   const activeProfileSpec = useMemo(
     () => (activeSpeedProfile ? modelCaps?.speed_profiles?.[activeSpeedProfile] || null : null),
@@ -2468,11 +2472,11 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   </Select>
                 </FormControl>
               )}
-              {modelCaps?.speed_profiles && (
+              {activeSpeedProfile && (
                 <FormControl size="small" fullWidth>
                   <InputLabel>Speed profile</InputLabel>
                   <Select
-                    value={activeSpeedProfile || "standard"}
+                    value={activeSpeedProfile}
                     onChange={(e) => setAdvancedParams({ ...advancedParams, speed_profile: e.target.value })}
                     label="Speed profile"
                   >

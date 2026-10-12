@@ -93,7 +93,8 @@ const ChatPage = () => {
       );
 
     if (existingProcesses.length > 0) {
-      console.warn(`DUPLICATE PREVENTION: Reusing existing process: ${existingProcesses[0][0]}`);
+      // Normal on a remount: this project's chat process already exists.
+      console.debug(`DUPLICATE PREVENTION: Reusing existing process: ${existingProcesses[0][0]}`);
       return existingProcesses[0][0];
     }
 

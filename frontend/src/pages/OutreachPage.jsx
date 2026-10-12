@@ -1266,9 +1266,11 @@ const OutreachPage = () => {
             />
           ))}
           <Tooltip title="Refresh now">
-            <IconButton size="small" onClick={fetchHistory} disabled={loadingHistory}>
-              <RefreshIcon fontSize="small" />
-            </IconButton>
+            <span>
+              <IconButton size="small" onClick={fetchHistory} disabled={loadingHistory}>
+                <RefreshIcon fontSize="small" />
+              </IconButton>
+            </span>
           </Tooltip>
         </Stack>
         {loadingHistory && history.length === 0 ? (

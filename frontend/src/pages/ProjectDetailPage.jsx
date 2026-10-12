@@ -843,14 +843,16 @@ const ProjectDetailPage = () => {
                     divider
                     secondaryAction={
                       <Tooltip title="Edit Task (Not Implemented on Detail Page yet)">
-                        <IconButton
-                          edge="end"
-                          aria-label="edit task"
-                          size="small"
-                          disabled
-                        >
-                          <EditIcon fontSize="small" />
-                        </IconButton>
+                        <span>
+                          <IconButton
+                            edge="end"
+                            aria-label="edit task"
+                            size="small"
+                            disabled
+                          >
+                            <EditIcon fontSize="small" />
+                          </IconButton>
+                        </span>
                       </Tooltip>
                     }
                   >
@@ -1055,14 +1057,16 @@ const ProjectDetailPage = () => {
                     divider
                     secondaryAction={
                       <Tooltip title="Edit Website (Not Implemented on Detail Page yet)">
-                        <IconButton
-                          edge="end"
-                          aria-label="edit website"
-                          size="small"
-                          disabled
-                        >
-                          <EditIcon fontSize="small" />
-                        </IconButton>
+                        <span>
+                          <IconButton
+                            edge="end"
+                            aria-label="edit website"
+                            size="small"
+                            disabled
+                          >
+                            <EditIcon fontSize="small" />
+                          </IconButton>
+                        </span>
                       </Tooltip>
                     }
                   >

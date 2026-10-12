@@ -652,7 +652,7 @@ const FileTreeCard = React.forwardRef(
         isMinimized={isMinimized}
         onToggleMinimize={onToggleMinimize}
         style={style}
-        headerActions={
+        titleBarActions={
           <IconButton
             size="small"
             onClick={handleOpenUploadModal}

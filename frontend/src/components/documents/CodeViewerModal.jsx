@@ -157,19 +157,25 @@ const CodeViewerModal = ({ open, onClose, file, onOpenInCodeEditor, startEditing
         </Box>
         <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
           <Tooltip title={editing ? "View mode" : "Edit mode"}>
-            <IconButton size="small" onClick={handleToggleEdit} disabled={loading || !!error || isLiveRepoFile}>
-              {editing ? <ViewIcon fontSize="small" /> : <EditIcon fontSize="small" />}
-            </IconButton>
+            <span>
+              <IconButton size="small" onClick={handleToggleEdit} disabled={loading || !!error || isLiveRepoFile}>
+                {editing ? <ViewIcon fontSize="small" /> : <EditIcon fontSize="small" />}
+              </IconButton>
+            </span>
           </Tooltip>
           <Tooltip title="Open in Code Editor">
-            <IconButton size="small" onClick={handleOpenInEditor} disabled={loading || !!error}>
-              <CodeIcon fontSize="small" />
-            </IconButton>
+            <span>
+              <IconButton size="small" onClick={handleOpenInEditor} disabled={loading || !!error}>
+                <CodeIcon fontSize="small" />
+              </IconButton>
+            </span>
           </Tooltip>
           <Tooltip title="Copy to clipboard">
-            <IconButton size="small" onClick={handleCopy} disabled={!content}>
-              {copied ? <CheckIcon fontSize="small" color="success" /> : <CopyIcon fontSize="small" />}
-            </IconButton>
+            <span>
+              <IconButton size="small" onClick={handleCopy} disabled={!content}>
+                {copied ? <CheckIcon fontSize="small" color="success" /> : <CopyIcon fontSize="small" />}
+              </IconButton>
+            </span>
           </Tooltip>
           <IconButton size="small" onClick={handleClose}>
             <CloseIcon fontSize="small" />

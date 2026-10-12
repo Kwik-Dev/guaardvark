@@ -785,9 +785,11 @@ const TrainingPage = () => {
                 )}
               </Typography>
               <Tooltip title="Refresh">
-                <IconButton onClick={fetchDemonstrations} disabled={demosLoading}>
-                  <RefreshIcon />
-                </IconButton>
+                <span>
+                  <IconButton onClick={fetchDemonstrations} disabled={demosLoading}>
+                    <RefreshIcon />
+                  </IconButton>
+                </span>
               </Tooltip>
             </Box>
             {demosLoading ? (
@@ -1014,47 +1016,53 @@ const TrainingPage = () => {
                             {/* Export is offered only once it has been verified for the job's base model. */}
                             {job.export_verified && job.status === "completed" && job.lora_path && !job.ollama_model_name && (
                               <Tooltip title="Export to Ollama">
-                                <IconButton
-                                  size="small"
-                                  color="primary"
-                                  onClick={() => handleExportToOllama(job, false)}
-                                  disabled={exportingJobs.has(job.id)}
-                                >
-                                  {exportingJobs.has(job.id) ? (
-                                    <CircularProgress size={18} />
-                                  ) : (
-                                    <CloudUploadIcon fontSize="small" />
-                                  )}
-                                </IconButton>
+                                <span>
+                                  <IconButton
+                                    size="small"
+                                    color="primary"
+                                    onClick={() => handleExportToOllama(job, false)}
+                                    disabled={exportingJobs.has(job.id)}
+                                  >
+                                    {exportingJobs.has(job.id) ? (
+                                      <CircularProgress size={18} />
+                                    ) : (
+                                      <CloudUploadIcon fontSize="small" />
+                                    )}
+                                  </IconButton>
+                                </span>
                               </Tooltip>
                             )}
                             {/* Re-quantize button - show for completed exports */}
                             {job.export_verified && job.status === "completed" && job.lora_path && job.ollama_model_name && (
                               <Tooltip title="Re-quantize (change quantization level)">
-                                <IconButton
-                                  size="small"
-                                  color="secondary"
-                                  onClick={() => handleExportToOllama(job, true)}
-                                  disabled={exportingJobs.has(job.id)}
-                                >
-                                  {exportingJobs.has(job.id) ? (
-                                    <CircularProgress size={18} />
-                                  ) : (
-                                    <RefreshIcon fontSize="small" />
-                                  )}
-                                </IconButton>
+                                <span>
+                                  <IconButton
+                                    size="small"
+                                    color="secondary"
+                                    onClick={() => handleExportToOllama(job, true)}
+                                    disabled={exportingJobs.has(job.id)}
+                                  >
+                                    {exportingJobs.has(job.id) ? (
+                                      <CircularProgress size={18} />
+                                    ) : (
+                                      <RefreshIcon fontSize="small" />
+                                    )}
+                                  </IconButton>
+                                </span>
                               </Tooltip>
                             )}
                             {job.export_verified && job.status === "failed: worse than base" && job.lora_path && (
                               <Tooltip title="Export anyway (the run measured worse than its base model)">
-                                <IconButton
-                                  size="small"
-                                  color="warning"
-                                  onClick={() => handleExportAnyway(job)}
-                                  disabled={exportingJobs.has(job.id)}
-                                >
-                                  <CloudUploadIcon fontSize="small" />
-                                </IconButton>
+                                <span>
+                                  <IconButton
+                                    size="small"
+                                    color="warning"
+                                    onClick={() => handleExportAnyway(job)}
+                                    disabled={exportingJobs.has(job.id)}
+                                  >
+                                    <CloudUploadIcon fontSize="small" />
+                                  </IconButton>
+                                </span>
                               </Tooltip>
                             )}
                             {canStart(job) && (

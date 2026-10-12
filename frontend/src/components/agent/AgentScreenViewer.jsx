@@ -156,14 +156,19 @@ export default function AgentScreenViewer({ open, onClose }) {
     }
   }, []);
 
-  // Start display on open; arm idle shutdown on close.
+  // Start display on open; arm idle shutdown when an open viewer closes.
+  // Not on mount: every page mounts the viewer closed, and each arm restarts
+  // the backend's shutdown timer.
+  const wasOpen = useRef(false);
   useEffect(() => {
     if (!open) {
       setDisplayReady(false);
       setDisplayStarting(false);
-      armDisplayIdle().catch(() => {});
+      if (wasOpen.current) armDisplayIdle().catch(() => {});
+      wasOpen.current = false;
       return undefined;
     }
+    wasOpen.current = true;
 
     let cancelled = false;
     cancelDisplayIdle().catch(() => {});
