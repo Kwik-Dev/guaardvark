@@ -368,9 +368,9 @@ def delete_subject(subject_id):
         try:
             from backend.utils.unified_progress_system import get_unified_progress
             prog = get_unified_progress()
-            prog.cancel_process(s.current_training_job_id, reason="Subject deleted")
+            prog.cancel_process(s.current_training_job_id, "Subject deleted")
         except Exception:
-            pass  # best effort
+            log.warning("could not mark training job %s cancelled", s.current_training_job_id, exc_info=True)
 
     # Mark training as purged if it was running.
     if s.training_status == "training":
