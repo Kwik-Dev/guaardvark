@@ -1036,7 +1036,7 @@ class SlashRouter:
                 except Exception:
                     self._console.print(content[:4000])
                 used_backend = True
-                from llx.working_memory import record_tool_use
+                from llx.working_memory import normalize_working_memory, record_tool_use
                 mem = normalize_working_memory(self._state.get("working_memory"))
                 record_tool_use(mem, "read_code", {"filepath": path})
                 self._state["working_memory"] = mem

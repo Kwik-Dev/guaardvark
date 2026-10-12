@@ -110,7 +110,8 @@ class AudioBackend(ABC):
         try:
             from pydub import AudioSegment
         except ImportError:
-            logger.warning("pydub not installed; skipping post-processing")
+            import logging
+            logging.getLogger(__name__).warning("pydub not installed; skipping post-processing")
             return input_path
 
         try:

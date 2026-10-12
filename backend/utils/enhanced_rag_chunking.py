@@ -21,6 +21,8 @@ os.environ.setdefault("NLTK_DISABLE_IMPORT_SECURITY", "1")
 import backend.utils.llama_index_local_config
 
 import logging
+
+logger = logging.getLogger(__name__)
 import threading
 import re
 import hashlib
@@ -58,7 +60,6 @@ from llama_index.core.node_parser import (
 from llama_index.core.schema import BaseNode, TextNode, NodeRelationship, RelatedNodeInfo
 from llama_index.core.text_splitter import TokenTextSplitter
 
-logger = logging.getLogger(__name__)
 
 @dataclass
 class ChunkMetadata:
