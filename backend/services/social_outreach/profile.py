@@ -210,6 +210,10 @@ def validate(data: Any) -> Dict[str, Any]:
         url = _clean_url(item.get("url"), f"video {i + 1} url")
         label = _clean_text(item.get("label"), MAX_LABEL)
         if not url:
+            # An empty row is dropped; a half-filled one is refused, so the
+            # editor does not silently lose what the person typed.
+            if label:
+                raise ValueError(f"video {i + 1} ('{label}') needs a URL")
             continue
         videos.append({"label": label or f"Video {len(videos) + 1}", "url": url})
 
@@ -228,6 +232,9 @@ def validate(data: Any) -> Dict[str, Any]:
             if kw and kw not in keywords:
                 keywords.append(kw)
         if not blurb and not keywords:
+            named = _clean_text(item.get("key"), MAX_KEY)
+            if named:
+                raise ValueError(f"feature {i + 1} ('{named}') needs a description or keywords")
             continue
         key = _clean_key(item.get("key"), f"feature_{len(features) + 1}")
         if key in seen_keys:
