@@ -263,7 +263,8 @@ def parse_transcripts_task(self, job_id: str, input_path: str, recursive: bool =
 
 @shared_task(bind=True, name='training.build_folder_dataset')
 def build_folder_dataset_task(self, job_id: str, folder: str, kinds=None,
-                              pairs_per_1000_words: float = 3):
+                              pairs_per_1000_words: float = 3, target_pairs="enough",
+                              include_large_files=None):
     """Build a messages dataset from a folder of notes (folder_dataset).
 
     Scan, scrub, chunk, ask the local model for pairs, filter, write. A cancel
@@ -280,7 +281,7 @@ def build_folder_dataset_task(self, job_id: str, folder: str, kinds=None,
                            started_at=utcnow(), celery_task_id=self.request.id)
         _emit_progress(job_id, 0, "Scanning the folder...", "start")
 
-        prepared = fd.prepare(folder, kinds)
+        prepared = fd.prepare(folder, kinds, include_large=include_large_files or ())
         scrub = prepared["scrub"]
         _emit_progress(job_id, 4, f"Read {prepared['files']} files ({prepared['words']} words); "
                                   f"scrubbed {scrub['total']} items")
@@ -288,8 +289,10 @@ def build_folder_dataset_task(self, job_id: str, folder: str, kinds=None,
             raise ValueError("Nothing to read: the folder has no notes of the chosen kinds "
                              "that the import rules let in")
 
-        chunks = fd.chunk_docs(prepared["docs"])
-        _emit_progress(job_id, 8, f"Split into {len(chunks)} chunks; writing pairs...")
+        all_chunks = fd.chunk_docs(prepared["docs"])
+        chunks, selection = fd.select_passages(all_chunks, fd.resolve_target(target_pairs), pairs_per_1000_words)
+        _emit_progress(job_id, 8, f"Split into {len(all_chunks)} passages; writing pairs for "
+                                  f"{len(chunks)} of them from {selection['files_contributing']} files...")
 
         generator = PairGenerator()
 
@@ -318,6 +321,7 @@ def build_folder_dataset_task(self, job_id: str, folder: str, kinds=None,
             "unreadable": prepared["unreadable"],
             "scrub": scrub,
             "chunks": len(chunks),
+            "selection": selection,
             "pairs_written": len(pairs),
             "pairs_kept": len(kept),
             "dropped": dropped,
@@ -339,6 +343,9 @@ def build_folder_dataset_task(self, job_id: str, folder: str, kinds=None,
                                "pairs_count": len(kept),
                                "files": prepared["files"],
                                "chunks": len(chunks),
+                               "passages_available": selection["passages_available"],
+                               "target_pairs": selection["target_pairs"],
+                               "large_files_left_out": len(prepared["skipped"]["large_files"]),
                                "scrubbed": scrub["total"],
                                "dropped": dropped,
                            }))
@@ -719,6 +726,8 @@ def _dataset_data_path(dataset_name: str, dataset_path: str, combined_path: Path
 
 # One optimiser step sees batch_size * this many rows.
 GRADIENT_ACCUMULATION_STEPS = 4
+# The batch size of a job with no device profile and no batch_size of its own.
+DEFAULT_BATCH_SIZE = 2
 
 # A job that leaves "steps" out trains for about this many passes over its
 # training rows: the usual range for a LoRA fine-tune of a chat model on a
@@ -885,7 +894,7 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False,
             raise ValueError("data_path not found in job config")
 
         learning_rate = job_config.get("lr", 2e-4)
-        batch_size = job_config.get("batch_size", device_profile.max_batch_size if device_profile else 2)
+        batch_size = job_config.get("batch_size", device_profile.max_batch_size if device_profile else DEFAULT_BATCH_SIZE)
         lora_rank = job_config.get("rank", 16)
         max_seq_length = job_config.get("seq_length", device_profile.max_seq_length if device_profile else 2048)
 

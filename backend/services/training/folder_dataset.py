@@ -22,11 +22,13 @@ import json
 import logging
 import math
 import os
+import random
 import re
 import time
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 
 from backend.services.training.folder_scrub import Scrubber, load_terms
 from backend.services.training.pair_generator import (
@@ -42,6 +44,19 @@ ALL_KINDS = (".md", ".txt", ".html", ".docx", ".pdf")
 DEFAULT_PAIRS_PER_1000_WORDS = 3
 MAX_PAIRS_PER_1000_WORDS = 20
 PROBE_CHUNKS = 3
+# A file this long is a tool dump or a word list (a grep output, a tokenizer
+# vocabulary), not notes: checked on a real notes folder on 2026-10-12, its
+# seven files over this held 30 % of the words and none was prose notes,
+# while the notes themselves sat well under it. Left out unless ticked.
+LARGE_FILE_WORDS = 50_000
+# Passages are chosen across files in this seeded order, so a rebuild picks the same ones.
+SELECTION_SEED = 42
+# A file gives at most this many times its fair share of the chosen passages
+# (and never fewer than PER_FILE_MIN), so one long file cannot fill the dataset.
+PER_FILE_SHARE = 3
+PER_FILE_MIN = 4
+# Pairs lost to the filter, as headroom on top of what training can use.
+FILTER_HEADROOM = 1.25
 # A chunk's size before the probe has measured one; the chunker's own target.
 ASSUMED_WORDS_PER_CHUNK = 250
 
@@ -199,10 +214,15 @@ def _words(text: str) -> int:
     return len(text.split())
 
 
-def prepare(folder: str, kinds, terms: Optional[list[str]] = None) -> dict:
-    """Scan, read and scrub. Returns the scrubbed texts and the report parts."""
+def prepare(folder: str, kinds, terms: Optional[list[str]] = None,
+            include_large: Iterable[str] = ()) -> dict:
+    """Scan, read and scrub. Returns the scrubbed texts and the report parts.
+    Files over LARGE_FILE_WORDS are listed in skipped["large_files"] and left
+    out unless their path is in include_large."""
     files, skipped = scan(folder, kinds)
+    include_large = set(include_large or ())
     skipped["not_prose"] = 0
+    skipped["large_files"] = []
     scrubber = Scrubber(terms if terms is not None else load_terms(scrub_terms_path()))
     docs, unreadable = [], []
     for full, rel in files:
@@ -217,6 +237,10 @@ def prepare(folder: str, kinds, terms: Optional[list[str]] = None) -> dict:
             continue
         if not_prose_reason(text):
             skipped["not_prose"] += 1
+            continue
+        words = _words(text)
+        if words > LARGE_FILE_WORDS and rel not in include_large:
+            skipped["large_files"].append({"source_path": rel, "words": words})
             continue
         clean = scrubber.scrub(text, rel)
         if clean.strip():
@@ -243,12 +267,14 @@ def chunk_docs(docs: list[dict], limit: Optional[int] = None) -> list[dict]:
     for doc in docs:
         nodes = chunker.chunk_documents([LlamaDocument(text=doc["text"], metadata={})], strategy_name="auto")
         texts = [n.get_content() for n in (nodes or []) if getattr(n, "text", None)] or [doc["text"][:2000]]
-        for text in texts:
+        for i, text in enumerate(texts):
             chunks.append({
                 "source_path": doc["source_path"],
                 "text": text,
                 "words": _words(text),
                 "hash": hashlib.sha256(text.encode()).hexdigest(),
+                # The passage after it in the same file, for a multi-hop question.
+                "next_text": texts[i + 1] if i + 1 < len(texts) else None,
             })
             if limit and len(chunks) >= limit:
                 return chunks
@@ -260,24 +286,121 @@ def questions_for(chunk_words: int, per_1000: float) -> int:
     return max(1, round(chunk_words * per_1000 / 1000))
 
 
-def estimate(prepared: dict, per_1000: float, probe: Optional[dict] = None) -> dict:
-    """Chunks, pairs and time before a build. Without a probe the chunk size is
-    assumed and there is no time; the probe measures both."""
+def pairs_per_passage(chunk_words: int, per_1000: float) -> int:
+    return questions_for(chunk_words, per_1000) + 1
+
+
+def enough_to_train() -> int:
+    """Pairs a default fine-tune can use, plus headroom for the filter.
+
+    The trainer stops at DEFAULT_STEPS["max"] steps of DEFAULT_BATCH_SIZE x
+    GRADIENT_ACCUMULATION_STEPS rows, and holds out at most EVAL_SPLIT["max_rows"]
+    rows; a row beyond that is never seen. Rounded up to a multiple of 500."""
+    from backend.tasks.training_tasks import (
+        DEFAULT_BATCH_SIZE, DEFAULT_STEPS, EVAL_SPLIT, GRADIENT_ACCUMULATION_STEPS)
+
+    rows = DEFAULT_STEPS["max"] * DEFAULT_BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS + EVAL_SPLIT["max_rows"]
+    return math.ceil(rows * FILTER_HEADROOM / 500) * 500
+
+
+TARGET_CHOICES = ("enough", 5000, 2000, "all")
+
+
+def resolve_target(target) -> Optional[int]:
+    """Pairs to aim for: a number, "enough" (the default) or "all" (None)."""
+    if target in (None, "enough"):
+        return enough_to_train()
+    if target == "all":
+        return None
+    return int(target)
+
+
+def _selection_counts(available: dict[str, int], needed: int) -> tuple[list[str], dict[str, int], int]:
+    """How many passages each file gives toward `needed`: files in a seeded
+    order, one passage from each in turn, so every file gives one before any
+    gives two, and none above its cap (PER_FILE_SHARE times its fair share,
+    at least PER_FILE_MIN). Returns (file order, counts, cap)."""
+    files = sorted(available)
+    random.Random(SELECTION_SEED).shuffle(files)
+    cap = max(PER_FILE_MIN, math.ceil(PER_FILE_SHARE * needed / max(1, len(files))))
+    taken, total = Counter(), 0
+    while total < needed:
+        progressed = False
+        for f in files:
+            if total >= needed:
+                break
+            if taken[f] < min(cap, available[f]):
+                taken[f] += 1
+                total += 1
+                progressed = True
+        if not progressed:
+            break
+    return files, taken, cap
+
+
+def select_passages(chunks: list[dict], target_pairs: Optional[int], per_1000: float) -> tuple[list[dict], dict]:
+    """The passages to write pairs for, spread across files (_selection_counts);
+    within a file they come in a seeded order, so they spread over it. When the
+    per-file cap stops it short of the target, the report says by how much.
+    No target: every passage."""
+    by_file: dict[str, list[dict]] = {}
+    for c in chunks:
+        by_file.setdefault(c["source_path"], []).append(c)
+    info = {"target_pairs": target_pairs, "passages_available": len(chunks), "files": len(by_file)}
+    if not chunks or target_pairs is None:
+        return chunks, {**info, "passages_chosen": len(chunks), "files_contributing": len(by_file)}
+    expected = sum(pairs_per_passage(c["words"], per_1000) for c in chunks) / len(chunks)
+    needed = min(len(chunks), math.ceil(target_pairs / expected))
+    files, taken, cap = _selection_counts({f: len(v) for f, v in by_file.items()}, needed)
+    rng = random.Random(SELECTION_SEED)
+    chosen = []
+    for f in files:
+        queue = list(by_file[f])
+        rng.shuffle(queue)
+        chosen.extend(queue[:taken[f]])
+    position = {id(c): i for i, c in enumerate(chunks)}
+    chosen.sort(key=lambda c: position[id(c)])
+    return chosen, {**info, "passages_needed": needed, "passages_chosen": len(chosen),
+                    "files_contributing": sum(1 for f in taken if taken[f]), "per_file_cap": cap,
+                    "short_by_cap": needed - len(chosen)}
+
+
+def estimate(prepared: dict, per_1000: float, probe: Optional[dict] = None, target="enough") -> dict:
+    """Passages, pairs and time before a build, for the chosen target and for
+    each choice the dialog offers. Without a probe the passage size is assumed
+    and there is no time; the probe measures both."""
     measured = bool(probe and probe.get("words_per_chunk"))
     words_per_chunk = probe["words_per_chunk"] if measured else ASSUMED_WORDS_PER_CHUNK
-    chunks = sum(max(1, math.ceil(d["words"] / words_per_chunk)) for d in prepared["docs"])
-    per_chunk = questions_for(round(words_per_chunk), per_1000) + 1  # + the summary pair
-    out = {
+    per_file = {d["source_path"]: max(1, math.ceil(d["words"] / words_per_chunk)) for d in prepared["docs"]}
+    available = sum(per_file.values())
+    per_passage = pairs_per_passage(round(words_per_chunk), per_1000)
+    seconds_per = probe.get("seconds_per_chunk") if probe else None
+
+    def plan(target_pairs):
+        if target_pairs is None or not per_file:
+            passages = available
+        else:
+            _, taken, _ = _selection_counts(per_file, min(available, math.ceil(target_pairs / per_passage)))
+            passages = sum(taken.values())
+        out = {"target_pairs": target_pairs, "passages": passages, "pairs_before_filter": passages * per_passage}
+        if seconds_per:
+            out["seconds"] = round(passages * seconds_per)
+        return out
+
+    chosen = plan(resolve_target(target))
+    return {
         "pairs_per_1000_words": per_1000,
         "words_per_chunk": words_per_chunk,
         "basis": "measured by the probe" if measured else f"assumed {ASSUMED_WORDS_PER_CHUNK} words per chunk",
-        "chunks": chunks,
-        "pairs_before_filter": chunks * per_chunk,
+        "passages_available": available,
+        "chunks": chosen["passages"],
+        "pairs_before_filter": chosen["pairs_before_filter"],
+        **({"seconds": chosen["seconds"]} if "seconds" in chosen else {}),
+        "target_pairs": chosen["target_pairs"],
+        "enough_to_train": enough_to_train(),
+        "choices": {str(c): plan(resolve_target(c)) for c in TARGET_CHOICES},
         "estimated": True,
     }
-    if probe and probe.get("seconds_per_chunk"):
-        out["seconds"] = round(chunks * probe["seconds_per_chunk"])
-    return out
 
 
 def probe_timing(prepared: dict, per_1000: float, generator: Optional[PairGenerator] = None) -> dict:
@@ -289,7 +412,7 @@ def probe_timing(prepared: dict, per_1000: float, generator: Optional[PairGenera
     started = time.monotonic()
     pairs = 0
     for chunk in chunks:
-        pairs += len(_pairs_for_chunk(generator, chunk, None, per_1000, 0))
+        pairs += len(_pairs_for_chunk(generator, chunk, per_1000, 0))
     seconds = time.monotonic() - started
     model = getattr(generator._llm, "model", None)
     return {
@@ -302,12 +425,11 @@ def probe_timing(prepared: dict, per_1000: float, generator: Optional[PairGenera
     }
 
 
-def _pairs_for_chunk(generator: PairGenerator, chunk: dict, next_chunk: Optional[dict],
-                     per_1000: float, kind_offset: int) -> list[dict]:
+def _pairs_for_chunk(generator: PairGenerator, chunk: dict, per_1000: float, kind_offset: int) -> list[dict]:
     pairs = []
     for i in range(questions_for(chunk["words"], per_1000)):
         kind = QUESTION_KINDS[(kind_offset + i) % len(QUESTION_KINDS)]
-        other = next_chunk["text"] if kind == "multi_hop" and next_chunk else None
+        other = chunk.get("next_text") if kind == "multi_hop" else None
         pair = generator.question(chunk["text"], kind, other)
         if pair:
             pair["support_text"] = chunk["text"] + ("\n" + other if other else "")
@@ -329,8 +451,7 @@ def generate(chunks: list[dict], per_1000: float, generator: PairGenerator,
     for i, chunk in enumerate(chunks):
         if should_stop():
             raise BuildCancelled()
-        nxt = chunks[i + 1] if i + 1 < len(chunks) and chunks[i + 1]["source_path"] == chunk["source_path"] else None
-        pairs.extend(_pairs_for_chunk(generator, chunk, nxt, per_1000, i))
+        pairs.extend(_pairs_for_chunk(generator, chunk, per_1000, i))
         on_progress(i + 1, len(chunks), len(pairs))
     return pairs
 
