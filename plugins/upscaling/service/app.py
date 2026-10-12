@@ -180,7 +180,7 @@ def _submit_watch_job(input_path: str):
     _start_video_job(
         input_path=input_path,
         output_path=output_path,
-        model_name=_config.default_model,
+        model_name=_default_model(),
         scale=None,
         denoise_strength=0.0,
         sharpen=0.3,
@@ -209,13 +209,24 @@ def _atomic_imwrite(output_path: str, image) -> bool:
     return True
 
 
+def _default_model() -> str:
+    """The model a request that names none uses: the configured default when it
+    is installed, else the first installed model (the one the Upscaling page
+    preselects), else the default, so the refusal names what to install."""
+    name = _config.default_model
+    if _model_manager.is_downloaded(name):
+        return name
+    downloaded = _model_manager.list_models()["downloaded"]
+    return downloaded[0]["name"] if downloaded else name
+
+
 def _ensure_model(model_name: Optional[str] = None) -> str:
     """Ensure the requested (or default) model is loaded. Returns model name.
 
     Raises ModelNotInstalledError when its weights are not on disk; queued
     jobs record that message as their error.
     """
-    name = model_name or _config.default_model
+    name = model_name or _default_model()
     if _model_manager.current_model_name != name:
         _model_manager.load_model(name)
     return name
@@ -227,7 +238,7 @@ def _require_installed(model_name: Optional[str]) -> str:
     Checked before a job is queued or a model is loaded, so the caller hears
     which model is missing and where to install it.
     """
-    name = model_name or _config.default_model
+    name = model_name or _default_model()
     try:
         missing = _model_manager.missing_model_message(name)
     except ValueError as e:
@@ -250,7 +261,7 @@ def _start_video_job(
 ) -> dict:
     """Create a video upscale job and drop it on the queue. The worker will
     pick it up when the GPU is free."""
-    name = model_name or _config.default_model
+    name = model_name or _default_model()
     job = _job_manager.create_job(
         input_path=input_path,
         output_path=output_path,
@@ -303,7 +314,7 @@ def _start_image_batch_job(
     Image batches ride the same single-consumer queue as video so a folder of
     stills never competes with a running render for VRAM.
     """
-    name = model_name or _config.default_model
+    name = model_name or _default_model()
     job = _job_manager.create_job(
         input_path=inputs[0] if inputs else output_dir,
         output_path=output_dir,
