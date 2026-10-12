@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 3.2.1 — Code Editor works offline and saves safely; Audio Studio fits on the card
+
+- **The Code Editor loads offline.** Its editor came from a public CDN on every visit; it now
+  ships with Guaardvark, so the page works with no internet and makes no outside request.
+- **Code Editor saves never overwrite a document with the wrong text.** A file that has not
+  finished loading, or failed to, cannot be saved; library documents save by id; each tab keeps
+  its own undo history; a save marks only the text it sent as saved. Run, Format and Debug reach
+  the backend, the card's play button runs the code, questions to the assistant show once, and a
+  new tab renamed before its first save keeps its name.
+- **Audio Studio fits on the card.** With an API key set, Audio Studio and the swarm now send it
+  when they ask for graphics memory, so the chat model steps aside for music instead of the
+  render running out of memory. Audio Studio also unloads its own idle models before a load
+  that would not fit.
+- **FX Lab works after Install.** Stable Audio Open loads the files Install wrote, instead of
+  asking to be installed again.
+- FX Lab keeps its own length setting, Download saves the clip, a finished job keeps the type it
+  started with in the progress footer, and the Code Editor's name fields take typing when they
+  open.
+
 ## 3.2.0 — Qwen-Image 2.1, ComfyUI updates from the Plugins page, and Rules that reach chat
 
 - **Qwen-Image 2.1** text-to-image through ComfyUI 0.37 or newer. Add Model accepts Qwen-Image 2.1
