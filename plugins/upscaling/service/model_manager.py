@@ -245,6 +245,10 @@ class ModelManager:
     def scale(self) -> Optional[int]:
         return self.current_scale
 
+    @property
+    def is_loaded(self) -> bool:
+        return self._model is not None
+
     def unload(self):
         """Unload current model and free VRAM."""
         if self._model is not None:

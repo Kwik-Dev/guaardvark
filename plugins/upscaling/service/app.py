@@ -51,6 +51,8 @@ _image_upscale_lock = threading.Lock()
 # sync request for another model is refused instead of swapping the model out
 # from under the job, which left both models on the card.
 _job_model: Optional[str] = None
+# The job the worker is running, for /status and /evict.
+_running_job_id: Optional[str] = None
 
 # Single-worker queue. The GPU is one resource — running N jobs in parallel
 # just means everyone fights for VRAM and the model swaps. So we serialize:
@@ -389,11 +391,13 @@ def _start_image_batch_job(
 def _job_worker():
     """Single consumer for the job queue. Runs one job at a time so the GPU
     isn't fighting itself."""
+    global _running_job_id
     while True:
         task = _job_queue.get()
         if task is None:
             break
         job_id = task["job_id"]
+        _running_job_id = job_id
         try:
             if task["kind"] == "image_batch":
                 _run_image_batch_job(
@@ -413,6 +417,8 @@ def _job_worker():
             # The runners already record failure into the job manager; this is a
             # last-resort log so a worker crash doesn't kill the loop.
             logger.exception(f"Worker crashed processing {job_id}: {e}")
+        finally:
+            _running_job_id = None
 
 
 def _run_video_job(
@@ -855,6 +861,45 @@ def upscale_video_endpoint(req: VideoUpscaleRequest, request: Request):
         double_fps=req.double_fps if req.double_fps is not None else False,
     )
     return job
+
+
+@app.get("/status")
+def status():
+    """What this service holds on the GPU and whether it is working. The
+    backend reads it before asking /evict for the memory."""
+    loaded = _model_manager.current_model_name if _model_manager and _model_manager.is_loaded else None
+    return {
+        "model_loaded": loaded,
+        "busy": _running_job_id is not None or _image_upscale_lock.locked(),
+        "running_job": _running_job_id,
+        "queued": _job_queue.qsize() if _job_queue is not None else 0,
+        "reserved_mb": int(torch.cuda.memory_reserved() // (1024 * 1024)) if torch.cuda.is_available() else 0,
+    }
+
+
+@app.post("/evict")
+def evict(request: Request):
+    """Unload the model and return its memory, unless a job runs or waits.
+
+    The backend calls this when another GPU job is short of memory. A busy
+    service answers unloaded: false, so a running upscale is never cut off.
+    """
+    verify_token(request)
+    if _running_job_id is not None or (_job_queue is not None and _job_queue.qsize()):
+        return {"unloaded": False, "reason": "a job is running or queued"}
+    if not _image_upscale_lock.acquire(blocking=False):
+        return {"unloaded": False, "reason": "an image is being upscaled"}
+    try:
+        name = _model_manager.current_model_name if _model_manager.is_loaded else None
+        if name is None:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            return {"unloaded": False, "reason": "no model loaded"}
+        _model_manager.unload()
+        logger.info(f"Evicted model {name} on request")
+        return {"unloaded": True, "model": name}
+    finally:
+        _image_upscale_lock.release()
 
 
 @app.get("/jobs")
