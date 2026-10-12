@@ -189,25 +189,17 @@ def execute_generic_llm_task(task: Dict[str, Any], progress_callback) -> str:
     logger.info(f"Executing generic LLM task {task['id']}: {task['name']}")
 
     try:
-        # Get model name - use task model or fall back to default
-        model_name = task.get('model_name')
+        # The same choice the in-process scheduler makes: the task's model, else
+        # the default task model, else the active model, checked against what
+        # Ollama has installed (first-listed /api/tags is whichever model Ollama
+        # touched last, an embedding model included).
+        from types import SimpleNamespace
+        from backend.services.task_scheduler import _resolve_task_model
+        model_name, model_note = _resolve_task_model(SimpleNamespace(model_name=task.get('model_name')))
+        if model_note:
+            logger.warning(f"Task {task['id']}: {model_note}")
         if not model_name:
-            model_name = os.environ.get('DEFAULT_LLM_MODEL', '')
-        if not model_name:
-            # Query Ollama for available models
-            try:
-                import requests as _requests
-                ollama_base_url = os.environ.get('OLLAMA_BASE_URL', 'http://127.0.0.1:11434')
-                resp = _requests.get(f"{ollama_base_url}/api/tags", timeout=5)
-                if resp.ok:
-                    models = resp.json().get('models', [])
-                    if models:
-                        model_name = models[0]['name']
-                        logger.info(f"Using first available Ollama model: {model_name}")
-            except Exception as e:
-                logger.warning(f"Could not query Ollama for models: {e}")
-        if not model_name:
-            raise ValueError("No LLM model available. Pull a model with 'ollama pull <model>' or set DEFAULT_LLM_MODEL env var.")
+            raise ValueError("No LLM model available. Pull a model with 'ollama pull <model>' or choose a default model in Settings.")
 
         prompt = task.get('prompt_text') or task.get('name') or ''
         if not prompt:
