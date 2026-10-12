@@ -35,11 +35,14 @@ const KINDS = [
   { ext: ".txt", label: "Text (.txt)" },
   { ext: ".html", label: "Web pages (.html)" },
   { ext: ".docx", label: "Word (.docx)" },
+  { ext: ".pdf", label: "PDF (.pdf)" },
 ];
 const PAIR_RATES = [1, 2, 3, 5, 8];
 const RULE_LABELS = {
   private_key: "Private keys",
   api_key: "API keys and tokens",
+  recovery_key: "Recovery keys",
+  recovery_code: "Recovery codes",
   bearer_header: "Bearer tokens",
   api_key_header: "X-API-Key headers",
   secret_assignment: "Passwords and secrets",
@@ -66,6 +69,12 @@ const skippedLine = (skipped) => {
   const parts = [];
   if (folders) parts.push(plural(folders, "hidden or internal folder"));
   if (files) parts.push(plural(files, "hidden or credential file"));
+  if (skipped.package_files) {
+    parts.push(`${plural(skipped.package_files, "file")} in ${plural(skipped.package_dirs || 0, "copied software folder")}`);
+  }
+  if (skipped.not_notes) parts.push(plural(skipped.not_notes, "licence, dependency or tokenizer file"));
+  if (skipped.not_prose) parts.push(plural(skipped.not_prose, "file") + " that are not prose");
+  if (skipped.credential_names) parts.push(plural(skipped.credential_names, "file") + " named for a credential");
   if (skipped.other_kinds) parts.push(plural(skipped.other_kinds, "file") + " of other kinds");
   return parts.length ? `Skipped ${parts.join(", ")}.` : "";
 };
@@ -287,6 +296,12 @@ const BuildFromFolderModal = ({ open, onClose, onStarted }) => {
                     {skippedLine(check.skipped)}
                   </Typography>
                 </Stack>
+                {check.skipped?.credential_files?.length > 0 && (
+                  <Alert severity="info">
+                    Left out because their names say they hold a credential:{" "}
+                    {check.skipped.credential_files.join(", ")}
+                  </Alert>
+                )}
                 {check.unreadable?.length > 0 && (
                   <Alert severity="warning">Could not read {plural(check.unreadable.length, "file")}: {check.unreadable[0]}</Alert>
                 )}
