@@ -513,7 +513,7 @@ More: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [agent mental model](docs/
 
 **Near term**
 - A hand-editable timeline in the video editor: drag to reorder, a transition per cut, and text overlays in the plan.
-- Every pipeline starting its own services (music video, Film Crew, images, audio, upscaling), the way video renders already start ComfyUI.
+- Every pipeline starting its own services (music video, Film Crew, images, audio), the way video renders already start ComfyUI.
 - Memory and context budgets sized to the model, and semantic memory recall with embeddings.
 - Outreach posting on X, verified end to end.
 - Sending a song from Audio Studio straight to the Music Video page.
