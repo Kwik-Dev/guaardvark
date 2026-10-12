@@ -75,6 +75,8 @@ data/conversations/summaries/
 data/training/screenshots/
 data/training/failures/
 data/training/datasets/*.jsonl
+data/training/scrub_terms.txt
+data/training/build_reports/
 data/training/models/
 # Servo calibration data — runtime-generated, regenerated per calibration run
 data/training/servo_logs/

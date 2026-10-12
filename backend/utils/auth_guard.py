@@ -152,6 +152,10 @@ PROTECTED_FILE_PREFIXES = (
     '/api/files/browse-server',
     # Reads files anywhere on the server to describe a training dataset.
     '/api/training/datasets/',
+    # Reads a folder of notes for a training dataset; answers with file paths and scrubbed lines.
+    '/api/training/pipeline/build-from-folder',
+    # The private word list a folder build scrubs (names of people, machines, clients).
+    '/api/training/scrub-terms',
 )
 
 # Endpoints protected only on DELETE

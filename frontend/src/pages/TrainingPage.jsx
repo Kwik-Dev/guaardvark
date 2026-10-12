@@ -68,6 +68,7 @@ import TrainingDatasetModal from "../components/modals/TrainingDatasetModal";
 import NewTrainingJobModal from "../components/modals/NewTrainingJobModal";
 import DeviceProfileModal, { hardwareNote, profileFromHardware } from "../components/modals/DeviceProfileModal";
 import ParseJobModal from "../components/modals/ParseJobModal";
+import BuildFromFolderModal from "../components/modals/BuildFromFolderModal";
 import ExportQuantizationModal from "../components/modals/ExportQuantizationModal";
 import { useSnackbar } from "../components/common/SnackbarProvider";
 import EntityContextMenu from "../components/common/EntityContextMenu";
@@ -303,6 +304,7 @@ const TrainingPage = () => {
   const [devicePrefill, setDevicePrefill] = useState(null);
   const [detectingHardware, setDetectingHardware] = useState(false);
   const [parseModalOpen, setParseModalOpen] = useState(false);
+  const [buildModalOpen, setBuildModalOpen] = useState(false);
   const [currentItem, setCurrentItem] = useState(null);
   // Starting values for a new dataset (a finished parse's output); kept in
   // state so the jobs list refreshing does not reset the open form.
@@ -447,9 +449,13 @@ const TrainingPage = () => {
     setEditModalOpen(false);
   };
 
+  // Parse and folder-build jobs both end in a .jsonl in the datasets folder.
+  const isDatasetJob = (job) => job.pipeline_stage === "parsing" || job.pipeline_stage === "building";
+
   const handleAddParsedDataset = (job) => {
     handleOpenEditModal(null, {
-      name: (job.name || "").replace(/^Parse:\s*/, "") || "Parsed transcripts",
+      name: (job.name || "").replace(/^(Parse|Build):\s*/, "") ||
+        (job.pipeline_stage === "building" ? "Notes" : "Parsed transcripts"),
       path: job.config?.output_path || "",
     });
   };
@@ -713,7 +719,7 @@ const TrainingPage = () => {
         job.export_verified && job.status === "failed: worse than base" && job.lora_path && {
           label: "Export anyway", icon: <CloudUploadIcon fontSize="small" />, onClick: () => handleExportAnyway(job), disabled: exporting,
         },
-        job.pipeline_stage === "parsing" && job.status === "completed" && job.config?.pairs_count > 0 && {
+        isDatasetJob(job) && job.status === "completed" && job.config?.pairs_count > 0 && {
           label: "Add as dataset", icon: <AddIcon fontSize="small" />, onClick: () => handleAddParsedDataset(job),
         },
         { label: "Delete", icon: <CloseIcon fontSize="small" />, onClick: () => handleDeleteJob(job.id), color: "error.main", dividerBefore: true },
@@ -861,6 +867,13 @@ const TrainingPage = () => {
                   onClick={() => setParseModalOpen(true)}
                 >
                   Parse Transcripts
+                </Button>
+                <Button
+                  variant="outlined"
+                  startIcon={<PlayArrowIcon />}
+                  onClick={() => setBuildModalOpen(true)}
+                >
+                  Build from folder
                 </Button>
                 <Button
                   variant="contained"
@@ -1080,10 +1093,12 @@ const TrainingPage = () => {
                             </Typography>
                           </Box>
                         )}
-                        {job.pipeline_stage === "parsing" && job.status === "completed" && job.config?.output_path && (
+                        {isDatasetJob(job) && job.status === "completed" && job.config?.output_path && (
                           <Box sx={{ mt: 1, display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap" }}>
                             <Typography variant="body2">
-                              Parsed {job.config.pairs_count ?? 0} pair{job.config.pairs_count === 1 ? "" : "s"}
+                              {job.pipeline_stage === "building" ? "Built" : "Parsed"} {job.config.pairs_count ?? 0} pair{job.config.pairs_count === 1 ? "" : "s"}
+                              {job.pipeline_stage === "building" && job.config.files != null &&
+                                ` from ${job.config.files} file${job.config.files === 1 ? "" : "s"}, ${job.config.scrubbed ?? 0} item${job.config.scrubbed === 1 ? "" : "s"} scrubbed`}
                             </Typography>
                             {job.config.pairs_count > 0 && (
                               <Button size="small" variant="outlined" startIcon={<AddIcon />} onClick={() => handleAddParsedDataset(job)}>
@@ -1287,6 +1302,17 @@ const TrainingPage = () => {
           onClose={() => setParseModalOpen(false)}
           onSuccess={(_result) => {
             showMessage("Parse job started successfully", "success");
+            fetchJobs();
+          }}
+        />
+      )}
+
+      {buildModalOpen && (
+        <BuildFromFolderModal
+          open={buildModalOpen}
+          onClose={() => setBuildModalOpen(false)}
+          onStarted={(_job, indexNote) => {
+            showMessage(`Building the dataset; follow it in Jobs.${indexNote || ""}`, "success");
             fetchJobs();
           }}
         />

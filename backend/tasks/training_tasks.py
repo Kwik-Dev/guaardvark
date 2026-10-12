@@ -262,6 +262,108 @@ def parse_transcripts_task(self, job_id: str, input_path: str, recursive: bool =
         raise
 
 
+@shared_task(bind=True, name='training.build_folder_dataset')
+def build_folder_dataset_task(self, job_id: str, folder: str, kinds=None,
+                              pairs_per_1000_words: float = 3, target_pairs="enough",
+                              include_large_files=None):
+    """Build a messages dataset from a folder of notes (folder_dataset).
+
+    Scan, scrub, chunk, ask the local model for pairs, filter, write. A cancel
+    is noticed between chunks and writes nothing. Generation goes through the
+    chat model like any chat call, so it waits behind a render the way chat
+    does and claims no GPU of its own."""
+    import time
+    from backend.services.training import folder_dataset as fd
+    from backend.services.training.pair_generator import PairGenerator
+
+    started = time.monotonic()
+    try:
+        _update_job_status(job_id, status="running", pipeline_stage="building",
+                           started_at=utcnow(), celery_task_id=self.request.id)
+        _emit_progress(job_id, 0, "Scanning the folder...", "start")
+
+        prepared = fd.prepare(folder, kinds, include_large=include_large_files or ())
+        scrub = prepared["scrub"]
+        _emit_progress(job_id, 4, f"Read {prepared['files']} files ({prepared['words']} words); "
+                                  f"scrubbed {scrub['total']} items")
+        if not prepared["docs"]:
+            raise ValueError("Nothing to read: the folder has no notes of the chosen kinds "
+                             "that the import rules let in")
+
+        all_chunks = fd.chunk_docs(prepared["docs"])
+        chunks, selection = fd.select_passages(all_chunks, fd.resolve_target(target_pairs), pairs_per_1000_words)
+        _emit_progress(job_id, 8, f"Split into {len(all_chunks)} passages; writing pairs for "
+                                  f"{len(chunks)} of them from {selection['files_contributing']} files...")
+
+        generator = PairGenerator()
+
+        def on_progress(done, total, pairs):
+            _emit_progress(job_id, 8 + 84 * done // max(1, total),
+                           f"Writing pairs: chunk {done} of {total}, {pairs} pairs so far",
+                           metrics={"chunks_done": done, "chunks": total, "pairs": pairs})
+
+        pairs = fd.generate(chunks, pairs_per_1000_words, generator,
+                            should_stop=_job_stop_check(job_id), on_progress=on_progress)
+
+        _emit_progress(job_id, 93, f"Filtering {len(pairs)} pairs...")
+        kept, dropped = fd.filter_pairs(pairs)
+        if not kept:
+            raise ValueError(f"No pairs survived the filter ({len(pairs)} written, "
+                             f"dropped: {dropped})")
+
+        name = fd.dataset_name(folder)
+        report = {
+            "folder": folder,
+            "kinds": prepared["kinds"],
+            "pairs_per_1000_words": pairs_per_1000_words,
+            "files": prepared["files"],
+            "words": prepared["words"],
+            "skipped": prepared["skipped"],
+            "unreadable": prepared["unreadable"],
+            "scrub": scrub,
+            "chunks": len(chunks),
+            "selection": selection,
+            "pairs_written": len(pairs),
+            "pairs_kept": len(kept),
+            "dropped": dropped,
+            "kinds_kept": {k: sum(1 for p in kept if p["kind"] == k)
+                           for k in ("specific", "reasoning", "multi_hop", "summary")},
+            "model": getattr(generator._llm, "model", None),
+            "model_calls": generator.calls,
+            "unparsed_answers": generator.unparsed,
+            "generation_seconds": round(generator.seconds, 1),
+            "seconds": round(time.monotonic() - started, 1),
+        }
+        output_path, report_path = fd.write(kept, report, name)
+        _update_job_status(job_id, status="completed", pipeline_stage="building",
+                           completed_at=utcnow(), progress=100,
+                           config_json=json.dumps({
+                               "input_path": folder,
+                               "output_path": output_path,
+                               "report_path": report_path,
+                               "pairs_count": len(kept),
+                               "files": prepared["files"],
+                               "chunks": len(chunks),
+                               "passages_available": selection["passages_available"],
+                               "target_pairs": selection["target_pairs"],
+                               "large_files_left_out": len(prepared["skipped"]["large_files"]),
+                               "scrubbed": scrub["total"],
+                               "dropped": dropped,
+                           }))
+        _emit_progress(job_id, 100, f"Completed: {len(kept)} pairs in {name}.jsonl", "complete")
+        return {"output_path": output_path, "report_path": report_path, "pairs_count": len(kept)}
+
+    except fd.BuildCancelled:
+        logger.info(f"Folder dataset build {job_id} cancelled; nothing written")
+        _emit_progress(job_id, 0, "Cancelled; nothing written", "cancelled")
+        return {"cancelled": True}
+    except Exception as e:
+        logger.error(f"Error in build_folder_dataset_task: {e}", exc_info=True)
+        _update_job_status(job_id, status="failed", error_message=str(e))
+        _emit_progress(job_id, 0, f"Error: {str(e)}", "error")
+        raise
+
+
 # Share of the full pipeline's progress bar the filter step fills.
 PIPELINE_FILTER_PROGRESS = (20, 30)
 
@@ -448,6 +550,40 @@ EVAL_GATE = {
 WORSE_THAN_BASE = "failed: worse than base"
 
 
+def _held_out_by_source(rows: list, target: int):
+    """Row indices to hold out, whole source files at a time, or None.
+
+    A folder build writes several pairs per chunk and several chunks per file,
+    so a random row split puts near-copies of one passage on both sides and the
+    held-out loss flatters the adapter. When every row names its source file
+    (metadata.source_path), files are drawn in a seeded order until the held
+    rows reach the target, never above EVAL_SPLIT["max_rows"] and never every
+    file. None (and a random row split) for other datasets, or when whole files
+    cannot give at least EVAL_SPLIT["min_rows"]."""
+    by_file = {}
+    for i, raw in enumerate(rows):
+        try:
+            row = json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+        meta = row.get("metadata") if isinstance(row, dict) else None
+        source = meta.get("source_path") if isinstance(meta, dict) else None
+        if not isinstance(source, str) or not source:
+            return None
+        by_file.setdefault(source, []).append(i)
+    if len(by_file) < 2:
+        return None
+    files = sorted(by_file)
+    random.Random(EVAL_SPLIT["seed"]).shuffle(files)
+    held = set()
+    for source in files[:-1]:
+        if len(held) >= target:
+            break
+        if len(held) + len(by_file[source]) <= EVAL_SPLIT["max_rows"]:
+            held.update(by_file[source])
+    return held if len(held) >= EVAL_SPLIT["min_rows"] else None
+
+
 def _hold_out_split(data_path: str, out_dir: Path, fraction: float):
     """Split a text dataset into training rows and held-out rows.
 
@@ -483,7 +619,13 @@ def _hold_out_split(data_path: str, out_dir: Path, fraction: float):
         )
         return data_path, None, report
 
-    held_out = set(random.Random(EVAL_SPLIT["seed"]).sample(range(len(rows)), held))
+    held_out = _held_out_by_source(rows, held)
+    if held_out is not None:
+        report["split"] = "by source file"
+    else:
+        held_out = set(random.Random(EVAL_SPLIT["seed"]).sample(range(len(rows)), held))
+        report["split"] = "random rows"
+    held = len(held_out)
     out_dir.mkdir(parents=True, exist_ok=True)
     train_path = out_dir / "train.jsonl"
     eval_path = out_dir / "heldout.jsonl"
@@ -585,6 +727,8 @@ def _dataset_data_path(dataset_name: str, dataset_path: str, combined_path: Path
 
 # One optimiser step sees batch_size * this many rows.
 GRADIENT_ACCUMULATION_STEPS = 4
+# The batch size of a job with no device profile and no batch_size of its own.
+DEFAULT_BATCH_SIZE = 2
 
 # A job that leaves "steps" out trains for about this many passes over its
 # training rows: the usual range for a LoRA fine-tune of a chat model on a
@@ -751,7 +895,7 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False,
             raise ValueError("data_path not found in job config")
 
         learning_rate = job_config.get("lr", 2e-4)
-        batch_size = job_config.get("batch_size", device_profile.max_batch_size if device_profile else 2)
+        batch_size = job_config.get("batch_size", device_profile.max_batch_size if device_profile else DEFAULT_BATCH_SIZE)
         lora_rank = job_config.get("rank", 16)
         max_seq_length = job_config.get("seq_length", device_profile.max_seq_length if device_profile else 2048)
 
