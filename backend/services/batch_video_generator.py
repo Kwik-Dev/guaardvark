@@ -823,8 +823,12 @@ class BatchVideoGenerator:
                 serializable["start_time"] = batch_status.start_time.isoformat()
             if batch_status.end_time:
                 serializable["end_time"] = batch_status.end_time.isoformat()
-            with open(metadata_file, "w") as f:
+            # Written to a temp file and swapped in, so the page polling this
+            # file never reads it half-written.
+            tmp_file = metadata_file.with_suffix(".json.tmp")
+            with open(tmp_file, "w") as f:
                 json.dump(serializable, f, indent=2)
+            os.replace(tmp_file, metadata_file)
 
             try:
                 from backend.socketio_instance import socketio

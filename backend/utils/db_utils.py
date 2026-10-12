@@ -148,7 +148,8 @@ def get_db_connection_info() -> dict:
             "checked_in": pool.checkedin(),
             "checked_out": pool.checkedout(),
             "overflow": pool.overflow(),
-            "invalid": pool.invalid(),
+            # QueuePool.invalid() is gone in SQLAlchemy 2.0; kept as a key for callers.
+            "invalid": pool.invalid() if hasattr(pool, "invalid") else None,
         }
         
         return info
