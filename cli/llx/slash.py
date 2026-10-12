@@ -1023,44 +1023,42 @@ class SlashRouter:
             offset = int(parts.pop())
         path = " ".join(parts)
 
-        # Prefer backend read_code (existing agent tool) when connected
-        server = self._state.get("server")
-        used_backend = False
-        try:
-            from llx.client import get_client
-            client = get_client(server)
-            bres = client.execute_tool("read_code", {"filepath": path})
-            if bres.get("success"):
-                out = bres.get("result", {})
-                content = out.get("output", str(out))
-                self._console.print(f"[llx.dim]{path} (via backend read_code)[/llx.dim]")
-                try:
-                    self._console.print(Syntax(content[:8000], "python", line_numbers=True))
-                except Exception:
-                    self._console.print(content[:4000])
-                used_backend = True
+        # Prefer the backend's read_code when it can serve the file. The path is
+        # resolved against this CLI's working folder first: the backend resolves
+        # a relative one against its own. It takes no offset/limit, so a slice
+        # is always read here.
+        from llx.local_tools import _resolve_path
+        target = _resolve_path(path, self._state.get("cwd"))
+        content = None
+        why_local = None
+        if offset is None and limit is None:
+            try:
+                from llx.client import get_client
+                bres = get_client(self._state.get("server")).execute_tool("read_code", {"filepath": str(target)})
+            except Exception as e:  # offline or refused: read it here
+                bres = {"success": False, "error": str(e)}
+            result = bres.get("result") if isinstance(bres.get("result"), dict) else {}
+            if bres.get("success") and result.get("success", True) and isinstance(result.get("output"), str):
+                content = result["output"]
+                self._console.print(f"[llx.dim]{target} (via backend read_code)[/llx.dim]")
+                self._console.print(Syntax(content[:8000], "python", line_numbers=True))
                 from llx.working_memory import normalize_working_memory, record_tool_use
                 mem = normalize_working_memory(self._state.get("working_memory"))
-                record_tool_use(mem, "read_code", {"filepath": path})
+                record_tool_use(mem, "read_code", {"filepath": str(target)})
                 self._state["working_memory"] = mem
-        except Exception:
-            pass
+                path_for_mem = str(target)
+            else:
+                why_local = result.get("error") or bres.get("error")
 
-        if not used_backend:
-            res = read_file(path, offset=offset, limit=limit, cwd=self._state.get("cwd"))
+        if content is None:
+            res = read_file(target, offset=offset, limit=limit, cwd=self._state.get("cwd"))
             if "error" in res:
                 self._console.print(f"[llx.error]{res['error']}[/llx.error]")
                 return
-            content = res.get("content", "")
-            try:
-                syn = Syntax(content, "python", line_numbers=True, word_wrap=True)
-                self._console.print(f"[llx.dim]{res['path']} (local read; backend read_code preferred when online)[/llx.dim]")
-                self._console.print(syn)
-            except Exception:
-                self._console.print(content)
-            path_for_mem = res.get("path", path)
-        else:
-            path_for_mem = path
+            note = f"; backend read_code: {why_local}" if why_local else ""
+            self._console.print(f"[llx.dim]{res['path']} (local read{note})[/llx.dim]")
+            self._console.print(Syntax(res.get("content", ""), "python", line_numbers=True, word_wrap=True))
+            path_for_mem = res.get("path", str(target))
 
         from llx.working_memory import normalize_working_memory, apply_attachments
         mem = normalize_working_memory(self._state.get("working_memory"))
