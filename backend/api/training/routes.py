@@ -976,14 +976,16 @@ def probe_folder_build():
         return problem
     try:
         prepared = fd.prepare(opts["folder"], opts["kinds"], include_large=opts["include_large"])
-        probe = fd.probe_timing(prepared, opts["per_1000"])
+        probe = fd.probe_timing(prepared, opts["per_1000"], target=opts["target"])
     except GenerationUnavailable as e:
         return error_response(str(e), 503, "MODEL_UNAVAILABLE")
     except Exception as e:
         logger.error(f"Folder build probe failed: {e}", exc_info=True)
         return error_response(f"Could not time the build: {e}", 500)
-    return success_response({"probe": probe,
-                             "estimate": fd.estimate(prepared, opts["per_1000"], probe, target=opts["target"])})
+    estimate = fd.estimate(prepared, opts["per_1000"], probe, target=opts["target"])
+    # The per-file counts only feed the estimate; the page has no use for a path per file.
+    probe.pop("passages_per_file", None)
+    return success_response({"probe": probe, "estimate": estimate})
 
 
 @training_bp.route("/pipeline/build-from-folder", methods=["POST"])
