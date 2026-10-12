@@ -617,8 +617,49 @@ const DocumentsPage = () => {
     }
   }, []);
 
+  // Where a window opened from its desktop icon goes, in grid units: beside the
+  // icon when it fits, over it when it does not, and always inside the visible
+  // area, so an icon low on the page opens low and one at the top opens high.
+  // Null when the icon is not on screen.
+  const placeNearIcon = useCallback((folderId, w, h) => {
+    const icon = desktopItemRefs.current.get(`folder-${folderId}`);
+    const container = windowContainerRef.current;
+    if (!icon?.isConnected || !container) return null;
+    const iconRect = icon.getBoundingClientRect();
+    const box = container.getBoundingClientRect();
+    if (!iconRect.width || !box.width) return null;
+    const [mx, my] = WINDOWS_MARGIN;
+    const [px, py] = WINDOWS_PADDING;
+    const colPitch = (box.width - px * 2 - mx * (WINDOWS_COLS - 1)) / WINDOWS_COLS + mx;
+    const rowPitch = WINDOWS_ROW_HEIGHT + my;
+    const iconLeft = Math.floor((iconRect.left - box.left - px) / colPitch);
+    const iconRight = Math.ceil((iconRect.right - box.left - px) / colPitch);
+    const iconTop = Math.round((iconRect.top - box.top - py) / rowPitch);
+    const GAP = 1;
+    let x;
+    if (iconRight + GAP + w <= WINDOWS_COLS) x = iconRight + GAP;
+    else if (iconLeft - GAP - w >= 0) x = iconLeft - GAP - w;
+    else x = iconLeft;
+    const { maxH } = getVisibleGridBounds();
+    return {
+      x: Math.max(0, Math.min(x, WINDOWS_COLS - w)),
+      y: Math.max(0, Math.min(iconTop, maxH - h)),
+    };
+  }, [getVisibleGridBounds]);
+
   // Handle folder double-click - expand from folded to maximized
   const handleFolderExpand = useCallback((windowId) => {
+    const opening = windowsRef.current.find(w => w.id === windowId);
+    const bounds = getVisibleGridBounds();
+    // A window keeps the size it had when it was last open (not its minimized bar).
+    const remembered = windowLayout.find(l => l.i === windowId && l.h >= WINDOW_MIN_HEIGHT);
+    const openW = Math.min(remembered?.w || WINDOW_MIN_WIDTH * 2, bounds.maxW);
+    const openH = Math.min(remembered?.h || WINDOW_MIN_HEIGHT * 2, bounds.maxH - 2);
+    // Read the icon's place now: once the window opens, the icon is gone.
+    const nearIcon = opening && opening.state === 'folded'
+      ? placeNearIcon(opening.folderId, openW, openH)
+      : null;
+
     // Use functional form to avoid stale closure on windows
     setWindows(prev => {
       const window = prev.find(w => w.id === windowId);
@@ -633,15 +674,17 @@ const DocumentsPage = () => {
 
     // CRITICAL: Ensure all active windows have layout items to prevent snapping
     // Build a complete layout with all maximized/minimized windows
-    let newLayout = [...windowLayout];
+    let newLayout = nearIcon
+      ? [
+        ...windowLayout.filter(l => l.i !== windowId),
+        { i: windowId, ...nearIcon, w: openW, h: openH, minW: WINDOW_MIN_WIDTH, minH: WINDOW_MIN_HEIGHT },
+      ]
+      : [...windowLayout];
 
     // First, ensure all currently active windows have layout items
     const activeWindowIds = newWindows
       .filter(w => w.state === 'maximized' || w.state === 'minimized')
       .map(w => w.id);
-
-    // Clamp windows to visible viewport
-    const bounds = getVisibleGridBounds();
 
     activeWindowIds.forEach(wId => {
       const existingLayout = newLayout.find(l => l.i === wId);
@@ -680,7 +723,7 @@ const DocumentsPage = () => {
     setWindowZIndex(newZIndex);
 
     saveWindowState(newWindows, newLayout, windowColors, newZIndex, newMaxZIndex);
-  }, [windows, windowLayout, windowColors, windowZIndex, maxZIndex, saveWindowState, getVisibleGridBounds]);
+  }, [windowLayout, windowColors, windowZIndex, maxZIndex, saveWindowState, getVisibleGridBounds, placeNearIcon]);
 
   // Handle window close - fold back to folder icon
   const handleWindowClose = useCallback((windowId) => {
