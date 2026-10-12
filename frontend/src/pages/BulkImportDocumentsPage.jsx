@@ -1,674 +1,638 @@
 // frontend/src/pages/BulkImportDocumentsPage.jsx
-// Bulk Import UI for large document ingestion - Improved UX
+// Bulk Import: bring a folder into Files and index it for search. Two sources:
+// files from this computer (a drop or Choose folder/files, uploaded as copies)
+// and a folder on the Guaardvark machine (imported by the worker, which can
+// also move). One Into folder, one Import button; the rest under More options.
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import axios from "axios";
+import { Box, Chip, Collapse, MenuItem, Paper, Stack, TextField, Typography } from "@mui/material";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { BASE_URL } from "../api/apiClient";
-import {
-  Alert,
-  AlertTitle,
-  Autocomplete,
-  Box,
-  Button,
-  Checkbox,
-  Dialog,
-  DialogActions,
-  DialogContent,
-  DialogTitle,
-  Divider,
-  FormControlLabel,
-  Grid,
-  IconButton,
-  LinearProgress,
-  List,
-  ListItemButton,
-  ListItemIcon,
-  ListItemText,
-  Paper,
-  Stack,
-  TextField,
-  Typography,
-} from "@mui/material";
-import { useNavigate } from "react-router-dom";
-import CloudUploadIcon from "@mui/icons-material/CloudUpload";
-import RestartAltIcon from "@mui/icons-material/RestartAlt";
-import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
-import FolderIcon from "@mui/icons-material/Folder";
-import FolderOpenIcon from "@mui/icons-material/FolderOpen";
-import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import { useSnackbar } from "../components/common/SnackbarProvider";
 import PageLayout from "../components/layout/PageLayout";
+import DirectoryPicker from "../components/common/DirectoryPicker";
+import TextInputDialog from "../components/common/TextInputDialog";
+import { ActionButton, ConfirmActionDialog, SettingChip } from "../components/settings/ui";
 import { displayPath, rootLabel } from "../utils/displayPath";
-import {
-  startBulkImport,
-  getBulkImportStatus,
-} from "../api/bulkImportService";
+import { ensureFolderPath, filesFolderApi } from "../utils/droppedFiles";
+import { startBulkImport, getBulkImportStatus } from "../api/bulkImportService";
 import { getClients } from "../api/clientService";
 import { getProjects } from "../api/projectService";
 import { getWebsites } from "../api/websiteService";
+import ImportDropZone from "../components/documents/bulkImport/ImportDropZone";
+import ImportStatusCard from "../components/documents/bulkImport/ImportStatusCard";
+import ImportActionButton from "../components/documents/bulkImport/ImportActionButton";
+import ImportTargetSelect, { DEFAULT_INTO, intoLabel } from "../components/documents/bulkImport/ImportTargetSelect";
+import { isTerminalStatus, isSuccessStatus, skippedPhrase } from "../components/documents/bulkImport/importStatus";
+import { stageDrop, stageFileList, stagedLabel, uploadStaged } from "../components/documents/bulkImport/browserImport";
 
 const POLL_INTERVAL_MS = 3000;
+const FILES_API = `${BASE_URL}/files`;
+// Per-browser conveniences: the running job (so leaving the page does not lose
+// it) and the last Into folder. The job's status lives on the server for an hour.
+const JOB_KEY = "guaardvark_bulkImportJob";
+const INTO_KEY = "guaardvark_bulkImportInto";
+const RECENT_PATHS_KEY = "guaardvark_recentDirectoryPaths"; // DirectoryPicker's own list
+const RECENT_CHIPS = 3;
+// A drop this large is better imported from the Guaardvark machine itself.
+// A guess, not a measurement.
+const BIG_DROP_FILES = 2000;
+const BIG_DROP_BYTES = 2 * 1024 * 1024 * 1024;
 
-// The worker ends a job with "complete"; this page used to wait for
-// "completed" and polled forever. Either spelling ends the job.
-const SUCCESS_STATUSES = ["complete", "completed"];
-const TERMINAL_STATUSES = [...SUCCESS_STATUSES, "error", "failed", "cancelled"];
-const normalizeStatus = (status) => String(status || "").toLowerCase();
-const isSuccessStatus = (status) => SUCCESS_STATUSES.includes(normalizeStatus(status));
-const isTerminalStatus = (status) => TERMINAL_STATUSES.includes(normalizeStatus(status));
-
-const initialForm = {
-  sourcePath: "",
-  targetFolder: "",
-  projectId: null,
-  clientId: null,
-  websiteId: null,
-  reindexMissing: true,
-  forceCopy: true,
-  dryRun: false,
+const readJson = (key, fallback) => {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
 };
+const writeJson = (key, value) => {
+  try {
+    if (value == null) localStorage.removeItem(key);
+    else localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Private windows and blocked storage: the page works without it.
+  }
+};
+
+const formatBytes = (bytes) => {
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+};
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 const BulkImportDocumentsPage = () => {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { showMessage } = useSnackbar();
 
-  const [form, setForm] = useState(initialForm);
-  const [submitting, setSubmitting] = useState(false);
-  const [jobId, setJobId] = useState(null);
-  const [jobStatus, setJobStatus] = useState(null);
-  const [polling, setPolling] = useState(false);
-  const [confirmDialogOpen, setConfirmDialogOpen] = useState(false);
+  // Where from: null, { kind: "server", path }, or { kind: "browser", files, skipped, tooLarge, totalBytes, label }.
+  const [source, setSource] = useState(null);
+  const [into, setInto] = useState(DEFAULT_INTO);
+  const [rootFolders, setRootFolders] = useState([]);
+  const [reindexMissing, setReindexMissing] = useState(true);
+  const [links, setLinks] = useState({ client_id: "", project_id: "", website_id: "" });
+  const [entities, setEntities] = useState({ clients: [], projects: [], websites: [] });
+  const [moreOpen, setMoreOpen] = useState(false);
 
-  // Dropdown data
-  const [clients, setClients] = useState([]);
-  const [projects, setProjects] = useState([]);
-  const [websites, setWebsites] = useState([]);
-  const [loadingEntities, setLoadingEntities] = useState(true);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [newFolderOpen, setNewFolderOpen] = useState(false);
+  const [browseInfo, setBrowseInfo] = useState({ roots: [], home: null });
+  const [recentPaths, setRecentPaths] = useState(() => readJson(RECENT_PATHS_KEY, []));
 
-  // File browser. An empty path asks the server for its default folder (the
-  // user's home); the server also says which parent, if any, is still allowed.
-  const [browserOpen, setBrowserOpen] = useState(false);
-  const [currentPath, setCurrentPath] = useState("");
-  const [loadedPath, setLoadedPath] = useState(null);
-  const [parentPath, setParentPath] = useState(null);
-  const [browseRoots, setBrowseRoots] = useState([]);
-  const [browseHome, setBrowseHome] = useState(null);
-  const [browseError, setBrowseError] = useState(null);
-  const [directories, setDirectories] = useState([]);
-  const [loadingDirs, setLoadingDirs] = useState(false);
+  // The job: a server job { kind: "server", jobId, mode, status, ... } or a
+  // browser upload { kind: "browser", status: "uploading" | "complete" | "stopped", ... }.
+  const [job, setJob] = useState(null);
+  const [starting, setStarting] = useState(false);
+  const [moveConfirm, setMoveConfirm] = useState(null);
+  const stopUploadRef = useRef(false);
 
-  // Load entities on mount
-  useEffect(() => {
-    const loadEntities = async () => {
-      setLoadingEntities(true);
-      try {
-        const [clientsData, projectsData, websitesData] = await Promise.all([
-          getClients(),
-          getProjects(),
-          getWebsites(),
-        ]);
+  const serverJobRunning = job?.kind === "server" && !isTerminalStatus(job.status);
+  const uploading = job?.kind === "browser" && job.status === "uploading";
+  const busy = starting || serverJobRunning || uploading;
 
-        setClients(Array.isArray(clientsData) ? clientsData : []);
-        setProjects(Array.isArray(projectsData) ? projectsData : []);
-        setWebsites(Array.isArray(websitesData) ? websitesData : []);
-      } catch (error) {
-        console.error("Error loading entities:", error);
-        showMessage("Failed to load clients/projects/websites", "error");
-      } finally {
-        setLoadingEntities(false);
-      }
-    };
-    loadEntities();
-  }, [showMessage]);
-
-  // Load directories when browser opens or the path changes. The server
-  // answers with the folder it resolved, so the first (empty) request settles
-  // on the home folder without a second fetch.
-  useEffect(() => {
-    if (browserOpen && loadedPath !== currentPath) {
-      loadDirectories(currentPath);
-    }
-  }, [browserOpen, currentPath, loadedPath]);
-
-  const loadDirectories = async (path) => {
-    setLoadingDirs(true);
+  // Load the Into folders, the link lists and the server-folder roots.
+  const loadRootFolders = useCallback(async () => {
     try {
-      const response = await fetch(
-        `${BASE_URL}/files/browse-server?path=${encodeURIComponent(path)}`
-      );
-      const data = await response.json();
-      if (Array.isArray(data.roots)) {
-        setBrowseRoots(data.roots);
-      }
-      if (data.home) {
-        setBrowseHome(data.home);
-      }
-      if (response.ok && data.directories) {
-        setLoadedPath(data.path);
-        setBrowseError(null);
-        setDirectories(data.directories.map((dir) => dir.name));
-        setParentPath(data.parent_path || null);
-        if (data.path && data.path !== path) {
-          setCurrentPath(data.path);
-        }
-      } else {
-        // A refused or missing folder: the dialog shows why and offers a way
-        // out; the path field alone is read-only.
-        setBrowseError(data.error || "Failed to load directories");
-        setLoadedPath(null);
-        setDirectories([]);
-        setParentPath(null);
-      }
-    } catch (error) {
-      console.error("Error loading directories:", error);
-      showMessage("Failed to load directories", "error");
-      setBrowseError("Failed to load directories");
-      setLoadedPath(null);
-      setDirectories([]);
-      setParentPath(null);
-    } finally {
-      setLoadingDirs(false);
+      const res = await axios.get(`${FILES_API}/browse`, { params: { path: "/", fields: "light" } });
+      const folders = (res.data?.data?.folders || [])
+        .filter((f) => Number.isInteger(f.id))
+        .map((f) => ({ id: f.id, name: f.name, path: f.path }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+      setRootFolders(folders);
+      return folders;
+    } catch {
+      return [];
     }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const folders = await loadRootFolders();
+      if (cancelled) return;
+      // Opened for one folder (Files › right-click › Bulk import into this folder…).
+      const intoId = Number(searchParams.get("into_id"));
+      const intoPath = searchParams.get("into");
+      if (intoId && intoPath) {
+        setInto({ id: intoId, path: intoPath, name: intoPath.split("/").filter(Boolean).pop(), isNew: false });
+        return;
+      }
+      const remembered = readJson(INTO_KEY, null);
+      const match = remembered && folders.find((f) => f.id === remembered.id);
+      if (match) setInto({ ...match, isNew: false });
+      else {
+        const imports = folders.find((f) => f.name === DEFAULT_INTO.name);
+        if (imports) setInto({ ...imports, isNew: false });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [loadRootFolders, searchParams]);
+
+  useEffect(() => {
+    Promise.all([getClients(), getProjects(), getWebsites()])
+      .then(([clients, projects, websites]) =>
+        setEntities({
+          clients: Array.isArray(clients) ? clients : [],
+          projects: Array.isArray(projects) ? projects : [],
+          websites: Array.isArray(websites) ? websites : [],
+        }))
+      .catch(() => {
+        // Linking is optional; without the lists its dropdowns stay hidden.
+      });
+  }, []);
+
+  useEffect(() => {
+    // One listing for the roots and the home folder, to offer them as chips
+    // and write paths with ~.
+    fetch(`${FILES_API}/browse-server?path=`)
+      .then((r) => r.json())
+      .then((data) => setBrowseInfo({ roots: Array.isArray(data.roots) ? data.roots : [], home: data.home || null }))
+      .catch(() => {});
+  }, []);
+
+  const chooseInto = (next) => {
+    setInto(next);
+    writeJson(INTO_KEY, next.id != null ? { id: next.id } : null);
   };
 
-  const handleBrowserNavigate = (path) => {
-    setCurrentPath(path);
-  };
+  // ── Server jobs: start, poll, resume ──────────────────────────────────────
 
-  // The chosen folder is written with ~ for the home folder; the server
-  // resolves ~ before it checks or imports anything.
-  const handleBrowserSelect = () => {
-    setForm((prev) => ({ ...prev, sourcePath: displayPath(currentPath, browseHome) }));
-    setBrowserOpen(false);
-  };
+  const applyStatus = useCallback((jobId, status, { first = false } = {}) => {
+    setJob((prev) => {
+      if (!prev || prev.jobId !== jobId) return prev;
+      const terminal = isTerminalStatus(status?.status);
+      return {
+        ...prev,
+        status: status?.status || prev.status,
+        message: status?.message || prev.message,
+        progress: typeof status?.progress === "number" ? status.progress : prev.progress,
+        stats: status?.stats && Object.keys(status.stats).length ? status.stats : prev.stats,
+        awayNote: first && prev.resumed && terminal ? "Finished while you were away." : prev.awayNote,
+      };
+    });
+  }, []);
 
-  const canSubmit = useMemo(
-    () => form.sourcePath.trim().length > 0 && !submitting,
-    [form.sourcePath, submitting]
-  );
-
-  const handleChange = (field) => (event) => {
-    const value = event.target.value;
-    setForm((prev) => ({ ...prev, [field]: value }));
-  };
-
-  const handleAutocompleteChange = (field) => (event, newValue) => {
-    setForm((prev) => ({ ...prev, [field]: newValue }));
-  };
-
-  const handleCheckbox = (field) => (event) => {
-    setForm((prev) => ({ ...prev, [field]: event.target.checked }));
-  };
-
-  const resetForm = () => {
-    setForm(initialForm);
-    // Stop the status poll too; the effect below clears its interval when
-    // either of these changes.
-    setPolling(false);
-    setJobId(null);
-    setJobStatus(null);
-  };
-
-  const handleStartClick = () => {
-    if (!canSubmit) return;
-    if (!form.dryRun) {
-      setConfirmDialogOpen(true);
-    } else {
-      submitImport();
+  const pollOnce = useCallback(async (jobId, opts) => {
+    try {
+      const status = await getBulkImportStatus(jobId);
+      applyStatus(jobId, status, opts);
+      if (isTerminalStatus(status?.status)) writeJson(JOB_KEY, null);
+      return status;
+    } catch (err) {
+      writeJson(JOB_KEY, null);
+      setJob((prev) =>
+        prev && prev.jobId === jobId
+          ? {
+            ...prev,
+            status: "error",
+            message: err.status === 404
+              ? "This import's status is no longer kept (the server keeps it for an hour). Its files are in Files."
+              : err.message || "Could not read the import's status",
+          }
+          : prev);
+      return null;
     }
-  };
+  }, [applyStatus]);
 
-  const submitImport = async () => {
-    if (!canSubmit) return;
-    setConfirmDialogOpen(false);
-    setSubmitting(true);
+  useEffect(() => {
+    if (job?.kind !== "server" || !job.jobId || isTerminalStatus(job.status)) return undefined;
+    const interval = setInterval(() => pollOnce(job.jobId), POLL_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [job?.kind, job?.jobId, job?.status, pollOnce]);
+
+  // Coming back to the page picks up the job that was running.
+  useEffect(() => {
+    const saved = readJson(JOB_KEY, null);
+    if (!saved?.jobId) return;
+    setJob({ ...saved, kind: "server", status: "processing", resumed: true });
+    pollOnce(saved.jobId, { first: true });
+  }, [pollOnce]);
+
+  const startServerJob = async ({ mode }) => {
+    if (source?.kind !== "server") return;
+    setStarting(true);
+    const preview = mode === "preview" || mode === "move-preview";
     try {
       const payload = {
-        source_path: form.sourcePath.trim(),
-        target_folder: form.targetFolder.trim() || null,
-        project_id: form.projectId?.id || null,
-        client_id: form.clientId?.id || null,
-        website_id: form.websiteId?.id || null,
-        reindex_missing: !!form.reindexMissing,
-        force_copy: !!form.forceCopy,
-        dry_run: !!form.dryRun,
+        source_path: source.path,
+        // The path as well as the id, so a server without target_folder_id
+        // still finds a top-level folder by it.
+        target_folder: into.path || into.name,
+        target_folder_id: into.id ?? null,
+        project_id: links.project_id || null,
+        client_id: links.client_id || null,
+        website_id: links.website_id || null,
+        reindex_missing: reindexMissing,
+        force_copy: mode !== "move",
+        dry_run: preview,
       };
-
       const response = await startBulkImport(payload);
-      if (response?.job_id) {
-        setJobId(response.job_id);
-        setJobStatus({
-          status: response.status || "queued",
-          message: response.message || "Import started.",
-        });
-        showMessage("Bulk import started successfully", "success");
-        setPolling(true);
-      } else {
-        showMessage(response?.message || "Bulk import response received.", "info");
+      if (!response?.job_id) {
+        showMessage(response?.message || "The import did not start", "error");
+        return;
       }
+      const record = {
+        kind: "server",
+        jobId: response.job_id,
+        mode,
+        preview,
+        status: response.status || "queued",
+        message: preview ? "Counting the files…" : "Import started",
+        sourceLabel: `From ${displayPath(source.path, browseInfo.home)}`,
+        intoLabel: intoLabel(into),
+      };
+      setJob(record);
+      writeJson(JOB_KEY, { jobId: record.jobId, mode, preview, sourceLabel: record.sourceLabel, intoLabel: record.intoLabel });
     } catch (error) {
-      console.error("Submit import error:", error);
-      showMessage(error.message || "Failed to start bulk import", "error");
+      showMessage(error.message || "Failed to start the import", "error");
     } finally {
-      setSubmitting(false);
+      setStarting(false);
     }
   };
 
-  // Poll job status
+  // A move is counted first, then confirmed with the real numbers.
   useEffect(() => {
-    if (!jobId || !polling) return undefined;
-    const interval = setInterval(async () => {
-      try {
-        const statusResp = await getBulkImportStatus(jobId);
-        setJobStatus(statusResp);
-        if (isTerminalStatus(statusResp?.status)) {
-          setPolling(false);
-        }
-      } catch (err) {
-        setPolling(false);
-        showMessage(err.message || "Failed to fetch status", "error");
+    if (job?.kind === "server" && job.mode === "move-preview" && isSuccessStatus(job.status) && !job.moveAsked) {
+      const count = Number(job.stats?.total_files) || 0;
+      setJob((prev) => ({ ...prev, moveAsked: true, ...(count === 0 ? { message: "Nothing to move: no files would come in." } : {}) }));
+      if (count > 0) {
+        setMoveConfirm({ count, skipped: skippedPhrase(job.stats?.skipped_private) });
       }
-    }, POLL_INTERVAL_MS);
-    return () => clearInterval(interval);
-  }, [jobId, polling, showMessage]);
-
-  const renderStatus = () => {
-    if (!jobId) {
-      return (
-        <Alert severity="info" icon={<InfoOutlinedIcon />}>
-          No import job running. Configure and start an import to see status here.
-        </Alert>
-      );
     }
+  }, [job]);
 
-    const failedFiles = Number(jobStatus?.stats?.errors) || 0;
-    const finished = isSuccessStatus(jobStatus?.status);
-    // A job ends "complete" even when files failed; that is not green.
-    const severity = finished && failedFiles > 0
-      ? "warning"
-      : finished
-      ? "success"
-      : ["error", "failed"].includes(normalizeStatus(jobStatus?.status))
-      ? "error"
-      : "info";
+  // An import into a new folder created it; Into becomes that folder.
+  const importFinished = job?.kind === "server" && !job.preview && isSuccessStatus(job.status);
+  useEffect(() => {
+    if (!importFinished || !into.isNew) return;
+    loadRootFolders().then((folders) => {
+      const created = folders.find((f) => f.name === into.name);
+      if (created) chooseInto({ ...created, isNew: false });
+    });
+  }, [importFinished, into.isNew, into.name, loadRootFolders]);
 
-    return (
-      <Alert severity={severity}>
-        <AlertTitle>
-          {finished && failedFiles > 0
-            ? `Finished with errors (${failedFiles} failed)`
-            : "Job Status"}
-        </AlertTitle>
-        <Typography variant="body2" component="div" sx={{ mt: 1 }}>
-          <strong>Job ID:</strong> {jobId}
-        </Typography>
-        <Typography variant="body2" component="div">
-          <strong>Status:</strong> {jobStatus?.status || "unknown"}
-        </Typography>
-        {jobStatus?.message && (
-          <Typography variant="body2" component="div">
-            <strong>Message:</strong> {jobStatus.message}
-          </Typography>
-        )}
-        {typeof jobStatus?.progress === "number" && (
-          <Box sx={{ mt: 1 }}>
-            <Typography variant="body2" component="div" sx={{ mb: 0.5 }}>
-              <strong>Progress:</strong> {jobStatus.progress}%
-            </Typography>
-            <LinearProgress variant="determinate" value={jobStatus.progress} />
-          </Box>
-        )}
-        {jobStatus?.stats && (
-          <Typography variant="body2" component="div" sx={{ mt: 1 }}>
-            <strong>Results:</strong>
-            <Box component="pre" sx={{ mt: 1, fontSize: "0.75rem", whiteSpace: "pre-wrap" }}>
-              {JSON.stringify(jobStatus.stats, null, 2)}
-            </Box>
-          </Typography>
-        )}
-      </Alert>
-    );
+  // ── Browser uploads ───────────────────────────────────────────────────────
+
+  const stage = async (staging) => {
+    const staged = await staging;
+    if (staged.files.length === 0) {
+      const why = [skippedPhrase(staged.skipped), staged.tooLarge.length ? plural(staged.tooLarge.length, "file") + " over 100 MB" : ""]
+        .filter(Boolean)
+        .join("; ");
+      showMessage(`Nothing to import${why ? `: skipped ${why}` : ""}`, "warning");
+      return;
+    }
+    setJob(null);
+    setSource({ kind: "browser", ...staged, label: stagedLabel(staged.files) });
   };
+
+  const startUpload = async () => {
+    if (source?.kind !== "browser") return;
+    stopUploadRef.current = false;
+    const record = {
+      kind: "browser",
+      status: "uploading",
+      progress: 0,
+      message: "Starting the upload…",
+      sourceLabel: `From ${source.label} (this computer)`,
+      intoLabel: intoLabel(into),
+    };
+    setJob(record);
+    try {
+      const baseFolder = into.id != null
+        ? into.path
+        : await ensureFolderPath(into.name, "/", filesFolderApi(axios, FILES_API));
+      const result = await uploadStaged({
+        files: source.files,
+        baseFolder,
+        links: Object.fromEntries(Object.entries(links).filter(([, v]) => v)),
+        http: axios,
+        filesApiBase: FILES_API,
+        shouldStop: () => stopUploadRef.current,
+        onProgress: ({ done, total, name }) =>
+          setJob((prev) => (prev?.kind === "browser"
+            ? {
+              ...prev,
+              progress: total ? Math.round((done / total) * 100) : 0,
+              message: name ? `Uploading ${done + 1} of ${total} · ${name}` : prev.message,
+            }
+            : prev)),
+      });
+      setJob((prev) => ({
+        ...prev,
+        status: result.stopped ? "stopped" : "complete",
+        progress: 100,
+        message: result.stopped
+          ? `Stopped after ${plural(result.imported + result.skipped + result.errors, "file")} of ${source.files.length}`
+          : "Upload finished",
+        stats: {
+          total_files: source.files.length,
+          imported: result.imported,
+          skipped: result.skipped,
+          errors: result.errors,
+          queued_for_indexing: result.queued_for_indexing,
+          skipped_private: source.skipped,
+        },
+        failures: [...result.failures, ...source.tooLarge.map((p) => `${p}: over 100 MB, not uploaded`)],
+      }));
+      if (into.isNew) {
+        const folders = await loadRootFolders();
+        const created = folders.find((f) => f.path === baseFolder || f.name === into.name);
+        if (created) chooseInto({ ...created, isNew: false });
+      }
+    } catch (err) {
+      setJob((prev) => ({ ...prev, status: "error", message: err.message || "The upload failed" }));
+    }
+  };
+
+  useEffect(() => {
+    if (!uploading) return undefined;
+    const warn = (e) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [uploading]);
+
+  // ── Actions ───────────────────────────────────────────────────────────────
+
+  const startOver = () => {
+    stopUploadRef.current = true;
+    writeJson(JOB_KEY, null);
+    setSource(null);
+    setJob(null);
+    setMoveConfirm(null);
+  };
+
+  const importNow = () => (source?.kind === "browser" ? startUpload() : startServerJob({ mode: "import" }));
+
+  const pickServerFolder = (path) => {
+    setJob(null);
+    setSource({ kind: "server", path });
+    setRecentPaths(readJson(RECENT_PATHS_KEY, []));
+  };
+
+  const fileCount = source?.kind === "browser" ? source.files.length : null;
+  const importLabel = fileCount != null ? `Import ${plural(fileCount, "file")}` : "Import";
+  const disabledReason = !source
+    ? "Choose what to import first"
+    : busy
+    ? "Wait for the current import to finish"
+    : "";
+
+  const serverChips = useMemo(() => {
+    const roots = browseInfo.roots.map((r) => ({ path: r, label: rootLabel(r, browseInfo.home) }));
+    const recent = recentPaths
+      .filter((p) => !browseInfo.roots.includes(p))
+      .slice(0, RECENT_CHIPS)
+      .map((p) => ({ path: p, label: displayPath(p, browseInfo.home) }));
+    return [...recent, ...roots];
+  }, [browseInfo, recentPaths]);
+
+  const linkKinds = [
+    { key: "client_id", label: "Client", items: entities.clients, name: (c) => c.name },
+    { key: "project_id", label: "Project", items: entities.projects, name: (p) => p.name },
+    { key: "website_id", label: "Website", items: entities.websites, name: (w) => w.url },
+  ].filter((k) => k.items.length > 0);
+
+  const bigDrop = source?.kind === "browser" &&
+    (source.files.length > BIG_DROP_FILES || source.totalBytes > BIG_DROP_BYTES);
+
+  const fromLine = source && (
+    <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ xs: "flex-start", sm: "center" }}>
+      <Typography variant="overline" color="text.secondary" sx={{ lineHeight: 1.5 }}>
+        From
+      </Typography>
+      <Typography variant="body2" sx={{ flexGrow: 1, minWidth: 0, overflowWrap: "anywhere" }} data-testid="import-from">
+        {source.kind === "server" ? (
+          <>
+            {displayPath(source.path, browseInfo.home)}
+            <Typography component="span" variant="body2" color="text.secondary">
+              {" · folder on the Guaardvark machine; runs in the background"}
+            </Typography>
+          </>
+        ) : (
+          <>
+            {source.label.startsWith('"') ? `${source.label} · ` : ""}
+            {plural(source.files.length, "file")}, {formatBytes(source.totalBytes)}
+            <Typography component="span" variant="body2" color="text.secondary">
+              {" · from this computer, uploaded as copies"}
+              {skippedPhrase(source.skipped) ? ` · skipped ${skippedPhrase(source.skipped)}` : ""}
+              {source.tooLarge.length ? ` · ${plural(source.tooLarge.length, "file")} over 100 MB left out` : ""}
+            </Typography>
+          </>
+        )}
+      </Typography>
+      <Stack direction="row" spacing={1}>
+        {source.kind === "server" && (
+          <ActionButton onClick={() => setPickerOpen(true)} disabled={busy}>
+            Change
+          </ActionButton>
+        )}
+        <ActionButton onClick={() => setSource(null)} disabled={busy}>
+          Clear
+        </ActionButton>
+      </Stack>
+    </Stack>
+  );
 
   return (
     <PageLayout
-      title="Bulk Import Documents"
+      title="Bulk Import"
       variant="standard"
       actions={
         <Stack direction="row" spacing={1}>
-          <Button
-            variant="outlined"
-            startIcon={<RestartAltIcon />}
-            onClick={resetForm}
-            disabled={submitting}
-          >
-            Reset
-          </Button>
-          <Button
-            variant="text"
-            onClick={() => navigate("/documents")}
-            disabled={submitting}
-          >
-            Back to Documents
-          </Button>
+          {(source || job) && (
+            <ActionButton onClick={startOver} disabled={starting}>
+              Start over
+            </ActionButton>
+          )}
+          <ActionButton kind="link" onClick={() => navigate("/documents")}>
+            Files
+          </ActionButton>
         </Stack>
       }
     >
-      <Typography variant="body1" color="text.secondary" sx={{ mb: 2 }}>
-        Import documents from server directories into your file manager and index them for search.
-      </Typography>
+      <Stack spacing={2}>
+        <Typography variant="body2" color="text.secondary">
+          Bring a folder into Files and index it for search.
+        </Typography>
 
-      <Paper sx={{ p: 3 }}>
-        <Stack spacing={3}>
-          <Typography variant="h6">Import Configuration</Typography>
-
-          <Grid container spacing={2}>
-            <Grid item xs={12}>
-              <TextField
-                label="Source Directory"
-                value={form.sourcePath}
-                onChange={handleChange("sourcePath")}
-                fullWidth
-                required
-                placeholder="/path/to/documents"
-                helperText="Path to the directory containing files to import"
-                disabled={submitting}
-                InputProps={{
-                  endAdornment: (
-                    <Button
-                      size="small"
-                      onClick={() => setBrowserOpen(true)}
-                      disabled={submitting}
-                    >
-                      Browse
-                    </Button>
-                  ),
-                }}
-              />
-            </Grid>
-
-            <Grid item xs={12}>
-              <TextField
-                label="Target Folder (optional)"
-                value={form.targetFolder}
-                onChange={handleChange("targetFolder")}
-                fullWidth
-                placeholder="Imports"
-                helperText="Folder name in Documents where files will be organized"
-                disabled={submitting}
-              />
-            </Grid>
-
-            <Grid item xs={12} sm={4}>
-              <Autocomplete
-                options={clients}
-                getOptionLabel={(option) => option.name || ""}
-                value={form.clientId}
-                onChange={handleAutocompleteChange("clientId")}
-                loading={loadingEntities}
-                disabled={submitting}
-                renderInput={(params) => (
-                  <TextField
-                    {...params}
-                    label="Client (optional)"
-                    helperText="Link documents to a client"
-                  />
-                )}
-              />
-            </Grid>
-
-            <Grid item xs={12} sm={4}>
-              <Autocomplete
-                options={projects}
-                getOptionLabel={(option) => option.name || ""}
-                value={form.projectId}
-                onChange={handleAutocompleteChange("projectId")}
-                loading={loadingEntities}
-                disabled={submitting}
-                renderInput={(params) => (
-                  <TextField
-                    {...params}
-                    label="Project (optional)"
-                    helperText="Link documents to a project"
-                  />
-                )}
-              />
-            </Grid>
-
-            <Grid item xs={12} sm={4}>
-              <Autocomplete
-                options={websites}
-                getOptionLabel={(option) => option.url || ""}
-                value={form.websiteId}
-                onChange={handleAutocompleteChange("websiteId")}
-                loading={loadingEntities}
-                disabled={submitting}
-                renderInput={(params) => (
-                  <TextField
-                    {...params}
-                    label="Website (optional)"
-                    helperText="Link documents to a website"
-                  />
-                )}
-              />
-            </Grid>
-          </Grid>
-
-          <Divider />
-
-          <Stack spacing={1}>
-            <Typography variant="subtitle1">Options</Typography>
-            <FormControlLabel
-              control={
-                <Checkbox
-                  checked={form.reindexMissing}
-                  onChange={handleCheckbox("reindexMissing")}
-                  disabled={submitting}
-                />
-              }
-              label="Index already-imported files that aren't indexed yet"
-            />
-            <Typography variant="caption" color="text.secondary" sx={{ pl: 4 }}>
-              A file this import already brought in (same target path) is skipped and its source is
-              left alone; with this ticked it is queued for indexing if its indexing never finished.
-              Files that are already indexed are not indexed again.
-            </Typography>
-            <FormControlLabel
-              control={
-                <Checkbox
-                  checked={form.forceCopy}
-                  onChange={handleCheckbox("forceCopy")}
-                  disabled={submitting}
-                />
-              }
-              label="Copy files instead of moving them"
-            />
-            <Typography variant="caption" color="text.secondary" sx={{ pl: 4 }}>
-              {form.forceCopy
-                ? "Each file is copied into Documents; the source folder is left as it is (the files take disk space twice)."
-                : "Each file is moved out of the source folder into Documents. Tick to copy and leave the source folder as it is."}
-            </Typography>
-            <FormControlLabel
-              control={
-                <Checkbox
-                  checked={form.dryRun}
-                  onChange={handleCheckbox("dryRun")}
-                  disabled={submitting}
-                />
-              }
-              label="Dry run (preview without importing)"
-            />
-          </Stack>
-
-          <Stack direction="row" spacing={2} justifyContent="flex-end">
-            <Button
-              variant="contained"
-              startIcon={<CloudUploadIcon />}
-              onClick={handleStartClick}
-              disabled={!canSubmit}
-              size="large"
+        <Paper variant="outlined" sx={{ p: 2 }}>
+          <Stack spacing={1.5}>
+            <ImportDropZone
+              compact={Boolean(source)}
+              disabled={busy}
+              disabledReason="Wait for the current import to finish"
+              onDrop={(snapshot) => stage(stageDrop(snapshot))}
+              onPick={(files) => stage(Promise.resolve(stageFileList(files)))}
             >
-              {submitting ? "Starting..." : form.dryRun ? "Preview Import" : "Start Import"}
-            </Button>
-          </Stack>
-        </Stack>
-      </Paper>
+              {fromLine}
+            </ImportDropZone>
 
-      {/* Directory Browser Dialog */}
-      <Dialog
-        open={browserOpen}
-        onClose={() => setBrowserOpen(false)}
-        maxWidth="sm"
-        fullWidth
-      >
-        <DialogTitle>
-          <Stack direction="row" alignItems="center" spacing={1}>
-            <FolderOpenIcon />
-            <Typography variant="h6">Browse Server Directory</Typography>
-          </Stack>
-        </DialogTitle>
-        <DialogContent>
-          <Stack spacing={2}>
-            <TextField
-              label="Current Path"
-              value={displayPath(currentPath, browseHome)}
-              fullWidth
-              InputProps={{
-                readOnly: true,
-                startAdornment: parentPath && (
-                  <IconButton
-                    size="small"
-                    aria-label="Up one folder"
-                    onClick={() => handleBrowserNavigate(parentPath)}
+            {!source && (
+              <Stack spacing={1}>
+                <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ xs: "stretch", sm: "center" }}>
+                  <Typography variant="body2" color="text.secondary">
+                    Or a folder on the Guaardvark machine
+                  </Typography>
+                  <ActionButton
+                    onClick={() => setPickerOpen(true)}
+                    disabled={busy}
+                    sx={{ whiteSpace: { xs: "normal", sm: "nowrap" }, height: { xs: "auto", sm: 30 }, py: { xs: 0.75, sm: 0 } }}
                   >
-                    <ArrowBackIcon />
-                  </IconButton>
-                ),
-              }}
-            />
-            {browseRoots.length > 0 && (
-              <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap alignItems="center">
-                <Typography variant="caption" color="text.secondary">
-                  Browse:
-                </Typography>
-                {browseRoots.map((root) => (
-                  <Button
-                    key={root}
-                    size="small"
-                    variant={root === currentPath ? "contained" : "outlined"}
-                    onClick={() => handleBrowserNavigate(root)}
-                    sx={{ textTransform: "none" }}
-                  >
-                    {rootLabel(root, browseHome)}
-                  </Button>
-                ))}
-                <Typography variant="caption" color="text.secondary">
-                  Hidden folders are not shown.
-                </Typography>
+                    Browse the Guaardvark machine…
+                  </ActionButton>
+                </Stack>
+                {serverChips.length > 0 && (
+                  <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap>
+                    {serverChips.map((c) => (
+                      <Chip
+                        key={c.path}
+                        label={c.label}
+                        size="small"
+                        variant="outlined"
+                        onClick={() => pickServerFolder(c.path)}
+                        disabled={busy}
+                      />
+                    ))}
+                  </Stack>
+                )}
               </Stack>
             )}
 
-            {loadingDirs ? (
-              <Box sx={{ p: 2, textAlign: "center" }}>
-                <Typography variant="body2" color="text.secondary">
-                  Loading directories...
-                </Typography>
+            {bigDrop && (
+              <Typography variant="caption" color="text.secondary">
+                That is a large drop. If this folder is on the Guaardvark machine, choose it there instead: it runs in
+                the background and can move instead of copy.
+              </Typography>
+            )}
+          </Stack>
+        </Paper>
+
+        <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} alignItems={{ xs: "stretch", sm: "center" }}>
+          <ImportTargetSelect
+            folders={rootFolders}
+            value={into}
+            onChange={chooseInto}
+            onNewFolder={() => setNewFolderOpen(true)}
+            disabled={busy}
+          />
+          <ActionButton kind="link" onClick={() => setMoreOpen((v) => !v)}>
+            {moreOpen ? "Fewer options ▾" : "More options ▸"}
+          </ActionButton>
+          <Box sx={{ flexGrow: 1 }} />
+          <ImportActionButton
+            label={importLabel}
+            disabled={!source || busy}
+            disabledReason={disabledReason}
+            canPreview={source?.kind === "server"}
+            canMove={source?.kind === "server"}
+            onImport={importNow}
+            onPreview={() => startServerJob({ mode: "preview" })}
+            onMove={() => startServerJob({ mode: "move-preview" })}
+          />
+        </Stack>
+
+        <Collapse in={moreOpen} unmountOnExit>
+          <Paper variant="outlined" sx={{ p: 2 }}>
+            <Stack spacing={1.5}>
+              <Box>
+                <SettingChip
+                  label="Index files an earlier import left unindexed"
+                  on={reindexMissing}
+                  onToggle={setReindexMissing}
+                  disabled={busy}
+                  tooltip="A file an earlier import already brought in is skipped and its source left alone; with this on it is queued for indexing if its indexing never finished. Files already indexed are not indexed again."
+                />
               </Box>
-            ) : browseError ? (
-              <Alert
-                severity="error"
-                action={
-                  <Button color="inherit" size="small" onClick={() => handleBrowserNavigate("")}>
-                    Go to home folder
-                  </Button>
-                }
-              >
-                {browseError}
-              </Alert>
-            ) : directories.length === 0 ? (
-              <Alert severity="info">
-                No subdirectories found. You can select this directory.
-              </Alert>
-            ) : (
-              <List sx={{ maxHeight: 300, overflow: "auto" }}>
-                {directories.map((dir) => (
-                  <ListItemButton
-                    key={dir}
-                    onClick={() => {
-                      const newPath = currentPath === "/" ? `/${dir}` : `${currentPath}/${dir}`;
-                      handleBrowserNavigate(newPath);
-                    }}
-                  >
-                    <ListItemIcon>
-                      <FolderIcon />
-                    </ListItemIcon>
-                    <ListItemText primary={dir} />
-                  </ListItemButton>
-                ))}
-              </List>
-            )}
-          </Stack>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setBrowserOpen(false)}>
-            Cancel
-          </Button>
-          <Button
-            onClick={handleBrowserSelect}
-            variant="contained"
-            disabled={!currentPath || loadedPath !== currentPath || Boolean(browseError)}
-          >
-            Select This Directory
-          </Button>
-        </DialogActions>
-      </Dialog>
+              {linkKinds.length > 0 && (
+                <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} alignItems={{ xs: "stretch", sm: "center" }}>
+                  <Typography variant="overline" color="text.secondary">
+                    Link to
+                  </Typography>
+                  {linkKinds.map((kind) => (
+                    <TextField
+                      key={kind.key}
+                      select
+                      size="small"
+                      label={kind.label}
+                      value={links[kind.key]}
+                      onChange={(e) => setLinks((prev) => ({ ...prev, [kind.key]: e.target.value }))}
+                      disabled={busy}
+                      sx={{ minWidth: 180 }}
+                    >
+                      <MenuItem value="">None</MenuItem>
+                      {kind.items.map((item) => (
+                        <MenuItem key={item.id} value={item.id}>
+                          {kind.name(item)}
+                        </MenuItem>
+                      ))}
+                    </TextField>
+                  ))}
+                </Stack>
+              )}
+            </Stack>
+          </Paper>
+        </Collapse>
 
-      {/* Confirmation Dialog */}
-      <Dialog open={confirmDialogOpen} onClose={() => setConfirmDialogOpen(false)}>
-        <DialogTitle>Confirm Bulk Import</DialogTitle>
-        <DialogContent>
-          <Typography variant="body1" gutterBottom>
-            Ready to import files:
-          </Typography>
-          <Box component="ul" sx={{ pl: 2, mt: 1 }}>
-            <li>From: <strong>{form.sourcePath || "(not specified)"}</strong></li>
-            <li>To: <strong>{form.targetFolder || "root"}</strong></li>
-            <li>
-              {form.forceCopy
-                ? "Files are copied; the source folder is left as it is."
-                : "Files are moved out of the source folder."}
-            </li>
-            {form.clientId && <li>Client: <strong>{form.clientId.name}</strong></li>}
-            {form.projectId && <li>Project: <strong>{form.projectId.name}</strong></li>}
-            {form.websiteId && <li>Website: <strong>{form.websiteId.url}</strong></li>}
-          </Box>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setConfirmDialogOpen(false)} disabled={submitting}>
-            Cancel
-          </Button>
-          <Button onClick={submitImport} variant="contained" disabled={submitting}>
-            Confirm Import
-          </Button>
-        </DialogActions>
-      </Dialog>
+        <ImportStatusCard
+          job={job}
+          onStop={uploading ? () => { stopUploadRef.current = true; } : undefined}
+          onOpenFiles={() => {
+            const target = into.path || into.name;
+            navigate(target ? `/documents?open=${encodeURIComponent(target)}` : "/documents");
+          }}
+          onImportAnother={startOver}
+        />
+      </Stack>
 
-      {/* Job Status */}
-      <Paper sx={{ p: 3 }}>
-        <Stack spacing={2}>
-          <Stack direction="row" alignItems="center" justifyContent="space-between">
-            <Typography variant="h6">Import Status</Typography>
-            {polling && (
-              <Stack direction="row" alignItems="center" spacing={1}>
-                <InfoOutlinedIcon fontSize="small" color="action" />
-                <Typography variant="body2" color="text.secondary">
-                  Polling...
-                </Typography>
-              </Stack>
-            )}
-          </Stack>
-          {renderStatus()}
-        </Stack>
-      </Paper>
+      <DirectoryPicker
+        open={pickerOpen}
+        onClose={() => setPickerOpen(false)}
+        onSelect={(path) => pickServerFolder(path)}
+        initialPath={source?.kind === "server" ? source.path : "~"}
+        title="Choose a folder on the Guaardvark machine"
+      />
+
+      <TextInputDialog
+        open={newFolderOpen}
+        title="New folder in Files"
+        description="The import creates it at the top level of Files."
+        label="Folder name"
+        submitLabel="Use this folder"
+        onSubmit={(name) => {
+          setNewFolderOpen(false);
+          const existing = rootFolders.find((f) => f.name === name);
+          chooseInto(existing ? { ...existing, isNew: false } : { id: null, path: null, name, isNew: true });
+        }}
+        onClose={() => setNewFolderOpen(false)}
+      />
+
+      <ConfirmActionDialog
+        open={Boolean(moveConfirm)}
+        title="Move the files into Files?"
+        description="Each file not already in Files is removed from the source folder once it is safely in Files."
+        facts={moveConfirm ? [
+          { label: "Files found", value: moveConfirm.count },
+          { label: "From", value: source?.kind === "server" ? displayPath(source.path, browseInfo.home) : "" },
+          { label: "Into", value: intoLabel(into) },
+        ] : []}
+        keeps={`files already imported earlier (left where they are)${moveConfirm?.skipped ? `, and the ${moveConfirm.skipped} skipped` : ""}`}
+        confirmLabel="Move"
+        onConfirm={() => {
+          setMoveConfirm(null);
+          startServerJob({ mode: "move" });
+        }}
+        onClose={() => setMoveConfirm(null)}
+      />
     </PageLayout>
   );
 };

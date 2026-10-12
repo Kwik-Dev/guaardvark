@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, act } from "@testing-library/react";
+import { render, screen, fireEvent, act, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 const { bulkApi, messages } = vi.hoisted(() => ({
@@ -13,6 +13,12 @@ vi.mock("../../api/bulkImportService", () => bulkApi);
 vi.mock("../../api/clientService", () => ({ getClients: vi.fn(async () => []) }));
 vi.mock("../../api/projectService", () => ({ getProjects: vi.fn(async () => []) }));
 vi.mock("../../api/websiteService", () => ({ getWebsites: vi.fn(async () => []) }));
+vi.mock("axios", () => ({
+  default: {
+    get: vi.fn(async () => ({ data: { data: { folders: [], documents: [] } } })),
+    post: vi.fn(),
+  },
+}));
 vi.mock("../../components/layout/PageLayout", () => ({
   default: ({ children, actions }) => (
     <div>
@@ -25,6 +31,21 @@ vi.mock("../../components/common/SnackbarProvider", () => {
   const api = { showMessage: (text, level) => messages.push({ text, level }) };
   return { useSnackbar: () => api };
 });
+// The shared folder picker, reduced to one button that picks /data/in.
+vi.mock("../../components/common/DirectoryPicker", () => ({
+  default: ({ open, onSelect, onClose }) =>
+    open ? (
+      <button
+        type="button"
+        onClick={() => {
+          onSelect("/data/in");
+          onClose();
+        }}
+      >
+        pick /data/in
+      </button>
+    ) : null,
+}));
 
 import BulkImportDocumentsPage from "../BulkImportDocumentsPage";
 
@@ -35,126 +56,168 @@ const renderPage = () =>
     </MemoryRouter>,
   );
 
+const pickServerFolder = () => {
+  fireEvent.click(screen.getByRole("button", { name: "Browse the Guaardvark machine…" }));
+  fireEvent.click(screen.getByRole("button", { name: "pick /data/in" }));
+};
+
+const runFromMenu = async (name) => {
+  fireEvent.click(screen.getByRole("button", { name: "More ways to import" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: new RegExp(`^${name}`) }));
+};
+
 beforeEach(() => {
   messages.length = 0;
+  localStorage.clear();
   bulkApi.startBulkImport.mockReset();
   bulkApi.getBulkImportStatus.mockReset();
-  global.fetch = vi.fn();
+  global.fetch = vi.fn(async () => ({ json: async () => ({ roots: [], home: "/home/u" }) }));
 });
 
 afterEach(() => {
   vi.useRealTimers();
 });
 
-describe("BulkImportDocumentsPage options", () => {
-  it("copies by default and says so; unticked, it says files are moved", async () => {
+describe("BulkImportDocumentsPage first screen", () => {
+  it("offers a drop zone, a server folder, Into and Import, with Import off until a source is chosen", () => {
     renderPage();
-    const copyBox = screen.getByLabelText("Copy files instead of moving them");
-    expect(copyBox).toBeChecked();
-    expect(screen.getByText(/the source folder is left as it is \(the files take disk space twice\)/)).toBeInTheDocument();
-
-    fireEvent.change(screen.getByLabelText(/Source Directory/), { target: { value: "/data/in" } });
-    fireEvent.click(screen.getByRole("button", { name: "Start Import" }));
-    expect(
-      await screen.findByText("Files are copied; the source folder is left as it is."),
-    ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-
-    fireEvent.click(copyBox);
-    expect(copyBox).not.toBeChecked();
-    expect(screen.getByText(/moved out of the source folder into Documents/)).toBeInTheDocument();
-    // The cancelled confirm dialog keeps the page aria-hidden until its exit transition ends.
-    fireEvent.click(await screen.findByRole("button", { name: "Start Import" }));
-    expect(await screen.findByText("Files are moved out of the source folder.")).toBeInTheDocument();
+    expect(screen.getByTestId("import-drop-zone")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Browse the Guaardvark machine…" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Into")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Import" })).toBeDisabled();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
   });
 });
 
-describe("BulkImportDocumentsPage reindex option", () => {
-  it("is named for what the worker does: only unindexed existing files are queued", () => {
-    renderPage();
-    const box = screen.getByLabelText("Index already-imported files that aren't indexed yet");
-    expect(box).toBeChecked();
-    expect(screen.getByText(/already indexed are not indexed again/)).toBeInTheDocument();
-    expect(screen.queryByLabelText(/Re-index existing documents/)).not.toBeInTheDocument();
-  });
-});
-
-describe("BulkImportDocumentsPage job status", () => {
-  const startDryRun = async () => {
+describe("BulkImportDocumentsPage server folder", () => {
+  it("imports a copy into Imports straight away, with no confirmation", async () => {
     bulkApi.startBulkImport.mockResolvedValue({ job_id: "job-1", status: "processing" });
     renderPage();
-    fireEvent.change(screen.getByLabelText(/Source Directory/), { target: { value: "/data/in" } });
-    fireEvent.click(screen.getByLabelText(/Dry run/));
-    fireEvent.click(screen.getByRole("button", { name: "Preview Import" }));
-    expect(await screen.findByText("Polling...")).toBeInTheDocument();
-  };
+    pickServerFolder();
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    await screen.findByTestId("import-status");
+    expect(bulkApi.startBulkImport).toHaveBeenCalledWith(expect.objectContaining({
+      source_path: "/data/in",
+      target_folder: "Imports",
+      target_folder_id: null,
+      force_copy: true,
+      dry_run: false,
+      reindex_missing: true,
+    }));
+    expect(screen.queryByText("Move the files into Files?")).not.toBeInTheDocument();
+  });
 
-  it("stops polling and turns green when the worker reports \"complete\"", async () => {
+  it("Preview only sends a dry run that copies nothing", async () => {
+    bulkApi.startBulkImport.mockResolvedValue({ job_id: "job-1", status: "processing" });
+    renderPage();
+    pickServerFolder();
+    await runFromMenu("Preview only");
+    await screen.findByTestId("import-status");
+    expect(bulkApi.startBulkImport).toHaveBeenCalledWith(expect.objectContaining({ dry_run: true, force_copy: true }));
+  });
+
+  it("Import and move counts the files first, then asks with the real count", async () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
-    await startDryRun();
+    bulkApi.startBulkImport.mockResolvedValue({ job_id: "job-1", status: "processing" });
     bulkApi.getBulkImportStatus.mockResolvedValue({
       job_id: "job-1",
       status: "complete",
       message: "Dry run: Would import 2 files",
-      progress: 100,
+      stats: { total_files: 2, files: ["a.txt", "b.txt"], skipped_private: { hidden_files: 1 } },
     });
+    renderPage();
+    pickServerFolder();
+    await runFromMenu("Import and move");
+    expect(bulkApi.startBulkImport).toHaveBeenLastCalledWith(expect.objectContaining({ dry_run: true }));
     await act(async () => {
       await vi.advanceTimersByTimeAsync(3000);
     });
-    expect(await screen.findByText("Dry run: Would import 2 files")).toBeInTheDocument();
-    expect(screen.queryByText("Polling...")).not.toBeInTheDocument();
-    const alert = screen.getByText("Job Status").closest(".MuiAlert-root");
-    expect(alert.className).toMatch(/Success/);
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(6000);
-    });
-    expect(bulkApi.getBulkImportStatus).toHaveBeenCalledTimes(1);
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Files found")).toBeInTheDocument();
+    expect(within(dialog).getByText("2")).toBeInTheDocument();
+    bulkApi.startBulkImport.mockResolvedValue({ job_id: "job-2", status: "processing" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Move" }));
+    expect(bulkApi.startBulkImport).toHaveBeenLastCalledWith(expect.objectContaining({ dry_run: false, force_copy: false }));
   });
+});
 
-  it("Reset stops the poll and clears the job", async () => {
+describe("BulkImportDocumentsPage job status", () => {
+  const startImport = async () => {
+    bulkApi.startBulkImport.mockResolvedValue({ job_id: "job-1", status: "processing" });
+    renderPage();
+    pickServerFolder();
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    await screen.findByTestId("import-status");
+  };
+
+  it("stops polling once the worker reports \"complete\"", async () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
-    await startDryRun();
-    bulkApi.getBulkImportStatus.mockResolvedValue({ job_id: "job-1", status: "processing" });
+    await startImport();
+    bulkApi.getBulkImportStatus.mockResolvedValue({
+      job_id: "job-1",
+      status: "complete",
+      message: "Import complete: 2 imported, 0 skipped, 0 errors",
+      stats: { total_files: 2, imported: 2, skipped: 0, errors: 0, queued_for_indexing: 2 },
+    });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(3000);
     });
-    expect(bulkApi.getBulkImportStatus).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByRole("button", { name: "Reset" }));
-    expect(screen.queryByText("Polling...")).not.toBeInTheDocument();
-    expect(screen.getByText(/No import job running/)).toBeInTheDocument();
+    expect(await screen.findByText("Imported")).toBeInTheDocument();
+    expect(screen.getByText(/2 imported · 0 failed · 2 queued for indexing/)).toBeInTheDocument();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(9000);
     });
     expect(bulkApi.getBulkImportStatus).toHaveBeenCalledTimes(1);
   });
 
-  it("shows a complete job with failed files as finished with errors, not green", async () => {
+  it("shows a complete job with failed files as finished with errors, not imported", async () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
-    await startDryRun();
+    await startImport();
     bulkApi.getBulkImportStatus.mockResolvedValue({
       job_id: "job-1",
       status: "complete",
-      message: "Import complete: 1 imported, 0 skipped, 2 errors",
       stats: { total_files: 3, imported: 1, skipped: 0, errors: 2, queued_for_indexing: 1 },
     });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(3000);
     });
     expect(await screen.findByText("Finished with errors (2 failed)")).toBeInTheDocument();
-    const alert = screen.getByText("Finished with errors (2 failed)").closest(".MuiAlert-root");
-    expect(alert.className).toMatch(/Warning/);
-    expect(alert.className).not.toMatch(/Success/);
-    expect(screen.queryByText("Polling...")).not.toBeInTheDocument();
+    expect(screen.queryByText("Imported")).not.toBeInTheDocument();
   });
 
-  it("also accepts \"completed\"", async () => {
+  it("Start over stops the poll and clears the job", async () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
-    await startDryRun();
-    bulkApi.getBulkImportStatus.mockResolvedValue({ job_id: "job-1", status: "completed" });
+    await startImport();
+    bulkApi.getBulkImportStatus.mockResolvedValue({ job_id: "job-1", status: "processing" });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(3000);
     });
-    expect(await screen.findByText("completed")).toBeInTheDocument();
-    expect(screen.queryByText("Polling...")).not.toBeInTheDocument();
+    expect(bulkApi.getBulkImportStatus).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Start over" }));
+    expect(screen.queryByTestId("import-status")).not.toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(9000);
+    });
+    expect(bulkApi.getBulkImportStatus).toHaveBeenCalledTimes(1);
+    expect(localStorage.getItem("guaardvark_bulkImportJob")).toBeNull();
+  });
+
+  it("picks up a job left running and says it finished while away", async () => {
+    localStorage.setItem("guaardvark_bulkImportJob", JSON.stringify({ jobId: "job-9", mode: "import", sourceLabel: "From /data/in" }));
+    bulkApi.getBulkImportStatus.mockResolvedValue({
+      job_id: "job-9",
+      status: "complete",
+      stats: { total_files: 1, imported: 1, skipped: 0, errors: 0 },
+    });
+    renderPage();
+    expect(await screen.findByText("Finished while you were away.")).toBeInTheDocument();
+    expect(localStorage.getItem("guaardvark_bulkImportJob")).toBeNull();
+  });
+
+  it("says so when the server no longer keeps the job's status", async () => {
+    localStorage.setItem("guaardvark_bulkImportJob", JSON.stringify({ jobId: "job-old", mode: "import" }));
+    bulkApi.getBulkImportStatus.mockRejectedValue(Object.assign(new Error("Job not found"), { status: 404 }));
+    renderPage();
+    expect(await screen.findByText(/no longer kept/)).toBeInTheDocument();
   });
 });
