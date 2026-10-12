@@ -261,6 +261,101 @@ def parse_transcripts_task(self, job_id: str, input_path: str, recursive: bool =
         raise
 
 
+@shared_task(bind=True, name='training.build_folder_dataset')
+def build_folder_dataset_task(self, job_id: str, folder: str, kinds=None,
+                              pairs_per_1000_words: float = 3):
+    """Build a messages dataset from a folder of notes (folder_dataset).
+
+    Scan, scrub, chunk, ask the local model for pairs, filter, write. A cancel
+    is noticed between chunks and writes nothing. Generation goes through the
+    chat model like any chat call, so it waits behind a render the way chat
+    does and claims no GPU of its own."""
+    import time
+    from backend.services.training import folder_dataset as fd
+    from backend.services.training.pair_generator import PairGenerator
+
+    started = time.monotonic()
+    try:
+        _update_job_status(job_id, status="running", pipeline_stage="building",
+                           started_at=utcnow(), celery_task_id=self.request.id)
+        _emit_progress(job_id, 0, "Scanning the folder...", "start")
+
+        prepared = fd.prepare(folder, kinds)
+        scrub = prepared["scrub"]
+        _emit_progress(job_id, 4, f"Read {prepared['files']} files ({prepared['words']} words); "
+                                  f"scrubbed {scrub['total']} items")
+        if not prepared["docs"]:
+            raise ValueError("Nothing to read: the folder has no notes of the chosen kinds "
+                             "that the import rules let in")
+
+        chunks = fd.chunk_docs(prepared["docs"])
+        _emit_progress(job_id, 8, f"Split into {len(chunks)} chunks; writing pairs...")
+
+        generator = PairGenerator()
+
+        def on_progress(done, total, pairs):
+            _emit_progress(job_id, 8 + 84 * done // max(1, total),
+                           f"Writing pairs: chunk {done} of {total}, {pairs} pairs so far",
+                           metrics={"chunks_done": done, "chunks": total, "pairs": pairs})
+
+        pairs = fd.generate(chunks, pairs_per_1000_words, generator,
+                            should_stop=_job_stop_check(job_id), on_progress=on_progress)
+
+        _emit_progress(job_id, 93, f"Filtering {len(pairs)} pairs...")
+        kept, dropped = fd.filter_pairs(pairs)
+        if not kept:
+            raise ValueError(f"No pairs survived the filter ({len(pairs)} written, "
+                             f"dropped: {dropped})")
+
+        name = fd.dataset_name(folder)
+        report = {
+            "folder": folder,
+            "kinds": prepared["kinds"],
+            "pairs_per_1000_words": pairs_per_1000_words,
+            "files": prepared["files"],
+            "words": prepared["words"],
+            "skipped": prepared["skipped"],
+            "unreadable": prepared["unreadable"],
+            "scrub": scrub,
+            "chunks": len(chunks),
+            "pairs_written": len(pairs),
+            "pairs_kept": len(kept),
+            "dropped": dropped,
+            "kinds_kept": {k: sum(1 for p in kept if p["kind"] == k)
+                           for k in ("specific", "reasoning", "multi_hop", "summary")},
+            "model": getattr(generator._llm, "model", None),
+            "model_calls": generator.calls,
+            "unparsed_answers": generator.unparsed,
+            "generation_seconds": round(generator.seconds, 1),
+            "seconds": round(time.monotonic() - started, 1),
+        }
+        output_path, report_path = fd.write(kept, report, name)
+        _update_job_status(job_id, status="completed", pipeline_stage="building",
+                           completed_at=utcnow(), progress=100,
+                           config_json=json.dumps({
+                               "input_path": folder,
+                               "output_path": output_path,
+                               "report_path": report_path,
+                               "pairs_count": len(kept),
+                               "files": prepared["files"],
+                               "chunks": len(chunks),
+                               "scrubbed": scrub["total"],
+                               "dropped": dropped,
+                           }))
+        _emit_progress(job_id, 100, f"Completed: {len(kept)} pairs in {name}.jsonl", "complete")
+        return {"output_path": output_path, "report_path": report_path, "pairs_count": len(kept)}
+
+    except fd.BuildCancelled:
+        logger.info(f"Folder dataset build {job_id} cancelled; nothing written")
+        _emit_progress(job_id, 0, "Cancelled; nothing written", "cancelled")
+        return {"cancelled": True}
+    except Exception as e:
+        logger.error(f"Error in build_folder_dataset_task: {e}", exc_info=True)
+        _update_job_status(job_id, status="failed", error_message=str(e))
+        _emit_progress(job_id, 0, f"Error: {str(e)}", "error")
+        raise
+
+
 # Share of the full pipeline's progress bar the filter step fills.
 PIPELINE_FILTER_PROGRESS = (20, 30)
 

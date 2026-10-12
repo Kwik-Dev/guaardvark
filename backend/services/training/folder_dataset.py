@@ -1,0 +1,313 @@
+"""Build a fine-tuning dataset from a folder of a person's own notes.
+
+The stages, in order, each reported with counts:
+
+1. scan: the folder is walked with Bulk Import's rules (scan_import_source:
+   no hidden folders or files, no credential files, nothing of Guaardvark's
+   own data), keeping the chosen file kinds;
+2. scrub: always on (folder_scrub), before any text reaches a model;
+3. chunk: EnhancedRAGChunker, strategy auto, as indexing does;
+4. pairs: questions and answers from the local model (pair_generator);
+5. filter: duplicate questions, answers the chunk does not support, the
+   heuristic quality rules and length bounds;
+6. write: one .jsonl in the training datasets folder and its build report.
+
+The check (scan and scrub, no model) and a three-chunk timing probe give the
+person the scrub report and an estimate before anything is built.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import math
+import os
+import re
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Callable, Optional
+
+from backend.services.training.folder_scrub import Scrubber, load_terms
+from backend.services.training.pair_generator import (
+    QUESTION_KINDS,
+    PairGenerator,
+    as_training_row,
+)
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_KINDS = (".md", ".txt")
+ALL_KINDS = (".md", ".txt", ".html", ".docx")
+DEFAULT_PAIRS_PER_1000_WORDS = 3
+MAX_PAIRS_PER_1000_WORDS = 20
+PROBE_CHUNKS = 3
+# A chunk's size before the probe has measured one; the chunker's own target.
+ASSUMED_WORDS_PER_CHUNK = 250
+
+# Filter bounds. Answers must share this much of their content words with the
+# text they came from (two passages for multi-hop, a summary paraphrases more).
+SUPPORT_MIN = {"specific": 0.6, "reasoning": 0.5, "multi_hop": 0.4, "summary": 0.4}
+QUESTION_CHARS = (10, 400)
+ANSWER_CHARS = (20, 2000)
+QUALITY_MIN = 0.5
+
+
+class BuildCancelled(Exception):
+    """The person cancelled the build; nothing is written."""
+
+
+def training_dir() -> Path:
+    from backend.config import STORAGE_DIR
+
+    return Path(STORAGE_DIR) / "training"
+
+
+def scrub_terms_path() -> Path:
+    return training_dir() / "scrub_terms.txt"
+
+
+def build_reports_dir() -> Path:
+    # Not beside the dataset: the dataset readers take every .json in the
+    # datasets folder as rows, so a report there would read as a broken dataset.
+    path = training_dir() / "build_reports"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def normalise_kinds(kinds) -> list[str]:
+    chosen = []
+    for kind in kinds or DEFAULT_KINDS:
+        kind = str(kind).lower().strip()
+        kind = kind if kind.startswith(".") else f".{kind}"
+        if kind in ALL_KINDS and kind not in chosen:
+            chosen.append(kind)
+    return chosen or list(DEFAULT_KINDS)
+
+
+def scan(folder: str, kinds) -> tuple[list[tuple[str, str]], dict]:
+    """(files, skipped): (full path, path relative to the folder) for each file
+    of the chosen kinds the Bulk Import rules let in."""
+    from backend.celery_tasks_isolated import _guaardvark_storage_dirs, scan_import_source
+
+    kinds = normalise_kinds(kinds)
+    storage_dir, upload_dir, backup_dir = _guaardvark_storage_dirs()
+    found, skipped = scan_import_source(folder, set(kinds), storage_dir, upload_dir,
+                                        backup_dir=backup_dir)
+    files = [(full, rel) for full, rel, name in found if os.path.splitext(name)[1].lower() in kinds]
+    skipped["other_kinds"] = len(found) - len(files)
+    return files, skipped
+
+
+def read_text(path: str) -> str:
+    suffix = os.path.splitext(path)[1].lower()
+    if suffix == ".docx":
+        from docx import Document
+
+        return "\n".join(p.text for p in Document(path).paragraphs)
+    with open(path, encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    if suffix == ".html":
+        from bs4 import BeautifulSoup
+
+        text = BeautifulSoup(text, "html.parser").get_text("\n")
+    return text
+
+
+def _words(text: str) -> int:
+    return len(text.split())
+
+
+def prepare(folder: str, kinds, terms: Optional[list[str]] = None) -> dict:
+    """Scan, read and scrub. Returns the scrubbed texts and the report parts."""
+    files, skipped = scan(folder, kinds)
+    scrubber = Scrubber(terms if terms is not None else load_terms(scrub_terms_path()))
+    docs, unreadable = [], []
+    for full, rel in files:
+        try:
+            text = read_text(full)
+        except Exception as e:
+            unreadable.append(f"{rel}: {e}")
+            continue
+        clean = scrubber.scrub(text, rel)
+        if clean.strip():
+            docs.append({"source_path": rel, "text": clean, "words": _words(clean)})
+    return {
+        "folder": folder,
+        "kinds": normalise_kinds(kinds),
+        "docs": docs,
+        "files": len(docs),
+        "words": sum(d["words"] for d in docs),
+        "skipped": skipped,
+        "unreadable": unreadable,
+        "scrub": scrubber.report(),
+    }
+
+
+def chunk_docs(docs: list[dict], limit: Optional[int] = None) -> list[dict]:
+    """Chunks as indexing makes them, each with its file and hash."""
+    from llama_index.core import Document as LlamaDocument
+    from backend.utils.enhanced_rag_chunking import EnhancedRAGChunker
+
+    chunker = EnhancedRAGChunker()
+    chunks = []
+    for doc in docs:
+        nodes = chunker.chunk_documents([LlamaDocument(text=doc["text"], metadata={})], strategy_name="auto")
+        texts = [n.get_content() for n in (nodes or []) if getattr(n, "text", None)] or [doc["text"][:2000]]
+        for text in texts:
+            chunks.append({
+                "source_path": doc["source_path"],
+                "text": text,
+                "words": _words(text),
+                "hash": hashlib.sha256(text.encode()).hexdigest(),
+            })
+            if limit and len(chunks) >= limit:
+                return chunks
+    return chunks
+
+
+def questions_for(chunk_words: int, per_1000: float) -> int:
+    """Questions asked of one chunk; its summary pair comes on top."""
+    return max(1, round(chunk_words * per_1000 / 1000))
+
+
+def estimate(prepared: dict, per_1000: float, probe: Optional[dict] = None) -> dict:
+    """Chunks, pairs and time before a build. Without a probe the chunk size is
+    assumed and there is no time; the probe measures both."""
+    measured = bool(probe and probe.get("words_per_chunk"))
+    words_per_chunk = probe["words_per_chunk"] if measured else ASSUMED_WORDS_PER_CHUNK
+    chunks = sum(max(1, math.ceil(d["words"] / words_per_chunk)) for d in prepared["docs"])
+    per_chunk = questions_for(round(words_per_chunk), per_1000) + 1  # + the summary pair
+    out = {
+        "pairs_per_1000_words": per_1000,
+        "words_per_chunk": words_per_chunk,
+        "basis": "measured by the probe" if measured else f"assumed {ASSUMED_WORDS_PER_CHUNK} words per chunk",
+        "chunks": chunks,
+        "pairs_before_filter": chunks * per_chunk,
+        "estimated": True,
+    }
+    if probe and probe.get("seconds_per_chunk"):
+        out["seconds"] = round(chunks * probe["seconds_per_chunk"])
+    return out
+
+
+def probe_timing(prepared: dict, per_1000: float, generator: Optional[PairGenerator] = None) -> dict:
+    """Generate (and throw away) the pairs of a few chunks to measure the time."""
+    chunks = chunk_docs(prepared["docs"], limit=PROBE_CHUNKS)
+    if not chunks:
+        return {"chunks": 0, "reason": "nothing to read in the folder"}
+    generator = generator or PairGenerator()
+    started = time.monotonic()
+    pairs = 0
+    for chunk in chunks:
+        pairs += len(_pairs_for_chunk(generator, chunk, None, per_1000, 0))
+    seconds = time.monotonic() - started
+    model = getattr(generator._llm, "model", None)
+    return {
+        "chunks": len(chunks),
+        "pairs": pairs,
+        "seconds": round(seconds, 1),
+        "seconds_per_chunk": round(seconds / len(chunks), 1),
+        "words_per_chunk": round(sum(c["words"] for c in chunks) / len(chunks), 1),
+        "model": model,
+    }
+
+
+def _pairs_for_chunk(generator: PairGenerator, chunk: dict, next_chunk: Optional[dict],
+                     per_1000: float, kind_offset: int) -> list[dict]:
+    pairs = []
+    for i in range(questions_for(chunk["words"], per_1000)):
+        kind = QUESTION_KINDS[(kind_offset + i) % len(QUESTION_KINDS)]
+        other = next_chunk["text"] if kind == "multi_hop" and next_chunk else None
+        pair = generator.question(chunk["text"], kind, other)
+        if pair:
+            pair["support_text"] = chunk["text"] + ("\n" + other if other else "")
+            pairs.append(pair)
+    summary = generator.summary(chunk["text"], Path(chunk["source_path"]).stem)
+    if summary:
+        summary["support_text"] = chunk["text"]
+        pairs.append(summary)
+    for pair in pairs:
+        pair["source_path"], pair["chunk_hash"] = chunk["source_path"], chunk["hash"]
+    return pairs
+
+
+def generate(chunks: list[dict], per_1000: float, generator: PairGenerator,
+             should_stop: Callable[[], bool] = lambda: False,
+             on_progress: Callable[[int, int, int], None] = lambda done, total, pairs: None) -> list[dict]:
+    """Pairs for every chunk. Stops between chunks when asked."""
+    pairs = []
+    for i, chunk in enumerate(chunks):
+        if should_stop():
+            raise BuildCancelled()
+        nxt = chunks[i + 1] if i + 1 < len(chunks) and chunks[i + 1]["source_path"] == chunk["source_path"] else None
+        pairs.extend(_pairs_for_chunk(generator, chunk, nxt, per_1000, i))
+        on_progress(i + 1, len(chunks), len(pairs))
+    return pairs
+
+
+_CONTENT_WORD = re.compile(r"[a-z0-9][a-z0-9'\-]{3,}")
+
+
+def _support(answer: str, text: str) -> float:
+    words = set(_CONTENT_WORD.findall(answer.lower()))
+    if not words:
+        return 0.0
+    source = set(_CONTENT_WORD.findall(text.lower()))
+    return len(words & source) / len(words)
+
+
+def _normalised(question: str) -> str:
+    return re.sub(r"[^a-z0-9 ]", "", re.sub(r"\s+", " ", question.lower())).strip()
+
+
+def filter_pairs(pairs: list[dict]) -> tuple[list[dict], dict]:
+    """Keep pairs that are unique, supported by their text and of sound length."""
+    from backend.tasks.training_tasks import PARSER_DIR
+    import sys
+
+    if str(PARSER_DIR) not in sys.path:
+        sys.path.insert(0, str(PARSER_DIR))
+    from quality_filter import QualityFilter
+
+    quality = QualityFilter()
+    dropped = {"duplicate": 0, "unsupported": 0, "length": 0, "quality": 0}
+    seen, kept = set(), []
+    for pair in pairs:
+        q, a = pair["question"], pair["answer"]
+        key = _normalised(q)
+        if key in seen:
+            dropped["duplicate"] += 1
+            continue
+        if not (QUESTION_CHARS[0] <= len(q) <= QUESTION_CHARS[1]
+                and ANSWER_CHARS[0] <= len(a) <= ANSWER_CHARS[1]):
+            dropped["length"] += 1
+            continue
+        if _support(a, pair["support_text"]) < SUPPORT_MIN.get(pair["kind"], 0.5):
+            dropped["unsupported"] += 1
+            continue
+        score, _issues = quality.score_example(q, a)
+        if score < QUALITY_MIN:
+            dropped["quality"] += 1
+            continue
+        seen.add(key)
+        kept.append(pair)
+    return kept, dropped
+
+
+def dataset_name(folder: str) -> str:
+    stem = re.sub(r"[^A-Za-z0-9_-]+", "_", Path(folder.rstrip("/")).name).strip("_") or "folder"
+    return f"folder_{stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+
+def write(pairs: list[dict], report: dict, name: str) -> tuple[str, str]:
+    """The dataset in the training datasets folder, the report in build_reports."""
+    from backend.tasks.training_tasks import parsed_datasets_dir
+
+    out_path = parsed_datasets_dir() / f"{name}.jsonl"
+    with open(out_path, "w", encoding="utf-8") as f:
+        for pair in pairs:
+            f.write(json.dumps(as_training_row(pair, pair["source_path"], pair["chunk_hash"])) + "\n")
+    report_path = build_reports_dir() / f"{name}.json"
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return str(out_path), str(report_path)

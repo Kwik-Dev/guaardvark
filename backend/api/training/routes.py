@@ -892,6 +892,139 @@ def start_filter_job():
         return error_response(str(e), 500)
 
 
+def _folder_build_options(data: dict):
+    """(folder, kinds, pairs_per_1000_words, None) from a Build from folder
+    request, or (None, None, None, error response). The folder must be one
+    Bulk Import may read: the same roots and refusals."""
+    from backend.api.files_api import resolve_import_directory
+    from backend.services.training import folder_dataset as fd
+
+    folder = data.get("folder")
+    if not isinstance(folder, str) or not folder.strip():
+        return None, None, None, error_response("folder is required", 400)
+    resolved, refusal = resolve_import_directory(folder.strip())
+    if refusal:
+        return None, None, None, error_response(refusal, 403, "PATH_NOT_ALLOWED")
+    if not os.path.isdir(resolved):
+        return None, None, None, error_response("folder is not a directory", 400)
+    kinds = data.get("kinds") or list(fd.DEFAULT_KINDS)
+    if not isinstance(kinds, list) or not all(isinstance(k, str) for k in kinds):
+        return None, None, None, error_response("kinds must be a list such as [\".md\", \".txt\"]", 400)
+    per_1000 = data.get("pairs_per_1000_words", fd.DEFAULT_PAIRS_PER_1000_WORDS)
+    if isinstance(per_1000, bool) or not isinstance(per_1000, (int, float)) \
+            or not 0 < per_1000 <= fd.MAX_PAIRS_PER_1000_WORDS:
+        return None, None, None, error_response(
+            f"pairs_per_1000_words must be a number above 0 and at most {fd.MAX_PAIRS_PER_1000_WORDS}", 400)
+    return resolved, fd.normalise_kinds(kinds), per_1000, None
+
+
+def _check_payload(prepared: dict) -> dict:
+    return {
+        "folder": prepared["folder"],
+        "kinds": prepared["kinds"],
+        "files": prepared["files"],
+        "words": prepared["words"],
+        "per_file": [{"source_path": d["source_path"], "words": d["words"]} for d in prepared["docs"]],
+        "skipped": prepared["skipped"],
+        "unreadable": prepared["unreadable"],
+        "scrub": prepared["scrub"],
+    }
+
+
+@training_bp.route("/pipeline/build-from-folder/check", methods=["POST"])
+def check_folder_build():
+    """Scan and scrub only (no model): what a build would read and remove."""
+    from backend.services.training import folder_dataset as fd
+
+    data = request.get_json(silent=True) or {}
+    folder, kinds, per_1000, problem = _folder_build_options(data)
+    if problem:
+        return problem
+    try:
+        prepared = fd.prepare(folder, kinds)
+    except Exception as e:
+        logger.error(f"Folder build check failed: {e}", exc_info=True)
+        return error_response(f"Could not read the folder: {e}", 500)
+    return success_response({**_check_payload(prepared), "estimate": fd.estimate(prepared, per_1000)})
+
+
+@training_bp.route("/pipeline/build-from-folder/probe", methods=["POST"])
+def probe_folder_build():
+    """Write (and discard) the pairs of three chunks to measure the time a
+    build would take. Uses the local chat model; writes nothing."""
+    from backend.services.training import folder_dataset as fd
+    from backend.services.training.pair_generator import GenerationUnavailable
+
+    data = request.get_json(silent=True) or {}
+    folder, kinds, per_1000, problem = _folder_build_options(data)
+    if problem:
+        return problem
+    try:
+        prepared = fd.prepare(folder, kinds)
+        probe = fd.probe_timing(prepared, per_1000)
+    except GenerationUnavailable as e:
+        return error_response(str(e), 503, "MODEL_UNAVAILABLE")
+    except Exception as e:
+        logger.error(f"Folder build probe failed: {e}", exc_info=True)
+        return error_response(f"Could not time the build: {e}", 500)
+    return success_response({"probe": probe, "estimate": fd.estimate(prepared, per_1000, probe)})
+
+
+@training_bp.route("/pipeline/build-from-folder", methods=["POST"])
+@ensure_db_session_cleanup
+def start_folder_build():
+    """Build a messages dataset from a folder of notes, as a training-queue job."""
+    data = request.get_json(silent=True) or {}
+    folder, kinds, per_1000, problem = _folder_build_options(data)
+    if problem:
+        return problem
+    name = data.get("name")
+    name = name.strip() if isinstance(name, str) else ""
+    name = name or f"Build: {os.path.basename(folder.rstrip('/')) or folder}"
+
+    job_id = str(uuid.uuid4())
+    job = TrainingJob(
+        job_id=job_id,
+        name=name,
+        pipeline_stage="building",
+        status="pending",
+        config_json=json.dumps({"input_path": folder, "kinds": kinds, "pairs_per_1000_words": per_1000}),
+    )
+    db.session.add(job)
+    db.session.commit()
+    try:
+        from backend.tasks.training_tasks import build_folder_dataset_task
+        task = build_folder_dataset_task.apply_async(args=[job_id, folder, kinds, per_1000], queue="training")
+        job.celery_task_id = task.id
+        job.status = "running"
+        db.session.commit()
+    except Exception as e:
+        logger.error(f"Failed to start folder build: {e}", exc_info=True)
+        return _not_started(job, "folder build", e)
+    return success_response(job.to_dict(), status_code=201)
+
+
+@training_bp.route("/scrub-terms", methods=["GET"])
+def get_scrub_terms():
+    """The per-install word list a folder build replaces (names, machines, clients)."""
+    from backend.services.training import folder_dataset as fd
+    from backend.services.training.folder_scrub import load_terms
+
+    return success_response({"terms": load_terms(fd.scrub_terms_path())})
+
+
+@training_bp.route("/scrub-terms", methods=["PUT"])
+def put_scrub_terms():
+    from backend.services.training import folder_dataset as fd
+    from backend.services.training.folder_scrub import save_terms
+
+    data = request.get_json(silent=True) or {}
+    terms = data.get("terms")
+    if not isinstance(terms, list) or not all(isinstance(t, str) for t in terms):
+        return error_response("terms must be a list of strings", 400)
+    return success_response({"terms": save_terms(fd.scrub_terms_path(), terms)})
+
+
 @training_bp.route("/jobs/<int:job_id>/export-anyway", methods=["POST"])
 @ensure_db_session_cleanup
 def export_anyway(job_id):
