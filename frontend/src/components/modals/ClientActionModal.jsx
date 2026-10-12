@@ -855,7 +855,7 @@ const ClientActionModal = ({
             disabled={
               isSaving ||
               !formData.name?.trim() ||
-              (formData.email && !/\S+@\S+\.\S+/.test(formData.email))
+              Boolean(formData.email && !/\S+@\S+\.\S+/.test(formData.email))
             }
           >
             {isSaving ? (
