@@ -506,10 +506,15 @@ class UnifiedProgressSystem:
                     ProcessStatus.COMPLETE, ProcessStatus.ERROR, ProcessStatus.CANCELLED):
                 return False
             progress = event_data.get("progress")
+            progress = int(progress) if isinstance(progress, (int, float)) else current.progress
+            message = event_data.get("message") or current.message
+            # This process's own updates come back through the relay unchanged.
+            if (status, progress, message) == (current.status, current.progress, current.message):
+                return False
             event = ProgressEvent(
                 process_id=process_id,
-                progress=int(progress) if isinstance(progress, (int, float)) else current.progress,
-                message=event_data.get("message") or current.message,
+                progress=progress,
+                message=message,
                 status=status,
                 process_type=current.process_type,
                 additional_data=current.additional_data,
@@ -756,6 +761,7 @@ class UnifiedProgressSystem:
                     logger.info(f"Skipping cleanup for {process_id} — process is active (status={current.status.value})")
                     return
                 self._active_processes.pop(process_id, None)
+                self._process_history.pop(process_id, None)
                 logger.info(f"Cleaned up process from memory: {process_id}")
         
         # Clean up all timers associated with this process
