@@ -447,6 +447,40 @@ EVAL_GATE = {
 WORSE_THAN_BASE = "failed: worse than base"
 
 
+def _held_out_by_source(rows: list, target: int):
+    """Row indices to hold out, whole source files at a time, or None.
+
+    A folder build writes several pairs per chunk and several chunks per file,
+    so a random row split puts near-copies of one passage on both sides and the
+    held-out loss flatters the adapter. When every row names its source file
+    (metadata.source_path), files are drawn in a seeded order until the held
+    rows reach the target, never above EVAL_SPLIT["max_rows"] and never every
+    file. None (and a random row split) for other datasets, or when whole files
+    cannot give at least EVAL_SPLIT["min_rows"]."""
+    by_file = {}
+    for i, raw in enumerate(rows):
+        try:
+            row = json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+        meta = row.get("metadata") if isinstance(row, dict) else None
+        source = meta.get("source_path") if isinstance(meta, dict) else None
+        if not isinstance(source, str) or not source:
+            return None
+        by_file.setdefault(source, []).append(i)
+    if len(by_file) < 2:
+        return None
+    files = sorted(by_file)
+    random.Random(EVAL_SPLIT["seed"]).shuffle(files)
+    held = set()
+    for source in files[:-1]:
+        if len(held) >= target:
+            break
+        if len(held) + len(by_file[source]) <= EVAL_SPLIT["max_rows"]:
+            held.update(by_file[source])
+    return held if len(held) >= EVAL_SPLIT["min_rows"] else None
+
+
 def _hold_out_split(data_path: str, out_dir: Path, fraction: float):
     """Split a text dataset into training rows and held-out rows.
 
@@ -482,7 +516,13 @@ def _hold_out_split(data_path: str, out_dir: Path, fraction: float):
         )
         return data_path, None, report
 
-    held_out = set(random.Random(EVAL_SPLIT["seed"]).sample(range(len(rows)), held))
+    held_out = _held_out_by_source(rows, held)
+    if held_out is not None:
+        report["split"] = "by source file"
+    else:
+        held_out = set(random.Random(EVAL_SPLIT["seed"]).sample(range(len(rows)), held))
+        report["split"] = "random rows"
+    held = len(held_out)
     out_dir.mkdir(parents=True, exist_ok=True)
     train_path = out_dir / "train.jsonl"
     eval_path = out_dir / "heldout.jsonl"
