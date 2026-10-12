@@ -41,7 +41,7 @@ export const SOURCE_LABELS = {
   uncle_claude: "Uncle Claude",
   nephew: "Guaardvark",
   family: "Family Node",
-  self_improvement: "Self-Improvement",
+  self_improvement: "Self-improvement",
 };
 
 const STATUS_MAP = {
