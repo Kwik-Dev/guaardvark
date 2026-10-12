@@ -1044,7 +1044,19 @@ def upload_file():
         # Validate folder_path if provided
         if folder_path and not ensure_path_is_safe(folder_path):
             return error_response("Invalid folder path", 400, "INVALID_PATH")
-        
+
+        # Bulk Import's browser uploads ask for the rules a server-folder
+        # import applies (no hidden folders or files, no credential files),
+        # checked on the names as sent. Other callers are unaffected.
+        if request.form.get("import_rules") == "bulk":
+            from backend.utils.path_safety import import_refusal
+
+            relative_path = request.form.get("relative_path", "")
+            refusal = import_refusal(file.filename) or (
+                import_refusal(relative_path) if relative_path else None)
+            if refusal:
+                return error_response(refusal, 400, "IMPORT_RULES_REFUSED")
+
         # Parse metadata
         try:
             metadata = json.loads(metadata_str) if metadata_str else {}
