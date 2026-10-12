@@ -107,12 +107,16 @@ export default function TrainingFloater({ open, onClose, _onNavigateAway }) {
     saveState({ collapsed, x: position.x, y: position.y, w: size.w, h: size.h });
   }, [collapsed, position, size]);
 
-  // Start display on open; arm idle shutdown on close.
+  // Start display on open; arm idle shutdown when an open trainer closes,
+  // not on mount (it is mounted closed on every page).
+  const wasOpen = useRef(false);
   useEffect(() => {
     if (!open) {
-      armDisplayIdle().catch(() => {});
+      if (wasOpen.current) armDisplayIdle().catch(() => {});
+      wasOpen.current = false;
       return undefined;
     }
+    wasOpen.current = true;
     cancelDisplayIdle().catch(() => {});
     startDisplay().catch(() => {});
     return undefined;
