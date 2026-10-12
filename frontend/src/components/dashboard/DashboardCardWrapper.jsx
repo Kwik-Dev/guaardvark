@@ -74,38 +74,37 @@ const DashboardCardWrapper = React.forwardRef(
     // to prevent them from being spread onto the Paper component.
     const {
       i,
-      _x,
-      _y,
-      _w,
-      _h, // Basic layout props
-      _minW,
-      _maxW,
-      _minH,
-      _maxH, // Size constraints
-      _isDraggable,
-      _isResizable,
-      _isBounded,
+      x: _x,
+      y: _y,
+      w: _w,
+      h: _h, // Basic layout props
+      minW: _minW,
+      maxW: _maxW,
+      minH: _minH,
+      maxH: _maxH, // Size constraints
+      isDraggable: _isDraggable,
+      isResizable: _isResizable,
+      isBounded: _isBounded,
       static: _staticProp, // Interaction props
-      _moved, // Layout state prop
-      _resizeHandles, // Resizing configuration
+      moved: _moved, // Layout state prop
+      resizeHandles: _resizeHandles, // Resizing configuration
       className, // RGL might add its own classes
       style, // RGL passes style, which we want to keep
 
       // Code editor specific props that should not be passed to DOM
-      _projectId,
-      _openTabs,
-      _setOpenTabs,
-      _activeTabIndex,
-      _setActiveTabIndex,
-      _fileTree,
-      _setFileTree,
-      _chatMessages,
-      _setChatMessages,
-      _searchResults,
-      _setSearchResults,
-      _rulesCutoffEnabled,
-      _currentTab,
-      _headerActions,
+      projectId: _projectId,
+      openTabs: _openTabs,
+      setOpenTabs: _setOpenTabs,
+      activeTabIndex: _activeTabIndex,
+      setActiveTabIndex: _setActiveTabIndex,
+      fileTree: _fileTree,
+      setFileTree: _setFileTree,
+      chatMessages: _chatMessages,
+      setChatMessages: _setChatMessages,
+      searchResults: _searchResults,
+      setSearchResults: _setSearchResults,
+      rulesCutoffEnabled: _rulesCutoffEnabled,
+      currentTab: _currentTab,
 
       ...restProps // Collect any other valid DOM/MUI props (like sx, data-grid)
     } = props;
