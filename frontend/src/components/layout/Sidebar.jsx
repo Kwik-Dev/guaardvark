@@ -29,6 +29,7 @@ import { longestActivePath } from "../../config/navCatalog";
 import { extensionNavGroups } from "../../extensions";
 import { usePendingApprovals } from "../../hooks/usePendingApprovals";
 import { useNavBadgeCounts } from "../../config/navBadges";
+import NavCount from "./NavCount";
 import BarChartIcon from "@mui/icons-material/BarChart";
 import DesktopWindowsIcon from "@mui/icons-material/DesktopWindows";
 import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
@@ -231,9 +232,9 @@ const Sidebar = () => {
                   {group.items.map((item) => {
                     const isActive = item.path === activePath;
 
-                    // A nav item may carry a live count. Collapsed, the badge is
-                    // the only signal there is, so it rides the icon in both
-                    // states rather than the label.
+                    // A nav item may carry a live count. Expanded, it follows the
+                    // label (a badge on the icon spilled over the text); collapsed,
+                    // the icon is all there is, so it rides the icon's corner.
                     const badgeCount = item.badge ? badgeCounts[item.badge] || 0 : 0;
 
                     const button = (
@@ -243,8 +244,12 @@ const Sidebar = () => {
                         sx={() => getNavLinkStyle(isActive, theme.palette.moduleAccents?.[item.path])}
                       >
                         <ListItemIcon>
-                          {badgeCount > 0 ? (
-                            <Badge badgeContent={badgeCount} color="warning">
+                          {badgeCount > 0 && !isExpanded ? (
+                            <Badge
+                              badgeContent={badgeCount}
+                              color="warning"
+                              sx={{ "& .MuiBadge-badge": { fontSize: "0.6rem", minWidth: 16, height: 16, px: 0.5 } }}
+                            >
                               {item.icon}
                             </Badge>
                           ) : (
@@ -261,6 +266,7 @@ const Sidebar = () => {
                             }}
                           />
                         )}
+                        {isExpanded && badgeCount > 0 && <NavCount count={badgeCount} />}
                       </ListItemButton>
                     );
 
