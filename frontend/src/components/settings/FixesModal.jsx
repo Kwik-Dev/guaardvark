@@ -180,7 +180,7 @@ export default function FixesModal({ open, onClose, showMessage }) {
       <DialogTitle sx={{ display: "flex", alignItems: "center", gap: 1, pr: 6 }}>
         <BugReportIcon fontSize="small" />
         <Typography variant="h6" component="span">
-          Self-Improvement Fixes
+          Self-improvement fixes
         </Typography>
         <Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>
           {fixes.length} total

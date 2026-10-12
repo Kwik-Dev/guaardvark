@@ -10,32 +10,22 @@ import {
   CircularProgress,
 } from "@mui/material";
 import { PlayArrow as PlayIcon } from "@mui/icons-material";
-import FixesModal from "./FixesModal";
-import ScanProgressModal from "./ScanProgressModal";
+import { useNavigate } from "react-router-dom";
 import { UNCLE_GOLD } from "../../utils/familyColors";
 import { ActionButton, Cluster, Hint, Line, Sep, SettingChip, StatusPill } from "./ui";
 import { claudeAdvisorService } from "../../api/claudeAdvisorService";
-import { selfImprovementService } from "../../api/selfImprovementService";
 
 export default function UncleClaudeSection() {
+  const navigate = useNavigate();
   const [status, setStatus] = useState(null);
-  const [siStatus, setSiStatus] = useState(null);
   const [loading, setLoading] = useState(true);
   const [testResult, setTestResult] = useState(null);
   const [testing, setTesting] = useState(false);
-  const [scanOpen, setScanOpen] = useState(false);
-  const [scanInBackground, setScanInBackground] = useState(false);
-  const [scanCancelled, setScanCancelled] = useState(false);
-  const [fixesOpen, setFixesOpen] = useState(false);
 
   const fetchStatus = useCallback(async () => {
     try {
-      const [claudeRes, siRes] = await Promise.allSettled([
-        claudeAdvisorService.getStatus(),
-        selfImprovementService.getStatus(),
-      ]);
+      const [claudeRes] = await Promise.allSettled([claudeAdvisorService.getStatus()]);
       if (claudeRes.status === "fulfilled") setStatus(claudeRes.value?.data);
-      if (siRes.status === "fulfilled") setSiStatus(siRes.value?.data);
     } catch (err) {
       console.error("Failed to fetch Uncle Claude status:", err);
     } finally {
@@ -78,55 +68,12 @@ export default function UncleClaudeSection() {
     }
   };
 
-  const handleToggleSelfImprovement = async () => {
-    try {
-      await selfImprovementService.toggle(!siStatus?.enabled);
-      fetchStatus();
-    } catch (err) {
-      console.error("Failed to toggle self-improvement:", err);
-    }
-  };
-
-  const handleToggleCodebaseLock = async () => {
-    try {
-      await selfImprovementService.lockCodebase(!siStatus?.codebase_locked);
-      fetchStatus();
-    } catch (err) {
-      console.error("Failed to toggle codebase lock:", err);
-    }
-  };
-
-  const handleOpenScan = () => {
-    setScanInBackground(false);
-    setScanCancelled(false);
-    setScanOpen(true);
-  };
-
-  // Stable reference — the modal depends on this in its main effect, and a
-  // fresh closure on every render would re-dispatch the scan.
-  const handleScanComplete = useCallback((run) => {
-    fetchStatus();
-    setScanInBackground(false);
-    if (run?.status === "cancelled") {
-      setScanCancelled(true);
-      return;
-    }
-    const proposedAnything =
-      (run?.changes_made && run.changes_made.length > 0) ||
-      run?.status === "success";
-    if (proposedAnything) {
-      setScanOpen(false);
-      setFixesOpen(true);
-    }
-  }, [fetchStatus]);
-
   if (loading) {
     return <CircularProgress size={16} />;
   }
 
   const usage = status?.usage || {};
   const budgetPercent = usage.budget_used_percent || 0;
-  const runs = siStatus?.total_fixes || 0;
   const connection = !status?.available
     ? { tone: "warn", label: "Not configured" }
     : testResult === null
@@ -203,65 +150,14 @@ export default function UncleClaudeSection() {
 
       <Cluster
         label="Self-improvement"
-        help="Guaardvark checks its own code and proposes fixes for you to review. Codebase locked blocks every automatic edit."
+        help="Guaardvark checks its own code and proposes fixes for you to review. Its switches, the self-check, pending fixes and the run log have their own page."
       >
         <Line>
-          <SettingChip
-            label="Self-improvement"
-            on={!!siStatus?.enabled}
-            onToggle={handleToggleSelfImprovement}
-            tooltip="Lets the mentor scan the codebase and propose fixes for review."
-          />
-          <SettingChip
-            label="Codebase locked"
-            on={!!siStatus?.codebase_locked}
-            onToggle={handleToggleCodebaseLock}
-            tooltip={siStatus?.codebase_locked ? "Autonomous edits are blocked. Turn off to allow them." : "Turn on to block every autonomous edit to the source tree."}
-          />
-          <Sep />
-          <ActionButton
-            onClick={handleOpenScan}
-            loading={scanOpen}
-            disabled={!siStatus?.enabled || !!siStatus?.codebase_locked}
-            startIcon={<PlayIcon />}
-            tooltip={
-              !siStatus?.enabled
-                ? "Turn on self-improvement first"
-                : siStatus?.codebase_locked
-                  ? "Unlock the codebase first"
-                  : "Runs the checks now. Cancel asks the server to stop; closing the view leaves the scan running."
-            }
-          >
-            Run self-check
-          </ActionButton>
-          <ActionButton kind="link" onClick={() => setFixesOpen(true)}>
-            Review fixes
+          <ActionButton onClick={() => navigate("/self-improvement")}>
+            Open Self-improvement
           </ActionButton>
         </Line>
-        <Hint>
-          {siStatus?.last_run
-            ? `Last run ${new Date(siStatus.last_run.timestamp).toLocaleString()} (${siStatus.last_run.status}) · ${runs} successful run${runs === 1 ? "" : "s"}.`
-            : "No runs yet."}
-          {siStatus?.codebase_locked ? " Codebase is locked: autonomous edits are blocked." : ""}
-        </Hint>
-        {scanCancelled && (
-          <StatusPill tone="neutral" label="Cancelled" />
-        )}
-        {scanInBackground && !scanCancelled && (
-          <StatusPill tone="info" label="Scan continues in the background" />
-        )}
       </Cluster>
-
-      <ScanProgressModal
-        open={scanOpen}
-        onClose={() => setScanOpen(false)}
-        onBackground={() => setScanInBackground(true)}
-        onComplete={handleScanComplete}
-      />
-      <FixesModal
-        open={fixesOpen}
-        onClose={() => setFixesOpen(false)}
-      />
     </Box>
   );
 }

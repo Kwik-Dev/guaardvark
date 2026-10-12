@@ -490,7 +490,7 @@ const EnhancedChatInterface = ({
               ? `${msg.content}\n\n*Used web search for real-time information*`
               : msg.content,
             // Claude badge for Uncle Claude responses
-            badge: msg.source === "uncle_claude" ? "Uncle Claude" : msg.source === "family" ? "Family Node" : msg.source === "self_improvement" ? "Self-Improvement" : undefined,
+            badge: msg.source === "uncle_claude" ? "Uncle Claude" : msg.source === "family" ? "Family Node" : msg.source === "self_improvement" ? "Self-improvement" : undefined,
             source: msg.source,
           }))}
         />

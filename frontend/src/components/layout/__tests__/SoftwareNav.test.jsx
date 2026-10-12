@@ -15,10 +15,15 @@ vi.mock("../../../config/brand", async (importOriginal) => {
     id: "alerts", kind: "page", path: "/documents/alerts", label: "Alerts",
     icon: React.createElement("span", null, "!"), pinned: true, listed: false, badge: "alerts",
   };
+  // Every core workspace has two or more pages; this one has one.
+  const solo = {
+    id: "solo", kind: "page", path: "/solo", label: "Solo",
+    icon: React.createElement("span", null, "s"), listed: false, workspace: "solo", stripOrder: 10,
+  };
   const brand = {
     ...actual.default,
-    navCatalog: [...CORE_NAV_CATALOG, alerts],
-    workspaces: WORKSPACES,
+    navCatalog: [...CORE_NAV_CATALOG, alerts, solo],
+    workspaces: [...WORKSPACES, { id: "solo", label: "Solo" }],
   };
   return { ...actual, brand, default: brand };
 });
@@ -69,9 +74,17 @@ describe("SoftwareNav", () => {
   });
 
   it("hides the tool strip when the workspace has a single page", () => {
+    renderNav("/solo");
+    expect(screen.getByRole("button", { name: "Solo" })).toHaveAttribute("aria-current", "page");
+    expect(screen.queryByRole("tablist", { name: "Workspace tools" })).not.toBeInTheDocument();
+  });
+
+  it("lists the code pages in the Code workspace's second row", () => {
     renderNav("/code-editor");
     expect(screen.getByRole("button", { name: "Code" })).toHaveAttribute("aria-current", "page");
-    expect(screen.queryByRole("tablist", { name: "Workspace tools" })).not.toBeInTheDocument();
+    const tabs = screen.getAllByRole("tab").map((tab) => tab.textContent);
+    expect(tabs).toEqual(["Code Editor", "Swarm", "System Map", "Self-improvement"]);
+    expect(screen.getByRole("tab", { name: /Code Editor/ })).toHaveAttribute("aria-selected", "true");
   });
 
   it("pins the catalog's actions and Settings on the right", () => {

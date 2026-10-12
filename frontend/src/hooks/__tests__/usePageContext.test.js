@@ -26,6 +26,12 @@ describe("pageContextFor", () => {
     expect(ctx("/dashboard")).toMatchObject({ page: "Dashboard" });
   });
 
+  it("names the code pages from the app's own catalog and route map", () => {
+    expect(pageContextFor("/swarm")).toMatchObject({ page: "Swarm", entityType: null });
+    expect(pageContextFor("/system-map")).toMatchObject({ page: "System Map", entityType: null });
+    expect(pageContextFor("/self-improvement")).toMatchObject({ page: "Self-improvement", entityType: null });
+  });
+
   it("covers a catalog route the route map never listed", () => {
     expect(ctx("/agents")).toMatchObject({ page: "Agents", entityType: null, entityId: null });
     expect(ctx("/agents/memory")).toMatchObject({ page: "Agents", entityId: null });

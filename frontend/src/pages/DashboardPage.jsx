@@ -90,7 +90,7 @@ const CARD_TITLES = {
   codegen: "Code Generation",
   imggen: "Image Generation",
   files: "File Manager",
-  family: "Family & Self-Improvement",
+  family: "Family & Self-improvement",
   autoresearch: "RAG Autoresearch",
   gpu: "GPU Memory",
 };

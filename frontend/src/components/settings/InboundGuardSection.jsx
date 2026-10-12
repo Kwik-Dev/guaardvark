@@ -156,7 +156,7 @@ function ReviewDialog({ open, onClose, onChanged }) {
               <Typography variant="subtitle2" sx={{ wordBreak: "break-all" }}>{item.subject}</Typography>
               <Hint>
                 {item.verdict === "block" ? "Blocked" : "Held"} · {item.source} · {item.files} file(s), +{item.added_lines} line(s) · digest {item.digest}
-                {item.pending_fix_id ? ` · waiting as pending fix #${item.pending_fix_id} (Review fixes)` : ""}
+                {item.pending_fix_id ? ` · waiting as pending fix #${item.pending_fix_id} (Self-improvement › Pending fixes)` : ""}
                 {selected.kind === "git" ? " · approving lets this exact change through the git hooks" : ""}
               </Hint>
               <FindingList findings={item.findings} />
