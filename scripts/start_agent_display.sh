@@ -261,15 +261,24 @@ seed_agent_autostart_overrides() {
     # leak documented in stop()/section 2b:
     #   geoclue-demo-agent              → geoclue-2.0/demos/agent
     #   tracker-miner-fs-3              → tracker-miner-fs (desktop-search indexer)
+    #   localsearch-3                   → the same indexer under its newer name
     #   org.gnome.Evolution-alarm-notify → pulls evolution-source-registry,
     #                                      evolution-calendar-factory,
     #                                      evolution-addressbook-factory
+    # and the ones that crash or pop dialogs on a virtual display. Each crash
+    # leaves an apport report that the host desktop then shows as a popup:
+    #   xiccd           → registers outputs with the system-wide colord, which
+    #                     also holds the host's displays; segfaults at start
+    #   light-locker    → aborts without a display-manager session
+    #   update-notifier → a second update/crash notifier, drawing over the
+    #                     screen the agent is working on
     #
     # Suppressing the autostart means the helpers never spawn — the kill
     # loop in section 2b stays as belt-and-suspenders for legacy sessions.
     local autostart_dir="$1/autostart"
     mkdir -p "$autostart_dir"
-    for name in geoclue-demo-agent tracker-miner-fs-3 org.gnome.Evolution-alarm-notify; do
+    for name in geoclue-demo-agent tracker-miner-fs-3 localsearch-3 org.gnome.Evolution-alarm-notify \
+                xiccd light-locker update-notifier; do
         [ -f "/etc/xdg/autostart/$name.desktop" ] || continue
         cat > "$autostart_dir/$name.desktop" << OVERRIDE
 [Desktop Entry]
