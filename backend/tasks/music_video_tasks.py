@@ -25,6 +25,7 @@ from flask import current_app
 from backend.models import db, MusicVideo, Document
 from backend.services.music_video_service import (
     MusicVideoService,
+    compute_bar_cut_plan,
     compute_cut_plan,
     fill_clip_to_duration,
     held_cuts,
@@ -441,6 +442,13 @@ def _mv_run(mv_id: int, *, expected_stage: str, next_agent: str | None):
 
 # --- Stage: analyzing --------------------------------------------------------
 
+def _music_pacing_enabled() -> bool:
+    """GUAARDVARK_MV_MUSIC_PACING=1 plans cuts on the song's bar grid, paced by its
+    loudness, with sections found from the music (compute_bar_cut_plan). Off by
+    default: the energy-quarter planner (compute_cut_plan) stays the stock path."""
+    return os.environ.get("GUAARDVARK_MV_MUSIC_PACING", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def run_analyzer(mv_id: int):
     """Analyze the song → energy-aware cut plan → seed the per-clip cursor.
 
@@ -457,9 +465,11 @@ def run_analyzer(mv_id: int):
         if not song:
             raise RuntimeError("song file not found on disk")
 
+        music_pacing = _music_pacing_enabled()
         resp = requests.post(
             f"{PLUGIN_URL}/analyze",
-            json={"audio_path": song, "section_count": 4},
+            # None reads the song (bar grid, loudness per bar, sections where the music changes)
+            json={"audio_path": song, "section_count": None if music_pacing else 4},
             timeout=120,
         )
         resp.raise_for_status()
@@ -486,7 +496,13 @@ def run_analyzer(mv_id: int):
         if any(kw in treatment_text for kw in ["slow", "dreamlike", "gliding", "drifting", "ethereal", "motion is slow", "slow and dreamlike"]):
             slow_pace = True
 
-        if slow_pace:
+        if music_pacing and structure.get("downbeat_times"):
+            plan = compute_bar_cut_plan(
+                structure["downbeat_times"], structure.get("bar_energy") or [],
+                structure["sections"], structure["duration_seconds"],
+                beat_times=structure["beat_times"], max_cut_s=max_cut_s, slow_pace=slow_pace,
+            )
+        elif slow_pace:
             # Recompute plan with energy dampened so even "high energy" sections get longer cuts.
             # This respects the artistic intent from the treatment ("Motion is Slow", dreamlike) over the raw librosa energy.
             # Combined with high max_stretch (slow motion setting), this produces the desired long, stretched, atmospheric shots
@@ -583,6 +599,17 @@ def run_analyzer(mv_id: int):
         # Enrich clips with Director's editing decisions (duration, transition, filter)
         # so the final Shotcut assembly can use real cinematic editing instead of hard-coded hard-cuts.
         mv.song_path = song  # cache the resolved path for later stages
+        stored = dict(mv.settings_json or {})
+        stored["song_analysis"] = {
+            "tempo_bpm": round(float(structure.get("tempo_bpm") or 0.0), 1),
+            "beat_count": len(structure.get("beat_times") or []),
+            "bar_count": len(structure.get("downbeat_times") or []),
+            "beats_per_bar": structure.get("beats_per_bar"),
+            "duration_seconds": structure.get("duration_seconds"),
+            "sections": structure.get("sections") or [],
+            "pacing": "bars" if music_pacing and structure.get("downbeat_times") else "energy_quarters",
+        }
+        mv.settings_json = stored
         mv.cut_plan = plan
         mv.clips = []
         for c in plan:

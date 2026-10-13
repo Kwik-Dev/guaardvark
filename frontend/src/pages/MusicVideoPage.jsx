@@ -241,6 +241,17 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
       <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
         <Typography variant="subtitle2">Video Plan</Typography>
         <Chip size="small" label={`${rows.length} cuts`} />
+        {detail.song_analysis?.tempo_bpm > 0 && (
+          <Chip
+            size="small"
+            variant="outlined"
+            label={[
+              `${Math.round(detail.song_analysis.tempo_bpm)} BPM`,
+              `${detail.song_analysis.beat_count} beats`,
+              detail.song_analysis.bar_count ? `${detail.song_analysis.bar_count} bars` : null,
+            ].filter(Boolean).join(" · ")}
+          />
+        )}
         {sections.length > 0 && (
           <Typography variant="caption" color="text.secondary">
             sections: {sections.join(" → ")}
