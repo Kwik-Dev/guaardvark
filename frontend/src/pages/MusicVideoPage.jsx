@@ -813,6 +813,8 @@ const MusicVideoPage = () => {
   const [i2vModel, setI2vModel] = useState("wan22-5b");
   // Z-Image Turbo stills render offline (as on the Images page); offered when it is installed.
   const [zimageInstalled, setZimageInstalled] = useState(false);
+  const keyframeTouched = useRef(false);
+  const defaultKeyframe = zimageInstalled ? "zimage-turbo" : DEFAULT_KEYFRAME_MODEL;
 
   const keyframeModelOptions = useMemo(
     () =>
@@ -824,8 +826,8 @@ const MusicVideoPage = () => {
             },
           ]
         : [
-            { value: "flux-schnell", label: "FLUX.1-schnell (fast, beautiful stills) — default" },
-            ...(zimageInstalled ? [{ value: "zimage-turbo", label: "Z-Image Turbo (no LoRA needed)" }] : []),
+            ...(zimageInstalled ? [{ value: "zimage-turbo", label: "Z-Image Turbo — default" }] : []),
+            { value: "flux-schnell", label: zimageInstalled ? "FLUX.1-schnell (fast stills)" : "FLUX.1-schnell (fast, beautiful stills) — default" },
             { value: "flux-dev-lora", label: "FLUX-dev + LoRA" },
             { value: "sdxl", label: "SDXL (no LoRA)" },
             { value: "sdxl-lora", label: "SDXL + LoRAs" },
@@ -886,7 +888,10 @@ const MusicVideoPage = () => {
       .then((data) => {
         if (!alive) return;
         const models = (data?.data || data || {}).models || [];
-        setZimageInstalled(models.some((m) => m && m.id === "zimage-turbo"));
+        // "models" also lists downloadable ones; only weights on disk count.
+        const ready = models.some((m) => m && m.id === "zimage-turbo" && (m.availability === "ready" || m.is_downloaded));
+        setZimageInstalled(ready);
+        if (ready && !keyframeTouched.current) setKeyframeModel("zimage-turbo");
       })
       .catch(() => {});
     return () => {
@@ -1022,7 +1027,7 @@ const MusicVideoPage = () => {
       setPlanningMode("narrative");
       setUseLoraConsistency(false);
       setSelectedSubjectIds([]);
-      setKeyframeModel(DEFAULT_KEYFRAME_MODEL);
+      setKeyframeModel(defaultKeyframe);
       setI2vModel("wan22-5b");
       // Reset any future advanced model params here too
       if (fileInputRef.current) fileInputRef.current.value = "";
@@ -1319,7 +1324,7 @@ const MusicVideoPage = () => {
                           || keyframeModel === "sdxl-lora"
                           || keyframeModel === "flux-dev-lora"
                         ) {
-                          setKeyframeModel(DEFAULT_KEYFRAME_MODEL);
+                          setKeyframeModel(defaultKeyframe);
                         }
                       }}
                       id="lora-consistency"
@@ -1401,8 +1406,11 @@ const MusicVideoPage = () => {
                       fullWidth
                       label="Keyframe / Storyboard Image Model"
                       value={keyframeModel}
-                      onChange={(e) => setKeyframeModel(e.target.value)}
-                      helperText="FLUX-schnell for fast beautiful stills; Z-Image Turbo for natural-looking stills from the same model as the Images page; SDXL for higher-fidelity stills without LoRA."
+                      onChange={(e) => {
+                        keyframeTouched.current = true;
+                        setKeyframeModel(e.target.value);
+                      }}
+                      helperText="Z-Image Turbo renders the stills offline with the Images page's model; FLUX-schnell and SDXL render through ComfyUI."
                       sx={{ mt: 1 }}
                     >
                       {keyframeModelOptions.map((opt) => (
