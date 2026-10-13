@@ -811,6 +811,8 @@ const MusicVideoPage = () => {
   const [useLoraConsistency, setUseLoraConsistency] = useState(false);
   const [keyframeModel, setKeyframeModel] = useState(DEFAULT_KEYFRAME_MODEL);
   const [i2vModel, setI2vModel] = useState("wan22-5b");
+  // Z-Image Turbo stills render offline (as on the Images page); offered when it is installed.
+  const [zimageInstalled, setZimageInstalled] = useState(false);
 
   const keyframeModelOptions = useMemo(
     () =>
@@ -823,11 +825,12 @@ const MusicVideoPage = () => {
           ]
         : [
             { value: "flux-schnell", label: "FLUX.1-schnell (fast, beautiful stills) — default" },
+            ...(zimageInstalled ? [{ value: "zimage-turbo", label: "Z-Image Turbo (no LoRA needed)" }] : []),
             { value: "flux-dev-lora", label: "FLUX-dev + LoRA" },
             { value: "sdxl", label: "SDXL (no LoRA)" },
             { value: "sdxl-lora", label: "SDXL + LoRAs" },
           ],
-    [useLoraConsistency],
+    [useLoraConsistency, zimageInstalled],
   );
 
   useEffect(() => {
@@ -876,6 +879,21 @@ const MusicVideoPage = () => {
     },
   };
   const [i2vModelOptions, setI2vModelOptions] = useState(FALLBACK_I2V_MODEL_OPTIONS);
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/batch-image/models")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!alive) return;
+        const models = (data?.data || data || {}).models || [];
+        setZimageInstalled(models.some((m) => m && m.id === "zimage-turbo"));
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   useEffect(() => {
     let alive = true;
     fetch("/api/batch-video/models")
@@ -1384,7 +1402,7 @@ const MusicVideoPage = () => {
                       label="Keyframe / Storyboard Image Model"
                       value={keyframeModel}
                       onChange={(e) => setKeyframeModel(e.target.value)}
-                      helperText="FLUX-schnell for fast beautiful stills; SDXL for higher-fidelity stills without LoRA."
+                      helperText="FLUX-schnell for fast beautiful stills; Z-Image Turbo for natural-looking stills from the same model as the Images page; SDXL for higher-fidelity stills without LoRA."
                       sx={{ mt: 1 }}
                     >
                       {keyframeModelOptions.map((opt) => (

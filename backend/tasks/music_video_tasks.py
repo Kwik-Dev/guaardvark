@@ -376,6 +376,13 @@ def _keyframe_loras_and_prompt(mv: MusicVideo, s: dict, base_prompt: str) -> tup
     return paths, prompt
 
 
+def _zimage_keyframes(s: dict) -> bool:
+    """Z-Image Turbo was picked for the stills: they render through the offline
+    pipeline the Images page uses (render_character_still with no cast), with its
+    own step defaults, LoRA or not."""
+    return (s.get("keyframe_model") or "").strip().lower() in ("zimage-turbo", "zimage", "z-image-turbo")
+
+
 def _keyframe_lora_strength(s: dict) -> float:
     """Model-aware default keyframe LoRA strength, shared by the clip path AND both
     storyboard endpoints so review thumbnails match the final render. Delegates to the shared
@@ -890,7 +897,7 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
                 kf_steps = s.get("keyframe_steps") or 45
                 kf_loras, kf_sids, kf_prompt = _keyframe_cast_context(mv, s, clip_prompt)
                 kf_lora_strength = _keyframe_lora_strength(s)
-                if kf_loras:
+                if kf_loras or _zimage_keyframes(s):
                     from backend.services.character_still_pipeline import render_character_still
                     still = render_character_still(
                         kf_prompt,
@@ -900,7 +907,7 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
                         source="musicvideo",
                         width=s["still_width"],
                         height=s["still_height"],
-                        steps=kf_steps,
+                        steps=kf_steps if kf_loras else s.get("keyframe_steps"),
                         seed=1000 + idx,
                         output_path=still_path,
                         lora_strength=kf_lora_strength,
@@ -1220,7 +1227,7 @@ def run_storyboard_generator(mv_id: int, force: bool = False):
                 still_path = str(out_dir / f"storyboard_{idx}.png")
                 try:
                     kf_loras, kf_sids, kf_prompt = _keyframe_cast_context(mv, s, prompt)
-                    if kf_loras:
+                    if kf_loras or _zimage_keyframes(s):
                         from backend.services.character_still_pipeline import render_character_still
                         still = render_character_still(
                             kf_prompt,
@@ -1230,7 +1237,7 @@ def run_storyboard_generator(mv_id: int, force: bool = False):
                             source="musicvideo",
                             width=s.get("still_width", 1024),
                             height=s.get("still_height", 576),
-                            steps=s.get("keyframe_steps") or 20,
+                            steps=(s.get("keyframe_steps") or 20) if kf_loras else s.get("keyframe_steps"),
                             seed=2000 + idx,
                             output_path=still_path,
                             lora_strength=kf_lora_strength,
@@ -1263,6 +1270,10 @@ def run_storyboard_generator(mv_id: int, force: bool = False):
                 except Exception as e:
                     log.warning("storyboard still failed for mv %s cut %s: %s", mv_id, idx, e)
             free_comfyui_vram()
+            if _zimage_keyframes(s):
+                # The batch kept the offline pipeline loaded between stills; the render needs the card.
+                from backend.services.offline_image_generator import get_image_generator
+                get_image_generator().release_kept_pipeline()
     except GpuBusyError as e:
         error_msg = f"GPU busy, cannot generate storyboards right now: {e}"
     except Exception as e:
