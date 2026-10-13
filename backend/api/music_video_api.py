@@ -158,7 +158,10 @@ def create():
 
     from backend.services.video_model_registry import resolve_active_video_model
     explicit_i2v = (settings.get("i2v_model") or "").strip() or None
-    picked, resolve_err = resolve_active_video_model("i2v", explicit_i2v, surface="music-video")
+    # Analysis needs no GPU; the storyboard and render stages start ComfyUI themselves.
+    picked, resolve_err = resolve_active_video_model(
+        "i2v", explicit_i2v, surface="music-video", comfyui_down_ok=True,
+    )
     if resolve_err:
         return jsonify({"error": resolve_err}), 400
     settings["i2v_model"] = picked
