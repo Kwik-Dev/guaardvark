@@ -87,7 +87,8 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
   });
 
   const totalDuration = rows.length ? Math.max(...rows.map((r) => r.end || 0)) : 0;
-  const sections = [...new Set(rows.map((r) => r.section))];
+  // Sections in song order (a label can come back, e.g. verse → drop → verse).
+  const sections = rows.map((r) => r.section).filter((s, i, all) => i === 0 || s !== all[i - 1]);
 
   const [storyboardVersions, setStoryboardVersions] = useState({}); // per-cut cache buster for thumbnails
   const [regenErrors, setRegenErrors] = useState({}); // per-cut last error for regen feedback
@@ -438,22 +439,23 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
         <Box
           sx={{
             display: "flex",
-            height: 6,
+            height: 10,
             mb: 1,
             borderRadius: 1,
             overflow: "hidden",
             backgroundColor: "rgba(255,255,255,0.08)",
           }}
-          title="Energy arc (left-to-right = cuts). Color = intensity (cool blue=low/calm, warm red=high/drop). Matches the song analysis the Director uses."
+          title="The song left to right: one segment per cut, as wide as the cut is long, coloured by energy (cool blue = calm, warm red = loud). Matches the song analysis the Director uses."
         >
           {rows.map((r, i) => (
             <Box
               key={i}
-              title={`cut ${r.index}: ${r.section} @ ${(r.energy || 0).toFixed(2)}`}
+              title={`cut ${r.index}: ${r.start.toFixed(1)}–${r.end.toFixed(1)}s, ${r.section}, energy ${(r.energy || 0).toFixed(2)}`}
               sx={{
-                flex: 1,
+                flex: Math.max(0.01, r.end - r.start),
                 height: "100%",
                 backgroundColor: arcColors(r.energy || 0),
+                borderLeft: i > 0 ? "1px solid rgba(0,0,0,0.55)" : "none",
                 opacity: 0.9,
               }}
             />
