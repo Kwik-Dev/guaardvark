@@ -129,6 +129,8 @@ def _mv_dict(mv: MusicVideo) -> dict:
     # The UI (PlanViewer) can show a warning badge so the operator knows the arc is not fully active.
     if isinstance(s, dict) and s.get("director_diagnostics"):
         out["director_diagnostics"] = s.get("director_diagnostics")
+    if s.get("song_analysis"):
+        out["song_analysis"] = s.get("song_analysis")
     out["storyboard_generating"] = bool(s.get("storyboard_generating"))
     if s.get("storyboard_error"):
         out["storyboard_error"] = s.get("storyboard_error")

@@ -132,7 +132,11 @@ class SongAnalyzeRequest(BaseModel):
     """Read-only audio analysis: tempo + beats + energy-labeled sections."""
 
     audio_path: str = Field(..., description="Absolute path to the song file.")
-    section_count: int = Field(4, ge=1, description="Number of energy sections to segment.")
+    section_count: Optional[int] = Field(
+        4, ge=1,
+        description="Equal-time energy sections to cut the song into; null reads the song "
+                    "instead (bar grid, per-bar loudness, sections where the music changes).",
+    )
     tightness: int = Field(100, ge=1, description="librosa beat_track rigidity.")
 
 
