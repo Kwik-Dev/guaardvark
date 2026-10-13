@@ -330,7 +330,7 @@ def _start_frames(refs):
             return None, f"{label} is empty."
         path, err = _media_path(text, label)
         if err:
-            if not os.path.isfile(text) or not _caller_is_this_machine():
+            if not _caller_is_this_machine() or not os.path.isfile(text):
                 return None, err
             if is_sensitive(text) or is_sensitive(os.path.realpath(text)):
                 return None, err
