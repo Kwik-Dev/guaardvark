@@ -940,31 +940,3 @@ def _ensure_distinct_and_energy_aware(
         log.info("director post-guard cued %d/%d repeated cuts", cued, len(out))
 
     return out
-
-
-
-
-def _augment_prompts_with_arc(prompts: list[str], cut_plan: list[dict[str, Any]], treatment: str) -> list[str]:
-    """P2: lightly prefix each (pure visual) prompt with position-in-arc language drawn from
-    the treatment. This makes the storyboard stills and i2v clips visibly illustrate
-    progression through the single cohesive story/mood arc, rather than just being
-    distinct variations on the global style.
-
-    Example output prefix: "opening moment in the fractured silver moonlight arc: [visual prompt]"
-    Keeps prompts suitable for image generators (no plot/names in the visual part).
-    """
-    if not treatment or not prompts:
-        return prompts
-    # Derive a short motif from the treatment (first sentence or 60 chars).
-    motif = treatment.split(".")[0][:60].strip() or "the visual arc"
-    n = len(prompts)
-    positions = ["opening", "rising", "peak", "resolution", "closing"]
-    out = []
-    for i, p in enumerate(prompts):
-        pos = positions[min(i, len(positions)-1)]
-        frac = (i + 1) / max(1, n)
-        # Light augmentation only if not already present; keeps "pure visual".
-        if "arc:" not in p.lower() and "moment in" not in p.lower() and len(p) > 5:
-            p = f"{pos} moment in {motif} (energy {frac:.1f}): {p}"
-        out.append(p)
-    return out
