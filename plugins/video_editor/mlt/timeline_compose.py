@@ -561,15 +561,20 @@ def _assign_tracks_and_timing(
         timeline_end_f = seconds_to_absolute_frame(c["timeline_end"], fps)
         source_in_f = seconds_to_absolute_frame(c["source_in"], fps)
         source_out_f = seconds_to_absolute_frame(c["source_out"], fps)
+        # A clip starts early to overlap the previous one only as far as its source has
+        # frames before source_in. Pulling the track start back further than the source
+        # makes the entry shorter than its slot, and every later clip on the track then
+        # plays early (0.2 s per dissolve, off the beat by the end of a music video).
+        in_ext = min(in_ext, source_in_f, timeline_start_f)
 
         placed.append(
             _PlacedClip(
                 clip_id=c.get("clip_id", f"entry{i}"),
                 source_path=c["source_path"],
                 track=current_track,
-                track_start_frames=max(0, timeline_start_f - in_ext),
+                track_start_frames=timeline_start_f - in_ext,
                 track_end_frames=timeline_end_f + out_ext,
-                source_in_frames=max(0, source_in_f - in_ext),
+                source_in_frames=source_in_f - in_ext,
                 source_out_frames=source_out_f + out_ext,
                 filter_preset=c.get("filter_preset", "none"),
                 transition_to_next=next_transition,
@@ -604,17 +609,18 @@ def _append_track_playlist(
         if p.track_start_frames > cursor:
             blank_frames = p.track_start_frames - cursor
             etree.SubElement(pl, "blank", attrib={"length": frames_to_smpte(blank_frames, fps)})
-        entry_in = frames_to_smpte(p.source_in_frames, fps)
-        entry_out = frames_to_smpte(max(p.source_in_frames, p.source_out_frames - 1), fps)
+        last_frame = max(p.source_in_frames, p.source_out_frames - 1)
         etree.SubElement(
             pl, "entry",
             attrib={
                 "producer": chain_id_by_source[p.source_path],
-                "in": entry_in,
-                "out": entry_out,
+                "in": frames_to_smpte(p.source_in_frames, fps),
+                "out": frames_to_smpte(last_frame, fps),
             },
         )
-        cursor = p.track_end_frames
+        # Where the playlist really is now, so the next blank is measured from the entry's
+        # actual end rather than the slot it was meant to fill.
+        cursor = max(cursor, p.track_start_frames) + (last_frame - p.source_in_frames + 1)
 
 
 def _append_audio_only_playlist(
