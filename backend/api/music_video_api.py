@@ -337,6 +337,34 @@ def rerender_held_cut(mv_id, idx):
     return jsonify({**_mv_dict(mv), **dispatch})
 
 
+@bp.post("/<int:mv_id>/reassemble")
+def reassemble(mv_id):
+    """Assemble the final video again from the clips already rendered.
+
+    For a video whose assembly failed, or that finished without a playable
+    output; no clip is rendered again."""
+    mv = db.session.get(MusicVideo, mv_id)
+    if mv is None:
+        return jsonify({"error": "not_found"}), 404
+    if not (mv.current_stage == "complete" or (mv.status or "") == "failed_assembling"):
+        return jsonify({"error": f"music_video is at stage '{mv.current_stage}', not complete or failed in assembly"}), 409
+    clips = [c for c in (mv.clips or []) if c.get("status") != "cancelled"]
+    missing = [c.get("index") for c in clips
+               if not (c.get("status") == "done" and c.get("clip_path") and os.path.exists(c["clip_path"]))]
+    if missing or not clips:
+        return jsonify({"error": f"cuts {missing} have no rendered clip on disk; re-plan to render them"}), 409
+    if held_cuts(clips):
+        return jsonify({"error": "a cut is held for review"}), 409
+    mv.current_stage = "assembling"
+    mv.status = "assembling"
+    mv.output_document_id = None
+    mv.error_blob = None
+    db.session.commit()
+    warning = MusicVideoService(db.session).try_dispatch(mv_id, "assembler")
+    db.session.refresh(mv)
+    return jsonify({**_mv_dict(mv), **dispatch_report(warning)})
+
+
 # --- Pre-approval plan inspection & editing -------------------------------
 
 @bp.post("/<int:mv_id>/plan")

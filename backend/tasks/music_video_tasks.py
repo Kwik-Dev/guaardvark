@@ -1083,9 +1083,28 @@ def run_assembler(mv_id: int):
         docs = [d for d in (result.get("documents") or []) if isinstance(d, dict)]
         def _is_mp4(d):
             return str(d.get("path") or d.get("file_path") or d.get("filename") or "").lower().endswith(".mp4")
-        mp4_doc = next((d for d in docs if _is_mp4(d)), None) or (docs[0] if docs else None)
+        mp4_doc = next((d for d in docs if _is_mp4(d)), None)
         if mp4_doc:
             mv.output_document_id = mp4_doc.get("id")
+        else:
+            # The plugin renders even when its POST back to us fails (a wrong
+            # backend URL, a restart in between); register the file here so the
+            # page can play it, and fail the stage rather than report a
+            # "complete" video nobody can open.
+            rendered = result.get("rendered_mp4")
+            if not rendered or not os.path.exists(rendered):
+                raise RuntimeError("assembly finished without a video file")
+            from backend.services.output_registration import register_file
+            doc = register_file(
+                physical_path=rendered,
+                folder_name="Videos",
+                file_metadata={"kind": "music_video", "music_video_id": mv_id},
+            )
+            if doc is None:
+                raise RuntimeError(f"the video was rendered to {rendered} but could not be added to the library")
+            log.warning("music_video %s: the editor did not register its render; registered %s here (doc %s)",
+                        mv_id, rendered, doc.id)
+            mv.output_document_id = doc.id
 
         # Convenience copy: put a nicely-named .mlt next to the music_video's clips/
         # so the user can easily find and open "the shotcut file" for this project
