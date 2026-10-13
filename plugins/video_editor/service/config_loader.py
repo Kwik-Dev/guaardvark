@@ -25,6 +25,23 @@ def project_root() -> Path:
     return _PLUGIN_ROOT.parent.parent
 
 
+def resolve_backend_url(explicit: str | None = None) -> str:
+    """Resolve the main Guaardvark backend's base URL.
+
+    Precedence: explicit config.yaml value > GUAARDVARK_BACKEND_URL env >
+    http://localhost:{FLASK_PORT}. The plugin launcher sources the project
+    root .env, so FLASK_PORT tracks wherever the backend actually listens
+    (5000 by default, 5055 on macOS). Same rule as audio_foundry.
+    """
+    if explicit:
+        return explicit
+    env_url = os.environ.get("GUAARDVARK_BACKEND_URL")
+    if env_url:
+        return env_url
+    port = os.environ.get("FLASK_PORT", "5000")
+    return f"http://localhost:{port}"
+
+
 def load_config() -> dict[str, Any]:
     """Return the merged runtime config."""
     manifest = _read_json(_PLUGIN_ROOT / "plugin.json")

@@ -97,6 +97,12 @@ export const rerenderMusicVideoCut = async (id, index) => {
   return response.data;
 };
 
+/** Assemble the final video again from the clips already rendered (no clip re-renders). */
+export const reassembleMusicVideo = async (id) => {
+  const response = await axios.post(`${API_BASE}/music-video/${id}/reassemble`);
+  return response.data;
+};
+
 export const generateMusicVideoStoryboards = async (id, data = {}) => {
   const response = await axios.post(`${API_BASE}/music-video/${id}/generate-storyboards`, data);
   return response.data;

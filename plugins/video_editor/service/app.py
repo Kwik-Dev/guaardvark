@@ -347,7 +347,7 @@ def auto_editor_trim(req: AutoEditorRequest) -> dict[str, Any]:
     if req.register_result:
         doc = register_output(
             result.output_path,
-            backend_url=_runtime.get("registration", {}).get("backend_url", "http://localhost:5002"),
+            backend_url=_runtime.get("registration", {}).get("backend_url"),
             folder=_runtime.get("registration", {}).get("folder", "Videos"),
             file_metadata={"kind": f"auto_editor_{result.mode}", "threshold": result.threshold},
         )
@@ -390,7 +390,7 @@ def shotcut_compose(req: ShotcutComposeRequest) -> dict[str, Any]:
     if req.register_result:
         doc = register_output(
             mlt_path,
-            backend_url=_runtime.get("registration", {}).get("backend_url", "http://localhost:5002"),
+            backend_url=_runtime.get("registration", {}).get("backend_url"),
             folder=_runtime.get("registration", {}).get("folder", "Videos"),
             file_metadata={"kind": "mlt_timeline", "text_overlays": len(timeline.text_elements)},
         )
@@ -416,7 +416,7 @@ def shotcut_compose(req: ShotcutComposeRequest) -> dict[str, Any]:
         if req.register_result:
             doc = register_output(
                 render.output_path,
-                backend_url=_runtime.get("registration", {}).get("backend_url", "http://localhost:5002"),
+                backend_url=_runtime.get("registration", {}).get("backend_url"),
                 folder=_runtime.get("registration", {}).get("folder", "Videos"),
                 file_metadata={"kind": "mlt_render", "text_overlays": len(timeline.text_elements)},
             )
@@ -479,7 +479,7 @@ def _do_beat_sync_render(job: Job, req: BeatSyncRequest) -> dict[str, Any]:
     if req.register_result:
         doc = register_output(
             mlt_path,
-            backend_url=_runtime.get("registration", {}).get("backend_url", "http://localhost:5002"),
+            backend_url=_runtime.get("registration", {}).get("backend_url"),
             folder=_runtime.get("registration", {}).get("folder", "Videos"),
             file_metadata={"kind": "mlt_project", "cut_count": len(cuts)},
         )
@@ -508,7 +508,7 @@ def _do_beat_sync_render(job: Job, req: BeatSyncRequest) -> dict[str, Any]:
         if req.register_result:
             doc = register_output(
                 render.output_path,
-                backend_url=_runtime.get("registration", {}).get("backend_url", "http://localhost:5002"),
+                backend_url=_runtime.get("registration", {}).get("backend_url"),
                 folder=_runtime.get("registration", {}).get("folder", "Videos"),
                 file_metadata={
                     "kind": "beat_sync_render",
@@ -707,7 +707,7 @@ def shotcut_compose_arrangement(body: ComposeArrangementBody) -> dict[str, Any]:
     if body.register_result:
         doc = register_output(
             mlt_path,
-            backend_url=_runtime.get("registration", {}).get("backend_url", "http://localhost:5002"),
+            backend_url=_runtime.get("registration", {}).get("backend_url"),
             folder=_runtime.get("registration", {}).get("folder", "Videos"),
             file_metadata={
                 "kind": "mlt_arrangement",
@@ -736,7 +736,7 @@ def shotcut_compose_arrangement(body: ComposeArrangementBody) -> dict[str, Any]:
         if body.register_result:
             doc = register_output(
                 render.output_path,
-                backend_url=_runtime.get("registration", {}).get("backend_url", "http://localhost:5002"),
+                backend_url=_runtime.get("registration", {}).get("backend_url"),
                 folder=_runtime.get("registration", {}).get("folder", "Videos"),
                 file_metadata={
                     "kind": "arrangement_render",

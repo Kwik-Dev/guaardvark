@@ -40,6 +40,7 @@ import {
   cancelMusicVideo,
   approveMusicVideoCut,
   rerenderMusicVideoCut,
+  reassembleMusicVideo,
 } from "../api/musicVideoService";
 import { getAllPluginStatus } from "../api/pluginsService";
 import { getAvailableModels } from "../api/modelService";
@@ -1055,6 +1056,21 @@ const MusicVideoPage = () => {
     }
   };
 
+  const handleReassemble = async () => {
+    if (!detail) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await reassembleMusicVideo(detail.id);
+      noteDispatch(detail.id, updated);
+      setDetail(updated);
+    } catch (e) {
+      setError(formatUiError(e?.response?.data?.error) || e.message || "Assemble again failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleCancel = async () => {
     if (!detail) return;
     const analyzing = detail.current_stage === "analyzing";
@@ -1705,7 +1721,7 @@ const MusicVideoPage = () => {
                 />
               )}
 
-              {detail.current_stage === "assembling" && (
+              {detail.current_stage === "assembling" && !(detail.status || "").startsWith("failed") && (
                 <Stack spacing={1}>
                   <Typography variant="body2">Assembling the final cut in sync with your song…</Typography>
                   <LinearProgress />
@@ -1732,8 +1748,29 @@ const MusicVideoPage = () => {
                 </Stack>
               )}
 
+              {detail.current_stage === "complete" && !detail.output_document_id && (
+                <Alert
+                  severity="warning"
+                  action={
+                    <Button color="inherit" size="small" onClick={handleReassemble} disabled={busy}>
+                      Assemble again
+                    </Button>
+                  }
+                >
+                  The clips are rendered but the finished video was not added to the library, so it
+                  cannot play here. Assemble again builds it from the same clips; nothing is re-rendered.
+                </Alert>
+              )}
+
               {(detail.status || "").startsWith("failed") && (
-                <Alert severity="error">
+                <Alert
+                  severity="error"
+                  action={detail.status === "failed_assembling" ? (
+                    <Button color="inherit" size="small" onClick={handleReassemble} disabled={busy}>
+                      Assemble again
+                    </Button>
+                  ) : undefined}
+                >
                   Failed at stage <b>{detail.error_blob?.stage || detail.status}</b>:{" "}
                   {String(detail.error_blob?.error || "unknown error")}
                 </Alert>
