@@ -124,6 +124,9 @@ def _mv_dict(mv: MusicVideo) -> dict:
     treatment = s.get("director_treatment") or s.get("director_storyline")
     if treatment:
         out["director_treatment"] = treatment
+    # The story the person wrote, shown as written next to the Director's version.
+    if s.get("user_treatment"):
+        out["user_treatment"] = s.get("user_treatment")
     # P0 diagnostics (story-arc plan): surface why we may have fallen back to global/identical
     # prompts (LLM unavailable, parse failure, recovery used, low distinctness after guard, etc.).
     # The UI (PlanViewer) can show a warning badge so the operator knows the arc is not fully active.
@@ -596,6 +599,21 @@ def get_mv_storyboard(mv_id, idx):
             if sp and os.path.exists(sp):
                 return send_file(sp, mimetype="image/png")
     return jsonify({"error": "storyboard not found for this cut"}), 404
+
+
+@bp.get("/<int:mv_id>/clip/<int:idx>")
+def get_mv_clip(mv_id, idx):
+    """Serve a cut's rendered clip, so a cut held for review can be watched before it is
+    approved or rendered again."""
+    mv = db.session.get(MusicVideo, mv_id)
+    if not mv or not mv.clips:
+        return jsonify({"error": "not found"}), 404
+    for c in (mv.clips or []):
+        if int(c.get("index", -1)) == int(idx):
+            cp = c.get("clip_path")
+            if cp and os.path.exists(cp):
+                return send_file(cp, mimetype="video/mp4", conditional=True)
+    return jsonify({"error": "no rendered clip for this cut"}), 404
 
 
 @bp.post("/<int:mv_id>/generate-storyboards")

@@ -105,7 +105,7 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
   // touched and never overwrites an edit (utils/serverFormSync). A picker the
   // person changed keeps their choice; its conflicts are not shown.
   const serverPlan = {
-    treatment: detail.director_treatment || detail.director_storyline || "",
+    treatment: detail.user_treatment || detail.director_treatment || detail.director_storyline || "",
     ...Object.fromEntries(rows.map((r) => [cutKey(r.index), r.prompt])),
   };
   const serverPickers = {
@@ -355,7 +355,8 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
           This is treated as the screenplay. Per-cut prompts should advance this story. */}
       <Box sx={{ mb: 1.5 }}>
         <Typography variant="caption" sx={{ fontWeight: 600 }}>
-          Visual Treatment / Story {isEditable ? "(edit and save to use as screenplay)" : ""}
+          {detail.user_treatment ? "Your story" : "Visual Treatment / Story"}{" "}
+          {isEditable ? "(edit and save to use as screenplay)" : ""}
         </Typography>
         {isEditable ? (
           <TextField
@@ -371,7 +372,7 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
           />
         ) : (
           <Typography variant="body2" sx={{ whiteSpace: "pre-wrap", mt: 0.5, fontSize: "0.875rem", opacity: 0.9 }}>
-            {detail.director_treatment || detail.director_storyline || "(no treatment — prompts were generated from style only)"}
+            {detail.user_treatment || detail.director_treatment || detail.director_storyline || "(no treatment — prompts were generated from style only)"}
           </Typography>
         )}
       </Box>
@@ -419,10 +420,11 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
           narrative treatment first (in the requested visual style), then derives per-cut
           prompts that advance it. This is what prevents the "identical prompt repeated
           for every scene" problem you saw. */}
-      {(detail.director_treatment || detail.director_storyline) && (
+      {(detail.director_treatment || detail.director_storyline)
+        && (detail.director_treatment || detail.director_storyline) !== detail.user_treatment && (
         <Box sx={{ mb: 1.5, p: 1.25, backgroundColor: "rgba(255,215,0,0.07)", borderRadius: 1, border: "1px solid rgba(255,215,0,0.25)" }}>
           <Typography variant="caption" sx={{ fontWeight: 600, color: "#ffd700", display: "block", mb: 0.5 }}>
-            VISUAL TREATMENT (screenwriter-style story arc)
+            {detail.user_treatment ? "THE DIRECTOR'S TREATMENT (written from your story)" : "VISUAL TREATMENT (screenwriter-style story arc)"}
           </Typography>
           <Typography variant="body2" sx={{ whiteSpace: "pre-wrap", fontSize: "0.875rem", lineHeight: 1.4 }}>
             {detail.director_treatment || detail.director_storyline}
@@ -1729,6 +1731,7 @@ const MusicVideoPage = () => {
                   busy={busy}
                   onApprove={(index) => handleHeldCut(index, "approve")}
                   onRerender={(index) => handleHeldCut(index, "rerender")}
+                  clipUrl={(index) => `/api/music-video/${detail.id}/clip/${index}?r=${detail.clips?.find((c) => c.index === index)?.rerenders || 0}`}
                 />
               )}
 
