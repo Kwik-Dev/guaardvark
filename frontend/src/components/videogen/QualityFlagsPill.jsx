@@ -15,6 +15,7 @@ const SHORT = {
   desaturated: "No colour",
   oversaturated: "Oversaturated",
   frozen: "Frozen",
+  flashes: "Flashing",
   wrong_size: "Wrong size",
   wrong_frame_count: "Wrong length",
   low_colour_match: "Colour drift",

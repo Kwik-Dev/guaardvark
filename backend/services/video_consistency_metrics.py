@@ -586,6 +586,19 @@ QUALITY_THRESHOLDS: Dict[str, Dict[str, Any]] = {
     "frozen_share": {"value": 0.5, "why": (
         "A clip is frozen when one unbroken run of still frames covers half of it; a held "
         "beat of a second or two is a shot, not a failure.")},
+    "flash_luma": {"value": 40, "why": (
+        "A frame flashes when its mean luma (0-255, frames scaled to 160 px wide) sits more than "
+        "40 above the median of the 4 frames either side. Measured 2026-10-13 on 200 Video Gen "
+        "clips and 29 music-video cuts: clean renders peak at 0-1 such frames, a white-out or "
+        "colour-burst render at 11-40.")},
+    "flash_min_frames": {"value": 3, "why": (
+        "Fewer flashing frames than this is a cut, a lightning strike or a lamp in shot.")},
+    "flash_share": {"value": 0.05, "why": (
+        "Flagged when at least 5% of the clip's frames flash. On the 2026-10-13 set this held "
+        "1 of 200 Video Gen clips (a render that turns to colour noise after its first frame) and "
+        "3 of 29 music-video cuts (two with white-outs, one strobing in motion blur); a story "
+        "light burst (3 of 241 frames) and a cut that brightens as its subject leaves (8 of "
+        "241) stay below it.")},
     "frame_count_grid": {"value": None, "why": (
         "Models move a length onto their frame grid (4n+1, 8n+1, 17k+5), up or down, so an "
         "expected count is allowed one grid step either way, multiplied by the RIFE factor.")},
@@ -612,6 +625,7 @@ _FLAG_TEXT = {
     "desaturated": "almost no colour",
     "oversaturated": "posterised, oversaturated colour",
     "frozen": "frozen video (frames do not change)",
+    "flashes": "flashing frames (brief white-outs or colour bursts)",
     "wrong_size": "wrong frame size",
     "wrong_frame_count": "wrong number of frames",
     "low_colour_match": "colours drift from the keyframe",
@@ -658,7 +672,7 @@ NEEDS_REVIEW = "needs_review"
 QUALITY_FLAG_OUTCOME: Dict[str, str] = {
     code: NEEDS_REVIEW for code in (
         "unreadable", "black_frames", "clipped_highlights", "washed_out",
-        "wrong_size", "wrong_frame_count", "low_vlm_score", "low_colour_match",
+        "wrong_size", "wrong_frame_count", "low_vlm_score", "low_colour_match", "flashes",
         # Records written before the colour match was named for what it is.
         "low_identity_score",
     )
@@ -764,6 +778,7 @@ def inspect_video_frames(
         return out
 
     diffs: list = []
+    frame_means: list = []
     samples: Dict[int, Any] = {}
     try:
         with av.open(str(p)) as container:
@@ -784,6 +799,7 @@ def inspect_video_frames(
                 if prev_luma is not None:
                     diffs.append(float(np.abs(luma - prev_luma).mean()))
                 prev_luma = luma
+                frame_means.append(float(luma.mean()))
                 if count % step == 0:
                     samples[count] = rgb
                 last = (count, rgb)
@@ -837,6 +853,17 @@ def inspect_video_frames(
         out["metrics"]["longest_still_run"] = best + 1 if best else 0
         if best + 1 >= _t("frozen_share") * out["frames"] and best:
             flags.append(_flag("frozen", f"{best + 1} of {out['frames']} frames unchanged in one run"))
+
+    if len(frame_means) >= 9:
+        means = np.asarray(frame_means)
+        flashing = [
+            i for i in range(len(means))
+            if means[i] - float(np.median(np.r_[means[max(0, i - 4):i], means[i + 1:i + 5]])) > _t("flash_luma")
+        ]
+        out["metrics"]["flash_frames"] = len(flashing)
+        if len(flashing) >= _t("flash_min_frames") and len(flashing) >= _t("flash_share") * len(means):
+            flags.append(_flag("flashes", f"{len(flashing)} of {len(means)} frames flash brighter than "
+                                          f"the frames around them (frames {flashing[:6]})"))
 
     if expected_width and expected_height and (out["width"], out["height"]) != (int(expected_width), int(expected_height)):
         flags.append(_flag("wrong_size", f"{out['width']}x{out['height']}, asked for "
