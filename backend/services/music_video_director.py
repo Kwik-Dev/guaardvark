@@ -210,15 +210,47 @@ def _resolve_model(preferred: str) -> str:
     return _director_candidates(preferred)[0]
 
 
-def _cut_brief(cut_plan: list[dict[str, Any]], *, max_stretch: float | None = None, fill_method: str | None = None) -> list[dict[str, Any]]:
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+_STORY_BEAT_MAX_CHARS = 300
+
+
+def _story_beats(treatment: str | None) -> list[str]:
+    """Split a user's story into its sentences, in order: the beats spread across the song."""
+    if not treatment or not treatment.strip():
+        return []
+    return [b.strip() for b in _SENTENCE_END.split(" ".join(treatment.split())) if b.strip()]
+
+
+def _beat_for_span(beats: list[str], start_s: float, end_s: float, song_s: float) -> str:
+    """The beats that fall in a cut's span when they are spread evenly over the song: beat i
+    owns [i/B, (i+1)/B) of it. A cut longer than one beat gets each beat it spans."""
+    if not beats or song_s <= 0:
+        return ""
+    n = len(beats)
+    first = min(n - 1, int(n * max(0.0, start_s) / song_s))
+    last = min(n - 1, max(first, int(n * max(0.0, end_s - 1e-6) / song_s)))
+    text = " ".join(beats[first:last + 1])
+    if len(text) > _STORY_BEAT_MAX_CHARS:
+        text = text[:_STORY_BEAT_MAX_CHARS].rsplit(" ", 1)[0] + " ..."
+    return text
+
+
+def _cut_brief(
+    cut_plan: list[dict[str, Any]], *, max_stretch: float | None = None, fill_method: str | None = None,
+    song_s: float | None = None, story_beats: list[str] | None = None,
+) -> list[dict[str, Any]]:
     """Build the compact CUTS list sent to the Director LLM.
 
     P1 (story-arc plan): optionally include the per-video Clip Stretch settings so the
     model can intelligently suggest `duration_seconds` (the *pre-stretch* source motion
     length) that will produce the desired final pacing after `fill_clip_to_duration`
     applies k = min(..., max_stretch).
+
+    ``song_s`` is the whole song's length, so a batch of cuts sees where it sits in the song
+    rather than within the batch; ``story_beats`` adds the part of the user's story each cut shows.
     """
-    song_s = max((float(c["end_s"]) for c in cut_plan), default=0.0)
+    if not song_s:
+        song_s = max((float(c["end_s"]) for c in cut_plan), default=0.0)
     out = []
     for c in cut_plan:
         item = {
@@ -230,6 +262,8 @@ def _cut_brief(cut_plan: list[dict[str, Any]], *, max_stretch: float | None = No
             "section": c.get("section_label", ""),
             "energy": round(float(c.get("energy", 0.0)), 3),
         }
+        if story_beats:
+            item["story_beat"] = _beat_for_span(story_beats, float(c["start_s"]), float(c["end_s"]), song_s)
         if max_stretch is not None:
             item["max_stretch"] = round(float(max_stretch), 2)
         if fill_method:
@@ -454,6 +488,8 @@ def _generate_shots_for_batch(
     rich: bool,
     sampling: dict | None = None,
     num_ctx: int | None = None,
+    song_s: float | None = None,
+    story_beats: list[str] | None = None,
 ) -> dict:
     """Generate per-shot prompts for ONE batch of cuts.
 
@@ -468,7 +504,9 @@ def _generate_shots_for_batch(
     b = len(cut_subset)
     if b == 0:
         return {"prompts": {}, "shots": [], "treatment": None, "raw_head": None}
-    cuts_json = json.dumps(_cut_brief(cut_subset, max_stretch=max_stretch, fill_method=fill_method))
+    cuts_json = json.dumps(_cut_brief(
+        cut_subset, max_stretch=max_stretch, fill_method=fill_method, song_s=song_s, story_beats=story_beats,
+    ))
     try:
         if rich:
             system = _SYSTEM
@@ -555,9 +593,10 @@ def _generate_storyline_and_prompts(
             f"Map its beats and progression to the specific song sections and energy values in the CUTS list below):\n"
             f"{user_treatment.strip()}\n\n"
             "Respect this treatment exactly. Do not invent a different story. Adapt the pacing and visuals to the CUTS. "
-            "Tell its events in the order written, across the whole song: each cut's song_position (0 = start, "
-            "1 = end) says where it falls, so the story's opening belongs to the first cuts and its ending to the "
-            "last cuts, and its peak to the loudest section. Keep every person, their gender, and every vehicle, "
+            "Tell its events in the order written, across the whole song. Each cut's story_beat is the part of the "
+            "story that cut shows: show that moment in that cut, not an earlier or later one, and never start the "
+            "story over. song_position (0 = start of the song, 1 = its end) says where the cut falls. "
+            "Keep every person, their gender, and every vehicle, "
             "creature and object the story names, and describe each the same way in every shot. "
             "The treatment may contain narrative elements — those belong ONLY in the top-level treatment field."
         )
@@ -585,6 +624,8 @@ def _generate_storyline_and_prompts(
         # separate, small-enough ollama.chat. The first (rich) batch writes the whole-video
         # treatment; later (shots-only) batches reuse it as continuity context.
         batches = [cut_plan[i:i + DIRECTOR_BATCH_SIZE] for i in range(0, n, DIRECTOR_BATCH_SIZE)]
+        song_s = max((float(c["end_s"]) for c in cut_plan), default=0.0)
+        story_beats = _story_beats(user_treatment)
         log.info(
             "music video director using ollama model=%s for %d cuts in %d batch(es) of <=%d (has_user_treatment=%s)",
             model, n, len(batches), DIRECTOR_BATCH_SIZE, bool(user_treatment),
@@ -612,6 +653,8 @@ def _generate_storyline_and_prompts(
                 rich=(bi == 0),
                 sampling=sampling,
                 num_ctx=_director_num_ctx,
+                song_s=song_s,
+                story_beats=story_beats,
             )
             if bi == 0 and res.get("treatment"):
                 treatment = res.get("treatment")
