@@ -350,6 +350,19 @@ def compute_bar_cut_plan(
     return cuts
 
 
+def default_keyframe_model() -> str:
+    """Storyboard and keyframe stills default to Z-Image Turbo when its weights are
+    on disk (offline, as on the Images page), else FLUX-schnell through ComfyUI."""
+    try:
+        from backend.services.offline_image_generator import get_image_generator
+        info = (get_image_generator().get_available_models() or {}).get("zimage-turbo") or {}
+        if info.get("availability") == "ready":
+            return "zimage-turbo"
+    except Exception:  # noqa: BLE001 — a probe failure keeps the ComfyUI default
+        pass
+    return "flux-schnell"
+
+
 def probe_duration(path: str) -> float:
     """Duration of a media file in seconds via ffprobe. 0.0 if unknown."""
     try:
@@ -467,6 +480,9 @@ class MusicVideoService(PipelineService):
         project_id: int | None,
         settings: dict | None = None,
     ) -> MusicVideo:
+        settings = dict(settings or {})
+        if not settings.get("keyframe_model"):
+            settings["keyframe_model"] = default_keyframe_model()
         mv = MusicVideo(
             name=name,
             song_document_id=song_document_id,

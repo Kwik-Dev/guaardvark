@@ -124,6 +124,9 @@ def _mv_dict(mv: MusicVideo) -> dict:
     treatment = s.get("director_treatment") or s.get("director_storyline")
     if treatment:
         out["director_treatment"] = treatment
+    # The story the person wrote, shown as written next to the Director's version.
+    if s.get("user_treatment"):
+        out["user_treatment"] = s.get("user_treatment")
     # P0 diagnostics (story-arc plan): surface why we may have fallen back to global/identical
     # prompts (LLM unavailable, parse failure, recovery used, low distinctness after guard, etc.).
     # The UI (PlanViewer) can show a warning badge so the operator knows the arc is not fully active.
@@ -155,7 +158,10 @@ def create():
 
     from backend.services.video_model_registry import resolve_active_video_model
     explicit_i2v = (settings.get("i2v_model") or "").strip() or None
-    picked, resolve_err = resolve_active_video_model("i2v", explicit_i2v, surface="music-video")
+    # Analysis needs no GPU; the storyboard and render stages start ComfyUI themselves.
+    picked, resolve_err = resolve_active_video_model(
+        "i2v", explicit_i2v, surface="music-video", comfyui_down_ok=True,
+    )
     if resolve_err:
         return jsonify({"error": resolve_err}), 400
     settings["i2v_model"] = picked
@@ -598,6 +604,21 @@ def get_mv_storyboard(mv_id, idx):
     return jsonify({"error": "storyboard not found for this cut"}), 404
 
 
+@bp.get("/<int:mv_id>/clip/<int:idx>")
+def get_mv_clip(mv_id, idx):
+    """Serve a cut's rendered clip, so a cut held for review can be watched before it is
+    approved or rendered again."""
+    mv = db.session.get(MusicVideo, mv_id)
+    if not mv or not mv.clips:
+        return jsonify({"error": "not found"}), 404
+    for c in (mv.clips or []):
+        if int(c.get("index", -1)) == int(idx):
+            cp = c.get("clip_path")
+            if cp and os.path.exists(cp):
+                return send_file(cp, mimetype="video/mp4", conditional=True)
+    return jsonify({"error": "no rendered clip for this cut"}), 404
+
+
 @bp.post("/<int:mv_id>/generate-storyboards")
 def generate_storyboards(mv_id):
     """Dispatch async storyboard keyframe generation for all cuts (thumbnails-first review)."""
@@ -672,7 +693,9 @@ def regen_mv_storyboard(mv_id, idx):
 
     s = _settings_for_mv(mv)
     from backend.services.comfyui_image_generator import ComfyUIImageGenerator
-    from backend.tasks.music_video_tasks import _keyframe_cast_context, _keyframe_lora_strength, _clip_dir
+    from backend.tasks.music_video_tasks import (
+        _clip_dir, _keyframe_cast_context, _keyframe_lora_strength, _zimage_keyframes,
+    )
     import copy
 
     clips = copy.deepcopy(mv.clips or [])
@@ -709,7 +732,7 @@ def regen_mv_storyboard(mv_id, idx):
     try:
         with gpu_session(JobKind.VIDEO_RENDER, f"mv_storyboard_{mv_id}_{idx}", evict_ollama=True,
                          free_comfyui=True, vram_estimate_mb=11000, require_fit=True):
-            if kf_loras:
+            if kf_loras or _zimage_keyframes(s):
                 from backend.services.character_still_pipeline import render_character_still
                 still = render_character_still(
                     kf_prompt,

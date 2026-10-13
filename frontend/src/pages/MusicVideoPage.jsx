@@ -87,7 +87,8 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
   });
 
   const totalDuration = rows.length ? Math.max(...rows.map((r) => r.end || 0)) : 0;
-  const sections = [...new Set(rows.map((r) => r.section))];
+  // Sections in song order (a label can come back, e.g. verse → drop → verse).
+  const sections = rows.map((r) => r.section).filter((s, i, all) => i === 0 || s !== all[i - 1]);
 
   const [storyboardVersions, setStoryboardVersions] = useState({}); // per-cut cache buster for thumbnails
   const [regenErrors, setRegenErrors] = useState({}); // per-cut last error for regen feedback
@@ -105,7 +106,7 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
   // touched and never overwrites an edit (utils/serverFormSync). A picker the
   // person changed keeps their choice; its conflicts are not shown.
   const serverPlan = {
-    treatment: detail.director_treatment || detail.director_storyline || "",
+    treatment: detail.user_treatment || detail.director_treatment || detail.director_storyline || "",
     ...Object.fromEntries(rows.map((r) => [cutKey(r.index), r.prompt])),
   };
   const serverPickers = {
@@ -355,7 +356,8 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
           This is treated as the screenplay. Per-cut prompts should advance this story. */}
       <Box sx={{ mb: 1.5 }}>
         <Typography variant="caption" sx={{ fontWeight: 600 }}>
-          Visual Treatment / Story {isEditable ? "(edit and save to use as screenplay)" : ""}
+          {detail.user_treatment ? "Your story" : "Visual Treatment / Story"}{" "}
+          {isEditable ? "(edit and save to use as screenplay)" : ""}
         </Typography>
         {isEditable ? (
           <TextField
@@ -371,7 +373,7 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
           />
         ) : (
           <Typography variant="body2" sx={{ whiteSpace: "pre-wrap", mt: 0.5, fontSize: "0.875rem", opacity: 0.9 }}>
-            {detail.director_treatment || detail.director_storyline || "(no treatment — prompts were generated from style only)"}
+            {detail.user_treatment || detail.director_treatment || detail.director_storyline || "(no treatment — prompts were generated from style only)"}
           </Typography>
         )}
       </Box>
@@ -419,10 +421,11 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
           narrative treatment first (in the requested visual style), then derives per-cut
           prompts that advance it. This is what prevents the "identical prompt repeated
           for every scene" problem you saw. */}
-      {(detail.director_treatment || detail.director_storyline) && (
+      {(detail.director_treatment || detail.director_storyline)
+        && (detail.director_treatment || detail.director_storyline) !== detail.user_treatment && (
         <Box sx={{ mb: 1.5, p: 1.25, backgroundColor: "rgba(255,215,0,0.07)", borderRadius: 1, border: "1px solid rgba(255,215,0,0.25)" }}>
           <Typography variant="caption" sx={{ fontWeight: 600, color: "#ffd700", display: "block", mb: 0.5 }}>
-            VISUAL TREATMENT (screenwriter-style story arc)
+            {detail.user_treatment ? "THE DIRECTOR'S TREATMENT (written from your story)" : "VISUAL TREATMENT (screenwriter-style story arc)"}
           </Typography>
           <Typography variant="body2" sx={{ whiteSpace: "pre-wrap", fontSize: "0.875rem", lineHeight: 1.4 }}>
             {detail.director_treatment || detail.director_storyline}
@@ -436,22 +439,23 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
         <Box
           sx={{
             display: "flex",
-            height: 6,
+            height: 10,
             mb: 1,
             borderRadius: 1,
             overflow: "hidden",
             backgroundColor: "rgba(255,255,255,0.08)",
           }}
-          title="Energy arc (left-to-right = cuts). Color = intensity (cool blue=low/calm, warm red=high/drop). Matches the song analysis the Director uses."
+          title="The song left to right: one segment per cut, as wide as the cut is long, coloured by energy (cool blue = calm, warm red = loud). Matches the song analysis the Director uses."
         >
           {rows.map((r, i) => (
             <Box
               key={i}
-              title={`cut ${r.index}: ${r.section} @ ${(r.energy || 0).toFixed(2)}`}
+              title={`cut ${r.index}: ${r.start.toFixed(1)}–${r.end.toFixed(1)}s, ${r.section}, energy ${(r.energy || 0).toFixed(2)}`}
               sx={{
-                flex: 1,
+                flex: Math.max(0.01, r.end - r.start),
                 height: "100%",
                 backgroundColor: arcColors(r.energy || 0),
+                borderLeft: i > 0 ? "1px solid rgba(0,0,0,0.55)" : "none",
                 opacity: 0.9,
               }}
             />
@@ -807,6 +811,10 @@ const MusicVideoPage = () => {
   const [useLoraConsistency, setUseLoraConsistency] = useState(false);
   const [keyframeModel, setKeyframeModel] = useState(DEFAULT_KEYFRAME_MODEL);
   const [i2vModel, setI2vModel] = useState("wan22-5b");
+  // Z-Image Turbo stills render offline (as on the Images page); offered when it is installed.
+  const [zimageInstalled, setZimageInstalled] = useState(false);
+  const keyframeTouched = useRef(false);
+  const defaultKeyframe = zimageInstalled ? "zimage-turbo" : DEFAULT_KEYFRAME_MODEL;
 
   const keyframeModelOptions = useMemo(
     () =>
@@ -818,12 +826,13 @@ const MusicVideoPage = () => {
             },
           ]
         : [
-            { value: "flux-schnell", label: "FLUX.1-schnell (fast, beautiful stills) — default" },
+            ...(zimageInstalled ? [{ value: "zimage-turbo", label: "Z-Image Turbo — default" }] : []),
+            { value: "flux-schnell", label: zimageInstalled ? "FLUX.1-schnell (fast stills)" : "FLUX.1-schnell (fast, beautiful stills) — default" },
             { value: "flux-dev-lora", label: "FLUX-dev + LoRA" },
             { value: "sdxl", label: "SDXL (no LoRA)" },
             { value: "sdxl-lora", label: "SDXL + LoRAs" },
           ],
-    [useLoraConsistency],
+    [useLoraConsistency, zimageInstalled],
   );
 
   useEffect(() => {
@@ -872,6 +881,24 @@ const MusicVideoPage = () => {
     },
   };
   const [i2vModelOptions, setI2vModelOptions] = useState(FALLBACK_I2V_MODEL_OPTIONS);
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/batch-image/models")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!alive) return;
+        const models = (data?.data || data || {}).models || [];
+        // "models" also lists downloadable ones; only weights on disk count.
+        const ready = models.some((m) => m && m.id === "zimage-turbo" && (m.availability === "ready" || m.is_downloaded));
+        setZimageInstalled(ready);
+        if (ready && !keyframeTouched.current) setKeyframeModel("zimage-turbo");
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   useEffect(() => {
     let alive = true;
     fetch("/api/batch-video/models")
@@ -1000,7 +1027,7 @@ const MusicVideoPage = () => {
       setPlanningMode("narrative");
       setUseLoraConsistency(false);
       setSelectedSubjectIds([]);
-      setKeyframeModel(DEFAULT_KEYFRAME_MODEL);
+      setKeyframeModel(defaultKeyframe);
       setI2vModel("wan22-5b");
       // Reset any future advanced model params here too
       if (fileInputRef.current) fileInputRef.current.value = "";
@@ -1297,7 +1324,7 @@ const MusicVideoPage = () => {
                           || keyframeModel === "sdxl-lora"
                           || keyframeModel === "flux-dev-lora"
                         ) {
-                          setKeyframeModel(DEFAULT_KEYFRAME_MODEL);
+                          setKeyframeModel(defaultKeyframe);
                         }
                       }}
                       id="lora-consistency"
@@ -1379,8 +1406,11 @@ const MusicVideoPage = () => {
                       fullWidth
                       label="Keyframe / Storyboard Image Model"
                       value={keyframeModel}
-                      onChange={(e) => setKeyframeModel(e.target.value)}
-                      helperText="FLUX-schnell for fast beautiful stills; SDXL for higher-fidelity stills without LoRA."
+                      onChange={(e) => {
+                        keyframeTouched.current = true;
+                        setKeyframeModel(e.target.value);
+                      }}
+                      helperText="Z-Image Turbo renders the stills offline with the Images page's model; FLUX-schnell and SDXL render through ComfyUI."
                       sx={{ mt: 1 }}
                     >
                       {keyframeModelOptions.map((opt) => (
@@ -1729,6 +1759,7 @@ const MusicVideoPage = () => {
                   busy={busy}
                   onApprove={(index) => handleHeldCut(index, "approve")}
                   onRerender={(index) => handleHeldCut(index, "rerender")}
+                  clipUrl={(index) => `/api/music-video/${detail.id}/clip/${index}?r=${detail.clips?.find((c) => c.index === index)?.rerenders || 0}`}
                 />
               )}
 

@@ -218,10 +218,14 @@ def _cut_brief(cut_plan: list[dict[str, Any]], *, max_stretch: float | None = No
     length) that will produce the desired final pacing after `fill_clip_to_duration`
     applies k = min(..., max_stretch).
     """
+    song_s = max((float(c["end_s"]) for c in cut_plan), default=0.0)
     out = []
     for c in cut_plan:
         item = {
             "index": c["index"],
+            "starts_at_s": round(float(c["start_s"]), 1),
+            # 0 = the first moment of the song, 1 = its end; a batch of cuts sees where it sits
+            "song_position": round(float(c["start_s"]) / song_s, 2) if song_s else 0.0,
             "seconds": round(float(c["end_s"]) - float(c["start_s"]), 2),
             "section": c.get("section_label", ""),
             "energy": round(float(c.get("energy", 0.0)), 3),
@@ -363,8 +367,8 @@ def _build_rich_user(
         "   - The prompts MUST be different from each other.\n"
         "   - **NEVER copy or echo the STYLE text (or large parts of it) into any shots[].prompt** — the STYLE is the global aesthetic and will be appended automatically by the caller after your prompt. Your shots[].prompt must be the *varying part only* (subject appearance, specific framing/composition, camera move, lighting for this exact moment, texture, atmosphere).\n"
         "   - Vary them according to each cut's 'section' label and 'energy' value.\n"
-        "   - Low energy cuts (intro/build): calmer, more atmospheric, wider framing, slower implied motion, using the 'loss' and 'searching' visual language from the treatment.\n"
-        "   - High energy cuts (drop): more intense, dynamic compositions, tighter framing, stronger contrast, using the 'convergence' and 'intensity' language.\n"
+        "   - Low energy cuts: calmer, more atmospheric, wider framing, slower implied motion.\n"
+        "   - High energy cuts: more intense, dynamic compositions, tighter framing, stronger contrast.\n"
         "   - Keep every prompt short and tight (aim <25 words / one comma phrase) so the full JSON fits in the model output window.\n"
         "   - Every shots[].prompt must be a PURE VISUAL PROMPT ONLY — no character names, no backstory, no plot points. Use only visual descriptors for consistency (e.g. recurring visual motifs like 'fractured silver moonlight on still water').\n"
         "   - Focus exclusively on: subject visuals, setting, framing, camera angle/motion, lighting, color palette, texture, atmosphere, mood as pure image, style elements from the treatment.\n"
@@ -551,6 +555,10 @@ def _generate_storyline_and_prompts(
             f"Map its beats and progression to the specific song sections and energy values in the CUTS list below):\n"
             f"{user_treatment.strip()}\n\n"
             "Respect this treatment exactly. Do not invent a different story. Adapt the pacing and visuals to the CUTS. "
+            "Tell its events in the order written, across the whole song: each cut's song_position (0 = start, "
+            "1 = end) says where it falls, so the story's opening belongs to the first cuts and its ending to the "
+            "last cuts, and its peak to the loudest section. Keep every person, their gender, and every vehicle, "
+            "creature and object the story names, and describe each the same way in every shot. "
             "The treatment may contain narrative elements — those belong ONLY in the top-level treatment field."
         )
 
@@ -663,17 +671,6 @@ def _generate_storyline_and_prompts(
             )
         except Exception:  # noqa: BLE001 — guard must never break the Director
             log.warning("director post-distinctness guard failed (safe no-op); using raw LLM output")
-
-        # P2: lightly inject arc/motif context from the treatment so per-shot prompts (used
-        # for storyboards and as i2v text conditioning) visibly illustrate progression
-        # through the story/mood arc, not just distinct variations on the global style.
-        # Keeps prompts "pure visual" by prefixing descriptive position-in-arc language
-        # drawn from the treatment (first sentence as motif) + index/energy.
-        if treatment:
-            try:
-                out = _augment_prompts_with_arc(out, cut_plan, treatment)
-            except Exception:  # noqa: BLE001
-                log.warning("director arc injection failed (safe no-op)")
 
         if treatment:
             log.info("director produced visual treatment for music video (len=%d): %s",
@@ -942,32 +939,4 @@ def _ensure_distinct_and_energy_aware(
     if cued:
         log.info("director post-guard cued %d/%d repeated cuts", cued, len(out))
 
-    return out
-
-
-
-
-def _augment_prompts_with_arc(prompts: list[str], cut_plan: list[dict[str, Any]], treatment: str) -> list[str]:
-    """P2: lightly prefix each (pure visual) prompt with position-in-arc language drawn from
-    the treatment. This makes the storyboard stills and i2v clips visibly illustrate
-    progression through the single cohesive story/mood arc, rather than just being
-    distinct variations on the global style.
-
-    Example output prefix: "opening moment in the fractured silver moonlight arc: [visual prompt]"
-    Keeps prompts suitable for image generators (no plot/names in the visual part).
-    """
-    if not treatment or not prompts:
-        return prompts
-    # Derive a short motif from the treatment (first sentence or 60 chars).
-    motif = treatment.split(".")[0][:60].strip() or "the visual arc"
-    n = len(prompts)
-    positions = ["opening", "rising", "peak", "resolution", "closing"]
-    out = []
-    for i, p in enumerate(prompts):
-        pos = positions[min(i, len(positions)-1)]
-        frac = (i + 1) / max(1, n)
-        # Light augmentation only if not already present; keeps "pure visual".
-        if "arc:" not in p.lower() and "moment in" not in p.lower() and len(p) > 5:
-            p = f"{pos} moment in {motif} (energy {frac:.1f}): {p}"
-        out.append(p)
     return out

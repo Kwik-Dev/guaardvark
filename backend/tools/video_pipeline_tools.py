@@ -405,8 +405,9 @@ class MusicVideoTool(BaseTool):
             if (i2v_model or "").strip():
                 settings["i2v_model"] = i2v_model.strip()
             from backend.services.video_model_registry import resolve_active_video_model
+            # Analysis needs no GPU; the storyboard and render stages start ComfyUI themselves.
             picked, resolve_err = resolve_active_video_model(
-                "i2v", settings.get("i2v_model"), surface="music-video",
+                "i2v", settings.get("i2v_model"), surface="music-video", comfyui_down_ok=True,
             )
             if resolve_err:
                 return ToolResult(success=False, error=resolve_err)
