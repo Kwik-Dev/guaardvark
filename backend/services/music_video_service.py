@@ -264,8 +264,8 @@ def compute_cut_plan(
 
 
 # Bars per cut by the loudness (0..1 within the song) of the two bars a cut starts
-# on: loud passages cut every bar, quiet ones hold up to eight. Measured on
-# One_Machine_-_009.wav (112 BPM) and the Ep 7/8 music bed (123 BPM): quiet parts
+# on: loud passages cut every bar, quiet ones hold up to eight. Measured on two
+# songs, at 112 BPM and 123 BPM: quiet parts
 # 7-8 cuts/min, loud parts 23-29 cuts/min, Wan 2.2 5B render time +14% over the
 # energy-quarter planner for the same song (43 cuts against 28).
 BARS_PER_CUT_BY_LOUDNESS = ((0.75, 1), (0.45, 2), (0.20, 4), (0.0, 8))
