@@ -226,13 +226,40 @@ def _beat_for_span(beats: list[str], start_s: float, end_s: float, song_s: float
     owns [i/B, (i+1)/B) of it. A cut longer than one beat gets each beat it spans."""
     if not beats or song_s <= 0:
         return ""
-    n = len(beats)
-    first = min(n - 1, int(n * max(0.0, start_s) / song_s))
-    last = min(n - 1, max(first, int(n * max(0.0, end_s - 1e-6) / song_s)))
+    first, last = _beat_range(len(beats), start_s, end_s, song_s)
     text = " ".join(beats[first:last + 1])
     if len(text) > _STORY_BEAT_MAX_CHARS:
         text = text[:_STORY_BEAT_MAX_CHARS].rsplit(" ", 1)[0] + " ..."
     return text
+
+
+def _beat_range(n: int, start_s: float, end_s: float, song_s: float) -> tuple[int, int]:
+    first = min(n - 1, int(n * max(0.0, start_s) / song_s))
+    return first, min(n - 1, max(first, int(n * max(0.0, end_s - 1e-6) / song_s)))
+
+
+def _batch_story_block(cut_subset: list[dict[str, Any]], song_s: float, beats: list[str]) -> str:
+    """Where one batch of cuts sits in the user's story: what earlier cuts already showed and
+    the only beats these cuts show. Placed right before the task, so a small model asked for
+    the last cuts of a video continues the story instead of telling it again from the start."""
+    if not beats or not cut_subset or song_s <= 0:
+        return ""
+    start = float(cut_subset[0]["start_s"])
+    end = float(cut_subset[-1]["end_s"])
+    first, last = _beat_range(len(beats), start, end, song_s)
+    block = (
+        f"\n\nTHESE CUTS IN THE STORY: they run from {start / song_s:.0%} to {end / song_s:.0%} of the song."
+    )
+    if first > 0:
+        shown = " ".join(beats[:first])
+        if len(shown) > 2 * _STORY_BEAT_MAX_CHARS:
+            shown = "... " + shown[-2 * _STORY_BEAT_MAX_CHARS:].split(" ", 1)[-1]
+        block += f" Earlier cuts already showed: {shown} Do not show those events again."
+    block += (
+        f" These cuts show only: {' '.join(beats[first:last + 1])} "
+        "Each shots[].prompt shows its own cut's story_beat."
+    )
+    return block
 
 
 def _cut_brief(
@@ -388,13 +415,13 @@ def generate_scene_prompts(
 
 def _build_rich_user(
     style_prompt: str, cuts_json: str, b: int, n_total: int,
-    mode_instruction: str, guidance_block: str, treatment_block: str,
+    mode_instruction: str, guidance_block: str, treatment_block: str, story_block: str = "",
 ) -> str:
     """The full TASK prompt: treatment + distinct per-cut shots for the first batch."""
     return (
         f"STYLE: {style_prompt}\n\n"
         f"CUTS ({b} of {n_total} total):\n{cuts_json}\n\n"
-        f"{mode_instruction}{guidance_block}{treatment_block}\n\n"
+        f"{mode_instruction}{guidance_block}{treatment_block}{story_block}\n\n"
         "TASK:\n"
         "1. Produce (or lightly refine) the top-level 'treatment' field using the provided user treatment as the main source. This field can contain the full dreamlike story and artistic directives. The treatment covers the WHOLE video, not just these cuts.\n"
         "2. For the 'shots' array: Create **one completely unique visual prompt for each individual cut** in the CUTS list above.\n"
@@ -413,7 +440,7 @@ def _build_rich_user(
 def _build_shots_only_user(
     style_prompt: str, cuts_json: str, b: int, n_total: int,
     mode_instruction: str, guidance_block: str, treatment_block: str,
-    treatment_context: str | None,
+    treatment_context: str | None, story_block: str = "",
 ) -> str:
     """The lean TASK prompt: distinct per-cut shots only, fed the already-written treatment
     as read-only continuity context. Used for every batch after the first and for recovery."""
@@ -427,7 +454,7 @@ def _build_shots_only_user(
     return (
         f"STYLE: {style_prompt}\n\n"
         f"CUTS ({b} of {n_total} total):\n{cuts_json}\n\n"
-        f"{mode_instruction}{guidance_block}{treatment_block}{tctx}\n\n"
+        f"{mode_instruction}{guidance_block}{treatment_block}{tctx}{story_block}\n\n"
         "TASK: Return ONLY this exact JSON shape (one entry per cut). Use the EXACT 'index' value from each CUTS entry above — DO NOT renumber from zero:\n"
         '{"shots": [{"index": <the cut index from the CUTS list>, "prompt": "pure visual for that cut ..."}, ...]}\n'
         "CRITICAL: Every shots[].prompt MUST be visually DISTINCT from all others AND MUST NOT BE A COPY (or near-copy) OF THE STYLE TEXT. "
@@ -507,13 +534,14 @@ def _generate_shots_for_batch(
     cuts_json = json.dumps(_cut_brief(
         cut_subset, max_stretch=max_stretch, fill_method=fill_method, song_s=song_s, story_beats=story_beats,
     ))
+    story_block = _batch_story_block(cut_subset, song_s or 0.0, story_beats or [])
     try:
         if rich:
             system = _SYSTEM
-            user = _build_rich_user(style_prompt, cuts_json, b, n_total, mode_instruction, guidance_block, treatment_block)
+            user = _build_rich_user(style_prompt, cuts_json, b, n_total, mode_instruction, guidance_block, treatment_block, story_block)
         else:
             system = _SHOTS_ONLY_SYSTEM
-            user = _build_shots_only_user(style_prompt, cuts_json, b, n_total, mode_instruction, guidance_block, treatment_block, treatment_context)
+            user = _build_shots_only_user(style_prompt, cuts_json, b, n_total, mode_instruction, guidance_block, treatment_block, treatment_context, story_block)
         data, content = _director_chat(ollama=ollama, model=model, system=system, user=user, batch_len=b, rich=rich, sampling=sampling, num_ctx=num_ctx)
         prompts_map = data.get("prompts", {}) or {}
         treatment = data.get("treatment")
@@ -522,7 +550,7 @@ def _generate_shots_for_batch(
         # Recovery: nothing parsed — try once more with the lean shots-only contract.
         if not prompts_map:
             try:
-                rec_user = _build_shots_only_user(style_prompt, cuts_json, b, n_total, mode_instruction, guidance_block, treatment_block, treatment_context)
+                rec_user = _build_shots_only_user(style_prompt, cuts_json, b, n_total, mode_instruction, guidance_block, treatment_block, treatment_context, story_block)
                 data2, _ = _director_chat(ollama=ollama, model=model, system=_SHOTS_ONLY_SYSTEM, user=rec_user, batch_len=b, rich=False, sampling=sampling, num_ctx=num_ctx)
                 if data2.get("prompts"):
                     prompts_map = data2.get("prompts", {})
