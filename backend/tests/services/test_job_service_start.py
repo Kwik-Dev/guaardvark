@@ -259,6 +259,9 @@ def test_music3_starts_comfyui_through_the_video_path(audio, services, monkeypat
 
 @pytest.fixture
 def upscaler(services, monkeypatch):
+    # The direct proxy path; with the GPU session on, the supervisor's worker
+    # submits the job instead of the route.
+    monkeypatch.setenv("GUAARDVARK_UPSCALE_GPU_SESSION", "0")
     posted = []
 
     def get(url, timeout=None, **kw):

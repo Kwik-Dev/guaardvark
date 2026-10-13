@@ -120,7 +120,7 @@ def test_share_draft_without_a_title_is_not_queued(draft_post):
     assert _rows() == []
 
 
-def test_an_approved_share_draft_is_submitted_to_its_subreddit(draft_post, app, monkeypatch):
+def test_an_approved_share_draft_is_submitted_to_its_subreddit(outreach_profile, draft_post, app, monkeypatch):
     submitted = []
 
     def submit(subreddit, title, link_url, *, before_submit=None):
@@ -147,7 +147,7 @@ def test_an_approved_share_draft_is_submitted_to_its_subreddit(draft_post, app, 
 
     result = tasks.tick_process_approved_drafts.run()
 
-    assert submitted == [("SideProject", "Local-first AI studio", "https://guaardvark.com")]
+    assert submitted == [("SideProject", "Local-first AI studio", "https://example.com")]
     assert result["processed"] == 1
     assert _rows()[0].status == "posted"
 
