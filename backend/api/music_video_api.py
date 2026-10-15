@@ -11,8 +11,15 @@ from pathlib import Path
 
 from flask import Blueprint, request, jsonify, send_file
 
-from backend.models import db, MusicVideo, Project, Document
-from backend.services.music_video_service import MusicVideoService, held_cuts
+from backend.models import db, MusicVideo, MusicVideoRevision, Project, Document
+from backend.services.music_video_service import (
+    MAX_REVISIONS_PER_VIDEO,
+    MusicVideoService,
+    clean_settings,
+    held_cuts,
+    restored_clips,
+    snapshot_of,
+)
 from backend.services.pipeline_service import dispatch_report
 from backend.services.gpu_resource_policy import gpu_session, free_comfyui_vram
 from backend.services.job_types import JobKind
@@ -61,6 +68,39 @@ def _resolve_song(song_document_id) -> str | None:
     return None
 
 
+def _live_clip_job(mv: MusicVideo) -> dict | None:
+    """The unified-progress record of the clip being rendered right now (sampler
+    step/steps from the ComfyUI bridge), or None. Works across processes: the
+    worker's job is read from its metadata record when not in this process."""
+    detail = (mv.settings_json or {}).get("progress") or {}
+    if mv.current_stage != "generating" or detail.get("stage") != "generating":
+        return None
+    idx = detail.get("clip_index")
+    if idx is None:
+        return None
+    try:
+        from backend.utils.unified_progress_system import get_unified_progress
+        return get_unified_progress().get_job_status(f"mv_{mv.id}_{int(idx)}")
+    except Exception:  # noqa: BLE001 — live detail is optional
+        return None
+
+
+def _progress_for(mv: MusicVideo) -> dict:
+    from backend.services.music_video_progress import compute_progress
+    try:
+        return compute_progress(
+            current_stage=mv.current_stage,
+            status=mv.status,
+            clips=mv.clips,
+            settings=mv.settings_json,
+            live=_live_clip_job(mv),
+            seconds_per_clip=_SECONDS_PER_CLIP,
+        )
+    except Exception as e:  # noqa: BLE001 — never break the detail view over the meter
+        log.warning("music_video %s: progress unavailable: %s", mv.id, e)
+        return {"overall_pct": None, "stages": [], "error": str(e)}
+
+
 def _mv_dict(mv: MusicVideo) -> dict:
     cut_count = len(mv.cut_plan or [])
     clips = mv.clips or []
@@ -71,6 +111,7 @@ def _mv_dict(mv: MusicVideo) -> dict:
         "status": mv.status,
         "current_stage": mv.current_stage,
         "project_id": mv.project_id,
+        "project_name": mv.project.name if mv.project_id and mv.project else None,
         "song_document_id": mv.song_document_id,
         "style_prompt": mv.style_prompt,
         "cut_count": cut_count,
@@ -87,11 +128,23 @@ def _mv_dict(mv: MusicVideo) -> dict:
         "cut_plan": mv.cut_plan or [],
         "clips": clips,
     }
+    # Cuts approval would render: not rendered yet, file gone, or inputs changed
+    # since (revise / restore keep the rest). Equals cut_count on a fresh plan.
+    from backend.services.music_video_service import clip_is_stale
+    raw_settings = mv.settings_json or {}
+    to_render = sum(
+        1 for c in clips
+        if c.get("status") != "cancelled" and (
+            c.get("status") != "done" or not (c.get("clip_path") and os.path.exists(c["clip_path"]))
+            or clip_is_stale(c, raw_settings)
+        )
+    ) if clips else cut_count
+    out["cuts_to_render"] = to_render
     # Surface the cost estimate once the plan exists (i.e. at the approval gate).
     if cut_count:
-        est = cut_count * _SECONDS_PER_CLIP
+        est = to_render * _SECONDS_PER_CLIP
         out["estimate"] = {
-            "clips_to_generate": cut_count,
+            "clips_to_generate": to_render,
             "seconds_per_clip": _SECONDS_PER_CLIP,
             "estimated_seconds": est,
             "estimated_human": f"~{est // 3600}h {(est % 3600) // 60}m" if est >= 3600 else f"~{est // 60}m",
@@ -134,6 +187,10 @@ def _mv_dict(mv: MusicVideo) -> dict:
         out["director_diagnostics"] = s.get("director_diagnostics")
     if s.get("song_analysis"):
         out["song_analysis"] = s.get("song_analysis")
+    out["notes"] = s.get("notes") or ""
+    out["tags"] = s.get("tags") or []
+    out["updated_at"] = mv.updated_at.isoformat() if mv.updated_at else None
+    out["progress"] = _progress_for(mv)
     out["storyboard_generating"] = bool(s.get("storyboard_generating"))
     if s.get("storyboard_error"):
         out["storyboard_error"] = s.get("storyboard_error")
@@ -166,8 +223,15 @@ def create():
         return jsonify({"error": resolve_err}), 400
     settings["i2v_model"] = picked
 
-    if project_id is not None and db.session.get(Project, project_id) is None:
-        return jsonify({"error": f"project_id {project_id} not found"}), 400
+    if project_id in ("", None):
+        project_id = None
+    if project_id is not None:
+        try:
+            project_id = int(project_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "project_id must be an integer"}), 400
+        if db.session.get(Project, project_id) is None:
+            return jsonify({"error": f"project_id {project_id} not found"}), 400
 
     song_path = _resolve_song(song_document_id)
     if not song_path:
@@ -191,7 +255,17 @@ def create():
 
 @bp.get("")
 def list_music_videos():
-    rows = MusicVideo.query.order_by(MusicVideo.created_at.desc()).all()
+    q = MusicVideo.query
+    pid = request.args.get("project_id")
+    if pid is not None:
+        if pid in ("", "none", "null"):
+            q = q.filter(MusicVideo.project_id.is_(None))
+        else:
+            try:
+                q = q.filter(MusicVideo.project_id == int(pid))
+            except ValueError:
+                return jsonify({"error": "project_id must be an integer or 'none'"}), 400
+    rows = q.order_by(MusicVideo.created_at.desc()).all()
     return jsonify({"music_videos": [_mv_dict(mv) for mv in rows]})
 
 
@@ -275,6 +349,7 @@ def approve(mv_id):
 
     svc = MusicVideoService(db.session)
     dispatch = {}
+    _save_revision(mv, reason="approve", label="Approved plan")
     if svc.advance_if_predecessor(mv_id, expected_predecessor="awaiting_approval"):
         dispatch = dispatch_report(svc.try_dispatch(mv_id, "clip_generator"))
         db.session.refresh(mv)
@@ -363,11 +438,13 @@ def reassemble(mv_id):
         return jsonify({"error": f"cuts {missing} have no rendered clip on disk; re-plan to render them"}), 409
     if held_cuts(clips):
         return jsonify({"error": "a cut is held for review"}), 409
+    _save_revision(mv, reason="reassemble", label="Before re-assembly")
     mv.current_stage = "assembling"
     mv.status = "assembling"
     mv.output_document_id = None
     mv.error_blob = None
     db.session.commit()
+    MusicVideoService(db.session).stamp_stage(mv_id, "assembling")
     warning = MusicVideoService(db.session).try_dispatch(mv_id, "assembler")
     db.session.refresh(mv)
     return jsonify({**_mv_dict(mv), **dispatch_report(warning)})
@@ -446,6 +523,7 @@ def _restart_analysis(mv_id: int) -> tuple[MusicVideo | None, str | None]:
         mv.cut_plan = None
         mv.clips = []
     db.session.commit()
+    MusicVideoService(db.session).stamp_stage(mv_id, "analyzing")
     warning = MusicVideoService(db.session).try_dispatch(mv_id, "analyzer")
     db.session.refresh(mv)
     return mv, warning
@@ -533,6 +611,8 @@ def replan(mv_id):
     mv.clips = clips
 
     db.session.commit()
+    MusicVideoService(db.session).stamp_stage(mv_id, "awaiting_approval")
+    db.session.refresh(mv)
     return jsonify(_mv_dict(mv))
 
 
@@ -846,3 +926,349 @@ def regenerate_plan(mv_id):
         updated = mv
     db.session.refresh(updated)
     return jsonify(_mv_dict(updated))
+
+
+# --- Progress -----------------------------------------------------------------
+
+@bp.get("/<int:mv_id>/progress")
+def get_progress(mv_id):
+    """The progress meter alone (stages, clip in flight, ETA): a cheap poll."""
+    mv = db.session.get(MusicVideo, mv_id)
+    if mv is None:
+        return jsonify({"error": "not_found"}), 404
+    return jsonify({"id": mv.id, "current_stage": mv.current_stage, "status": mv.status,
+                    "progress": _progress_for(mv)})
+
+
+# --- Saving and editing a music video as a project ------------------------------
+
+_BUSY_STAGES = ("analyzing", "generating", "assembling")
+
+
+def _is_busy(mv: MusicVideo) -> bool:
+    status = mv.status or ""
+    return (mv.current_stage in _BUSY_STAGES
+            and not status.startswith("failed") and not status.startswith("cancelled"))
+
+
+def _save_revision(mv: MusicVideo, *, reason: str, label: str | None = None) -> MusicVideoRevision | None:
+    """Snapshot the video's creative state. Keeps the newest MAX_REVISIONS_PER_VIDEO.
+    Best-effort for automatic snapshots: a failure is logged, never blocks the action."""
+    try:
+        rev = MusicVideoRevision(
+            music_video_id=mv.id, reason=reason, label=(label or "")[:255] or None,
+            snapshot=snapshot_of(mv),
+        )
+        db.session.add(rev)
+        db.session.flush()
+        stale = (
+            MusicVideoRevision.query.filter_by(music_video_id=mv.id)
+            .order_by(MusicVideoRevision.created_at.desc(), MusicVideoRevision.id.desc())
+            .offset(MAX_REVISIONS_PER_VIDEO).all()
+        )
+        for old in stale:
+            db.session.delete(old)
+        db.session.commit()
+        return rev
+    except Exception as e:  # noqa: BLE001
+        log.warning("music_video %s: could not save a %s version: %s", mv.id, reason, e)
+        db.session.rollback()
+        return None
+
+
+def _parse_project_id(raw):
+    """(project_id or None, error response or None)."""
+    if raw in (None, "", "none", "null"):
+        return None, None
+    try:
+        pid = int(raw)
+    except (TypeError, ValueError):
+        return None, (jsonify({"error": "project_id must be an integer or null"}), 400)
+    if db.session.get(Project, pid) is None:
+        return None, (jsonify({"error": f"project_id {pid} not found"}), 400)
+    return pid, None
+
+
+def _refile_outputs(mv: MusicVideo) -> None:
+    """Move the video's rendered outputs to its (new) project, or out of any."""
+    from backend.services.music_video_service import attach_outputs_to_project
+    ids = list((mv.settings_json or {}).get("project_document_ids") or [])
+    if mv.output_document_id:
+        ids.append(mv.output_document_id)
+    if not ids:
+        return
+    if mv.project_id:
+        attach_outputs_to_project(mv, ids)
+    else:
+        for doc in Document.query.filter(Document.id.in_(ids)).all():
+            doc.project_id = None
+
+
+@bp.patch("/<int:mv_id>")
+def patch_music_video(mv_id):
+    """Rename, file under a project (or none), and keep notes/tags. Any stage.
+
+    Body (all optional): {name, project_id (int|null), notes, tags: [str]}
+    Moving to a project also files the rendered video under it.
+    """
+    mv = db.session.get(MusicVideo, mv_id)
+    if mv is None:
+        return jsonify({"error": "not_found"}), 404
+    body = request.get_json(silent=True) or {}
+
+    if "name" in body:
+        name = (body.get("name") or "").strip()
+        if not name:
+            return jsonify({"error": "name cannot be empty"}), 400
+        mv.name = name[:255]
+
+    moved = False
+    if "project_id" in body:
+        pid, err = _parse_project_id(body.get("project_id"))
+        if err:
+            return err
+        moved = pid != mv.project_id
+        mv.project_id = pid
+
+    if "notes" in body or "tags" in body:
+        db.session.refresh(mv, ["settings_json"])
+        s = dict(mv.settings_json or {})
+        if "notes" in body:
+            s["notes"] = str(body.get("notes") or "")[:20000]
+        if "tags" in body:
+            tags = body.get("tags") or []
+            if not isinstance(tags, list):
+                return jsonify({"error": "tags must be a list of strings"}), 400
+            s["tags"] = sorted({str(t).strip()[:64] for t in tags if str(t).strip()})[:50]
+        mv.settings_json = s
+
+    if moved:
+        db.session.flush()
+        try:
+            _refile_outputs(mv)
+        except Exception as e:  # noqa: BLE001
+            log.warning("music_video %s: re-filing outputs failed: %s", mv_id, e)
+    db.session.commit()
+    db.session.refresh(mv)
+    return jsonify(_mv_dict(mv))
+
+
+@bp.post("/<int:mv_id>/duplicate")
+def duplicate_music_video(mv_id):
+    """Copy a music video's song, style, story, settings and cut plan into a new
+    one parked at the approval gate (or re-analyzed when there is no plan).
+
+    Body (optional): {name, project_id, keep_storyboards: bool=true, keep_clips: bool=false}
+    keep_clips reuses the rendered clip files: only cuts you change re-render.
+    """
+    import copy
+    src = db.session.get(MusicVideo, mv_id)
+    if src is None:
+        return jsonify({"error": "not_found"}), 404
+    body = request.get_json(silent=True) or {}
+    pid = src.project_id
+    if "project_id" in body:
+        pid, err = _parse_project_id(body.get("project_id"))
+        if err:
+            return err
+    keep_sb = body.get("keep_storyboards", True) is not False
+    keep_clips = bool(body.get("keep_clips", False))
+
+    settings = clean_settings(src.settings_json)
+    settings.pop("project_document_ids", None)
+    settings.pop("director_diagnostics", None)
+    clips = copy.deepcopy(src.clips or [])
+    for c in clips:
+        if not keep_sb:
+            c["storyboard_path"] = None
+            c.pop("storyboard_variation", None)
+        if not keep_clips:
+            c.update({"status": "pending", "clip_path": None, "quality": None, "review": None})
+            c.pop("input_hash", None)
+            c.pop("elapsed_s", None)
+        c.pop("deferred_since", None)
+        c.pop("error", None)
+    if keep_clips:
+        clips = restored_clips(clips)
+
+    name = (body.get("name") or "").strip() or f"{src.name} (copy)"
+    svc = MusicVideoService(db.session)
+    new = svc.create(
+        name=name[:255], song_document_id=src.song_document_id, song_path=src.song_path,
+        style_prompt=src.style_prompt, project_id=pid, settings=settings,
+    )
+    has_plan = bool(src.cut_plan)
+    dispatch = {}
+    if has_plan:
+        new.cut_plan = copy.deepcopy(src.cut_plan)
+        new.clips = clips
+        new.current_stage = "awaiting_approval"
+        new.status = "awaiting_approval"
+        db.session.commit()
+        svc.stamp_stage(new.id, "awaiting_approval")
+    elif svc.advance_if_predecessor(new.id, expected_predecessor="draft"):
+        dispatch = dispatch_report(svc.try_dispatch(new.id, "analyzer"))
+    db.session.refresh(new)
+    _save_revision(new, reason="manual", label=f"Copied from «{src.name}» (#{src.id})")
+    db.session.refresh(new)
+    return jsonify({**_mv_dict(new), **dispatch, "duplicated_from": src.id}), 201
+
+
+@bp.post("/<int:mv_id>/revise")
+def revise_music_video(mv_id):
+    """Reopen a finished, failed or cancelled video for editing at the approval gate.
+
+    Unlike /replan (which renders every cut again), finished clips are KEPT:
+    after you edit, approving re-renders only the cuts whose prompt, seed or
+    render settings changed (clips[i].input_hash), then re-assembles.
+    """
+    mv = db.session.get(MusicVideo, mv_id)
+    if mv is None:
+        return jsonify({"error": "not_found"}), 404
+    if not mv.cut_plan:
+        return jsonify({"error": "no cut plan yet; analyze the song first"}), 409
+    if _is_busy(mv) or mv.current_stage == "awaiting_approval":
+        return jsonify({"error": f"music_video is at stage '{mv.current_stage}'; revise a finished, failed or cancelled video"}), 409
+    _save_revision(mv, reason="revise", label="Before revision")
+    mv.clips = restored_clips(mv.clips)
+    mv.current_stage = "awaiting_approval"
+    mv.status = "awaiting_approval"
+    mv.error_blob = None
+    # The old render stays in the library (and in the version just saved).
+    db.session.commit()
+    MusicVideoService(db.session).stamp_stage(mv_id, "awaiting_approval")
+    db.session.refresh(mv)
+    return jsonify(_mv_dict(mv))
+
+
+@bp.post("/<int:mv_id>/cut/<int:idx>")
+def edit_cut(mv_id, idx):
+    """Edit one cut: {prompt?, seed? (int|null), locked? (bool)}.
+
+    At the approval gate: changes the plan (a changed prompt clears that cut's
+    storyboard). While generating, a changed prompt/seed sends just this cut
+    back to render. Locked cuts keep their prompt when the Director re-plans.
+    """
+    import copy
+    mv = db.session.get(MusicVideo, mv_id)
+    if mv is None:
+        return jsonify({"error": "not_found"}), 404
+    if mv.current_stage not in ("awaiting_approval", "generating") or (mv.status or "").startswith(("failed", "cancelled")):
+        return jsonify({"error": f"cuts can be edited at the approval gate or while generating; this video is at '{mv.current_stage}' (use revise first)"}), 409
+    body = request.get_json(silent=True) or {}
+    clips = copy.deepcopy(mv.clips or [])
+    cut = next((c for c in clips if c.get("index") == idx), None)
+    if cut is None:
+        return jsonify({"error": f"cut {idx} not found"}), 404
+
+    changed_render = False
+    if "prompt" in body:
+        prompt = str(body.get("prompt") or "").strip()
+        if not prompt:
+            return jsonify({"error": "prompt cannot be empty"}), 400
+        if prompt != (cut.get("prompt") or "").strip():
+            cut["prompt"] = prompt
+            cut["storyboard_path"] = None
+            cut.pop("storyboard_variation", None)
+            changed_render = True
+    if "seed" in body:
+        seed = body.get("seed")
+        if seed in (None, ""):
+            new_seed = None
+        else:
+            try:
+                new_seed = int(seed)
+            except (TypeError, ValueError):
+                return jsonify({"error": "seed must be an integer or null"}), 400
+            if not (0 <= new_seed < 2**31):
+                return jsonify({"error": "seed must be between 0 and 2147483647"}), 400
+        if new_seed != cut.get("seed"):
+            if new_seed is None:
+                cut.pop("seed", None)
+            else:
+                cut["seed"] = new_seed
+            changed_render = True
+    if "locked" in body:
+        cut["locked"] = bool(body.get("locked"))
+
+    if changed_render and cut.get("status") in ("done", "failed"):
+        # Re-render this cut. Hash covers it for hashed clips; legacy ones need the reset.
+        cut.update({"status": "pending", "clip_path": None, "quality": None, "review": None})
+    mv.clips = clips
+    db.session.commit()
+    dispatch = _continue_generation(mv) if changed_render else {}
+    db.session.refresh(mv)
+    return jsonify({**_mv_dict(mv), **dispatch})
+
+
+# --- Versions -------------------------------------------------------------------
+
+@bp.get("/<int:mv_id>/revisions")
+def list_revisions(mv_id):
+    mv = db.session.get(MusicVideo, mv_id)
+    if mv is None:
+        return jsonify({"error": "not_found"}), 404
+    rows = (MusicVideoRevision.query.filter_by(music_video_id=mv_id)
+            .order_by(MusicVideoRevision.created_at.desc(), MusicVideoRevision.id.desc()).all())
+    return jsonify({"revisions": [r.to_dict() for r in rows]})
+
+
+@bp.post("/<int:mv_id>/revisions")
+def create_revision(mv_id):
+    """Save the current state as a named version: {label?}."""
+    mv = db.session.get(MusicVideo, mv_id)
+    if mv is None:
+        return jsonify({"error": "not_found"}), 404
+    label = str((request.get_json(silent=True) or {}).get("label") or "").strip() or "Saved version"
+    rev = _save_revision(mv, reason="manual", label=label)
+    if rev is None:
+        return jsonify({"error": "could not save the version"}), 500
+    return jsonify(rev.to_dict()), 201
+
+
+@bp.get("/<int:mv_id>/revisions/<int:rev_id>")
+def get_revision(mv_id, rev_id):
+    rev = db.session.get(MusicVideoRevision, rev_id)
+    if rev is None or rev.music_video_id != mv_id:
+        return jsonify({"error": "not_found"}), 404
+    return jsonify(rev.to_dict(include_snapshot=True))
+
+
+@bp.post("/<int:mv_id>/revisions/<int:rev_id>/restore")
+def restore_revision(mv_id, rev_id):
+    """Bring a saved version back. The current state is saved first, so a restore
+    can itself be undone. Lands at the approval gate; clips whose file still
+    exists and whose inputs match are kept, the rest render on approval."""
+    mv = db.session.get(MusicVideo, mv_id)
+    rev = db.session.get(MusicVideoRevision, rev_id)
+    if mv is None or rev is None or rev.music_video_id != mv_id:
+        return jsonify({"error": "not_found"}), 404
+    if _is_busy(mv):
+        return jsonify({"error": f"cannot restore while '{mv.current_stage}' is running; cancel it first"}), 409
+    snap = rev.snapshot or {}
+    if not snap.get("cut_plan"):
+        return jsonify({"error": "this version has no cut plan to restore"}), 409
+
+    _save_revision(mv, reason="restore", label=f"Before restoring version #{rev.id}")
+    import copy
+    db.session.refresh(mv, ["settings_json"])
+    current = dict(mv.settings_json or {})
+    restored = dict(snap.get("settings") or {})
+    # Keep where the video is filed and its run-time bookkeeping.
+    for k in ("project_document_ids", "stage_timings"):
+        if k in current:
+            restored[k] = current[k]
+    if snap.get("name"):
+        mv.name = snap["name"]
+    if snap.get("style_prompt"):
+        mv.style_prompt = snap["style_prompt"]
+    mv.cut_plan = copy.deepcopy(snap["cut_plan"])
+    mv.clips = restored_clips(snap.get("clips"))
+    mv.settings_json = restored
+    mv.current_stage = "awaiting_approval"
+    mv.status = "awaiting_approval"
+    mv.error_blob = None
+    db.session.commit()
+    MusicVideoService(db.session).stamp_stage(mv_id, "awaiting_approval")
+    db.session.refresh(mv)
+    return jsonify({**_mv_dict(mv), "restored_revision": rev.id})

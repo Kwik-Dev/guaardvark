@@ -25,6 +25,9 @@ from flask import current_app
 from backend.models import db, MusicVideo, Document
 from backend.services.music_video_service import (
     MusicVideoService,
+    attach_outputs_to_project,
+    clip_input_hash,
+    clip_is_stale,
     compute_bar_cut_plan,
     compute_cut_plan,
     fill_clip_to_duration,
@@ -447,6 +450,84 @@ def _mv_run(mv_id: int, *, expected_stage: str, next_agent: str | None):
             celery.send_task(f"music_video.run_{next_agent}", args=[mv_id])
 
 
+# --- Progress detail (read by music_video_progress.compute_progress) ---------
+
+def _set_progress(mv_id: int, stage: str, **fields) -> None:
+    """Record the step a stage is on in settings_json["progress"].
+
+    Commits what the session holds first, then re-reads settings_json so a
+    write made elsewhere (the API, another step) is merged, not overwritten.
+    Display-only: never raises into the pipeline.
+    """
+    from datetime import datetime
+    try:
+        db.session.commit()
+        mv = db.session.get(MusicVideo, mv_id)
+        if mv is None:
+            return
+        db.session.refresh(mv, ["settings_json"])
+        s = dict(mv.settings_json or {})
+        s["progress"] = {"stage": stage, "updated_at": datetime.now().isoformat(timespec="seconds"), **fields}
+        mv.settings_json = s
+        db.session.commit()
+    except Exception as e:  # noqa: BLE001
+        log.debug("music_video %s: progress write skipped: %s", mv_id, e)
+        try:
+            db.session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+class _StageProcess:
+    """A unified-progress job for a whole stage (mv_<id>_analyze / _assemble), so
+    the Jobs rail and the page both see the step, plus the settings_json mirror
+    a different process (the API) can read. Never raises."""
+
+    def __init__(self, mv, stage: str, suffix: str, title: str, steps):
+        self.mv_id = mv.id
+        self.stage = stage
+        self.steps = steps
+        self.process_id = f"mv_{mv.id}_{suffix}"
+        self._progress = None
+        try:
+            from backend.utils.unified_progress_system import get_unified_progress, ProcessType
+            self._progress = get_unified_progress()
+            self._progress.create_process(
+                ProcessType.VIDEO_RENDER, f"Music video «{mv.name}»: {title}",
+                process_id=self.process_id,
+                additional_data={"music_video_id": mv.id, "kind": f"music_video_{suffix}"},
+            )
+        except Exception as e:  # noqa: BLE001
+            log.debug("music_video %s: %s progress job unavailable: %s", mv.id, suffix, e)
+            self._progress = None
+
+    def step(self, key: str, pct: float = 0.0, message: str | None = None) -> None:
+        from backend.services.music_video_progress import _steps_pct, _step_label
+        label = message or _step_label(self.steps, key) or key
+        _set_progress(self.mv_id, self.stage, step=key, pct=pct, message=label)
+        if self._progress is not None:
+            try:
+                self._progress.update_process(
+                    self.process_id, int(_steps_pct(self.steps, key, pct)), label,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+    def done(self, message: str) -> None:
+        if self._progress is not None:
+            try:
+                self._progress.complete_process(self.process_id, message)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def error(self, message: str) -> None:
+        if self._progress is not None:
+            try:
+                self._progress.error_process(self.process_id, message)
+            except Exception:  # noqa: BLE001
+                pass
+
+
 # --- Stage: analyzing --------------------------------------------------------
 
 def _music_pacing_enabled() -> bool:
@@ -468,189 +549,206 @@ def run_analyzer(mv_id: int):
     with _mv_run(mv_id, expected_stage="analyzing", next_agent=None) as mv:
         if mv is None:
             return
-        from backend.services.plugin_bridge import ensure_plugins_for_stage
-        ensure_plugins_for_stage("music-video", "analyzing")
-        song = _resolve_song_path(mv)
-        if not song:
-            raise RuntimeError("song file not found on disk")
+        from backend.services.music_video_progress import ANALYZE_STEPS
+        stage_job = _StageProcess(mv, "analyzing", "analyze", "analyzing the song", ANALYZE_STEPS)
+        try:
+            _analyze(mv_id, mv, stage_job)
+        except Exception as e:
+            stage_job.error(f"Analysis failed: {e}")
+            raise
+        stage_job.done("Plan ready for your approval")
 
-        music_pacing = _music_pacing_enabled()
-        resp = requests.post(
-            f"{PLUGIN_URL}/analyze",
-            # None reads the song (bar grid, loudness per bar, sections where the music changes)
-            json={"audio_path": song, "section_count": None if music_pacing else 4},
-            timeout=120,
+
+def _analyze(mv_id: int, mv: MusicVideo, stage_job: "_StageProcess"):
+    """run_analyzer's body (inside the stage guard), reporting each step."""
+    from backend.services.plugin_bridge import ensure_plugins_for_stage
+    stage_job.step("audio")
+    ensure_plugins_for_stage("music-video", "analyzing")
+    song = _resolve_song_path(mv)
+    if not song:
+        raise RuntimeError("song file not found on disk")
+
+    music_pacing = _music_pacing_enabled()
+    stage_job.step("beats")
+    resp = requests.post(
+        f"{PLUGIN_URL}/analyze",
+        # None reads the song (bar grid, loudness per bar, sections where the music changes)
+        json={"audio_path": song, "section_count": None if music_pacing else 4},
+        timeout=120,
+    )
+    resp.raise_for_status()
+    structure = resp.json()
+
+    # Cap cut length at what a forward clip can fill (clip native length ×
+    # the per-video stretch budget) so no slot needs a reverse to cover it.
+    stage_job.step("cuts")
+    s = _settings(mv)
+    # Both bounds scale with Clip Stretch so the setting lengthens clips (energy still varies
+    # pacing within the band). max_cut_s also remains the forward-clip ceiling for _split_long_cuts.
+    min_cut_s, max_cut_s = _cut_length_bounds(s)
+    plan = compute_cut_plan(
+        structure["beat_times"], structure["sections"], structure["duration_seconds"],
+        max_cut_s=max_cut_s, min_cut_s=min_cut_s,
+    )
+    if not plan:
+        raise RuntimeError("cut planner produced no cuts")
+
+    # Bias the cut planner for slow/dreamlike treatments (user's "slow motion" intent and the treatment's "Motion is Slow").
+    # This produces fewer, longer cuts so the edit feels dreamy rather than frantic, even if the raw audio energy is high.
+    # The max_stretch setting (slowdown) is already used for max_cut_s, but we also dampen energy effect here.
+    slow_pace = False
+    treatment_text = (s.get("user_treatment") or s.get("director_treatment") or mv.style_prompt or "").lower()
+    if any(kw in treatment_text for kw in ["slow", "dreamlike", "gliding", "drifting", "ethereal", "motion is slow", "slow and dreamlike"]):
+        slow_pace = True
+
+    if music_pacing and structure.get("downbeat_times"):
+        plan = compute_bar_cut_plan(
+            structure["downbeat_times"], structure.get("bar_energy") or [],
+            structure["sections"], structure["duration_seconds"],
+            beat_times=structure["beat_times"], max_cut_s=max_cut_s, slow_pace=slow_pace,
         )
-        resp.raise_for_status()
-        structure = resp.json()
-
-        # Cap cut length at what a forward clip can fill (clip native length ×
-        # the per-video stretch budget) so no slot needs a reverse to cover it.
-        s = _settings(mv)
-        # Both bounds scale with Clip Stretch so the setting lengthens clips (energy still varies
-        # pacing within the band). max_cut_s also remains the forward-clip ceiling for _split_long_cuts.
-        min_cut_s, max_cut_s = _cut_length_bounds(s)
+    elif slow_pace:
+        # Recompute plan with energy dampened so even "high energy" sections get longer cuts.
+        # This respects the artistic intent from the treatment ("Motion is Slow", dreamlike) over the raw librosa energy.
+        # Combined with high max_stretch (slow motion setting), this produces the desired long, stretched, atmospheric shots
+        # instead of many short frantic ones.
         plan = compute_cut_plan(
             structure["beat_times"], structure["sections"], structure["duration_seconds"],
             max_cut_s=max_cut_s, min_cut_s=min_cut_s,
+            slow_pace=True,
         )
-        if not plan:
-            raise RuntimeError("cut planner produced no cuts")
 
-        # Bias the cut planner for slow/dreamlike treatments (user's "slow motion" intent and the treatment's "Motion is Slow").
-        # This produces fewer, longer cuts so the edit feels dreamy rather than frantic, even if the raw audio energy is high.
-        # The max_stretch setting (slowdown) is already used for max_cut_s, but we also dampen energy effect here.
-        slow_pace = False
-        treatment_text = (s.get("user_treatment") or s.get("director_treatment") or mv.style_prompt or "").lower()
-        if any(kw in treatment_text for kw in ["slow", "dreamlike", "gliding", "drifting", "ethereal", "motion is slow", "slow and dreamlike"]):
-            slow_pace = True
-
-        if music_pacing and structure.get("downbeat_times"):
-            plan = compute_bar_cut_plan(
-                structure["downbeat_times"], structure.get("bar_energy") or [],
-                structure["sections"], structure["duration_seconds"],
-                beat_times=structure["beat_times"], max_cut_s=max_cut_s, slow_pace=slow_pace,
-            )
-        elif slow_pace:
-            # Recompute plan with energy dampened so even "high energy" sections get longer cuts.
-            # This respects the artistic intent from the treatment ("Motion is Slow", dreamlike) over the raw librosa energy.
-            # Combined with high max_stretch (slow motion setting), this produces the desired long, stretched, atmospheric shots
-            # instead of many short frantic ones.
-            plan = compute_cut_plan(
-                structure["beat_times"], structure["sections"], structure["duration_seconds"],
-                max_cut_s=max_cut_s, min_cut_s=min_cut_s,
-                slow_pace=True,
-            )
-
-        # Director: now generates an actual VISUAL STORYLINE (narrative arc mapped to
-        # the song sections + energy) first, then distinct per-cut prompts that advance
-        # that storyline. This prevents the "every cut is just the global style repeated"
-        # problem. Still degrades gracefully to the old behavior on any LLM failure.
-        shot_plans = {}
-        if s.get("director_enabled", True):
-            from backend.services.music_video_director import DIRECTOR_MODEL, _is_embedding_model
-            director_model = s.get("director_model") or DIRECTOR_MODEL
-            if _is_embedding_model(director_model):
-                logging.getLogger(__name__).warning("overriding bad director_model=%s (embedding model cannot chat) -> %s", director_model, DIRECTOR_MODEL)
-                director_model = DIRECTOR_MODEL
-            # When a trained character is cast, identity (trigger + bible) is injected
-            # into every keyframe by _keyframe_loras_and_prompt. Tell the Director NOT to
-            # describe the hero's appearance — otherwise it free-styles hair/face per cut
-            # and fights the lock (the "hair length drifts every scene" failure).
-            _dir_guidance = s.get("director_guidance")
-            if s.get("use_lora_consistency") and (s.get("subject_ids") or s.get("loras") or s.get("lora_paths")):
-                _lock_note = ("A trained character is locked into every shot by a separate identity "
-                              "system. Do NOT describe the main character's face, hair, skin, eyes, or "
-                              "build — only their pose, action, wardrobe, framing, camera, lighting, and "
-                              "setting. Refer to them only as 'the figure' or 'she/he' if needed.")
-                _dir_guidance = f"{_dir_guidance}\n{_lock_note}" if _dir_guidance else _lock_note
-            # Unified Director (SONG_CUTPLAN). `plan` (the cut plan) shadows the imported
-            # function name, so alias it. creativity=None ⇒ engine-default sampling: this is a
-            # BYTE-IDENTICAL migration of the fragile MV path (still temp 0.7/0.65). We can flip
-            # MV to the CREATIVE profile later as a separate, tested change.
-            from backend.services.director_service import plan as director_plan, DirectorBrief, DirectorMode
-            _lyrics_note = _song_lyrics_guidance(mv)
-            if _lyrics_note:
-                _dir_guidance = f"{_dir_guidance}\n{_lyrics_note}" if _dir_guidance else _lyrics_note
-            _res = director_plan(DirectorBrief(
-                mode=DirectorMode.SONG_CUTPLAN,
-                style=mv.style_prompt,
-                cut_plan=plan,
-                creativity=None,
-                model=director_model,
-                planning_mode=s.get("planning_mode", "narrative"),
-                extra_guidance=_dir_guidance,
-                user_treatment=s.get("user_treatment") or s.get("director_treatment"),
+    # Director: now generates an actual VISUAL STORYLINE (narrative arc mapped to
+    # the song sections + energy) first, then distinct per-cut prompts that advance
+    # that storyline. This prevents the "every cut is just the global style repeated"
+    # problem. Still degrades gracefully to the old behavior on any LLM failure.
+    shot_plans = {}
+    if s.get("director_enabled", True):
+        stage_job.step("director")
+        from backend.services.music_video_director import DIRECTOR_MODEL, _is_embedding_model
+        director_model = s.get("director_model") or DIRECTOR_MODEL
+        if _is_embedding_model(director_model):
+            logging.getLogger(__name__).warning("overriding bad director_model=%s (embedding model cannot chat) -> %s", director_model, DIRECTOR_MODEL)
+            director_model = DIRECTOR_MODEL
+        # When a trained character is cast, identity (trigger + bible) is injected
+        # into every keyframe by _keyframe_loras_and_prompt. Tell the Director NOT to
+        # describe the hero's appearance — otherwise it free-styles hair/face per cut
+        # and fights the lock (the "hair length drifts every scene" failure).
+        _dir_guidance = s.get("director_guidance")
+        if s.get("use_lora_consistency") and (s.get("subject_ids") or s.get("loras") or s.get("lora_paths")):
+            _lock_note = ("A trained character is locked into every shot by a separate identity "
+                          "system. Do NOT describe the main character's face, hair, skin, eyes, or "
+                          "build — only their pose, action, wardrobe, framing, camera, lighting, and "
+                          "setting. Refer to them only as 'the figure' or 'she/he' if needed.")
+            _dir_guidance = f"{_dir_guidance}\n{_lock_note}" if _dir_guidance else _lock_note
+        # Unified Director (SONG_CUTPLAN). `plan` (the cut plan) shadows the imported
+        # function name, so alias it. creativity=None ⇒ engine-default sampling: this is a
+        # BYTE-IDENTICAL migration of the fragile MV path (still temp 0.7/0.65). We can flip
+        # MV to the CREATIVE profile later as a separate, tested change.
+        from backend.services.director_service import plan as director_plan, DirectorBrief, DirectorMode
+        _lyrics_note = _song_lyrics_guidance(mv)
+        if _lyrics_note:
+            _dir_guidance = f"{_dir_guidance}\n{_lyrics_note}" if _dir_guidance else _lyrics_note
+        _res = director_plan(DirectorBrief(
+            mode=DirectorMode.SONG_CUTPLAN,
+            style=mv.style_prompt,
+            cut_plan=plan,
+            creativity=None,
+            model=director_model,
+            planning_mode=s.get("planning_mode", "narrative"),
+            extra_guidance=_dir_guidance,
+            user_treatment=s.get("user_treatment") or s.get("director_treatment"),
+            max_stretch=float(s.get("max_stretch", 2.0)),
+            fill_method=s.get("fill_method"),
+        ))
+        # Use the engine's native dict so every downstream read below is unchanged.
+        result = _res.raw if _res.raw is not None else {"prompts": [], "treatment": _res.treatment}
+        # P0 guard application (story-arc plan): ensure the prompts we store for
+        # storyboards + i2v are distinct + energy-aware even on marginal LLM output.
+        # Also the natural place to (in future) pass stretch context for duration suggestions.
+        raw_prompts = result.get("prompts") or []
+        guarded = raw_prompts
+        try:
+            from backend.services.music_video_director import _ensure_distinct_and_energy_aware
+            guarded = _ensure_distinct_and_energy_aware(
+                raw_prompts, plan, mv.style_prompt,
                 max_stretch=float(s.get("max_stretch", 2.0)),
-                fill_method=s.get("fill_method"),
-            ))
-            # Use the engine's native dict so every downstream read below is unchanged.
-            result = _res.raw if _res.raw is not None else {"prompts": [], "treatment": _res.treatment}
-            # P0 guard application (story-arc plan): ensure the prompts we store for
-            # storyboards + i2v are distinct + energy-aware even on marginal LLM output.
-            # Also the natural place to (in future) pass stretch context for duration suggestions.
-            raw_prompts = result.get("prompts") or []
-            guarded = raw_prompts
-            try:
-                from backend.services.music_video_director import _ensure_distinct_and_energy_aware
-                guarded = _ensure_distinct_and_energy_aware(
-                    raw_prompts, plan, mv.style_prompt,
-                    max_stretch=float(s.get("max_stretch", 2.0)),
-                )
-            except Exception:  # noqa: BLE001 — guard is best-effort
-                pass
-            if guarded:
-                result["prompts"] = guarded  # feed the guarded list downstream
+            )
+        except Exception:  # noqa: BLE001 — guard is best-effort
+            pass
+        if guarded:
+            result["prompts"] = guarded  # feed the guarded list downstream
 
-            # If a rich user-provided treatment was supplied, we can also store the
-            # raw treatment the Director produced/refined so the UI can show the
-            # final version the agent settled on.
-            if result.get("treatment"):
-                s = dict(mv.settings_json or {})
-                s["director_treatment"] = result.get("treatment")
-                mv.settings_json = s
-            prompts = result["prompts"]
-            treatment = result.get("treatment")
-            shot_plans = {s.get("index"): s for s in (result.get("shots") or []) if isinstance(s, dict)}
-            if treatment:
-                s = dict(mv.settings_json or {})
-                s["director_treatment"] = treatment
-                mv.settings_json = s
-            # Store any director diagnostics (fallback reason, raw head, etc.) so _mv_dict
-            # can surface them in the UI for the "why are my prompts not unique?" case.
-            if result.get("director_diagnostics"):
-                ss = dict(mv.settings_json or {})
-                ss["director_diagnostics"] = result.get("director_diagnostics")
-                mv.settings_json = ss
-        else:
-            prompts = [mv.style_prompt] * len(plan)
+        # If a rich user-provided treatment was supplied, we can also store the
+        # raw treatment the Director produced/refined so the UI can show the
+        # final version the agent settled on.
+        if result.get("treatment"):
+            s = dict(mv.settings_json or {})
+            s["director_treatment"] = result.get("treatment")
+            mv.settings_json = s
+        prompts = result["prompts"]
+        treatment = result.get("treatment")
+        shot_plans = {s.get("index"): s for s in (result.get("shots") or []) if isinstance(s, dict)}
+        if treatment:
+            s = dict(mv.settings_json or {})
+            s["director_treatment"] = treatment
+            mv.settings_json = s
+        # Store any director diagnostics (fallback reason, raw head, etc.) so _mv_dict
+        # can surface them in the UI for the "why are my prompts not unique?" case.
+        if result.get("director_diagnostics"):
+            ss = dict(mv.settings_json or {})
+            ss["director_diagnostics"] = result.get("director_diagnostics")
+            mv.settings_json = ss
+    else:
+        prompts = [mv.style_prompt] * len(plan)
 
-        # Enrich clips with Director's editing decisions (duration, transition, filter)
-        # so the final Shotcut assembly can use real cinematic editing instead of hard-coded hard-cuts.
-        mv.song_path = song  # cache the resolved path for later stages
-        stored = dict(mv.settings_json or {})
-        stored["song_analysis"] = {
-            "tempo_bpm": round(float(structure.get("tempo_bpm") or 0.0), 1),
-            "beat_count": len(structure.get("beat_times") or []),
-            "bar_count": len(structure.get("downbeat_times") or []),
-            "beats_per_bar": structure.get("beats_per_bar"),
-            "duration_seconds": structure.get("duration_seconds"),
-            "sections": structure.get("sections") or [],
-            "pacing": "bars" if music_pacing and structure.get("downbeat_times") else "energy_quarters",
+    stage_job.step("save")
+    # Enrich clips with Director's editing decisions (duration, transition, filter)
+    # so the final Shotcut assembly can use real cinematic editing instead of hard-coded hard-cuts.
+    mv.song_path = song  # cache the resolved path for later stages
+    stored = dict(mv.settings_json or {})
+    stored["song_analysis"] = {
+        "tempo_bpm": round(float(structure.get("tempo_bpm") or 0.0), 1),
+        "beat_count": len(structure.get("beat_times") or []),
+        "bar_count": len(structure.get("downbeat_times") or []),
+        "beats_per_bar": structure.get("beats_per_bar"),
+        "duration_seconds": structure.get("duration_seconds"),
+        "sections": structure.get("sections") or [],
+        "pacing": "bars" if music_pacing and structure.get("downbeat_times") else "energy_quarters",
+    }
+    mv.settings_json = stored
+    mv.cut_plan = plan
+    mv.clips = []
+    for c in plan:
+        idx = c["index"]
+        sp = shot_plans.get(idx, {})
+        # The flat `prompts` list is what the Director settled on per cut: the shot
+        # plan's text with the global style appended, made distinct by
+        # _ensure_distinct_and_energy_aware and carrying the arc context. The shot
+        # plan's raw LLM prompt is only a fallback for a cut that list does not cover.
+        shot_prompt = prompts[idx] if idx < len(prompts) and prompts[idx] else ""
+        if not shot_prompt:
+            shot_prompt = sp.get("prompt") or mv.style_prompt
+            if sp.get("prompt") and mv.style_prompt:
+                style_suffix = f", {mv.style_prompt}" if not mv.style_prompt.startswith(",") else mv.style_prompt
+                if not shot_prompt.rstrip().endswith(style_suffix.strip()):
+                    shot_prompt = f"{shot_prompt.rstrip().rstrip(',')}{style_suffix}"
+        clip = {
+            "index": idx,
+            "start": c["start_s"],
+            "end": c["end_s"],
+            "clip_path": None,
+            "status": "pending",
+            "prompt": shot_prompt,
+            "duration_seconds": sp.get("duration_seconds"),
+            "transition_to_next": sp.get("transition_to_next"),
+            "filter_preset": sp.get("filter_preset"),
         }
-        mv.settings_json = stored
-        mv.cut_plan = plan
-        mv.clips = []
-        for c in plan:
-            idx = c["index"]
-            sp = shot_plans.get(idx, {})
-            # The flat `prompts` list is what the Director settled on per cut: the shot
-            # plan's text with the global style appended, made distinct by
-            # _ensure_distinct_and_energy_aware and carrying the arc context. The shot
-            # plan's raw LLM prompt is only a fallback for a cut that list does not cover.
-            shot_prompt = prompts[idx] if idx < len(prompts) and prompts[idx] else ""
-            if not shot_prompt:
-                shot_prompt = sp.get("prompt") or mv.style_prompt
-                if sp.get("prompt") and mv.style_prompt:
-                    style_suffix = f", {mv.style_prompt}" if not mv.style_prompt.startswith(",") else mv.style_prompt
-                    if not shot_prompt.rstrip().endswith(style_suffix.strip()):
-                        shot_prompt = f"{shot_prompt.rstrip().rstrip(',')}{style_suffix}"
-            clip = {
-                "index": idx,
-                "start": c["start_s"],
-                "end": c["end_s"],
-                "clip_path": None,
-                "status": "pending",
-                "prompt": shot_prompt,
-                "duration_seconds": sp.get("duration_seconds"),
-                "transition_to_next": sp.get("transition_to_next"),
-                "filter_preset": sp.get("filter_preset"),
-            }
-            mv.clips.append(clip)
-        db.session.commit()
-        log.info("music_video %s analyzed: %d cuts over %.1fs (director=%s, has_treatment=%s)",
-                 mv_id, len(plan), structure["duration_seconds"], s.get("director_enabled", True),
-                 bool(mv.settings_json.get("director_treatment") if isinstance(mv.settings_json, dict) else False))
+        mv.clips.append(clip)
+    db.session.commit()
+    log.info("music_video %s analyzed: %d cuts over %.1fs (director=%s, has_treatment=%s)",
+             mv_id, len(plan), structure["duration_seconds"], s.get("director_enabled", True),
+             bool(mv.settings_json.get("director_treatment") if isinstance(mv.settings_json, dict) else False))
 
 
 # --- Stage: generating (self-re-dispatching, one clip per invocation) --------
@@ -670,12 +768,15 @@ def run_clip_generator(mv_id: int):
         return
 
     clips = list(mv.clips or [])
+    raw_settings = mv.settings_json or {}
     target = None
     for c in clips:
         if c.get("status") == "cancelled":
             continue
         on_disk = c.get("clip_path") and os.path.exists(c["clip_path"])
-        if not (c.get("status") == "done" and on_disk):
+        # A done clip whose prompt/seed/settings changed since it was rendered
+        # (revise, restore, per-cut edit) is rendered again; the rest are kept.
+        if not (c.get("status") == "done" and on_disk) or clip_is_stale(c, raw_settings):
             target = c
             break
 
@@ -805,6 +906,16 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
     idx = clip["index"]
     clip_count = max(1, len(mv.clips or []))
     process_id = f"mv_{mv.id}_{idx}"
+    clip_started = time.time()
+    # Hash of the inputs as they are NOW (raw settings, not defaults), recorded on
+    # the finished clip so a later edit can tell which clips went stale.
+    render_hash = clip_input_hash(clip, mv.settings_json or {})
+    # Per-cut seed (set from the plan editor); the historical default otherwise.
+    still_seed = int(clip["seed"]) if isinstance(clip.get("seed"), int) else 1000 + idx
+
+    def _substage(name: str) -> None:
+        _set_progress(mv.id, "generating", clip_index=idx, substage=name, clip_started_at=clip_started)
+
     progress = get_unified_progress()
     progress.create_process(
         ProcessType.VIDEO_RENDER,
@@ -892,6 +1003,7 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
             lease_seconds=3600,
         ):
             if not use_pregen_storyboard:
+                _substage("keyframe")
                 progress.update_process(
                     process_id, 5,
                     f"Clip {idx + 1}/{clip_count}: generating keyframe still…",
@@ -910,7 +1022,7 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
                         width=s["still_width"],
                         height=s["still_height"],
                         steps=kf_steps if kf_loras else s.get("keyframe_steps"),
-                        seed=1000 + idx,
+                        seed=still_seed,
                         output_path=still_path,
                         lora_strength=kf_lora_strength,
                         keep_pipeline=False,
@@ -937,7 +1049,7 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
                         flux_vae=s.get("flux_vae"),
                     ).generate_image(
                         prompt=kf_prompt, loras=kf_loras, output_path=still_path,
-                        width=s["still_width"], height=s["still_height"], seed=1000 + idx,
+                        width=s["still_width"], height=s["still_height"], seed=still_seed,
                         steps=kf_steps,
                         model=s.get("keyframe_model"),
                     )
@@ -945,6 +1057,7 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
             else:
                 _comfyui_free_vram()
 
+            _substage("i2v")
             progress.update_process(
                 process_id, 35,
                 f"Clip {idx + 1}/{clip_count}: animating (I2V)…",
@@ -1009,6 +1122,7 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
             if not wan_abs.exists():
                 raise RuntimeError(f"WAN output not found at resolved path: {wan_abs}")
 
+        _substage("conform")
         progress.update_process(process_id, 85, f"Clip {idx + 1}/{clip_count}: conforming duration…")
 
         # Fill to the EXACT cut length (memory #721 sync fix) — CPU ffmpeg, no gate.
@@ -1021,6 +1135,7 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
             method=s["fill_method"], max_stretch=float(s["max_stretch"]),
         )
 
+        _substage("quality")
         progress.update_process(process_id, 92, f"Clip {idx + 1}/{clip_count}: checking quality…")
         quality, review = _cut_quality(s, wan_abs, req, img)
 
@@ -1037,6 +1152,9 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
                 c["status"] = "done"
                 c["quality"] = quality
                 c["review"] = review
+                c["input_hash"] = render_hash
+                c["elapsed_s"] = round(time.time() - clip_started, 1)
+                c.pop("deferred_since", None)
                 break
         mv.clips = clips
         db.session.commit()
@@ -1063,102 +1181,127 @@ def run_assembler(mv_id: int):
     with _mv_run(mv_id, expected_stage="assembling", next_agent=None) as mv:
         if mv is None:
             return
-        from backend.services.plugin_bridge import ensure_plugins_for_stage
-        ensure_plugins_for_stage("music-video", "assembling")
-
-        held = {c.get("index") for c in held_cuts(mv.clips)}
-        clips = [
-            c for c in (mv.clips or [])
-            if c.get("status") == "done" and c.get("clip_path") and os.path.exists(c["clip_path"])
-            and c.get("index") not in held
-        ]
-        if not clips:
-            raise RuntimeError("no completed clips to assemble")
-
-        s = _settings(mv)
-        arrangement_clips = []
-        for c in clips:
-            # Use the full energy-planned cut length for timeline slot (audio sync).
-            # Prefer the *actual* duration of the filled clip file on disk for source_out
-            # (defensive against any pre-fix renders or rounding). This ensures the .mlt
-            # chains/entries request a play length that the avformat producer can actually deliver.
-            base_cut_len = float(c["end"]) - float(c["start"])
-            actual_dur = probe_duration(c["clip_path"]) or base_cut_len
-            source_out = min(actual_dur, base_cut_len)
-
-            arrangement_clips.append({
-                "clip_id": f"mv{mv_id}_{c['index']}",
-                "source_path": c["clip_path"],
-                "section_label": "",
-                "timeline_start": float(c["start"]),
-                "timeline_end": float(c["end"]),
-                "source_in": 0.0,
-                "source_out": source_out,
-                "filter_preset": c.get("filter_preset") or "none",
-                "transition_to_next": c.get("transition_to_next") or "hard-cut",
-            })
-
-        song_duration = mv.cut_plan[-1]["end_s"] if mv.cut_plan else None
-        style_recipe = s.get("style_recipe_name", "default")
-        body = {
-            "arrangement": {"style_recipe_name": style_recipe, "seed": 0, "clips": arrangement_clips},
-            "audio_path": mv.song_path,
-            "audio_volume": 1.0,
-            "song_duration_seconds": song_duration,
-            "fps_num": s["fps"], "fps_den": 1,
-            "width": s["width"], "height": s["height"],
-            "render_mp4": True, "register": True,
-        }
-        resp = requests.post(f"{PLUGIN_URL}/shotcut/compose-arrangement", json=body, timeout=1800)
-        resp.raise_for_status()
-        result = resp.json()
-
-        # compose-arrangement registers BOTH the .mlt project AND the rendered .mp4
-        # as Documents. Pick the .mp4 — docs[0] is often the .mlt, which made the
-        # in-page <video> player point at a timeline file it can't play.
-        docs = [d for d in (result.get("documents") or []) if isinstance(d, dict)]
-        def _is_mp4(d):
-            return str(d.get("path") or d.get("file_path") or d.get("filename") or "").lower().endswith(".mp4")
-        mp4_doc = next((d for d in docs if _is_mp4(d)), None)
-        if mp4_doc:
-            mv.output_document_id = mp4_doc.get("id")
-        else:
-            # The plugin renders even when its POST back to us fails (a wrong
-            # backend URL, a restart in between); register the file here so the
-            # page can play it, and fail the stage rather than report a
-            # "complete" video nobody can open.
-            rendered = result.get("rendered_mp4")
-            if not rendered or not os.path.exists(rendered):
-                raise RuntimeError("assembly finished without a video file")
-            from backend.services.output_registration import register_file
-            doc = register_file(
-                physical_path=rendered,
-                folder_name="Videos",
-                file_metadata={"kind": "music_video", "music_video_id": mv_id},
-            )
-            if doc is None:
-                raise RuntimeError(f"the video was rendered to {rendered} but could not be added to the library")
-            log.warning("music_video %s: the editor did not register its render; registered %s here (doc %s)",
-                        mv_id, rendered, doc.id)
-            mv.output_document_id = doc.id
-
-        # Convenience copy: put a nicely-named .mlt next to the music_video's clips/
-        # so the user can easily find and open "the shotcut file" for this project
-        # without hunting in the opaque mlt-projects/ hash dir. The XML still uses
-        # absolute paths to the clips, so it is self-contained for Shotcut.
+        from backend.services.music_video_progress import ASSEMBLE_STEPS
+        stage_job = _StageProcess(mv, "assembling", "assemble", "assembling the final cut", ASSEMBLE_STEPS)
         try:
-            mlt_path = result.get("mlt_path")
-            if mlt_path and os.path.exists(mlt_path):
-                nice_mlt = _clip_dir(mv_id).parent / f"music_video_{mv_id}.mlt"
-                import shutil
-                shutil.copy2(mlt_path, nice_mlt)
-                log.info("music_video %s: convenience .mlt also at %s", mv_id, nice_mlt)
-        except Exception:  # noqa: BLE001
-            pass
+            _assemble(mv_id, mv, stage_job)
+        except Exception as e:
+            stage_job.error(f"Assembly failed: {e}")
+            raise
+        stage_job.done("Music video ready")
 
-        db.session.commit()
-        log.info("music_video %s assembled → %s (doc %s)",
-                 mv_id, result.get("rendered_mp4"), mv.output_document_id)
+
+def _assemble(mv_id: int, mv: MusicVideo, stage_job: "_StageProcess"):
+    """run_assembler's body (inside the stage guard), reporting each step."""
+    from backend.services.plugin_bridge import ensure_plugins_for_stage
+    stage_job.step("collect")
+    ensure_plugins_for_stage("music-video", "assembling")
+
+    held = {c.get("index") for c in held_cuts(mv.clips)}
+    clips = [
+        c for c in (mv.clips or [])
+        if c.get("status") == "done" and c.get("clip_path") and os.path.exists(c["clip_path"])
+        and c.get("index") not in held
+    ]
+    if not clips:
+        raise RuntimeError("no completed clips to assemble")
+
+    s = _settings(mv)
+    arrangement_clips = []
+    for c in clips:
+        # Use the full energy-planned cut length for timeline slot (audio sync).
+        # Prefer the *actual* duration of the filled clip file on disk for source_out
+        # (defensive against any pre-fix renders or rounding). This ensures the .mlt
+        # chains/entries request a play length that the avformat producer can actually deliver.
+        base_cut_len = float(c["end"]) - float(c["start"])
+        actual_dur = probe_duration(c["clip_path"]) or base_cut_len
+        source_out = min(actual_dur, base_cut_len)
+
+        arrangement_clips.append({
+            "clip_id": f"mv{mv_id}_{c['index']}",
+            "source_path": c["clip_path"],
+            "section_label": "",
+            "timeline_start": float(c["start"]),
+            "timeline_end": float(c["end"]),
+            "source_in": 0.0,
+            "source_out": source_out,
+            "filter_preset": c.get("filter_preset") or "none",
+            "transition_to_next": c.get("transition_to_next") or "hard-cut",
+        })
+
+    song_duration = mv.cut_plan[-1]["end_s"] if mv.cut_plan else None
+    style_recipe = s.get("style_recipe_name", "default")
+    body = {
+        "arrangement": {"style_recipe_name": style_recipe, "seed": 0, "clips": arrangement_clips},
+        "audio_path": mv.song_path,
+        "audio_volume": 1.0,
+        "song_duration_seconds": song_duration,
+        "fps_num": s["fps"], "fps_den": 1,
+        "width": s["width"], "height": s["height"],
+        "render_mp4": True, "register": True,
+    }
+    stage_job.step("render", 0.0, f"Rendering the final cut ({len(arrangement_clips)} clips)")
+    resp = requests.post(f"{PLUGIN_URL}/shotcut/compose-arrangement", json=body, timeout=1800)
+    resp.raise_for_status()
+    result = resp.json()
+
+    # compose-arrangement registers BOTH the .mlt project AND the rendered .mp4
+    # as Documents. Pick the .mp4 — docs[0] is often the .mlt, which made the
+    # in-page <video> player point at a timeline file it can't play.
+    stage_job.step("register")
+    docs = [d for d in (result.get("documents") or []) if isinstance(d, dict)]
+    def _is_mp4(d):
+        return str(d.get("path") or d.get("file_path") or d.get("filename") or "").lower().endswith(".mp4")
+    mp4_doc = next((d for d in docs if _is_mp4(d)), None)
+    if mp4_doc:
+        mv.output_document_id = mp4_doc.get("id")
+    else:
+        # The plugin renders even when its POST back to us fails (a wrong
+        # backend URL, a restart in between); register the file here so the
+        # page can play it, and fail the stage rather than report a
+        # "complete" video nobody can open.
+        rendered = result.get("rendered_mp4")
+        if not rendered or not os.path.exists(rendered):
+            raise RuntimeError("assembly finished without a video file")
+        from backend.services.output_registration import register_file
+        doc = register_file(
+            physical_path=rendered,
+            folder_name="Videos",
+            file_metadata={"kind": "music_video", "music_video_id": mv_id},
+        )
+        if doc is None:
+            raise RuntimeError(f"the video was rendered to {rendered} but could not be added to the library")
+        log.warning("music_video %s: the editor did not register its render; registered %s here (doc %s)",
+                    mv_id, rendered, doc.id)
+        mv.output_document_id = doc.id
+
+    # Convenience copy: put a nicely-named .mlt next to the music_video's clips/
+    # so the user can easily find and open "the shotcut file" for this project
+    # without hunting in the opaque mlt-projects/ hash dir. The XML still uses
+    # absolute paths to the clips, so it is self-contained for Shotcut.
+    try:
+        mlt_path = result.get("mlt_path")
+        if mlt_path and os.path.exists(mlt_path):
+            nice_mlt = _clip_dir(mv_id).parent / f"music_video_{mv_id}.mlt"
+            import shutil
+            shutil.copy2(mlt_path, nice_mlt)
+            log.info("music_video %s: convenience .mlt also at %s", mv_id, nice_mlt)
+    except Exception:  # noqa: BLE001
+        pass
+
+    # File the render (and its .mlt) under the video's project, if it has one.
+    try:
+        if mv.project_id:
+            attach_outputs_to_project(
+                mv, [d.get("id") for d in docs] + [mv.output_document_id],
+            )
+    except Exception as e:  # noqa: BLE001 — filing is a convenience, never a failure
+        log.warning("music_video %s: could not file outputs under project %s: %s",
+                    mv_id, mv.project_id, e)
+
+    db.session.commit()
+    log.info("music_video %s assembled → %s (doc %s)",
+             mv_id, result.get("rendered_mp4"), mv.output_document_id)
 
 
 # --- Storyboard generator (async, pre-approval review thumbnails) ------------
@@ -1175,6 +1318,26 @@ def _set_storyboard_generating(mv_id: int, *, generating: bool, error: str | Non
         s.pop("storyboard_error", None)
     mv.settings_json = s
     db.session.commit()
+
+
+def _set_storyboard_progress(mv_id: int, done: int, total: int) -> None:
+    """settings_json["storyboard_progress"] for the progress meter. Never raises."""
+    try:
+        db.session.commit()
+        mv = db.session.get(MusicVideo, mv_id)
+        if mv is None:
+            return
+        db.session.refresh(mv, ["settings_json"])
+        s = dict(mv.settings_json or {})
+        s["storyboard_progress"] = {"done": int(done), "total": int(total)}
+        mv.settings_json = s
+        db.session.commit()
+    except Exception as e:  # noqa: BLE001
+        log.debug("music_video %s: storyboard progress write skipped: %s", mv_id, e)
+        try:
+            db.session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def run_storyboard_generator(mv_id: int, force: bool = False):
@@ -1215,6 +1378,13 @@ def run_storyboard_generator(mv_id: int, force: bool = False):
             vg.service_available = getattr(vg, "_check_comfyui_connection", lambda: False)()
     except Exception:
         pass
+
+    todo = [
+        c for c in clips
+        if force or not (c.get("storyboard_path") and os.path.exists(c.get("storyboard_path")))
+    ]
+    sb_done = 0
+    _set_storyboard_progress(mv_id, 0, len(todo))
 
     error_msg = None
     try:
@@ -1271,6 +1441,8 @@ def run_storyboard_generator(mv_id: int, force: bool = False):
                     log.error("run_storyboard_generator ComfyUI failure for mv %s cut %s: %s", mv_id, idx, e)
                 except Exception as e:
                     log.warning("storyboard still failed for mv %s cut %s: %s", mv_id, idx, e)
+                sb_done += 1
+                _set_storyboard_progress(mv_id, sb_done, len(todo))
             free_comfyui_vram()
             if _zimage_keyframes(s):
                 # The batch kept the offline pipeline loaded between stills; the render needs the card.

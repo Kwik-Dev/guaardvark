@@ -334,6 +334,20 @@ def _document_from_song_ref(song: str, *, mcp: bool = False):
     return _library_song(Path(found.path))
 
 
+def _resolve_project(ref) -> tuple[int | None, str | None]:
+    """A Project id or exact name → (id, None); nothing given → (None, None)."""
+    ref = str(ref or "").strip()
+    if not ref:
+        return None, None
+    from backend.models import Project, db
+    row = db.session.get(Project, int(ref)) if ref.isdigit() else None
+    if row is None:
+        row = Project.query.filter(Project.name == ref).first()
+    if row is None:
+        return None, f"no project with id or name '{ref}'"
+    return row.id, None
+
+
 class MusicVideoTool(BaseTool):
     """Start a beat-synced music-video plan. Does not approve or render clips."""
 
@@ -380,16 +394,26 @@ class MusicVideoTool(BaseTool):
             description="Optional I2V model id. Default: the active video model.",
             required=False,
         ),
+        "project": ToolParameter(
+            name="project",
+            type="string",
+            description=(
+                "Optional Guaardvark Project to file the music video under: its id or exact name. "
+                "The finished video then shows in that project's Videos and Documents."
+            ),
+            required=False,
+        ),
     }
 
     def execute(self, song: str, style_prompt: str, name: str | None = None,
-                i2v_model: str | None = None, **kwargs) -> ToolResult:
+                i2v_model: str | None = None, project: str | None = None, **kwargs) -> ToolResult:
         style_prompt = (style_prompt or "").strip()
         if not style_prompt:
             return ToolResult(success=False, error="style_prompt is required")
         if is_mcp_transport(self):
             # Document rows, the Director and Celery dispatch belong to the backend process.
-            arguments = {"song": song, "style_prompt": style_prompt, "name": name, "i2v_model": i2v_model}
+            arguments = {"song": song, "style_prompt": style_prompt, "name": name,
+                         "i2v_model": i2v_model, "project": project}
             return run_tool_in_backend(self.name, {k: v for k, v in arguments.items() if v is not None})
         try:
             from backend.models import db
@@ -421,6 +445,10 @@ class MusicVideoTool(BaseTool):
                 return ToolResult(success=False, error=resolve_err)
             settings["i2v_model"] = picked
 
+            project_id, project_err = _resolve_project(project)
+            if project_err:
+                return ToolResult(success=False, error=project_err)
+
             title = (name or "").strip() or Path(doc.filename).stem
             svc = MusicVideoService(db.session)
             mv = svc.create(
@@ -428,7 +456,7 @@ class MusicVideoTool(BaseTool):
                 song_document_id=doc.id,
                 song_path=song_path,
                 style_prompt=style_prompt,
-                project_id=None,
+                project_id=project_id,
                 settings=settings,
             )
             started, dispatch_err = _dispatch_first_stage(svc, mv.id, "analyzer")
@@ -452,6 +480,7 @@ class MusicVideoTool(BaseTool):
                 ]),
                 metadata={
                     "music_video_id": mv.id,
+                    "project_id": mv.project_id,
                     "stage": mv.current_stage,
                     "studio_url": studio,
                     "i2v_model": settings.get("i2v_model"),

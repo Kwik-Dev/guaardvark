@@ -110,7 +110,7 @@ the user's own words.
 
 | Checkpoint | Route that releases it | What to say first |
 |---|---|---|
-| Music video: cut plan approved | `POST /api/music-video/<id>/approve` | number of cuts, seconds per clip, model, total time; offer storyboards first |
+| Music video: cut plan approved | `POST /api/music-video/<id>/approve` | number of cuts, seconds per clip, model, total time; offer storyboards first. After `/revise` or a restore, say how many cuts changed (only those render) |
 | Film Crew: casting confirmed | `POST /api/production/<id>/casting/confirm` | every subject and how it is cast (existing LoRA, new LoRA, as described) |
 | Film Crew: storyboard approved | `POST /api/production/<id>/storyboard/approve` | shot count, render cost, and any shots the curator flagged |
 | Voice clone | upload via `/api/audio-foundry/voice-clips/upload` | whose voice, and that they consented; refuse public figures |

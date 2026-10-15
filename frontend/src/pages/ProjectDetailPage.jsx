@@ -55,6 +55,7 @@ import { formatTimestamp } from "../utils/fileTypeUtils";
 import PageLayout from "../components/layout/PageLayout";
 import { ContextualLoader } from "../components/common/LoadingStates";
 import { PROJECT_TABS } from "../utils/entityLinks";
+import ProjectVideosPanel from "../components/projects/ProjectVideosPanel";
 
 const tabIndexFor = (name) => Math.max(0, PROJECT_TABS.indexOf(name));
 
@@ -784,6 +785,11 @@ const ProjectDetailPage = () => {
             id="project-tab-rules"
             aria-controls="project-panel-rules"
           />
+          <Tab
+            label="Videos"
+            id="project-tab-videos"
+            aria-controls="project-panel-videos"
+          />
         </Tabs>
       </Box>
 
@@ -1092,6 +1098,11 @@ const ProjectDetailPage = () => {
                 ))}
               </List>
             )}
+          </Paper>
+        )}
+        {tabValue === 4 /* Videos Panel */ && project?.id && (
+          <Paper elevation={2} sx={{ p: 2 }} id="project-panel-videos">
+            <ProjectVideosPanel projectId={project.id} />
           </Paper>
         )}
         {tabValue === 3 /* Rules Panel */ && (

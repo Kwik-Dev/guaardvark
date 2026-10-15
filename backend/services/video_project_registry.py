@@ -69,24 +69,62 @@ def _spine_dict(row, kind: str) -> dict:
         "name": row.name,
         "status": row.status,
         "current_stage": row.current_stage,
+        "project_id": getattr(row, "project_id", None),
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }
 
 
-def list_all(session) -> list[dict]:
+def list_all(session, project_id: int | None = None) -> list[dict]:
     """Every video project across all kinds, newest first — the unified spine view.
 
     Returns normalized lifecycle dicts (kind/id/name/status/stage/timestamps) only;
     kind-specific payload (script, song, cut_plan, clips) is fetched per-kind when a
     caller actually needs it. This is what a single "all your videos" UI reads.
+    ``project_id`` narrows it to the videos filed under one Project.
     """
     rows: list[dict] = []
     for key, vk in VIDEO_KINDS.items():
-        for row in session.query(vk.model).all():
+        q = session.query(vk.model)
+        if project_id is not None:
+            q = q.filter(vk.model.project_id == project_id)
+        for row in q.all():
             rows.append(_spine_dict(row, key))
     rows.sort(key=lambda r: (r["created_at"] or ""), reverse=True)
     return rows
+
+
+def count_by_project(session) -> dict[int, int]:
+    """{project_id: number of video projects} across every kind (one query per kind)."""
+    from sqlalchemy import func
+    out: dict[int, int] = {}
+    for vk in VIDEO_KINDS.values():
+        for pid, n in (session.query(vk.model.project_id, func.count(vk.model.id))
+                       .filter(vk.model.project_id.isnot(None))
+                       .group_by(vk.model.project_id).all()):
+            out[pid] = out.get(pid, 0) + int(n)
+    return out
+
+
+def detach_project_media(session, project_id: int) -> int:
+    """Before a Project is deleted: un-file the rendered outputs its videos put
+    under it, so Project.documents' delete-orphan cascade does not delete them.
+    Returns the number of Documents detached. Does not commit."""
+    from backend.models import Document
+    ids: set[int] = set()
+    for vk in VIDEO_KINDS.values():
+        for row in session.query(vk.model).filter(vk.model.project_id == project_id).all():
+            s = row.settings_json or {}
+            ids.update(i for i in (s.get("project_document_ids") or []) if isinstance(i, int))
+            out_id = getattr(row, "output_document_id", None)
+            if out_id:
+                ids.add(out_id)
+    if not ids:
+        return 0
+    docs = session.query(Document).filter(Document.id.in_(ids), Document.project_id == project_id).all()
+    for d in docs:
+        d.project_id = None
+    return len(docs)
 
 
 def resume_all_kinds(session, gate=None) -> dict[str, int]:

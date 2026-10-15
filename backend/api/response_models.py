@@ -46,5 +46,6 @@ class ProjectResponse(BaseModel):
     task_count: int
     rule_count: int
     primary_rule_count: int
+    video_count: int = 0
     created_at: Optional[str] = None
     updated_at: Optional[str] = None

@@ -453,6 +453,112 @@ def fill_clip_to_duration(
     return output_path
 
 
+# --- Editing / versions helpers (pure) ---------------------------------------
+
+# Settings that change what a clip looks like. A rendered clip whose inputs hash
+# differently from its recorded input_hash is stale and is rendered again; every
+# other clip is kept (revise / restore re-render only what changed).
+CLIP_RENDER_SETTING_KEYS = (
+    "i2v_model", "i2v_engine", "keyframe_model", "keyframe_steps", "keyframe_lora_strength",
+    "i2v_width", "i2v_height", "i2v_steps", "still_width", "still_height",
+    "fill_method", "max_stretch", "interpolation_multiplier", "fps", "width", "height",
+    "use_lora_consistency", "subject_ids", "loras", "lora_paths", "high_consistency",
+)
+
+# Run-time bookkeeping that never travels into a copy or a saved version.
+TRANSIENT_SETTING_KEYS = (
+    "stage_timings", "progress", "storyboard_generating", "storyboard_error",
+    "storyboard_progress", "storyboard_generating_since",
+)
+
+MAX_REVISIONS_PER_VIDEO = 50
+
+
+def clip_input_hash(clip: dict, settings: dict | None) -> str:
+    """Stable digest of everything that decides a clip's pixels."""
+    import hashlib
+    import json as _json
+    s = settings or {}
+    payload = {
+        "prompt": (clip.get("prompt") or "").strip(),
+        "start": round(float(clip.get("start") or 0.0), 3),
+        "end": round(float(clip.get("end") or 0.0), 3),
+        "seed": clip.get("seed"),
+        "storyboard": clip.get("storyboard_path"),
+        "storyboard_variation": clip.get("storyboard_variation"),
+        "duration": clip.get("duration_seconds"),
+        "settings": {k: s.get(k) for k in CLIP_RENDER_SETTING_KEYS},
+    }
+    raw = _json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def clip_is_stale(clip: dict, settings: dict | None) -> bool:
+    """A done clip rendered from different inputs than it has now. Clips from
+    before input hashing (no input_hash) are never called stale."""
+    recorded = clip.get("input_hash")
+    if not recorded:
+        return False
+    return recorded != clip_input_hash(clip, settings)
+
+
+def clean_settings(settings: dict | None) -> dict:
+    return {k: v for k, v in (settings or {}).items() if k not in TRANSIENT_SETTING_KEYS}
+
+
+def snapshot_of(mv) -> dict:
+    """Everything needed to bring a music video's creative state back."""
+    import copy
+    return {
+        "name": mv.name,
+        "style_prompt": mv.style_prompt,
+        "project_id": mv.project_id,
+        "cut_plan": copy.deepcopy(mv.cut_plan or []),
+        "clips": copy.deepcopy(mv.clips or []),
+        "settings": clean_settings(mv.settings_json),
+        "output_document_id": mv.output_document_id,
+        "stage": mv.current_stage,
+    }
+
+
+def restored_clips(clips: list | None, exists=None) -> list:
+    """Clips from a snapshot, with any whose file is gone set back to pending."""
+    import copy
+    import os as _os
+    exists = exists or _os.path.exists
+    out = copy.deepcopy(clips or [])
+    for c in out:
+        if c.get("status") == "cancelled":
+            c["status"] = "pending"
+        if c.get("status") == "done" and not (c.get("clip_path") and exists(c["clip_path"])):
+            c.update({"status": "pending", "clip_path": None, "quality": None, "review": None})
+        if c.get("status") == "failed":
+            c["status"] = "pending"
+        c.pop("deferred_since", None)
+    return out
+
+
+def attach_outputs_to_project(mv, doc_ids) -> list[int]:
+    """File a music video's output Documents under its Project.
+
+    Remembers the ids in settings_json["project_document_ids"] so a project delete
+    can detach them first: Project.documents is delete-orphan, and a finished
+    video must not vanish with the project it was filed under. Returns the ids
+    attached. The song is never moved (it may be shared by other videos).
+    """
+    ids = [int(i) for i in doc_ids if isinstance(i, int) or (isinstance(i, str) and i.isdigit())]
+    if not ids:
+        return []
+    s = dict(mv.settings_json or {})
+    known = [i for i in (s.get("project_document_ids") or []) if isinstance(i, int)]
+    s["project_document_ids"] = sorted(set(known) | set(ids))
+    mv.settings_json = s
+    from backend.models import Document
+    for doc in Document.query.filter(Document.id.in_(ids)).all():
+        doc.project_id = mv.project_id
+    return ids
+
+
 class MusicVideoService(PipelineService):
     """Coordinates state transitions on MusicVideo rows.
 
@@ -467,6 +573,7 @@ class MusicVideoService(PipelineService):
     stage_to_agent = STAGE_TO_AGENT
     task_namespace = "music_video"
     stage_context = "music-video"
+    record_stage_timings = True
 
     # --- Lifecycle ---------------------------------------------------------
 
@@ -526,9 +633,13 @@ class MusicVideoService(PipelineService):
             idx = c.get("index")
             if isinstance(idx, int) and idx in prompt_updates:
                 new_p = (prompt_updates[idx] or "").strip()
-                if new_p:
+                if new_p and new_p != (c.get("prompt") or "").strip():
                     c["prompt"] = new_p
                     changed = True
+                    # A rendered clip from before input hashing can't be detected as
+                    # stale by hash; send it back to render explicitly.
+                    if c.get("status") == "done" and not c.get("input_hash"):
+                        c.update({"status": "pending", "clip_path": None, "quality": None, "review": None})
         if changed:
             mv.clips = clips
             self.s.commit()
@@ -625,6 +736,8 @@ class MusicVideoService(PipelineService):
         clips = copy.deepcopy(mv.clips or [])
         for c in clips:
             idx = c.get("index")
+            if c.get("locked"):
+                continue  # a locked cut keeps the person's prompt and storyboard
             if isinstance(idx, int) and idx < len(prompts):
                 c["prompt"] = prompts[idx]
                 # P0 stale-storyboard fix: when the Director prompt for a cut changes,
