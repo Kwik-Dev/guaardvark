@@ -107,7 +107,7 @@ def test_no_usable_connection_queues_nothing(monkeypatch, local, connections):
     result = _tool("chat").execute(body="hello")
 
     assert not result.success
-    assert "Connections page" in result.error
+    assert "Social Accounts page" in result.error
     assert local == []
 
 

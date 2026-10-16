@@ -242,7 +242,7 @@ def test_a_saved_supervision_off_row_is_honoured(db_app):
 
 
 def test_settings_route_reports_and_saves_supervision(db_app):
-    """The Connections page reads and writes the switch through this route."""
+    """The Social Accounts page reads and writes the switch through this route."""
     from backend.api.connections_api import connections_bp
 
     db_app.register_blueprint(connections_bp)

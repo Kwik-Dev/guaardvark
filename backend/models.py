@@ -2121,6 +2121,17 @@ class PublishRecord(db.Model):
         onupdate=lambda: datetime.now(),
     )
     posted_at = db.Column(db.DateTime, nullable=True)
+    # When it should go public; None means as soon as it is approved.
+    scheduled_at = db.Column(db.DateTime, nullable=True, index=True)
+    # The platform holds it for scheduled_at (remote_id names the held post).
+    scheduled_natively = db.Column(db.Boolean, nullable=False, default=False)
+    # When a person released it: the Approvals click, or the UI publish itself
+    # when approval is switched off. The scheduler sends nothing without it.
+    approved_at = db.Column(db.DateTime, nullable=True)
+    # The post discloses AI use, by the platform's mechanism (see AIDisclosure).
+    ai_disclosure = db.Column(db.Boolean, nullable=False, default=False)
+    # When Delete on platform removed it.
+    deleted_at = db.Column(db.DateTime, nullable=True)
 
     connection = db.relationship("Connection", backref=db.backref("publishes", lazy="dynamic"))
 
@@ -2157,6 +2168,13 @@ class PublishRecord(db.Model):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "posted_at": self.posted_at.isoformat() if self.posted_at else None,
+            # Scheduling times carry the server's offset, so a browser in another
+            # zone reads the same moment.
+            "scheduled_at": self.scheduled_at.astimezone().isoformat() if self.scheduled_at else None,
+            "scheduled_natively": bool(self.scheduled_natively),
+            "approved_at": self.approved_at.astimezone().isoformat() if self.approved_at else None,
+            "ai_disclosure": bool(self.ai_disclosure),
+            "deleted_at": self.deleted_at.astimezone().isoformat() if self.deleted_at else None,
         }
 
 

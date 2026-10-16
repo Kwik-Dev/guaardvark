@@ -114,6 +114,8 @@ def create_celery_app():
             # to Celery's default 'celery' queue, which no worker consumes, and
             # the "Submit to Index" button silently produces a ghost task.
             'google_indexing.*': {'queue': 'default'},
+            # Custom-named, so routed explicitly like google_indexing.* above.
+            'connections.*': {'queue': 'default'},
         },
 
         beat_schedule={
@@ -174,6 +176,14 @@ def create_celery_app():
             'social-outreach-process-approved': {
                 'task': 'social_outreach.tick_process_approved_drafts',
                 'schedule': 60.0,  # 1 minute
+                'options': {'queue': 'default'},
+            },
+            # Sends approved publishes whose scheduled time has come, one at a
+            # time, and checks posts a platform holds for later. Held back by
+            # its gate while nothing is scheduled.
+            'connections-publish-due': {
+                'task': 'connections.publish_due_tick',
+                'schedule': 60.0,
                 'options': {'queue': 'default'},
             },
             # Reap Subjects stuck in training_status='training' past the train cap
@@ -448,6 +458,13 @@ def create_celery_app():
         'social-outreach-process-approved': 'social_outreach',
         'social-outreach-reap-stuck-processing': 'social_outreach',
     })
+
+    try:
+        from backend.tasks.publish_schedule_tasks import publish_due_tick  # noqa: F401
+        gate_beat_entries(celery_app, {'connections-publish-due': 'scheduled_publishes'})
+        logger.info("Scheduled publish task imported successfully")
+    except ImportError as e:
+        logger.warning(f"Could not import scheduled publish task: {e}")
 
     try:
         from backend.tasks.memory_maintenance_tasks import cleanup_old_session_memory  # noqa: F401

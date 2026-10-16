@@ -1379,6 +1379,12 @@ try:
                 ("experiment_runs", "judge_model", "ALTER TABLE experiment_runs ADD COLUMN IF NOT EXISTS judge_model VARCHAR(100)"),
                 ("experiment_runs", "retrieval_metrics", "ALTER TABLE experiment_runs ADD COLUMN IF NOT EXISTS retrieval_metrics JSON"),
                 ("research_configs", "status", "ALTER TABLE research_configs ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'promoted'"),
+                # Scheduled publishing, AI disclosure and Delete on platform.
+                ("publish_records", "scheduled_at", "ALTER TABLE publish_records ADD COLUMN IF NOT EXISTS scheduled_at TIMESTAMP"),
+                ("publish_records", "scheduled_natively", "ALTER TABLE publish_records ADD COLUMN IF NOT EXISTS scheduled_natively BOOLEAN NOT NULL DEFAULT FALSE"),
+                ("publish_records", "approved_at", "ALTER TABLE publish_records ADD COLUMN IF NOT EXISTS approved_at TIMESTAMP"),
+                ("publish_records", "ai_disclosure", "ALTER TABLE publish_records ADD COLUMN IF NOT EXISTS ai_disclosure BOOLEAN NOT NULL DEFAULT FALSE"),
+                ("publish_records", "deleted_at", "ALTER TABLE publish_records ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP"),
             ):
                 try:
                     from sqlalchemy import text as _sa_text
@@ -1396,6 +1402,20 @@ try:
                         db.session.rollback()
                     except Exception:
                         pass
+
+            try:
+                from sqlalchemy import text as _sa_text
+                db.session.execute(_sa_text(
+                    "CREATE INDEX IF NOT EXISTS ix_publish_records_scheduled_at "
+                    "ON publish_records (scheduled_at)"
+                ))
+                db.session.commit()
+            except Exception as idx_err:
+                app.logger.warning(f"publish_records.scheduled_at index skipped: {idx_err}")
+                try:
+                    db.session.rollback()
+                except Exception:
+                    pass
 
             # Feedback rows learned to name a reply and carry what they taught
             # (2026-09-22). Additive, nullable; legacy rows keep working.

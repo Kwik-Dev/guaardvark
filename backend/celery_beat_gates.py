@@ -64,6 +64,25 @@ def _flag(key: str) -> bool:
     return (_read_setting(key, "false") or "false").strip().lower() in _TRUE
 
 
+def scheduled_publishes_gate() -> bool:
+    """A publish waits for its time (status 'scheduled' in publish_records).
+
+    Raises when the table cannot be read; GateCache then keeps the entry closed.
+    """
+    global _engine
+    from sqlalchemy import create_engine, text
+
+    if _engine is None:
+        from backend import config
+
+        _engine = create_engine(config.DATABASE_URL, pool_pre_ping=True)
+    with _engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT 1 FROM publish_records WHERE status = 'scheduled' LIMIT 1")
+        ).fetchone()
+    return row is not None
+
+
 def autoresearch_gate() -> bool:
     """Settings → RAG Autoresearch → "Auto-start in nightly window"."""
     return _flag("rag_autoresearch_auto_enabled")
@@ -117,6 +136,7 @@ GATES: Dict[str, Callable[[], bool]] = {
     "self_improvement": self_improvement_gate,
     "uncle_claude_scheduled": uncle_claude_scheduled_gate,
     "interconnector_client": interconnector_client_gate,
+    "scheduled_publishes": scheduled_publishes_gate,
 }
 
 

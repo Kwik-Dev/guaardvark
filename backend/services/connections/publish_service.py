@@ -3,15 +3,28 @@
 One PublishRecord and one Task per target: a failed YouTube upload must not
 roll back a successful Bluesky post, and per-connection Tasks give each
 platform its own progress bar on the Jobs page.
+
+A record moves awaiting_approval -> (approved) -> queued -> processing ->
+posted, or waits as ``scheduled`` in between when it has a time (see
+scheduling.py). Nothing leaves awaiting_approval without ``approve()`` or, when
+approval is switched off, the person's own Publish click in the UI.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
-from backend.services.connections import gates, media as media_util, registry
+from backend.services.connections import (
+    gates,
+    media as media_util,
+    rate_limits,
+    registry,
+    scheduling,
+)
+from backend.services.connections.base import DISCLOSURE_TEXT, DeleteRequest
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +45,9 @@ def preflight(
     body: str = "",
     title: Optional[str] = None,
     visibility: Optional[str] = None,
+    scheduled_at: Optional[datetime] = None,
+    ai_disclosure: Optional[bool] = None,
+    requested_by: str = "ui",
 ) -> Dict[str, Any]:
     """Validate without queueing, for live feedback in the compose modal."""
     from backend.models import Connection
@@ -42,6 +58,11 @@ def preflight(
     except media_util.MediaResolveError as e:
         return {"ok": False, "per_connection": {}, "violations": [v for v in (stopped, str(e)) if v]}
 
+    general = [stopped] if stopped else []
+    general += scheduling.problems(scheduled_at)
+    # Without approval a post with no time goes out at once, so its limit applies now.
+    immediate = scheduled_at is None and not gates.requires_approval(requested_by)
+
     per_connection: Dict[str, Any] = {}
     for cid in connection_ids or []:
         connection = Connection.query.get(cid)
@@ -49,28 +70,87 @@ def preflight(
             per_connection[str(cid)] = {"violations": ["Connection not found."]}
             continue
         problems = _connection_problems(connection)
-        final_body = _body_with_disclosure(body, items, connection)
+        entry: Dict[str, Any] = {
+            "provider": connection.provider,
+            "label": connection.display_name or connection.provider,
+        }
         if not problems:
-            caps = registry.spec_for(connection.provider).capabilities
+            spec = registry.spec_for(connection.provider)
+            caps = spec.capabilities
+            disclosed, required = disclosure_for(caps, items, requested_by, ai_disclosure)
+            final_body = compose_body(body, items, connection, caps, disclosed)
             problems = media_util.validate_against(
                 caps, items, body=final_body, title=title, visibility=visibility
             )
-        per_connection[str(cid)] = {
-            "provider": connection.provider,
-            "label": connection.display_name or connection.provider,
-            "violations": problems,
-            "body": final_body,
-        }
+            problems += bot_label_problems(caps, connection)
+            if immediate:
+                verdict = rate_limits.check(connection.id, caps.rate_limits)
+                if not verdict.allowed:
+                    problems.append(verdict.reason)
+            entry["body"] = final_body
+            entry["ai_disclosure"] = {
+                **caps.ai_disclosure.to_dict(),
+                "required": required,
+                "applied": disclosed,
+            }
+            if scheduled_at is not None:
+                target_visibility = visibility or caps.default_visibility
+                mode = scheduling.plan(caps, scheduled_at, target_visibility)
+                entry["schedule"] = {
+                    "mode": mode,
+                    "note": scheduling.describe(caps, spec.label, mode),
+                }
+        entry["violations"] = problems
+        per_connection[str(cid)] = entry
 
     return {
         "ok": (
-            not stopped
+            not general
             and all(not v["violations"] for v in per_connection.values())
             and bool(per_connection)
         ),
         "per_connection": per_connection,
-        "violations": [stopped] if stopped else [],
+        "violations": general,
     }
+
+
+def disclosure_for(caps, items, requested_by: str, choice: Optional[bool]) -> Tuple[bool, bool]:
+    """(disclosed, required) for one destination.
+
+    The platform's rule wins where it applies; elsewhere the person's switch
+    decides, and it defaults off.
+    """
+    generated = any(getattr(item, "generated", False) for item in items or [])
+    required = caps.ai_disclosure.required_for(generated, requested_by)
+    return required or bool(choice), required
+
+
+def compose_body(body: str, items, connection, caps, disclosed: bool) -> str:
+    """The text that goes out: the body, the model credit, and the AI line."""
+    text = _body_with_disclosure(body, items, connection)
+    rule = caps.ai_disclosure
+    if disclosed and rule.mechanism == DISCLOSURE_TEXT and rule.text:
+        stripped = (text or "").rstrip()
+        if rule.text not in stripped:
+            text = f"{stripped}\n\n{rule.text}" if stripped else rule.text
+    return text
+
+
+def bot_label_problems(caps, connection) -> List[str]:
+    """Refuse an account whose bot label must be set and is not known to be."""
+    label = caps.bot_label
+    if not (label.block_when_unset and label.readable):
+        return []
+    try:
+        config = json.loads(connection.config) if isinstance(connection.config, str) else (connection.config or {})
+    except (ValueError, TypeError):
+        config = {}
+    if config.get("bot_label_set") is True:
+        return []
+    return [
+        "This platform asks automated accounts to carry its bot label, and this "
+        f"account's label is not set (or not read yet: run Test). {label.how}"
+    ]
 
 
 def _discloses_ai_media(connection) -> bool:
@@ -115,12 +195,18 @@ def queue_publish(
     tags: Optional[List[str]] = None,
     visibility: Optional[str] = None,
     requested_by: str = "ui",
+    scheduled_at: Optional[datetime] = None,
+    ai_disclosure: Optional[bool] = None,
 ) -> Dict[str, Any]:
-    """Create one PublishRecord + Task per connection and dispatch them.
+    """Create one PublishRecord (+ Task) per connection and release or hold them.
+
+    Every target is validated before any record is written, so a refusal for
+    one destination does not leave the others half-queued.
 
     Raises:
-        ValueError: nothing selected, or the post violates a target's limits.
-        RuntimeError: publishing is gated off, or public posting is stopped.
+        ValueError: nothing selected, a bad time, or the post violates a target's limits.
+        RuntimeError: publishing is gated off, public posting is stopped, or a
+            post that would go out now is over its account's rate limit.
     """
     from backend.models import Connection, PublishRecord, db
 
@@ -134,10 +220,14 @@ def queue_publish(
     if not gates.publish_enabled():
         raise RuntimeError("Publishing is disabled.")
 
+    time_problems = scheduling.problems(scheduled_at)
+    if time_problems:
+        raise ValueError(time_problems[0])
+
     items = media_util.resolve_media(document_ids or [])
     needs_approval = gates.requires_approval(requested_by)
 
-    queued: List[Dict[str, Any]] = []
+    planned = []
     for cid in connection_ids:
         connection = Connection.query.get(cid)
         if connection is None:
@@ -145,14 +235,24 @@ def queue_publish(
 
         problems = _connection_problems(connection)
         spec = registry.spec_for(connection.provider)
-        target_visibility = visibility or spec.capabilities.default_visibility
-        final_body = _body_with_disclosure(body, items, connection)
+        caps = spec.capabilities
+        target_visibility = visibility or caps.default_visibility
+        disclosed, _required = disclosure_for(caps, items, requested_by, ai_disclosure)
+        final_body = compose_body(body, items, connection, caps, disclosed)
         problems += media_util.validate_against(
-            spec.capabilities, items, body=final_body, title=title, visibility=target_visibility
+            caps, items, body=final_body, title=title, visibility=target_visibility
         )
+        problems += bot_label_problems(caps, connection)
         if problems:
             raise ValueError(f"{spec.label}: {problems[0]}")
+        if not needs_approval and scheduled_at is None:
+            verdict = rate_limits.check(connection.id, caps.rate_limits)
+            if not verdict.allowed:
+                raise RuntimeError(f"{spec.label}: {verdict.reason}")
+        planned.append((connection, spec, target_visibility, final_body, disclosed))
 
+    queued: List[Dict[str, Any]] = []
+    for connection, spec, target_visibility, final_body, disclosed in planned:
         record = PublishRecord(
             connection_id=connection.id,
             platform=connection.provider,
@@ -163,23 +263,76 @@ def queue_publish(
             link_url=link_url,
             tags=json.dumps(tags or []),
             visibility=target_visibility,
-            status="awaiting_approval" if needs_approval else "queued",
+            status="awaiting_approval",
             requested_by=requested_by,
+            scheduled_at=scheduled_at,
+            ai_disclosure=disclosed,
         )
         db.session.add(record)
         db.session.commit()
 
         if needs_approval:
-            queued.append({"publish_record_id": record.id, "status": record.status})
+            queued.append({
+                "publish_record_id": record.id,
+                "status": record.status,
+                "scheduled_at": scheduling.to_utc_iso(record.scheduled_at),
+            })
             continue
 
-        queued.append(_dispatch(record, connection, spec))
+        # Approval is switched off and a person clicked Publish in the UI.
+        record.approved_at = datetime.now()
+        try:
+            queued.append(_release(record, connection, spec))
+        except RuntimeError:
+            db.session.rollback()
+            raise
 
     return {
         "queued": queued,
         "requires_approval": needs_approval,
         "count": len(queued),
     }
+
+
+def _release(record, connection, spec, now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Send an approved record on: now, to the platform's own schedule, or to the timer.
+
+    Raises RuntimeError before committing anything when the post, now or at
+    the time the platform would publish it, is over its account's rate limit.
+    A timer post is checked when it comes due instead.
+    """
+    from backend.models import db
+
+    now = now or datetime.now()
+    caps = spec.capabilities
+    when = record.scheduled_at if record.scheduled_at and record.scheduled_at > now else None
+    mode = scheduling.plan(caps, when, record.visibility, now) if when else None
+
+    if mode != scheduling.MODE_TIMER:
+        verdict = rate_limits.check(
+            connection.id, caps.rate_limits, at=when or now, now=now, exclude_record_id=record.id
+        )
+        if not verdict.allowed:
+            raise RuntimeError(verdict.reason)
+
+    record.error_message = None
+    if mode == scheduling.MODE_TIMER:
+        record.status = "scheduled"
+        db.session.commit()
+        return {
+            "publish_record_id": record.id,
+            "status": record.status,
+            "scheduled_at": scheduling.to_utc_iso(record.scheduled_at),
+            "platform": connection.provider,
+        }
+    record.status = "queued"
+    db.session.commit()
+    return _dispatch(record, connection, spec)
+
+
+def release_due(record, connection, spec, now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Send an approved timer post whose time has come (``scheduler.release_due``)."""
+    return _release(record, connection, spec, now=now)
 
 
 def _dispatch(record, connection, spec) -> Dict[str, Any]:
@@ -241,9 +394,10 @@ def _dispatch(record, connection, spec) -> Dict[str, Any]:
 
 
 def approve(record) -> Dict[str, Any]:
-    """Release a supervised or held publish to the queue.
+    """Release a supervised or held publish: now, or for its scheduled time.
 
-    Raises RuntimeError while public posting is stopped; the record stays put.
+    Raises RuntimeError while public posting is stopped, or when a post that
+    would go out now is over its account's rate limit; the record stays put.
     """
     from backend.models import Connection, db
 
@@ -256,14 +410,17 @@ def approve(record) -> Dict[str, Any]:
     if connection is None:
         raise ValueError("The target connection no longer exists.")
 
-    record.status = "queued"
-    record.error_message = None
-    db.session.commit()
-    return _dispatch(record, connection, registry.spec_for(connection.provider))
+    record.approved_at = datetime.now()
+    try:
+        return _release(record, connection, registry.spec_for(connection.provider))
+    except RuntimeError:
+        # A refusal leaves the record waiting, without the approval stamp.
+        db.session.rollback()
+        raise
 
 
-def hold(record) -> None:
-    """Send a publish back to awaiting_approval because public posting stopped.
+def hold(record, message: str = HELD_MESSAGE) -> None:
+    """Send a publish back to awaiting_approval, by default because public posting stopped.
 
     A held publish needs a person's click to go out, so lifting the stop never
     sends a backlog by itself.
@@ -271,7 +428,8 @@ def hold(record) -> None:
     from backend.models import db
 
     record.status = "awaiting_approval"
-    record.error_message = HELD_MESSAGE
+    record.approved_at = None
+    record.error_message = message
     db.session.commit()
 
 
@@ -286,6 +444,7 @@ def hold_queued() -> tuple[int, int]:
     rows = PublishRecord.query.filter(PublishRecord.status == "queued").all()
     for row in rows:
         row.status = "awaiting_approval"
+        row.approved_at = None
         row.error_message = HELD_MESSAGE
     db.session.commit()
     in_flight = PublishRecord.query.filter(PublishRecord.status == "processing").count()
@@ -316,5 +475,63 @@ def cancel(record) -> None:
             "This publish is already being sent. Cancel its job from Activity "
             "to stop it."
         )
+    if record.status == "scheduled" and record.scheduled_natively:
+        raise ValueError(
+            "The platform already holds this post for its time. Use Delete on "
+            "platform to withdraw it."
+        )
     record.status = "cancelled"
     db.session.commit()
+
+
+def delete_remote(record) -> str:
+    """Delete a posted (or natively scheduled) post from its platform.
+
+    Allowed while public posting is stopped: a takedown is not a post. Returns
+    the provider's message. Raises ValueError when the record or platform
+    cannot be deleted from here, RuntimeError when the platform refused.
+    """
+    from backend.models import Connection, db
+
+    pending = record.status == "scheduled" and bool(record.scheduled_natively)
+    if record.status != "posted" and not pending:
+        raise ValueError(f"Only a posted or platform-scheduled publish can be deleted, not '{record.status}'.")
+    if not record.remote_id:
+        raise ValueError("The platform gave no id for this post, so it cannot be deleted from here.")
+    connection = Connection.query.get(record.connection_id) if record.connection_id else None
+    if connection is None:
+        raise ValueError("The connection that posted this no longer exists.")
+
+    spec = registry.spec_for(connection.provider)
+    caps = spec.capabilities
+    if not caps.deletable or not registry.supports(connection.provider, "delete"):
+        raise ValueError(f"{spec.label} posts cannot be deleted from here.")
+    if caps.delete_window_seconds and record.posted_at and not pending:
+        age = (datetime.now() - record.posted_at).total_seconds()
+        if age > caps.delete_window_seconds:
+            hours = caps.delete_window_seconds // 3600
+            raise ValueError(f"{spec.label} allows deleting only within {hours} hours of posting.")
+
+    from backend.services.connections import service
+
+    try:
+        result = registry.get_provider(connection.provider).delete(
+            service.build_ctx(connection),
+            DeleteRequest(
+                record_id=record.id,
+                remote_id=record.remote_id,
+                remote_url=record.remote_url,
+                pending_schedule=pending,
+            ),
+        )
+    except Exception as e:  # noqa: BLE001 - any provider failure is shown, never a 500
+        logger.warning("Delete of publish %s raised: %s", record.id, e, exc_info=True)
+        raise RuntimeError(service.redact(str(e))) from e
+    if not result.ok:
+        raise RuntimeError(service.redact(result.message) or "The platform refused the delete.")
+
+    record.status = "deleted"
+    record.deleted_at = datetime.now()
+    record.error_message = None
+    db.session.commit()
+    return result.message
