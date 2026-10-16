@@ -105,6 +105,10 @@ services:
     volumes:
       - app_data:/app/data
       - app_logs:/app/logs
+      # The credential store (backend/utils/credential_store.py): Connections
+      # and WordPress site keys and the key that encrypts them. A volume of its
+      # own, so they outlive a rebuilt or recreated container.
+      - app_config:/root/.config/guaardvark
     depends_on:
       postgres:
         condition: service_healthy
@@ -137,3 +141,4 @@ volumes:
   ollama_models:
   app_data:
   app_logs:
+  app_config:
