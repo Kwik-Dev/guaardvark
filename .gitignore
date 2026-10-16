@@ -50,6 +50,9 @@ data/agent_state.json
 data/.screenshot_url_secret
 # Which training base models this install has downloaded
 data/training/base_models.json
+# The GGUF converter installed from Settings > Training libraries, and its staging folders
+data/training/gguf_converter/
+data/training/.gguf_converter-*/
 # Per-machine UI state and MCP server config
 data/folder_state.json
 data/images_windows_state.json

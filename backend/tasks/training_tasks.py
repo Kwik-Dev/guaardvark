@@ -1100,33 +1100,45 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False,
 
 
 class ExportNotVerified(RuntimeError):
-    """Export to Ollama has not been verified for the job's base model."""
+    """Export to Ollama cannot run for the job now; export_block says why
+    (not verified for its base model, or the GGUF converter not ready)."""
 
 
-def export_refusal(base_model: str, lora_path: str = None):
-    """Why a job's adapter may not be exported yet, or None. Export stays off
-    for a base model until it has been run live and its entry says verified,
-    and on an Ollama version measured unable to import the merged model."""
-    from backend.services import training_base_models
+def export_block(base_model: str, lora_path: str = None):
+    """Why a job's adapter may not be exported now, as (code, reason), or None.
+    Export stays off for a base model until it has been run live and its entry
+    says verified, and goes through GGUF, so it waits for the GGUF converter
+    to be installed and checked with the model's family
+    (training_gguf_converter.refusal_for)."""
+    from backend.services import training_base_models, training_gguf_converter
     where = f" The trained adapter stays at {lora_path}." if lora_path else ""
     if not training_base_models.export_verified(base_model):
-        return f"Export to Ollama is not verified for {base_model} yet.{where}"
-    blocked = ollama_import_refusal()
+        return "EXPORT_NOT_VERIFIED", f"Export to Ollama is not verified for {base_model} yet.{where}"
+    blocked = training_gguf_converter.refusal_for(training_base_models.get(base_model))
     if blocked:
-        return f"{blocked}{where}"
+        code, reason = blocked
+        return code, f"{reason}{where}"
     return None
 
 
+def export_refusal(base_model: str, lora_path: str = None):
+    """export_block's reason alone, or None."""
+    block = export_block(base_model, lora_path)
+    return block[1] if block else None
+
+
 def _unsupported_import_reason(version: str) -> str:
-    return (f"Export to Ollama cannot run with the installed Ollama {version}: it imports a "
-            "trained (safetensors) model only through its MLX engine, which does not take "
-            "this model on this system.")
+    return (f"The installed Ollama {version} cannot import the merged model as safetensors: it "
+            "takes safetensors only through its MLX engine, which does not take this model on "
+            "this system. Export through GGUF instead (Settings > Training libraries > GGUF "
+            "converter).")
 
 
-# What each Ollama version measured here does with the merged safetensors folder
-# an export registers (`ollama create --quantize <level>` on <run>/merged). A
-# version that cannot import it is refused before the merge, with its reason;
-# a version not listed is tried, as before.
+# What each Ollama version measured here does with a merged safetensors folder
+# (`ollama create --quantize <level>` on <run>/merged), the route a run folder
+# merged before Export went through GGUF still imports by. A version that
+# cannot import it is refused before `ollama create`, with its reason; a version
+# not listed is tried.
 OLLAMA_SAFETENSORS_IMPORT = {
     "0.40.1": {
         "imports": False,
@@ -1180,33 +1192,44 @@ def ollama_import_refusal():
     return None
 
 
-# Ollama's spelling of each quantization the export form offers, for
-# `ollama create --quantize` on a safetensors folder; None means unquantised.
-# The levels are the ones Ollama documents for importing safetensors; the
-# others in the form have no safetensors path and are refused.
+# Ollama's spelling of each level for `ollama create --quantize` on a merged
+# safetensors folder (_create_from_merged); None means unquantised. The levels
+# are the ones Ollama documents for importing safetensors. Export itself offers
+# the GGUF converter's levels (training_gguf_converter.LEVELS).
 OLLAMA_QUANTIZE = {"q4_k_m": "q4_K_M", "q4_k_s": "q4_K_S", "q8_0": "q8_0", "f16": None}
 # Folding a 1-3 GB adapter into its base on the CPU takes minutes; this
 # bounds a merge that hangs.
 MERGE_TIME_LIMIT_SECONDS = 3600
 
 
+def export_gguf_name(model_dir: Path, level: str) -> Path:
+    """Where Export writes a run's GGUF file at a level."""
+    return Path(model_dir) / f"{Path(model_dir).name}-{level}.gguf"
+
+
 @shared_task(bind=True, name='training.export_gguf')
-def export_gguf_task(self, job_id: str, model_dir: str, quantization: str = 'q4_k_m'):
+def export_gguf_task(self, job_id: str, model_dir: str, quantization: str = None):
     """First export step: fold the job's LoRA adapter into its bf16 base model
-    (model_dir/merged, safetensors) in an offline subprocess on the CPU.
-    import_ollama_task then registers that folder with `ollama create
-    --quantize`. Refused, before the job is touched, until export is verified
-    for the job's base model."""
+    (model_dir/merged, safetensors) in an offline subprocess on the CPU, then
+    convert that folder to one GGUF file at the chosen level with the GGUF
+    converter (training_gguf_converter), also on the CPU. import_ollama_task
+    then registers the file with `ollama create`. Refused, before the job is
+    touched, until export is verified for the job's base model and the
+    converter is installed; a level the converter does not offer is refused
+    with the choices. quantization None means its default level."""
     logger.info(f"Starting export_gguf_task for job {job_id}")
 
+    from backend.services import training_gguf_converter
     from flask import current_app
     with current_app.app_context():
         job = db.session.query(TrainingJob).filter(TrainingJob.job_id == job_id).first()
         base_model = job.base_model if job else None
+        previous_gguf = job.gguf_path if job else None
     refusal = export_refusal(base_model, str(Path(model_dir) / "lora"))
     if refusal:
         # Before the job is touched, so it keeps its completed status.
         raise ExportNotVerified(refusal)
+    level = training_gguf_converter.level_for(quantization)
 
     try:
         _update_job_status(job_id, status="running", pipeline_stage="exporting", started_at=utcnow(), celery_task_id=self.request.id)
@@ -1227,10 +1250,19 @@ def export_gguf_task(self, job_id: str, model_dir: str, quantization: str = 'q4_
              "parent_pid": os.getpid()},
             workdir=model_dir_path, time_limit_s=MERGE_TIME_LIMIT_SECONDS)
 
-        _update_job_status(job_id, pipeline_stage="exporting", progress=100)
-        _emit_progress(job_id, 100, f"Merged model saved to {merged}", "complete")
-        logger.info(f"Export task completed for job {job_id}: {merged}")
-        return {"merged_path": str(merged)}
+        label = training_gguf_converter.LEVELS[level]["label"]
+        _emit_progress(job_id, 60, f"Converting the merged model to GGUF ({label})...", "processing")
+        gguf = training_gguf_converter.convert(
+            merged, export_gguf_name(model_dir_path, level), level,
+            log_path=model_dir_path / training_runner.LOG_NAME)
+        _drop_other_export(previous_gguf, model_dir_path, gguf)
+
+        _update_job_status(job_id, pipeline_stage="exporting", progress=100,
+                           gguf_path=str(gguf), quantization_level=level)
+        size_gb = gguf.stat().st_size / 1e9
+        _emit_progress(job_id, 100, f"GGUF saved to {gguf} ({size_gb:.2f} GB)", "complete")
+        logger.info(f"Export task completed for job {job_id}: {gguf}")
+        return {"merged_path": str(merged), "gguf_path": str(gguf), "quantization": level}
 
     except Exception as e:
         logger.error(f"Error in export_gguf_task: {e}", exc_info=True)
@@ -1239,15 +1271,49 @@ def export_gguf_task(self, job_id: str, model_dir: str, quantization: str = 'q4_
         raise
 
 
-def ollama_modelfile(entry: dict, merged_dir: Path) -> str:
-    """The Modelfile registering a merged model with Ollama: the folder, the
-    chat template and stop words its base model entry declares, and the
-    app's default sampling."""
+def _drop_other_export(previous: str, model_dir: Path, current: Path) -> None:
+    """Delete the GGUF an earlier export of this run wrote at another level,
+    so a re-export leaves one file. Only a file Export itself names is touched."""
+    from backend.services import training_gguf_converter
+    if not previous:
+        return
+    previous_path = Path(previous)
+    ours = {export_gguf_name(model_dir, level) for level in training_gguf_converter.LEVELS}
+    if previous_path != current and previous_path in ours and previous_path.is_file():
+        previous_path.unlink()
+        logger.info(f"Removed the earlier export {previous_path}")
+
+
+def ollama_modelfile(entry: dict, source: Path) -> str:
+    """The Modelfile registering an exported model with Ollama: the GGUF file
+    (or a merged folder), the chat template and stop words its base model
+    entry declares, and the app's default sampling."""
     from backend.services import sampling_profiles
     template = entry["ollama_template"]
     stops = "\n".join(f'PARAMETER stop "{stop}"' for stop in entry.get("ollama_stop", ()))
     params = sampling_profiles.profile_modelfile_params(sampling_profiles.DEFAULT_PROFILE)
-    return f'FROM {merged_dir}\n\nTEMPLATE """{template}"""\n\n{stops}\n{params}\n'
+    return f'FROM {source}\n\nTEMPLATE """{template}"""\n\n{stops}\n{params}\n'
+
+
+def _create_from_gguf(job_id: str, model_dir: Path, gguf: Path, entry: dict, model_name: str,
+                      level: str) -> dict:
+    """`ollama create <name> -f Modelfile` for an exported GGUF file. Ollama
+    imports the file at the level it was converted to; it does not quantize a
+    GGUF import."""
+    from backend.services import training_gguf_converter
+    _emit_progress(job_id, 20, f"Writing the Modelfile for {model_name}...", "processing")
+    modelfile = model_dir / "Modelfile"
+    modelfile.write_text(ollama_modelfile(entry, gguf), encoding="utf-8")
+
+    command = ["ollama", "create", model_name, "-f", str(modelfile)]
+    label = training_gguf_converter.LEVELS.get(level, {}).get("label") or level.upper() or "GGUF"
+    _emit_progress(job_id, 50, f"Registering {model_name} with Ollama ({label})...", "processing")
+    result = subprocess.run(command, capture_output=True, text=True, cwd=str(model_dir),
+                            timeout=MERGE_TIME_LIMIT_SECONDS)
+    if result.returncode != 0:
+        tail = (result.stderr or result.stdout or "").strip()[-500:]
+        raise RuntimeError(f"ollama create failed: {tail}")
+    return {"ollama_model_name": model_name, "quantization": level, "gguf_path": str(gguf)}
 
 
 def _create_from_merged(job_id: str, model_dir: Path, merged: Path, model_name: str) -> dict:
@@ -1328,6 +1394,23 @@ def import_ollama_task(self, job_id: str, model_dir: str, model_name: str):
 
         model_dir_obj = Path(model_dir)
 
+        from backend.services import training_base_models
+        from flask import current_app
+        with current_app.app_context():
+            job = db.session.query(TrainingJob).filter(TrainingJob.job_id == job_id).first()
+            base_model = job.base_model if job else None
+            exported = Path(job.gguf_path) if job and job.gguf_path else None
+            level = ((job.quantization_level if job else None) or "").lower()
+        entry = training_base_models.get(base_model)
+        if entry is not None and exported is not None and exported.is_file():
+            created = _create_from_gguf(job_id, model_dir_obj, exported, entry, model_name, level)
+            _update_job_status(job_id, status="completed", pipeline_stage="importing",
+                               completed_at=utcnow(), progress=100, ollama_model_name=model_name)
+            _emit_progress(job_id, 100, f"Ollama import complete: {model_name}", "complete")
+            logger.info(f"Import task completed for job {job_id}: {model_name} from {exported}")
+            return created
+
+        # A run folder merged before Export went through GGUF holds only merged/.
         merged = model_dir_obj / "merged"
         if (merged / "config.json").is_file():
             created = _create_from_merged(job_id, model_dir_obj, merged, model_name)
@@ -1520,7 +1603,7 @@ def full_training_pipeline_task(self, job_id: str, config: dict):
         
         export_result = export_gguf_task(job_id,
                                         model_dir,
-                                        job_config.get("quantization", "q4_k_m"))
+                                        job_config.get("quantization"))
         
         _update_job_status(job_id, pipeline_stage="importing")
         _emit_progress(job_id, 90, "Step 5/5: Importing to Ollama...", "processing")

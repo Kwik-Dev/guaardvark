@@ -70,6 +70,7 @@ import DeviceProfileModal, { hardwareNote, profileFromHardware } from "../compon
 import ParseJobModal from "../components/modals/ParseJobModal";
 import BuildFromFolderModal from "../components/modals/BuildFromFolderModal";
 import ExportQuantizationModal from "../components/modals/ExportQuantizationModal";
+import TrainingLibrariesModal from "../components/modals/TrainingLibrariesModal";
 import { useSnackbar } from "../components/common/SnackbarProvider";
 import EntityContextMenu from "../components/common/EntityContextMenu";
 import useContextMenu from "../hooks/useContextMenu";
@@ -545,13 +546,21 @@ const TrainingPage = () => {
   const [exportModalOpen, setExportModalOpen] = useState(false);
   const [selectedJobForExport, setSelectedJobForExport] = useState(null);
   const [isReQuantize, setIsReQuantize] = useState(false);
+  const [converterOpen, setConverterOpen] = useState(false);
+
+  // Export cannot run now: say why before the form opens, and when the GGUF
+  // converter is what it waits for, open the Install for it.
+  const exportBlocked = (job) => {
+    if (!job.export_blocked) return false;
+    showMessage(job.export_blocked, "warning");
+    if (["GGUF_CONVERTER_MISSING", "GGUF_CONVERTER_NOT_READY"].includes(job.export_blocked_code)) {
+      setConverterOpen(true);
+    }
+    return true;
+  };
 
   const handleExportToOllama = (job, reQuantize = false) => {
-    // The installed Ollama cannot take the export: say so before the form opens.
-    if (job.export_blocked) {
-      showMessage(job.export_blocked, "warning");
-      return;
-    }
+    if (exportBlocked(job)) return;
     setSelectedJobForExport(job);
     setIsReQuantize(reQuantize);
     setExportModalOpen(true);
@@ -560,10 +569,7 @@ const TrainingPage = () => {
   // A run held as worse than its base model is exported only on the person's
   // explicit choice; the backend records it, then the usual export dialog opens.
   const handleExportAnyway = async (job) => {
-    if (job.export_blocked) {
-      showMessage(job.export_blocked, "warning");
-      return;
-    }
+    if (exportBlocked(job)) return;
     const ok = window.confirm(
       `This run was held because it measured worse than its base model:\n\n${job.error_message || ""}\n\n` +
         "Export it anyway? Your choice is recorded on the job.",
@@ -1335,8 +1341,17 @@ const TrainingPage = () => {
           isExporting={exportingJobs.has(selectedJobForExport?.id)}
           isReQuantize={isReQuantize}
           currentQuantization={selectedJobForExport?.quantization_level}
+          levels={selectedJobForExport?.export_levels}
         />
       )}
+
+      <TrainingLibrariesModal
+        open={converterOpen}
+        onClose={() => setConverterOpen(false)}
+        showMessage={showMessage}
+        onConverterChanged={() => fetchJobs()}
+        focus="gguf-converter"
+      />
 
       <EntityContextMenu
         anchorPosition={rowMenu.anchorPosition}

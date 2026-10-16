@@ -325,6 +325,35 @@ export const removeTrainingLibraries = async (planToken) => {
   return data.data || data;
 };
 
+// Settings > Training libraries > GGUF converter (llama.cpp's converter that
+// Export to Ollama runs). plan: also ask for the one-use token Install and
+// Remove send back; the backend downloads nothing without it.
+export const getGgufConverter = async ({ plan = false } = {}) => {
+  const response = await fetch(`${BASE_URL}/training/libraries/gguf-converter${plan ? "?plan=1" : ""}`);
+  const data = await handleResponse(response);
+  return data.data || data;
+};
+
+export const installGgufConverter = async (planToken) => {
+  const response = await fetch(`${BASE_URL}/training/libraries/gguf-converter/install`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm: "install", plan_token: planToken }),
+  });
+  const data = await handleResponse(response);
+  return data.data || data;
+};
+
+export const removeGgufConverter = async (planToken) => {
+  const response = await fetch(`${BASE_URL}/training/libraries/gguf-converter/remove`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm: "remove", plan_token: planToken }),
+  });
+  const data = await handleResponse(response);
+  return data.data || data;
+};
+
 export const getImageFolders = async () => {
   try {
     const response = await fetch(`${BASE_URL}/training/images`);

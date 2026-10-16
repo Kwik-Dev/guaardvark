@@ -81,14 +81,38 @@ def _cancel(job) -> bool:
 def _job_dict(job) -> dict:
     """The job as the Training page reads it, with whether its base model's
     export to Ollama has been verified (the page offers Export only then) and,
-    when it has, why the installed Ollama cannot take it (export_blocked)."""
-    from backend.services import training_base_models
+    when it has, the levels Export offers and why it cannot run now
+    (export_blocked, with export_blocked_code; GGUF_CONVERTER_MISSING sends
+    the page to the converter's Install)."""
+    from backend.services import training_base_models, training_gguf_converter
     verified = training_base_models.export_verified(job.base_model)
-    blocked = None
+    code = blocked = None
     if verified:
-        from backend.tasks.training_tasks import ollama_import_refusal
-        blocked = ollama_import_refusal()
-    return {**job.to_dict(), "export_verified": verified, "export_blocked": blocked}
+        from backend.tasks.training_tasks import export_block
+        block = export_block(job.base_model)
+        if block:
+            code, blocked = block
+    return {**job.to_dict(), "export_verified": verified, "export_blocked": blocked,
+            "export_blocked_code": code,
+            "export_levels": training_gguf_converter.levels() if verified else []}
+
+
+def _export_refused(job):
+    """The 409 for a job whose export cannot run now, or None."""
+    from backend.tasks.training_tasks import export_block
+    block = export_block(job.base_model, job.lora_path)
+    if block:
+        return error_response(block[1], 409, block[0])
+    return None
+
+
+def _export_level(data: dict):
+    """(level, None) for the request's quantization, or (None, the 400)."""
+    from backend.services import training_gguf_converter
+    try:
+        return training_gguf_converter.level_for(data.get("quantization")), None
+    except ValueError as e:
+        return None, error_response(str(e), 400, "UNSUPPORTED_LEVEL")
 
 
 def _put_back(job, before, what: str, exc: Exception):
@@ -262,6 +286,63 @@ def remove_training_libraries():
         return error_response(str(e), e.status, e.code)
     except Exception as e:
         logger.error(f"Error starting the training libraries remove: {e}", exc_info=True)
+        return error_response(str(e), 500)
+
+
+@training_bp.route("/libraries/gguf-converter", methods=["GET"])
+def get_gguf_converter():
+    """Settings > Training libraries > GGUF converter: the pinned llama.cpp
+    converter Export uses, whether it is installed and intact, and the install
+    in progress. ?plan=1 also hands out the one-use token Install and Remove send."""
+    try:
+        from backend.services import training_gguf_converter
+        return success_response(
+            training_gguf_converter.status(with_plan_token=request.args.get("plan") == "1"))
+    except Exception as e:
+        logger.error(f"Error reading the GGUF converter: {e}", exc_info=True)
+        return error_response(str(e), 500)
+
+
+@training_bp.route("/libraries/gguf-converter/install", methods=["POST"])
+def install_gguf_converter():
+    """Fetch the pinned converter files from GitHub and check them.
+    Only the Install click sends what this needs:
+    {"confirm": "install", "plan_token": <from GET /libraries/gguf-converter?plan=1>}."""
+    from backend.services import training_gguf_converter
+    data = request.get_json(silent=True) or {}
+    if data.get("confirm") != "install":
+        return error_response(training_gguf_converter.NEEDS_CLICK, 403, "NEEDS_CLICK")
+    try:
+        result = training_gguf_converter.start_install(data.get("plan_token"))
+        logger.info("GGUF converter install started")
+        return success_response(result, "Install started", status_code=202)
+    except training_gguf_converter.Refused as e:
+        return error_response(str(e), e.status, e.code)
+    except Exception as e:
+        logger.error(f"Error starting the GGUF converter install: {e}", exc_info=True)
+        return error_response(str(e), 500)
+
+
+@training_bp.route("/libraries/gguf-converter/remove", methods=["POST"])
+@ensure_db_session_cleanup
+def remove_gguf_converter():
+    """Delete the installed converter.
+    Body: {"confirm": "remove", "plan_token": <from GET /libraries/gguf-converter?plan=1>}."""
+    from backend.services import training_gguf_converter
+    data = request.get_json(silent=True) or {}
+    if data.get("confirm") != "remove":
+        return error_response(training_gguf_converter.NEEDS_CLICK, 403, "NEEDS_CLICK")
+    exporting = db.session.query(TrainingJob).filter(
+        TrainingJob.status == "running", TrainingJob.pipeline_stage == "exporting").count()
+    if exporting:
+        return error_response(f"{exporting} export(s) running; remove the converter once they "
+                              f"finish.", 409, "EXPORT_RUNNING")
+    try:
+        return success_response(training_gguf_converter.start_remove(data.get("plan_token")), "Removed")
+    except training_gguf_converter.Refused as e:
+        return error_response(str(e), e.status, e.code)
+    except Exception as e:
+        logger.error(f"Error removing the GGUF converter: {e}", exc_info=True)
         return error_response(str(e), 500)
 
 
@@ -1072,10 +1153,9 @@ def export_anyway(job_id):
             return error_response(f"LoRA adapter path not found: {job.lora_path}", 400)
 
         # Releasing a run for an export that cannot run would only change its status.
-        from backend.tasks.training_tasks import export_refusal
-        refusal = export_refusal(job.base_model, job.lora_path)
-        if refusal:
-            return error_response(refusal, 409, "EXPORT_NOT_VERIFIED")
+        refused = _export_refused(job)
+        if refused:
+            return refused
 
         data = request.get_json(silent=True) or {}
         config = json.loads(job.config_json) if job.config_json else {}
@@ -1125,13 +1205,14 @@ def export_job_to_gguf(job_id):
         if not lora_path.exists():
             return error_response(f"LoRA adapter path not found: {job.lora_path}", 400)
 
-        from backend.tasks.training_tasks import export_refusal
-        refusal = export_refusal(job.base_model, job.lora_path)
-        if refusal:
-            return error_response(refusal, 409, "EXPORT_NOT_VERIFIED")
+        refused = _export_refused(job)
+        if refused:
+            return refused
 
         data = request.get_json() or {}
-        quantization = data.get("quantization", "q4_k_m")
+        quantization, bad_level = _export_level(data)
+        if bad_level:
+            return bad_level
 
         before = (job.status, job.pipeline_stage)
         job.pipeline_stage = "exporting"
@@ -1238,10 +1319,13 @@ def export_to_ollama(job_id):
                 )
 
         data = request.get_json() or {}
-        quantization = data.get("quantization", "q4_k_m")
         model_name = data.get("model_name") or job.output_model_name or f"guaardvark-{job.name.lower().replace(' ', '-')}"
+        requested = str(data.get("quantization") or "").lower()
 
-        if job.gguf_path and Path(job.gguf_path).exists():
+        # A GGUF already exported at the level asked for (or with none asked
+        # for) is registered as it is; another level is exported again.
+        same_level = not requested or requested == (job.quantization_level or "").lower()
+        if job.gguf_path and Path(job.gguf_path).exists() and same_level:
             logger.info(f"GGUF already exists at {job.gguf_path}, skipping to import")
             before = (job.status, job.pipeline_stage)
             job.pipeline_stage = "importing"
@@ -1274,10 +1358,12 @@ def export_to_ollama(job_id):
         if not lora_path.exists():
             return error_response(f"LoRA adapter path not found: {job.lora_path}", 400)
 
-        from backend.tasks.training_tasks import export_refusal
-        refusal = export_refusal(job.base_model, job.lora_path)
-        if refusal:
-            return error_response(refusal, 409, "EXPORT_NOT_VERIFIED")
+        refused = _export_refused(job)
+        if refused:
+            return refused
+        quantization, bad_level = _export_level(data)
+        if bad_level:
+            return bad_level
 
         before = (job.status, job.pipeline_stage)
         job.pipeline_stage = "exporting"
