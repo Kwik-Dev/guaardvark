@@ -23,7 +23,6 @@ import BuildIcon from "@mui/icons-material/Build";
 import SmartToyIcon from "@mui/icons-material/SmartToy";
 import StickyNote2Icon from "@mui/icons-material/StickyNote2";
 import ExtensionIcon from "@mui/icons-material/Extension";
-import HubIcon from "@mui/icons-material/Hub";
 import RuleIcon from "@mui/icons-material/Rule";
 import HiveIcon from "@mui/icons-material/Hive";
 import CampaignIcon from "@mui/icons-material/Campaign";
@@ -46,6 +45,8 @@ import SchoolIcon from "@mui/icons-material/School";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import DriveFolderUploadIcon from "@mui/icons-material/DriveFolderUpload";
 import WebAssetIcon from "@mui/icons-material/WebAsset";
+import AlternateEmailIcon from "@mui/icons-material/AlternateEmail";
+import DynamicFeedIcon from "@mui/icons-material/DynamicFeed";
 import DescriptionIcon from "@mui/icons-material/Description";
 import BugReportIcon from "@mui/icons-material/BugReport";
 import BarChartIcon from "@mui/icons-material/BarChart";
@@ -346,6 +347,28 @@ export const CORE_NAV_CATALOG = Object.freeze([
     workspace: "work",
     stripOrder: 80,
   }),
+  // Next to WordPress Sites and Pages (40, 50) in the Work bar; listed in the
+  // sidebar too, which has no WordPress entries.
+  page({
+    id: "social-accounts",
+    path: "/social/accounts",
+    label: "Social Accounts",
+    icon: <AlternateEmailIcon />,
+    sidebarGroup: "Management",
+    menu: "Work",
+    workspace: "work",
+    stripOrder: 52,
+  }),
+  page({
+    id: "social-posts",
+    path: "/social/posts",
+    label: "Social Posts",
+    icon: <DynamicFeedIcon />,
+    sidebarGroup: "Management",
+    menu: "Work",
+    workspace: "work",
+    stripOrder: 54,
+  }),
 
   page({
     id: "rules",
@@ -426,16 +449,6 @@ export const CORE_NAV_CATALOG = Object.freeze([
     menu: "View",
     workspace: "system",
     stripOrder: 20,
-  }),
-  page({
-    id: "connections",
-    path: "/connections",
-    label: "Connections",
-    icon: <HubIcon />,
-    sidebarGroup: "Configuration",
-    menu: "View",
-    workspace: "system",
-    stripOrder: 30,
   }),
   page({
     id: "approvals",

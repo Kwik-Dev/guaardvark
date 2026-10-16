@@ -10,8 +10,10 @@ import {
   DialogContent,
   DialogTitle,
   Divider,
+  FormControlLabel,
   MenuItem,
   Stack,
+  Switch,
   TextField,
   Tooltip,
   Typography,
@@ -35,9 +37,27 @@ const useDebounced = (value, delay = 400) => {
   return debounced;
 };
 
+/** A Date as the value a datetime-local input takes, in local time. */
+const toLocalInput = (date) => {
+  const pad = (n) => String(n).padStart(2, "0");
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+    `T${pad(date.getHours())}:${pad(date.getMinutes())}`
+  );
+};
+
+/** The next whole hour at least an hour away: a sensible first suggestion. */
+const suggestedTime = () => {
+  const date = new Date(Date.now() + 60 * 60 * 1000);
+  date.setMinutes(0, 0, 0);
+  return toLocalInput(new Date(date.getTime() + 60 * 60 * 1000));
+};
+
 /**
  * Compose a post and publish selected assets to one or more connections.
- * Validation limits come from each provider's capabilities, never hardcoded.
+ * Validation limits come from each provider's capabilities, never hardcoded;
+ * the AI disclosure rule and who sends a scheduled post come back per
+ * destination from preflight.
  */
 const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
   const [connections, setConnections] = useState([]);
@@ -47,6 +67,9 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
   const [body, setBody] = useState("");
   const [tags, setTags] = useState("");
   const [visibility, setVisibility] = useState("");
+  const [aiDisclosure, setAiDisclosure] = useState(false);
+  const [scheduleOn, setScheduleOn] = useState(false);
+  const [scheduledAt, setScheduledAt] = useState("");
   const [preflight, setPreflight] = useState(null);
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -83,9 +106,19 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
     setTags(Array.isArray(first?.tags) ? first.tags.join(", ") : "");
     setSelected([]);
     setVisibility("");
+    setAiDisclosure(false);
+    setScheduleOn(false);
+    setScheduledAt("");
     setPreflight(null);
     setError(null);
   }, [open, documents]);
+
+  // ISO with the browser's offset, so the server reads the same moment.
+  const scheduledIso = useMemo(() => {
+    if (!scheduleOn || !scheduledAt) return null;
+    const date = new Date(scheduledAt);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  }, [scheduleOn, scheduledAt]);
 
   const selectedSpecs = useMemo(
     () =>
@@ -131,6 +164,8 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
       body: debouncedBody,
       title: supportsTitle ? debouncedTitle : null,
       visibility: visibility || null,
+      scheduled_at: scheduledIso,
+      ai_disclosure: aiDisclosure,
     })
       .then((result) => !cancelled && setPreflight(result))
       .catch(() => !cancelled && setPreflight(null));
@@ -139,7 +174,7 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
     };
   }, [
     open, selected, documentIds, debouncedBody, debouncedTitle,
-    visibility, supportsTitle,
+    visibility, supportsTitle, scheduledIso, aiDisclosure,
   ]);
 
   const toggle = useCallback((id) => {
@@ -163,6 +198,24 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
     return [...general, ...perConnection];
   }, [preflight]);
 
+  // Destinations whose terms require the AI label for this post: the switch
+  // cannot turn it off there, and each one says why.
+  const requiredDisclosures = useMemo(
+    () =>
+      Object.values(preflight?.per_connection || {})
+        .filter((entry) => entry.ai_disclosure?.required)
+        .map((entry) => ({ label: entry.label, rule: entry.ai_disclosure.rule })),
+    [preflight],
+  );
+
+  const scheduleNotes = useMemo(
+    () =>
+      Object.values(preflight?.per_connection || {})
+        .filter((entry) => entry.schedule?.note)
+        .map((entry) => ({ label: entry.label, note: entry.schedule.note })),
+    [preflight],
+  );
+
   const handlePublish = useCallback(async () => {
     setSubmitting(true);
     setError(null);
@@ -178,12 +231,17 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
           .filter(Boolean),
         visibility: visibility || null,
         requested_by: "ui",
+        scheduled_at: scheduledIso,
+        ai_disclosure: aiDisclosure,
       });
+      const verb = scheduledIso ? "Scheduled" : "Queued";
       onFeedback?.({
         open: true,
         message: result.requires_approval
-          ? `Queued ${result.count} publish(es) — review them under Approvals.`
-          : `Publishing to ${result.count} destination(s).`,
+          ? `${verb} ${result.count} publish(es) — review them under Approvals.`
+          : scheduledIso
+            ? `Scheduled ${result.count} publish(es); see them under Social Posts.`
+            : `Publishing to ${result.count} destination(s).`,
         severity: "success",
       });
       onClose?.();
@@ -194,12 +252,16 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
     }
   }, [
     selected, documentIds, body, title, tags, visibility, supportsTitle,
-    onClose, onFeedback,
+    scheduledIso, aiDisclosure, onClose, onFeedback,
   ]);
 
   const overLimit = charLimit !== null && body.length > charLimit;
   const canPublish =
-    selected.length > 0 && !overLimit && !allViolations.length && !submitting;
+    selected.length > 0 &&
+    !overLimit &&
+    !allViolations.length &&
+    !submitting &&
+    (!scheduleOn || Boolean(scheduledIso));
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
@@ -217,7 +279,7 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
 
             {!connections.length && (
               <Alert severity="info">
-                No social connections yet. Add one on the Connections page first.
+                No social accounts yet. Add one on the Social Accounts page first.
               </Alert>
             )}
 
@@ -320,6 +382,63 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
               </TextField>
             )}
 
+            <Box>
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={aiDisclosure}
+                    onChange={(e) => setAiDisclosure(e.target.checked)}
+                    size="small"
+                  />
+                }
+                label="Label as made with AI"
+              />
+              {requiredDisclosures.map((entry) => (
+                <Typography
+                  key={entry.label}
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ display: "block" }}
+                >
+                  Always on for {entry.label}: {entry.rule}
+                </Typography>
+              ))}
+            </Box>
+
+            <Box>
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={scheduleOn}
+                    onChange={(e) => {
+                      setScheduleOn(e.target.checked);
+                      if (e.target.checked && !scheduledAt) setScheduledAt(suggestedTime());
+                    }}
+                    size="small"
+                  />
+                }
+                label="Schedule for later"
+              />
+              {scheduleOn && (
+                <Stack spacing={0.5} sx={{ mt: 1 }}>
+                  <TextField
+                    type="datetime-local"
+                    label="Goes out at"
+                    value={scheduledAt}
+                    onChange={(e) => setScheduledAt(e.target.value)}
+                    size="small"
+                    InputLabelProps={{ shrink: true }}
+                    helperText="Still waits for approval first when approval is required."
+                  />
+                  {scheduleNotes.map((entry) => (
+                    <Typography key={entry.label} variant="caption" color="text.secondary">
+                      {entry.label}: {entry.note}
+                    </Typography>
+                  ))}
+                </Stack>
+              )}
+            </Box>
+
             {allViolations.length > 0 && (
               <Alert severity="warning">
                 <Stack spacing={0.5}>
@@ -337,7 +456,7 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
       <DialogActions>
         <Button onClick={onClose}>Cancel</Button>
         <Button variant="contained" onClick={handlePublish} disabled={!canPublish}>
-          {submitting ? "Publishing…" : "Publish"}
+          {submitting ? (scheduleOn ? "Scheduling…" : "Publishing…") : scheduleOn ? "Schedule" : "Publish"}
         </Button>
       </DialogActions>
     </Dialog>

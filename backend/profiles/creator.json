@@ -26,7 +26,8 @@
       "/code-editor", "/notes",
       "/clients", "/projects", "/websites", "/activity", "/outreach",
       "/rules", "/tools", "/agents", "/file-generation", "/content-library",
-      "/autoresearch", "/connections", "/approvals", "/system-map", "/self-improvement"
+      "/autoresearch", "/connections", "/social/accounts", "/social/posts", "/approvals",
+      "/system-map", "/self-improvement"
     ]
   },
   "landing_route": "/images",

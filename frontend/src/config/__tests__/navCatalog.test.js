@@ -52,6 +52,8 @@ describe("catalogToNavGroups", () => {
       ["Management", "Jobs", "/tasks", null],
       ["Management", "Activity", "/activity", null],
       ["Management", "Outreach", "/outreach", null],
+      ["Management", "Social Accounts", "/social/accounts", null],
+      ["Management", "Social Posts", "/social/posts", null],
       ["Configuration", "Rules & Prompts", "/rules", null],
       ["Configuration", "Agent Tools", "/tools", null],
       ["Configuration", "Agents", "/agents", null],
@@ -60,7 +62,6 @@ describe("catalogToNavGroups", () => {
       ["Configuration", "CSVGen", "/content-library", null],
       ["Configuration", "Autoresearch", "/autoresearch", null],
       ["Configuration", "Plugins", "/plugins", null],
-      ["Configuration", "Connections", "/connections", null],
       ["Configuration", "Approvals", "/approvals", "pendingApprovals"],
       ["Configuration", "Settings", "/settings", null],
     ]);
@@ -220,6 +221,21 @@ describe("workspaces", () => {
       "swarm",
       "system-map",
       "self-improvement",
+    ]);
+  });
+
+  it("puts the social pages next to WordPress in Work", () => {
+    expect(toolsForWorkspace(CORE_NAV_CATALOG, "work").map((item) => item.id)).toEqual([
+      "clients",
+      "projects",
+      "websites",
+      "wordpress-sites",
+      "wordpress-pages",
+      "social-accounts",
+      "social-posts",
+      "jobs",
+      "activity",
+      "outreach",
     ]);
   });
 
