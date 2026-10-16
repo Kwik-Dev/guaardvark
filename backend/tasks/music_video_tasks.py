@@ -450,10 +450,12 @@ def _mv_run(mv_id: int, *, expected_stage: str, next_agent: str | None):
 # --- Stage: analyzing --------------------------------------------------------
 
 def _music_pacing_enabled() -> bool:
-    """GUAARDVARK_MV_MUSIC_PACING=1 plans cuts on the song's bar grid, paced by its
-    loudness, with sections found from the music (compute_bar_cut_plan). Off by
-    default: the energy-quarter planner (compute_cut_plan) stays the stock path."""
-    return os.environ.get("GUAARDVARK_MV_MUSIC_PACING", "").strip().lower() in ("1", "true", "yes", "on")
+    """Cuts are planned on the song's bar grid, paced by its loudness, with
+    sections found from the music (compute_bar_cut_plan). On by default;
+    GUAARDVARK_MV_MUSIC_PACING=0 (or false/no/off) falls back to the
+    energy-quarter planner (compute_cut_plan), which splits the song into four
+    equal-time sections."""
+    return os.environ.get("GUAARDVARK_MV_MUSIC_PACING", "").strip().lower() not in ("0", "false", "no", "off")
 
 
 def run_analyzer(mv_id: int):
