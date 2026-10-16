@@ -36,6 +36,46 @@ def _document_abs_path(doc) -> Optional[str]:
     return None
 
 
+# Metadata Guaardvark's generators write when they register an output
+# (output_registration.register_file callers). A Document carrying any of them
+# was generated here; an upload from the person carries none.
+GENERATED_SOURCES = ("batch_generation", "comfyui", "music_generation")
+GENERATED_KINDS = ("music_video",)
+GENERATED_KEYS = ("original_prompt", "prompt", "batch_id", "music_video_id", "attribution")
+
+
+def is_generated(meta: Dict[str, Any]) -> bool:
+    """Whether Document metadata says Guaardvark generated the file."""
+    if not isinstance(meta, dict):
+        return False
+    if meta.get("source") in GENERATED_SOURCES or meta.get("kind") in GENERATED_KINDS:
+        return True
+    return any(meta.get(key) for key in GENERATED_KEYS)
+
+
+def _document_meta(doc) -> Dict[str, Any]:
+    if not doc or not doc.file_metadata:
+        return {}
+    try:
+        raw = doc.file_metadata
+        meta = json.loads(raw) if isinstance(raw, str) else dict(raw)
+    except (ValueError, TypeError):
+        return {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _generated(doc, meta: Dict[str, Any]) -> bool:
+    """Generated itself, or an editor render of a generated source clip."""
+    if is_generated(meta):
+        return True
+    source_id = meta.get("source_document_id")
+    if source_id and source_id != doc.id:
+        from backend.models import Document
+
+        return is_generated(_document_meta(Document.query.get(source_id)))
+    return False
+
+
 def resolve_media(document_ids: Iterable[int]) -> List[MediaItem]:
     """Turn Document ids into MediaItems. Requires an app context."""
     from backend.models import Document
@@ -50,26 +90,17 @@ def resolve_media(document_ids: Iterable[int]) -> List[MediaItem]:
             raise MediaResolveError(f"File for document {doc_id} is missing on disk.")
 
         mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
-        alt_text = None
-        attribution = None
-        has_audio = False
-        if doc.file_metadata:
-            try:
-                meta = json.loads(doc.file_metadata) if isinstance(doc.file_metadata, str) else dict(doc.file_metadata)
-                alt_text = meta.get("original_prompt") or None
-                attribution = meta.get("attribution") or None
-                has_audio = bool(meta.get("has_audio"))
-            except (ValueError, TypeError):
-                pass
+        meta = _document_meta(doc)
 
         item = MediaItem(
             path=path,
             mime=mime,
             bytes=os.path.getsize(path),
             document_id=doc.id,
-            alt_text=alt_text,
-            attribution=attribution,
-            has_audio=has_audio,
+            alt_text=meta.get("original_prompt") or None,
+            attribution=meta.get("attribution") or None,
+            has_audio=bool(meta.get("has_audio")),
+            generated=_generated(doc, meta),
         )
         if item.kind == "video":
             item.duration_s = probe_duration(path)
@@ -210,6 +241,7 @@ def media_from_refs(raw: Optional[str]) -> List[MediaItem]:
                 document_id=e.get("document_id"),
                 role=e.get("role") or "primary",
                 alt_text=e.get("alt_text"),
+                generated=bool(e.get("generated")),
             )
         )
     return items
