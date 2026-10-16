@@ -1879,7 +1879,10 @@ class WordPressSite(db.Model):
     url = db.Column(db.String(2048), nullable=False, unique=True)
     site_name = db.Column(db.String(255), nullable=True)
     username = db.Column(db.String(255), nullable=True)  # Optional, only for direct WordPress REST API
-    api_key = db.Column(db.Text, nullable=False)  # LLAMANATOR2 API key or WordPress Application Password
+    # Kept empty. The LLAMANATOR2 API key or WordPress Application Password
+    # lives in the credential store (backend.services.wordpress_credentials);
+    # rows from older installs are moved there at startup.
+    api_key = db.Column(db.Text, nullable=False, default="")
     connection_type = db.Column(db.String(50), default="llamanator", nullable=False)  # "llamanator" or "wordpress"
     client_id = db.Column(
         db.Integer,
@@ -1935,13 +1938,19 @@ class WordPressSite(db.Model):
                 push_settings = json.loads(self.push_settings)
             except (json.JSONDecodeError, TypeError):
                 push_settings = {}
-        
+
+        from backend.services.wordpress_credentials import key_status
+
+        key = key_status(self)
         return {
             "id": self.id,
             "url": self.url,
             "site_name": self.site_name,
             "username": self.username if self.username else None,  # Convert empty string to None for API
-            "has_api_key": bool(self.api_key),  # Don't expose actual key
+            # Never the key itself: whether one is stored, and its last four characters.
+            "has_api_key": key["configured"],
+            "api_key_hint": key["hint"],
+            "api_key_encrypted": key["encrypted"],
             "connection_type": self.connection_type,
             "client_id": self.client_id,
             "client": {"id": self.client_ref.id, "name": self.client_ref.name} if self.client_ref else None,

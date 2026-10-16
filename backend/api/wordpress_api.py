@@ -13,6 +13,7 @@ from flask import Blueprint, current_app, jsonify, request
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from backend.models import WordPressSite, WordPressPage, Client, Project, Website, db
+from backend.services import wordpress_credentials
 from backend.services.wordpress_api_service import WordPressAPIService
 from backend.services.llamanator_api_service import LlamanatorAPIService
 
@@ -57,6 +58,12 @@ def register_wordpress_site():
                     "success": False,
                     "error": f"Missing required field: {field}"
                 }), 400
+        api_key = wordpress_credentials.incoming_key(data["api_key"])
+        if not api_key:
+            return jsonify({
+                "success": False,
+                "error": "Missing required field: api_key"
+            }), 400
         
         # Check if site already exists
         existing = db.session.query(WordPressSite).filter_by(url=data["url"]).first()
@@ -70,13 +77,13 @@ def register_wordpress_site():
         if connection_type == "llamanator":
             wp_service = LlamanatorAPIService(
                 site_url=data["url"],
-                api_key=data["api_key"]
+                api_key=api_key
             )
         else:
             wp_service = WordPressAPIService(
                 site_url=data["url"],
                 username=data["username"],
-                api_key=data["api_key"]
+                api_key=api_key
             )
         
         success, error = wp_service.test_connection()
@@ -96,7 +103,7 @@ def register_wordpress_site():
             url=data["url"],
             site_name=data.get("site_name"),
             username=username_value,  # Use empty string for LLAMANATOR2 if not provided
-            api_key=data["api_key"],  # TODO: Encrypt this
+            api_key="",
             connection_type=connection_type,
             client_id=data.get("client_id"),
             project_id=data.get("project_id"),
@@ -108,7 +115,15 @@ def register_wordpress_site():
         )
         
         db.session.add(wp_site)
-        db.session.commit()
+        # The id names the key's record in the credential store.
+        db.session.flush()
+        new_site_id = wp_site.id
+        try:
+            wordpress_credentials.set_api_key(wp_site, api_key)
+            db.session.commit()
+        except Exception:
+            wordpress_credentials.delete_api_key(new_site_id)
+            raise
         
         logger.info(f"Registered WordPress site: {wp_site.url} (ID: {wp_site.id})")
         
@@ -186,8 +201,9 @@ def update_wordpress_site(site_id: int):
                 wp_site.username = data["username"] or ""
             else:
                 wp_site.username = data["username"]
-        if "api_key" in data:
-            wp_site.api_key = data["api_key"]  # TODO: Encrypt
+        # Blank, or the masked hint sent back, keeps the stored key. A new
+        # key is stored just before the commit, so a refused update keeps the old one.
+        new_api_key = wordpress_credentials.incoming_key(data.get("api_key"))
         if "connection_type" in data:
             wp_site.connection_type = data["connection_type"]
         if "client_id" in data:
@@ -206,12 +222,13 @@ def update_wordpress_site(site_id: int):
         wp_site.updated_at = datetime.now()
         
         # If credentials changed, test connection
-        if "api_key" in data or "username" in data or "connection_type" in data:
+        if new_api_key or "username" in data or "connection_type" in data:
             connection_type = wp_site.connection_type or "llamanator"
+            api_key = new_api_key or wordpress_credentials.get_api_key(wp_site)
             if connection_type == "llamanator":
                 test_service = LlamanatorAPIService(
                     site_url=wp_site.url,
-                    api_key=wp_site.api_key
+                    api_key=api_key
                 )
             else:
                 if not wp_site.username:
@@ -222,9 +239,12 @@ def update_wordpress_site(site_id: int):
                 test_service = WordPressAPIService(
                     site_url=wp_site.url,
                     username=wp_site.username,
-                    api_key=wp_site.api_key
+                    api_key=api_key
                 )
-            success, error = test_service.test_connection()
+            if api_key:
+                success, error = test_service.test_connection()
+            else:
+                success, error = False, wordpress_credentials.MISSING_KEY_MESSAGE
             wp_site.last_test_at = datetime.now()
             if success:
                 wp_site.status = "active"
@@ -233,6 +253,8 @@ def update_wordpress_site(site_id: int):
                 wp_site.status = "error"
                 wp_site.error_message = error
         
+        if new_api_key:
+            wordpress_credentials.set_api_key(wp_site, new_api_key)
         db.session.commit()
         
         return jsonify({
@@ -262,11 +284,17 @@ def test_wordpress_connection(site_id: int):
         
         # Use appropriate service based on connection type
         connection_type = getattr(wp_site, 'connection_type', 'llamanator') or 'llamanator'
+        api_key = wordpress_credentials.get_api_key(wp_site)
+        if not api_key:
+            return jsonify({
+                "success": False,
+                "error": wordpress_credentials.MISSING_KEY_MESSAGE
+            }), 400
         
         if connection_type == "llamanator":
             wp_service = LlamanatorAPIService(
                 site_url=wp_site.url,
-                api_key=wp_site.api_key
+                api_key=api_key
             )
         else:
             if not wp_site.username:
@@ -277,7 +305,7 @@ def test_wordpress_connection(site_id: int):
             wp_service = WordPressAPIService(
                 site_url=wp_site.url,
                 username=wp_site.username,
-                api_key=wp_site.api_key
+                api_key=api_key
             )
         
         success, error = wp_service.test_connection()
@@ -319,6 +347,7 @@ def delete_wordpress_site(site_id: int):
         
         db.session.delete(wp_site)
         db.session.commit()
+        wordpress_credentials.delete_api_key(site_id)
         
         return jsonify({
             "success": True,

@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Any
 from collections import defaultdict
 
 from backend.models import WordPressPage, WordPressSite, db
+from backend.services import wordpress_credentials
 from backend.services.llamanator_api_service import LlamanatorAPIService
 
 logger = logging.getLogger(__name__)
@@ -48,10 +49,14 @@ class SEOAnalyticsService:
         if connection_type != 'llamanator':
             return {"success": False, "error": "Analytics sync only available for LLAMANATOR2 connections"}
         
+        api_key = wordpress_credentials.get_api_key(wp_site)
+        if not api_key:
+            return {"success": False, "error": wordpress_credentials.MISSING_KEY_MESSAGE}
+        
         try:
             wp_service = LlamanatorAPIService(
                 site_url=wp_site.url,
-                api_key=wp_site.api_key
+                api_key=api_key
             )
             
             # Get all pages for this site
@@ -110,10 +115,14 @@ class SEOAnalyticsService:
         if connection_type != 'llamanator':
             return {"success": False, "error": "PageSpeed sync only available for LLAMANATOR2 connections"}
         
+        api_key = wordpress_credentials.get_api_key(wp_site)
+        if not api_key:
+            return {"success": False, "error": wordpress_credentials.MISSING_KEY_MESSAGE}
+        
         try:
             wp_service = LlamanatorAPIService(
                 site_url=wp_site.url,
-                api_key=wp_site.api_key
+                api_key=api_key
             )
             
             pages = db.session.query(WordPressPage).filter_by(

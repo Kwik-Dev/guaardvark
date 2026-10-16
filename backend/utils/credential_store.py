@@ -260,6 +260,30 @@ def list_refs() -> List[str]:
     return sorted(_read_doc()["records"].keys())
 
 
+def file_readable() -> bool:
+    """True when a write keeps every record already on disk.
+
+    A write replaces the whole file, and a file that does not parse is read as
+    empty, so writing over it drops what it held. Code that writes without a
+    person asking (a migration at startup) checks this first; an absent or
+    empty file has nothing to lose.
+    """
+    path = credentials_path()
+    if not path.exists():
+        return True
+    try:
+        text = path.read_text()
+    except OSError:
+        return False
+    if not text.strip():
+        return True
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        return False
+    return isinstance(doc, dict) and isinstance(doc.get("records"), dict)
+
+
 def get_status(ref: str, *, env_keys: Sequence[str] = ()) -> Dict[str, Any]:
     """Masked status for the UI. Never returns a secret value."""
     value, env_key = _env_value(env_keys)
