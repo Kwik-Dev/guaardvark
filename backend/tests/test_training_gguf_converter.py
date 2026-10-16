@@ -3,8 +3,8 @@ fetched only on the Install click, file by file from the pinned commit, kept
 only when every file matches its declared sha256, checked again before each
 conversion, run offline on the CPU, and deleted on Remove.
 
-Seams: install_dir, _spawn and FILES on the service module; requests.Session,
-read by _install at call time; subprocess.run on the module for convert.
+Seams: install_dir, _spawn and FILES on the service module;
+backend.utils.hosts.no_netrc_session, read by _install at call time; subprocess.run on the module for convert.
 Nothing touches the network or runs the converter.
 """
 import hashlib
@@ -53,7 +53,7 @@ def machine(monkeypatch, tmp_path):
 
 
 class FakeGitHub:
-    """requests.Session serving `served` (path -> bytes) and recording URLs."""
+    """A no_netrc_session() serving `served` (path -> bytes) and recording URLs."""
 
     def __init__(self, served):
         self.served = dict(served)
@@ -91,10 +91,10 @@ class _Context:
 
 @pytest.fixture
 def github(monkeypatch):
-    import requests
+    from backend.utils import hosts
 
     fake = FakeGitHub(CONTENT)
-    monkeypatch.setattr(requests, "Session", fake)
+    monkeypatch.setattr(hosts, "no_netrc_session", fake)
     return fake
 
 

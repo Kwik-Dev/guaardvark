@@ -452,14 +452,14 @@ def _fetch(session, path: str, size: int) -> bytes:
 
 
 def _install() -> None:
-    import requests
+    from backend.utils.hosts import no_netrc_session
 
     target = install_dir()
     staging = None
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         staging = Path(tempfile.mkdtemp(prefix=".gguf_converter-", dir=target.parent))
-        with requests.Session() as session:
+        with no_netrc_session() as session:
             for i, (path, size, digest) in enumerate(FILES):
                 data = _fetch(session, path, size)
                 if len(data) != size or hashlib.sha256(data).hexdigest() != digest:
