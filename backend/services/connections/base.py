@@ -138,6 +138,10 @@ class ProviderSpec:
     setup_help: str = ""
     review_required: bool = False
     beta: bool = False
+    # True when the credential can post only into a channel its holder
+    # manages (a Discord webhook). Only such a connection may be switched to
+    # post without a per-post approval (gates.requires_approval).
+    posts_to_owned_channel: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -153,6 +157,7 @@ class ProviderSpec:
             "setup_help": self.setup_help,
             "review_required": self.review_required,
             "beta": self.beta,
+            "posts_to_owned_channel": self.posts_to_owned_channel,
         }
 
 

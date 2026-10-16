@@ -1,9 +1,12 @@
 """Safety gates for publishing.
 
 Publishing your own asset is a different act from unsolicited outreach, so it
-gets its own enable switch and defaults to on. Each publish still waits on the
-Approvals page unless a person switches approval off. The two paths share one
-per-platform cadence budget and one stop on all public posting
+gets its own enable switch and defaults to on. Each publish waits on the
+Approvals page for a person. The one exception is a connection that can post
+only into a channel its owner manages (``ProviderSpec.posts_to_owned_channel``,
+a Discord webhook) and that the person switched to post without approval;
+even then a request from chat, MCP or a schedule waits. The two paths share
+one per-platform cadence budget and one stop on all public posting
 (``kill_switch.posting_stop_reason``). That stop is its own setting, not the
 outreach on/off switch: outreach defaults off, and that must not hold back a
 publish.
@@ -11,13 +14,15 @@ publish.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 PUBLISH_ENABLED_KEY = "connections_publish_enabled"
-PUBLISH_SUPERVISED_KEY = "connections_publish_supervised"
+# Connection.config key a person sets on an owned-channel connection.
+POST_WITHOUT_APPROVAL_KEY = "post_without_approval"
 
 # Requests from an agent always require a human click, regardless of settings.
 # "unknown" is here so an unattributed request fails safe: a caller that omits
@@ -62,20 +67,40 @@ def set_publish_enabled(value: bool) -> None:
     save_setting(PUBLISH_ENABLED_KEY, "true" if value else "false")
 
 
-def publish_supervised() -> bool:
-    """True unless a person switched approval off; a saved value wins."""
-    return _setting(PUBLISH_SUPERVISED_KEY, "true") in _TRUTHY
+def may_skip_approval(provider: str | None) -> bool:
+    """Whether a connection of ``provider`` may be switched to post without a
+    per-post approval: only one that posts into a channel its owner manages."""
+    try:
+        from backend.services.connections import registry
+
+        return bool(registry.spec_for(provider or "").posts_to_owned_channel)
+    except Exception:  # noqa: BLE001 - an unknown provider waits for a person
+        return False
 
 
-def set_publish_supervised(value: bool) -> None:
-    from backend.utils.settings_utils import save_setting
+def posts_without_approval(connection) -> bool:
+    """True only for an owned-channel connection whose person switched it to
+    post without approval. A config that cannot be read means approval."""
+    if connection is None or not may_skip_approval(getattr(connection, "provider", None)):
+        return False
+    try:
+        raw = connection.config
+        config = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        return isinstance(config, dict) and config.get(POST_WITHOUT_APPROVAL_KEY) is True
+    except (ValueError, TypeError):
+        return False
 
-    save_setting(PUBLISH_SUPERVISED_KEY, "true" if value else "false")
 
+def requires_approval(requested_by: str, connection=None) -> bool:
+    """Whether this publish waits on the Approvals page.
 
-def requires_approval(requested_by: str) -> bool:
-    """An agent-initiated publish is never allowed to go out unattended."""
-    return (requested_by or "ui").strip().lower() in ALWAYS_SUPERVISED_SOURCES or publish_supervised()
+    Always, except a publish a person started from the app ("ui") to an
+    owned-channel connection set to post without approval. An agent-initiated
+    publish is never allowed to go out unattended.
+    """
+    if (requested_by or "ui").strip().lower() in ALWAYS_SUPERVISED_SOURCES:
+        return True
+    return not posts_without_approval(connection)
 
 
 def posting_stop_reason() -> Optional[str]:

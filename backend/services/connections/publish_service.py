@@ -135,13 +135,15 @@ def queue_publish(
         raise RuntimeError("Publishing is disabled.")
 
     items = media_util.resolve_media(document_ids or [])
-    needs_approval = gates.requires_approval(requested_by)
 
     queued: List[Dict[str, Any]] = []
+    any_waiting = False
     for cid in connection_ids:
         connection = Connection.query.get(cid)
         if connection is None:
             raise ValueError(f"Connection {cid} not found.")
+        needs_approval = gates.requires_approval(requested_by, connection)
+        any_waiting = any_waiting or needs_approval
 
         problems = _connection_problems(connection)
         spec = registry.spec_for(connection.provider)
@@ -175,9 +177,11 @@ def queue_publish(
 
         queued.append(_dispatch(record, connection, spec))
 
+    # True when any target waits on the Approvals page; each entry's status
+    # says which.
     return {
         "queued": queued,
-        "requires_approval": needs_approval,
+        "requires_approval": any_waiting,
         "count": len(queued),
     }
 
@@ -241,7 +245,7 @@ def _dispatch(record, connection, spec) -> Dict[str, Any]:
 
 
 def approve(record) -> Dict[str, Any]:
-    """Release a supervised or held publish to the queue.
+    """Release a publish waiting for approval, or a held one, to the queue.
 
     Raises RuntimeError while public posting is stopped; the record stays put.
     """
