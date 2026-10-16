@@ -67,7 +67,7 @@ def preflight(
         if connection is None:
             per_connection[str(cid)] = {"violations": ["Connection not found."]}
             continue
-        problems = _connection_problems(connection)
+        problems = connection_problems(connection)
         entry: Dict[str, Any] = {
             "provider": connection.provider,
             "label": connection.display_name or connection.provider,
@@ -187,7 +187,7 @@ def _body_with_disclosure(body: str, items, connection) -> str:
     return f"{text}\n\n{line}" if text else line
 
 
-def _connection_problems(connection) -> List[str]:
+def connection_problems(connection) -> List[str]:
     if not connection.enabled:
         return ["This connection is disabled."]
     if connection.status not in ("connected", "unconfigured"):
@@ -247,7 +247,7 @@ def queue_publish(
             raise ValueError(f"Connection {cid} not found.")
         needs_approval = gates.requires_approval(requested_by, connection)
 
-        problems = _connection_problems(connection)
+        problems = connection_problems(connection)
         spec = registry.spec_for(connection.provider)
         caps = spec.capabilities
         target_visibility = visibility or caps.default_visibility

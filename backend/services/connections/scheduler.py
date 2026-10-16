@@ -161,6 +161,12 @@ def release_due(now: datetime) -> Dict[str, Any]:
             publish_service.hold(record, NOT_APPROVED_MESSAGE)
             out["held"].append(record.id)
             continue
+        # Disabled, or failing its last Test, since it was scheduled.
+        problems = publish_service.connection_problems(connection)
+        if problems:
+            publish_service.hold(record, problems[0])
+            out["held"].append(record.id)
+            continue
         if posting_blocked:
             publish_service.hold(record, STOPPED_DUE_MESSAGE)
             out["held"].append(record.id)
@@ -174,13 +180,7 @@ def release_due(now: datetime) -> Dict[str, Any]:
             out["waiting"].append(record.id)
             continue
 
-        try:
-            spec = registry.spec_for(connection.provider)
-        except KeyError:
-            publish_service.hold(record, f"Provider '{connection.provider}' is not available.")
-            out["held"].append(record.id)
-            continue
-
+        spec = registry.spec_for(connection.provider)
         allowed, _reason = gates.check_can_publish(connection.provider)
         verdict = rate_limits.check(connection.id, spec.capabilities.rate_limits, now=now)
         if not allowed or not verdict.allowed:

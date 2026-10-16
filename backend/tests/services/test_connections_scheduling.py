@@ -251,6 +251,22 @@ def test_due_while_posting_is_stopped_goes_back_to_a_person(db_app, platform):
     assert platform.dispatched == []
 
 
+def test_a_post_for_a_since_disabled_account_waits_for_a_person(db_app, platform):
+    from backend.models import db
+
+    telegram = _connection("telegram", {"chat_id": "@c"})
+    record = _queue(telegram, scheduled_at=datetime.now() + LATER)
+    publish_service.approve(record)
+    telegram.enabled = False
+    db.session.commit()
+    _make_due(record)
+
+    out = scheduler.tick()
+
+    assert record.id in out["held"] and record.status == "awaiting_approval"
+    assert platform.dispatched == []
+
+
 def test_a_very_late_post_waits_for_a_person(db_app, platform):
     record = _queue(_connection("telegram", {"chat_id": "@c"}), scheduled_at=datetime.now() + LATER)
     publish_service.approve(record)
