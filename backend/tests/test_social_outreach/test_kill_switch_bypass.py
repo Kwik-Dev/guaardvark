@@ -50,7 +50,7 @@ def test_approved_draft_dispatcher_skips_when_kill_switch_off(app, db_session, m
 
     db_session.refresh(row)
     assert bootstrap_called["n"] == 0
-    assert result == {"processed": 0, "reason": "kill_switch_off"}
+    assert result == {"unsupported": 0, "reason": "kill_switch_off"}
     assert row.status == "approved"
 
 

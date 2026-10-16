@@ -34,6 +34,7 @@ import {
   fetchPublishSettings,
   fetchStoreHealth,
   testConnection,
+  updateConnection,
   updatePublishSettings,
 } from "../api/connectionsService";
 
@@ -138,6 +139,24 @@ const ConnectionsPage = () => {
     }
   }, []);
 
+  // Only a provider whose spec says posts_to_owned_channel (a Discord webhook)
+  // offers this; the backend refuses it for any other.
+  const handlePostWithoutApproval = useCallback(async (connection, value) => {
+    try {
+      const saved = await updateConnection(connection.id, { post_without_approval: value });
+      setConnections((prev) => prev.map((c) => (c.id === connection.id ? saved : c)));
+      setFeedback({
+        open: true,
+        message: value
+          ? "Publishes you start here to this channel now go out without approval."
+          : "Publishes to this channel wait for approval again.",
+        severity: "success",
+      });
+    } catch (e) {
+      setFeedback({ open: true, message: e.message, severity: "error" });
+    }
+  }, []);
+
   return (
     <Container maxWidth="lg" sx={{ py: 3 }}>
       <Typography variant="h4" gutterBottom>
@@ -178,17 +197,11 @@ const ConnectionsPage = () => {
                 />
                 <Typography variant="body2">Publishing enabled</Typography>
               </Stack>
-              <Stack direction="row" alignItems="center" spacing={1}>
-                <Switch
-                  checked={settings.publish_supervised}
-                  onChange={(e) =>
-                    handleSettingChange("publish_supervised", e.target.checked)
-                  }
-                />
-                <Tooltip title="Requests from chat or MCP always require approval regardless of this setting.">
-                  <Typography variant="body2">Require approval</Typography>
-                </Tooltip>
-              </Stack>
+              <Typography variant="body2" color="text.secondary">
+                Every publish waits for your approval on the Approvals page. A Discord
+                webhook, which posts into a channel you manage, can be set to post without
+                it on its own card.
+              </Typography>
             </Stack>
           </CardContent>
         </Card>
@@ -270,6 +283,18 @@ const ConnectionsPage = () => {
                       <Alert severity="error" sx={{ mt: 1 }}>
                         {conn.error_message}
                       </Alert>
+                    )}
+                    {spec?.posts_to_owned_channel && (
+                      <Stack direction="row" alignItems="center" spacing={1} sx={{ mt: 1 }}>
+                        <Switch
+                          size="small"
+                          checked={conn.config?.post_without_approval === true}
+                          onChange={(e) => handlePostWithoutApproval(conn, e.target.checked)}
+                        />
+                        <Tooltip title="For a channel you manage. Publishes you start here go out without waiting on the Approvals page; requests from chat, MCP or a schedule still wait.">
+                          <Typography variant="body2">Post without approval</Typography>
+                        </Tooltip>
+                      </Stack>
                     )}
                   </CardContent>
                   <CardActions>

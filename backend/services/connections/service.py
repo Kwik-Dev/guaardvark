@@ -155,9 +155,33 @@ def update_connection(connection, payload: MutableMapping[str, Any]):
             connection.status = STATUS_UNCONFIGURED
 
     _apply_config(connection, payload, spec)
+    _apply_post_without_approval(connection, payload, spec)
     _apply_secrets(connection, payload, spec)
     db.session.commit()
     return connection
+
+
+def _apply_post_without_approval(connection, payload: MutableMapping[str, Any], spec) -> None:
+    """Store a person's choice to let this connection post without a per-post
+    approval. Only an owned-channel provider (``posts_to_owned_channel``)
+    accepts it; for any other the request is refused, never stored."""
+    from backend.services.connections import gates
+
+    if gates.POST_WITHOUT_APPROVAL_KEY not in payload:
+        return
+    value = payload.get(gates.POST_WITHOUT_APPROVAL_KEY)
+    if not isinstance(value, bool):
+        raise ValueError(f"{gates.POST_WITHOUT_APPROVAL_KEY} must be true or false.")
+    if value and not spec.posts_to_owned_channel:
+        owned = [s.label for s in registry.list_specs() if s.posts_to_owned_channel]
+        raise ValueError(
+            f"{spec.label} publishes always wait for approval. Only a connection that "
+            f"posts into a channel you manage ({', '.join(owned) or 'none installed'}) "
+            "can post without one."
+        )
+    merged = _json_loads(connection.config, {})
+    merged[gates.POST_WITHOUT_APPROVAL_KEY] = value
+    connection.config = json.dumps(merged)
 
 
 def _apply_config(connection, payload: MutableMapping[str, Any], spec) -> None:

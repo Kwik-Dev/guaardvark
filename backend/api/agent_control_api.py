@@ -1271,6 +1271,11 @@ def capture_raw():
         # Clear error cache on success
         _capture_error_cache["error"] = None
 
+        # Only the Agent Screen viewer asks for these frames, so each one says
+        # the viewer is open; a watched outreach post reads that.
+        from backend.utils.agent_screen_presence import note_frame
+        note_frame()
+
         from flask import send_file
         return send_file(buf, mimetype="image/jpeg")
 

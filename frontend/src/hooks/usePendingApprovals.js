@@ -2,12 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchPublishes } from "../api/connectionsService";
 import { inboundGuardService } from "../api/inboundGuardService";
 import { isActionable } from "../api/heldChanges";
-import { fetchQueue as fetchOutreachQueue } from "../api/outreachService";
+import { fetchQueue as fetchOutreachQueue, fetchWatchedPost } from "../api/outreachService";
 
 // A pending publish has no Task row until it is approved, so it is invisible to
 // the jobs API. The queue and the sidebar badge both read the publish records
 // directly, and share this hook so they cannot disagree about the count. Code
-// the inbound guard holds and outreach drafts in supervised mode wait on the
+// the inbound guard holds, outreach drafts waiting for approval and approved
+// Reddit/YouTube/Facebook drafts waiting for a person's "Post now" wait on the
 // same person, so they count here too.
 const POLL_MS = 30000;
 const LIMIT = 200;
@@ -17,13 +18,15 @@ const LIMIT = 200;
  *
  * @param {object}  options
  * @param {boolean} options.notify  raise a desktop notification when a count rises
- * @returns {{count: number, pending: object[], held: object[], loading: boolean, heldLoading: boolean,
+ * @returns {{count: number, pending: object[], held: object[], outreach: object[],
+ *            outreachWaiting: object[], loading: boolean, heldLoading: boolean,
  *            error: string|null, refresh: function}}
  */
 export const usePendingApprovals = ({ notify = false } = {}) => {
   const [pending, setPending] = useState([]);
   const [held, setHeld] = useState([]);
   const [outreach, setOutreach] = useState([]);
+  const [outreachWaiting, setOutreachWaiting] = useState([]);
   const [outreachLoading, setOutreachLoading] = useState(true);
   const [loading, setLoading] = useState(true);
   const [heldLoading, setHeldLoading] = useState(true);
@@ -48,8 +51,12 @@ export const usePendingApprovals = ({ notify = false } = {}) => {
 
   const refreshOutreach = useCallback(async () => {
     try {
-      const rows = await fetchOutreachQueue();
+      const [rows, watched] = await Promise.all([
+        fetchOutreachQueue(),
+        fetchWatchedPost().catch(() => null),
+      ]);
       setOutreach(Array.isArray(rows) ? rows : []);
+      setOutreachWaiting(Array.isArray(watched?.waiting) ? watched.waiting : []);
       return rows;
     } catch {
       // Outreach routes answer only this machine without an API key.
@@ -110,10 +117,11 @@ export const usePendingApprovals = ({ notify = false } = {}) => {
   }, [refreshPublishes, refreshHeld, refreshOutreach, notify]);
 
   return {
-    count: pending.length + held.length + outreach.length,
+    count: pending.length + held.length + outreach.length + outreachWaiting.length,
     pending,
     held,
     outreach,
+    outreachWaiting,
     loading,
     heldLoading,
     outreachLoading,

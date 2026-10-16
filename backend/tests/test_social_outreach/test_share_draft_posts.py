@@ -1,6 +1,6 @@
 """A share draft made with outreach_draft_post can actually be posted.
 
-The posting tick reads the subreddit from the row's target_url, so the tool
+The watched poster reads the subreddit from the row's target_url, so the tool
 has to queue a share row that points at the subreddit named in share_target.
 The persona is a stand-in (no LLM), the Reddit submit poster is a recorder
 (no browser), and the tool's HTTP call is answered by the test client.
@@ -9,6 +9,7 @@ The persona is a stand-in (no LLM), the Reddit submit poster is a recorder
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -98,7 +99,7 @@ def test_share_ignores_a_stray_target_url(draft_post):
     ({"platform": "reddit", "share_target": "u/someone"}, "not a subreddit"),
     ({"platform": "reddit", "share_target": "https://example.com/r/x"}, "not a subreddit"),
     ({"platform": "reddit"}, "requires share_target"),
-    ({"platform": "twitter", "share_target": "my timeline"}, "can only be posted on reddit"),
+    ({"platform": "twitter", "share_target": "my timeline"}, "does not post to X"),
     ({"platform": "discord", "share_target": "#general"}, "can only be posted on reddit"),
 ])
 def test_share_that_could_never_post_is_refused_before_drafting(draft_post, arguments, needle):
@@ -120,7 +121,9 @@ def test_share_draft_without_a_title_is_not_queued(draft_post):
     assert _rows() == []
 
 
-def test_an_approved_share_draft_is_submitted_to_its_subreddit(outreach_profile, draft_post, app, monkeypatch):
+def test_an_approved_share_draft_is_submitted_to_its_subreddit(
+    outreach_profile, draft_post, app, monkeypatch, fake_redis, watching,
+):
     submitted = []
 
     def submit(subreddit, title, link_url, *, before_submit=None):
@@ -145,10 +148,10 @@ def test_an_approved_share_draft_is_submitted_to_its_subreddit(outreach_profile,
     row_id = draft_post(platform="reddit", mode="share", share_target="r/SideProject").output["audit_id"]
     assert draft_post.client.post(f"/api/social-outreach/approve/{row_id}").status_code == 200
 
-    result = tasks.tick_process_approved_drafts.run()
+    result = tasks.post_watched_draft.run(row_id, time.time())
 
     assert submitted == [("SideProject", "Local-first AI studio", "https://example.com")]
-    assert result["processed"] == 1
+    assert result["posted"] is True
     assert _rows()[0].status == "posted"
 
 

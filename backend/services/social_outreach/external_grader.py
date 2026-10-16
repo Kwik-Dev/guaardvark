@@ -9,9 +9,9 @@ with a fixed rubric, catches drafts that the writer overrated.
 This is intentionally NOT a generation model — it's a binary fitness check.
 The grader is asked only three yes/no questions (engages, on_topic,
 appropriate_tone); concise is counted in code. A draft passes only when all
-three answers are yes. Grade is the four items over 4, for display. What a
-failed or unchecked draft may do lives in gates.py (independent_check_label,
-independent_ok).
+three answers are yes. Grade is the four items over 4, for display. No
+answer here posts a draft: every draft waits for a person, who sees what the
+check concluded (gates.py).
 """
 
 from __future__ import annotations
@@ -112,8 +112,7 @@ def grade_draft_externally(draft_text: str, thread_context: str) -> dict:
     """Score a draft against the rubric using a different-family LLM.
 
     For replies to a thread only. A self-share has no thread to engage with,
-    so callers do not grade it; gates.independent_ok holds every share for a
-    person instead.
+    so callers do not grade it.
 
     Returns:
         {
@@ -134,8 +133,7 @@ def grade_draft_externally(draft_text: str, thread_context: str) -> dict:
     or not answered, leaves the draft unchecked, reason "grader_reply_unparsed".
 
     An unchecked result is not a rejection, but it is no independent signal
-    either: gates.independent_ok holds an unchecked draft for a person's
-    approval instead of letting it post on its self-grade.
+    either; the person reviewing the draft is told it went unchecked.
     """
     model = _resolve_grader_model()
     if model is None:
@@ -219,8 +217,8 @@ def score_thread_relevance(
     Same skip-on-infra-failure semantics as grade_draft_externally — if the
     model isn't loaded or the call fails, we return skipped=True. That is not
     a reject: recon queues the candidate on its keyword match and the
-    scheduled Reddit loop drafts it, both marked unchecked, which holds an
-    unsupervised draft for approval (gates.independent_ok).
+    scheduled Reddit loop drafts it, both marked unchecked for the person who
+    reviews the draft.
     """
     model = _resolve_grader_model()
     if model is None:

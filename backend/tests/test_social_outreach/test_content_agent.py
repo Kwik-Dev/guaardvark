@@ -2,8 +2,8 @@
 
 Tests cover:
   • candidate → drafted (good draft, grade ≥ MIN_GRADE, external grader passes/skipped)
-  • unsupervised: approved only when the independent check ran and passed;
-    an unchecked draft is held as drafted with a hold_reason
+  • never approved: every draft waits as drafted for a person, whatever the
+    checks say; what the independent check found is recorded
   • candidate → rejected (low self-grade, low external grade, empty draft, json parse error, draft call raises)
   • candidate → skipped (already non-candidate status, e.g. drafted/posted/rejected)
   • candidate not found (id doesn't exist in DB)
@@ -22,8 +22,8 @@ import pytest
 
 
 # Default external grader mock — unchecked, same as production when the grader
-# model isn't installed. The draft is not rejected; whether it may post on its
-# own is the would_post gate's call. Individual tests override to test the gate.
+# model isn't installed. The draft is not rejected; the person reviewing it is
+# told it went unchecked. Individual tests override to test the check.
 EXT_SKIPPED = {"grade": 0.0, "checked": False, "skipped": True, "model": None, "reason": "test_default"}
 EXT_PASS = {"grade": 1.0, "passed": True, "checked": True, "skipped": False, "model": "test", "reason": "looks good", "engages": 1, "on_topic": 1, "appropriate_tone": 1, "concise": 1}
 EXT_FAIL = {"grade": 0.5, "passed": False, "checked": True, "skipped": False, "model": "test", "reason": "generic boilerplate", "engages": 0, "on_topic": 1, "appropriate_tone": 0, "concise": 1}
@@ -268,7 +268,7 @@ def _two_candidates():
 
 
 def _batch_with(grader_effect=None, trail_effect=None):
-    """Run draft_batch with drafting stubbed, outreach off and supervised on."""
+    """Run draft_batch with drafting stubbed and outreach off."""
     with patch(
         "backend.services.social_outreach.content_agent.persona.draft_outreach_text",
         return_value={"draft": "ok", "grade": 0.9},
@@ -283,8 +283,6 @@ def _batch_with(grader_effect=None, trail_effect=None):
         side_effect=trail_effect,
     ), patch(
         "backend.services.social_outreach.kill_switch.is_enabled", return_value=False,
-    ), patch(
-        "backend.services.social_outreach.kill_switch.is_supervised", return_value=True,
     ), patch(
         "backend.services.social_outreach.kill_switch.cadence_allows_post",
         return_value=(True, None),
@@ -366,8 +364,8 @@ def test_external_grader_low_score_rejects_even_if_self_grade_high(app):
 
 def test_external_grader_skipped_falls_through_to_self_grade(app):
     """When the external grader returns skipped=True (model unavailable, call
-    failed, etc.) the draft is not rejected; it is drafted on its self-grade.
-    Whether it may then post without a person is tested further down."""
+    failed, etc.) the draft is not rejected; it is drafted on its self-grade
+    and waits for a person like every draft."""
     with app.app_context():
         row = _make_candidate()
         with patch(
@@ -399,72 +397,40 @@ def test_unsupported_action_is_rejected(app):
         assert "abort" in updated.abort_reason
 
 
-def test_draft_candidate_unsupervised_promotes_to_approved(app):
-    """Parity with /draft-comment would_post: enabled + not supervised +
-    grade OK + cadence OK + independent check passed → approved (not drafted)."""
+def test_a_passed_draft_waits_for_a_person_even_with_outreach_on(app):
+    """Outreach on, cadence open, both checks passed: still drafted. Nothing
+    approves a draft but a person."""
     with app.app_context():
         row = _make_candidate(platform="youtube")
-        with patch(
-            "backend.services.social_outreach.content_agent.persona.draft_outreach_text",
-            return_value={
-                "draft": "Solid Ollama walkthrough — https://github.com/guaardvark/guaardvark",
-                "grade": 0.9,
-            },
-        ), patch(
-            "backend.services.social_outreach.content_agent.external_grader.grade_draft_externally",
-            return_value=EXT_PASS,
-        ), patch(
-            "backend.services.social_outreach.content_agent.persona.apply_utm_tags",
-            side_effect=lambda text, **k: text,
-        ), patch(
-            "backend.services.social_outreach.kill_switch.is_enabled",
-            return_value=True,
-        ), patch(
-            "backend.services.social_outreach.kill_switch.is_supervised",
-            return_value=False,
-        ), patch(
-            "backend.services.social_outreach.kill_switch.cadence_allows_post",
-            return_value=(True, None),
-        ):
-            outcome = ContentAgent().draft_candidate(row.id)
-        assert outcome["status"] == "approved"
-        assert outcome.get("would_post") is True
-        db.session.expire_all()
-        updated = SocialOutreachLog.query.get(row.id)
-        assert updated.status == "approved"
+        outcome, extra, _ = _draft_with_gates(row.id, EXT_PASS)
 
-
-def test_draft_candidate_supervised_stays_drafted(app):
-    """Even with kill on + cadence OK, supervised keeps status=drafted."""
-    with app.app_context():
-        row = _make_candidate(platform="youtube")
-        with patch(
-            "backend.services.social_outreach.content_agent.persona.draft_outreach_text",
-            return_value={"draft": "Nice local AI tip.", "grade": 0.88},
-        ), patch(
-            "backend.services.social_outreach.content_agent.persona.apply_utm_tags",
-            side_effect=lambda text, **k: text,
-        ), patch(
-            "backend.services.social_outreach.kill_switch.is_enabled",
-            return_value=True,
-        ), patch(
-            "backend.services.social_outreach.kill_switch.is_supervised",
-            return_value=True,
-        ), patch(
-            "backend.services.social_outreach.kill_switch.cadence_allows_post",
-            return_value=(True, None),
-        ):
-            outcome = ContentAgent().draft_candidate(row.id)
         assert outcome["status"] == "drafted"
-        assert outcome.get("would_post") is False
+        assert "would_post" not in outcome
+        assert outcome["independent_reason"] == "passed"
+        assert outcome["hold_reason"] is None
+        assert extra["external_checked"] is True
+        assert extra["promoted_status"] == "drafted"
         db.session.expire_all()
-        updated = SocialOutreachLog.query.get(row.id)
-        assert updated.status == "drafted"
+        assert SocialOutreachLog.query.get(row.id).status == "drafted"
 
 
-# ---- unsupervised posting needs an independent check that actually ran ---------------
+@pytest.mark.parametrize("key", ["social_outreach_supervised", "outreach_require_independent_check"])
+def test_settings_from_an_older_install_do_not_approve_a_draft(app, key):
+    from backend.models import Setting
+    with app.app_context():
+        db.session.add(Setting(key=key, value="false"))
+        db.session.commit()
+        row = _make_candidate(platform="youtube")
+        outcome, _, _ = _draft_with_gates(row.id, EXT_SKIPPED)
 
-def _draft_with_gates(row_id, ext, *, supervised=False, draft="Nice local AI tip.", grade=0.88):
+        assert outcome["status"] == "drafted"
+        db.session.expire_all()
+        assert SocialOutreachLog.query.get(row.id).status == "drafted"
+
+
+# ---- what the independent check found is recorded for the person ----------------------
+
+def _draft_with_gates(row_id, ext, *, draft="Nice local AI tip.", grade=0.88):
     """Draft one candidate with outreach on and cadence open. Returns the outcome,
     the audit-trail extra, and the grader mock."""
     with patch(
@@ -480,9 +446,6 @@ def _draft_with_gates(row_id, ext, *, supervised=False, draft="Nice local AI tip
         "backend.services.social_outreach.kill_switch.is_enabled",
         return_value=True,
     ), patch(
-        "backend.services.social_outreach.kill_switch.is_supervised",
-        return_value=supervised,
-    ), patch(
         "backend.services.social_outreach.kill_switch.cadence_allows_post",
         return_value=(True, None),
     ), patch(
@@ -493,74 +456,33 @@ def _draft_with_gates(row_id, ext, *, supervised=False, draft="Nice local AI tip
     return outcome, extra, grader
 
 
-def test_unsupervised_unchecked_draft_is_held_for_approval(app):
-    """The grader did not run (model not installed): the draft must not post on
-    its self-grade. It waits as drafted, and the trail says why."""
+def test_an_unchecked_draft_waits_and_says_so(app):
+    """The grader did not run (model not installed): the draft waits as
+    drafted, and the trail says it went unchecked."""
     with app.app_context():
         row = _make_candidate(platform="youtube")
         outcome, extra, _ = _draft_with_gates(row.id, EXT_SKIPPED)
 
         assert outcome["status"] == "drafted"
-        assert outcome["would_post"] is False
-        assert outcome["hold_reason"] == "no_independent_check"
-        assert extra["hold_reason"] == "no_independent_check"
+        assert outcome["independent_reason"] == "unchecked"
+        assert extra["independent_reason"] == "unchecked"
         assert extra["external_checked"] is False
         db.session.expire_all()
         assert SocialOutreachLog.query.get(row.id).status == "drafted"
 
 
-def test_unsupervised_unchecked_draft_posts_when_the_check_is_not_required(app):
-    """outreach_require_independent_check switched off restores the old
-    behaviour: an unchecked draft posts on its self-grade."""
-    from backend.models import Setting
-    with app.app_context():
-        db.session.add(Setting(key="outreach_require_independent_check", value="false"))
-        db.session.commit()
-        row = _make_candidate(platform="youtube")
-        outcome, extra, _ = _draft_with_gates(row.id, EXT_SKIPPED)
-
-        assert outcome["status"] == "approved"
-        assert outcome["would_post"] is True
-        assert outcome["hold_reason"] is None
-        assert extra["hold_reason"] is None
-
-
-def test_unsupervised_checked_and_passed_draft_is_approved(app):
-    with app.app_context():
-        row = _make_candidate(platform="youtube")
-        outcome, extra, _ = _draft_with_gates(row.id, EXT_PASS)
-
-        assert outcome["status"] == "approved"
-        assert outcome["hold_reason"] is None
-        assert extra["external_checked"] is True
-
-
-def test_supervised_unchecked_draft_waits_without_a_hold_reason(app):
-    """Supervised mode is unchanged: every draft waits for a person anyway, so
-    a missing check is not what holds it."""
-    with app.app_context():
-        row = _make_candidate(platform="youtube")
-        outcome, extra, _ = _draft_with_gates(row.id, EXT_SKIPPED, supervised=True)
-
-        assert outcome["status"] == "drafted"
-        assert outcome["would_post"] is False
-        assert outcome["hold_reason"] is None
-        assert extra["hold_reason"] is None
-
-
 def test_grader_result_without_checked_counts_as_unchecked(app):
-    """Only an explicit checked=True is a check that ran; anything else holds."""
+    """Only an explicit checked=True is a check that ran."""
     with app.app_context():
         row = _make_candidate(platform="youtube")
         outcome, _, _ = _draft_with_gates(row.id, {"grade": 0.9, "skipped": False})
 
         assert outcome["status"] == "drafted"
-        assert outcome["hold_reason"] == "no_independent_check"
+        assert outcome["independent_reason"] == "unchecked"
 
 
-def test_unsupervised_reply_is_held_because_replies_are_not_graded(app):
-    """Replies skip the comment rubric, so they have no independent check and
-    wait for approval when unsupervised."""
+def test_a_reply_is_not_graded_and_waits_for_a_person(app):
+    """Replies skip the comment rubric, so they have no independent check."""
     with app.app_context():
         row = _make_candidate(
             payload={
@@ -577,26 +499,23 @@ def test_unsupervised_reply_is_held_because_replies_are_not_graded(app):
 
         grader.assert_not_called()
         assert outcome["status"] == "drafted"
-        assert outcome["hold_reason"] == "no_independent_check"
+        assert outcome["independent_reason"] == "unchecked"
         assert extra["external_reason"] == "skip_for_reply_action"
 
 
-@pytest.mark.parametrize("supervised, hold", [(False, "share_needs_person"), (True, None)])
-def test_a_share_candidate_is_not_graded_and_waits_for_a_person(app, supervised, hold):
-    """A self-share has no thread for the rubric, so the grader is not asked and
-    the share waits as drafted, supervised or not."""
+def test_a_share_candidate_is_not_graded_and_waits_for_a_person(app):
+    """A self-share has no thread for the rubric, so the grader is not asked."""
     with app.app_context():
         row = _make_candidate(
             payload={"stage": "recon", "target": "r/SideProject", "link_url": "https://example.com/x"},
             target_url="https://www.reddit.com/r/SideProject",
             action="share",
         )
-        outcome, extra, grader = _draft_with_gates(row.id, EXT_PASS, supervised=supervised)
+        outcome, extra, grader = _draft_with_gates(row.id, EXT_PASS)
 
         grader.assert_not_called()
         assert outcome["status"] == "drafted"
-        assert outcome["would_post"] is False
-        assert outcome["hold_reason"] == hold
+        assert outcome["independent_reason"] == "share_not_graded"
         assert extra["external_reason"] == "share_not_graded"
         db.session.expire_all()
         assert SocialOutreachLog.query.get(row.id).status == "drafted"
@@ -619,34 +538,22 @@ def _recon_candidate(relevance_skipped):
     )
 
 
-def test_an_unjudged_thread_holds_a_passed_draft_when_unsupervised(app):
+def test_an_unjudged_thread_is_noted_on_a_passed_draft(app):
     with app.app_context():
         row = _recon_candidate(relevance_skipped=True)
         outcome, extra, grader = _draft_with_gates(row.id, EXT_PASS)
 
         grader.assert_called_once()
         assert outcome["status"] == "drafted"
-        assert outcome["would_post"] is False
-        assert outcome["hold_reason"] == "relevance_unchecked"
+        assert outcome["independent_reason"] == "relevance_unchecked"
         assert extra["relevance_unchecked"] is True
-        db.session.expire_all()
-        assert SocialOutreachLog.query.get(row.id).status == "drafted"
 
 
-def test_an_unjudged_thread_waits_for_a_person_when_supervised(app):
-    with app.app_context():
-        row = _recon_candidate(relevance_skipped=True)
-        outcome, _, _ = _draft_with_gates(row.id, EXT_PASS, supervised=True)
-
-        assert outcome["status"] == "drafted"
-        assert outcome["hold_reason"] is None
-
-
-def test_a_judged_thread_with_a_passed_draft_is_approved(app):
+def test_a_judged_thread_with_a_passed_draft_still_waits(app):
     with app.app_context():
         row = _recon_candidate(relevance_skipped=False)
         outcome, extra, _ = _draft_with_gates(row.id, EXT_PASS)
 
-        assert outcome["status"] == "approved"
-        assert outcome["hold_reason"] is None
+        assert outcome["status"] == "drafted"
+        assert outcome["independent_reason"] == "passed"
         assert extra["relevance_unchecked"] is False

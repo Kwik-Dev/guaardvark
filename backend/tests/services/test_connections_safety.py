@@ -1,6 +1,7 @@
 """Publish gates, secret isolation and job-registry wiring."""
 
 import importlib
+import json
 import sys
 import types
 
@@ -58,28 +59,50 @@ def test_publishing_can_be_disabled(settings):
     assert gates.publish_enabled() is False
 
 
-def test_supervision_is_on_by_default_for_the_ui(settings):
-    assert gates.publish_supervised() is True
+def _connection(provider, config=None):
+    return types.SimpleNamespace(
+        provider=provider, config=json.dumps(config) if isinstance(config, dict) else config,
+    )
+
+
+def test_a_ui_publish_waits_for_approval(settings):
     assert gates.requires_approval("ui") is True
+    assert gates.requires_approval("ui", _connection("bluesky")) is True
 
 
-def test_a_saved_supervision_off_is_honoured(settings):
-    settings[gates.PUBLISH_SUPERVISED_KEY] = "false"
-    assert gates.publish_supervised() is False
-    assert gates.requires_approval("ui") is False
+def test_an_old_global_switch_cannot_turn_approval_off(settings):
+    settings["connections_publish_supervised"] = "false"
+    assert gates.requires_approval("ui", _connection("bluesky")) is True
+    assert gates.requires_approval("ui", _connection("discord_webhook")) is True
+    assert not hasattr(gates, "publish_supervised")
+    assert not hasattr(gates, "set_publish_supervised")
 
 
-@pytest.mark.parametrize("source", ["chat", "mcp", "schedule"])
+def test_a_discord_webhook_set_to_skip_approval_posts_a_ui_publish(settings):
+    hook = _connection("discord_webhook", {"post_without_approval": True})
+    assert gates.posts_without_approval(hook) is True
+    assert gates.requires_approval("ui", hook) is False
+
+
+@pytest.mark.parametrize("config", [
+    None, "", "not json", "[]", {}, {"post_without_approval": False},
+    {"post_without_approval": "true"}, {"post_without_approval": 1},
+])
+def test_anything_short_of_true_on_a_webhook_waits(settings, config):
+    assert gates.requires_approval("ui", _connection("discord_webhook", config)) is True
+
+
+@pytest.mark.parametrize("provider", ["bluesky", "mastodon", "telegram", "youtube", "nonexistent"])
+def test_only_an_owned_channel_provider_can_skip_approval(settings, provider):
+    """The setting written by hand on another provider is not honoured."""
+    assert gates.requires_approval("ui", _connection(provider, {"post_without_approval": True})) is True
+
+
+@pytest.mark.parametrize("source", ["chat", "mcp", "schedule", "unknown"])
 def test_agent_initiated_publishes_always_require_approval(settings, source):
-    """An agent must never publish without a human click."""
-    settings[gates.PUBLISH_SUPERVISED_KEY] = "false"
-    assert gates.publish_supervised() is False
-    assert gates.requires_approval(source) is True
-
-
-def test_supervised_mode_gates_the_ui_too(settings):
-    settings[gates.PUBLISH_SUPERVISED_KEY] = "true"
-    assert gates.requires_approval("ui") is True
+    """An agent must never publish without a human click, whatever the connection says."""
+    hook = _connection("discord_webhook", {"post_without_approval": True})
+    assert gates.requires_approval(source, hook) is True
 
 
 # --- source attribution ------------------------------------------------------
@@ -101,9 +124,8 @@ def test_source_matching_ignores_case_and_padding():
 
 def test_an_unattributed_publish_is_supervised(settings):
     """A caller that omits its source must not land on the unsupervised branch."""
-    settings[gates.PUBLISH_SUPERVISED_KEY] = "false"
-    assert gates.publish_supervised() is False
-    assert gates.requires_approval(gates.normalize_source(None)) is True
+    hook = _connection("discord_webhook", {"post_without_approval": True})
+    assert gates.requires_approval(gates.normalize_source(None), hook) is True
 
 
 def test_disabled_publishing_blocks_the_gate(settings):
@@ -224,37 +246,97 @@ def test_fresh_database_publishes_with_outreach_off(db_app, monkeypatch):
 
 def test_fresh_database_waits_for_approval(db_app):
     """No settings row: a publish from the UI waits on the Approvals page."""
-    from backend.models import Setting, db
-
-    assert db.session.get(Setting, gates.PUBLISH_SUPERVISED_KEY) is None
-    assert gates.publish_supervised() is True
     assert gates.requires_approval("ui") is True
 
 
-def test_a_saved_supervision_off_row_is_honoured(db_app):
+def test_a_stored_global_switch_off_is_not_read(db_app):
+    """An older install may have saved connections_publish_supervised=false."""
     from backend.models import Setting, db
 
-    gates.set_publish_supervised(False)
+    db.session.add(Setting(key="connections_publish_supervised", value="false"))
+    db.session.commit()
 
-    assert db.session.get(Setting, gates.PUBLISH_SUPERVISED_KEY).value == "false"
-    assert gates.publish_supervised() is False
-    assert gates.requires_approval("ui") is False
+    assert gates.requires_approval("ui") is True
 
 
-def test_settings_route_reports_and_saves_supervision(db_app):
-    """The Connections page reads and writes the switch through this route."""
+def test_settings_route_refuses_to_switch_approval_off(db_app):
     from backend.api.connections_api import connections_bp
 
     db_app.register_blueprint(connections_bp)
     client = db_app.test_client()
 
-    assert client.get("/api/connections/settings").get_json()["publish_supervised"] is True
-    saved = client.post("/api/connections/settings", json={"publish_supervised": False})
-    assert saved.get_json()["publish_supervised"] is False
-    assert client.get("/api/connections/settings").get_json()["publish_supervised"] is False
-    # Changing the other switch leaves the saved choice alone.
-    client.post("/api/connections/settings", json={"publish_enabled": True})
-    assert client.get("/api/connections/settings").get_json()["publish_supervised"] is False
+    assert "publish_supervised" not in client.get("/api/connections/settings").get_json()
+    refused = client.post("/api/connections/settings", json={"publish_supervised": False})
+    assert refused.status_code == 400
+    assert "Discord webhook" in refused.get_json()["error"]
+    # The other switch still saves.
+    saved = client.post("/api/connections/settings", json={"publish_enabled": False})
+    assert saved.status_code == 200 and saved.get_json()["publish_enabled"] is False
+
+
+def _social_connection(provider, **fields):
+    from backend.models import Connection, db
+
+    connection = Connection(
+        family="social", provider=provider, account_slug="default",
+        auth_kind="webhook_url", credential_ref=f"social/{provider}/default",
+        status="connected", **fields,
+    )
+    db.session.add(connection)
+    db.session.commit()
+    return connection
+
+
+def test_a_webhook_can_be_switched_to_post_without_approval(db_app, monkeypatch):
+    from backend.services.connections import service
+
+    monkeypatch.setattr(service.credential_store, "apply_secret_updates",
+                        lambda *a, **k: {"updated": [], "skipped_empty": False})
+    hook = _social_connection("discord_webhook", config='{"channel_id": "1"}')
+
+    service.update_connection(hook, {"post_without_approval": True})
+
+    assert json.loads(hook.config) == {"channel_id": "1", "post_without_approval": True}
+    assert gates.requires_approval("ui", hook) is False
+    service.update_connection(hook, {"post_without_approval": False})
+    assert gates.requires_approval("ui", hook) is True
+
+
+@pytest.mark.parametrize("value", ["true", 1, None])
+def test_the_webhook_switch_takes_only_a_boolean(db_app, monkeypatch, value):
+    from backend.services.connections import service
+
+    monkeypatch.setattr(service.credential_store, "apply_secret_updates",
+                        lambda *a, **k: {"updated": [], "skipped_empty": False})
+    hook = _social_connection("discord_webhook")
+
+    with pytest.raises(ValueError, match="true or false"):
+        service.update_connection(hook, {"post_without_approval": value})
+
+
+def test_another_provider_cannot_be_switched_to_post_without_approval(db_app, monkeypatch):
+    from backend.services.connections import service
+
+    monkeypatch.setattr(service.credential_store, "apply_secret_updates",
+                        lambda *a, **k: {"updated": [], "skipped_empty": False})
+    other = _social_connection("bluesky")
+
+    with pytest.raises(ValueError, match="always wait for approval"):
+        service.update_connection(other, {"post_without_approval": True})
+    assert "post_without_approval" not in (other.config or "")
+
+
+def test_a_config_field_cannot_smuggle_the_switch_in(db_app, monkeypatch):
+    """The edit dialog sends the whole config; only the dedicated key sets it."""
+    from backend.services.connections import service
+
+    monkeypatch.setattr(service.credential_store, "apply_secret_updates",
+                        lambda *a, **k: {"updated": [], "skipped_empty": False})
+    hook = _social_connection("discord_webhook")
+
+    service.update_connection(hook, {"config": {"post_without_approval": True}})
+
+    assert gates.requires_approval("ui", hook) is True
 
 
 def _publish_row(status, **fields):

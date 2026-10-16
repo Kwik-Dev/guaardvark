@@ -27,7 +27,6 @@ def test_status_question_never_queues(app):
 
     with app.app_context(), \
          patch("backend.services.social_outreach.intent.kill_switch.is_enabled", return_value=True), \
-         patch("backend.services.social_outreach.intent.kill_switch.is_supervised", return_value=True), \
          patch("backend.services.social_outreach.intent.kill_switch.cadence_status", return_value={}), \
          patch("backend.services.social_outreach.intent.queue_outreach_run") as mock_q:
 
@@ -82,7 +81,6 @@ def test_scout_youtube_offline_ai_comfyui_queues(app):
 
     with app.app_context(), \
          patch("backend.services.social_outreach.intent.kill_switch.is_enabled", return_value=True), \
-         patch("backend.services.social_outreach.intent.kill_switch.is_supervised", return_value=True), \
          patch("backend.services.social_outreach.intent.queue_outreach_run") as mock_q:
 
         mock_q.return_value = {
@@ -122,8 +120,7 @@ def test_youtube_scout_is_not_queued_while_web_access_is_off(app):
     })
 
     with app.app_context(), \
-         patch("backend.services.social_outreach.kill_switch.is_enabled", return_value=True), \
-         patch("backend.services.social_outreach.kill_switch.is_supervised", return_value=True):
+         patch("backend.services.social_outreach.kill_switch.is_enabled", return_value=True):
         result = execute_outreach_intent(
             "comment on some youtube videos regarding Offline AI or ComfyUI",
             created_by="test",
@@ -164,7 +161,6 @@ def test_structured_platform_topics_skips_classifier(app):
 
     with app.app_context(), \
          patch("backend.services.social_outreach.intent.kill_switch.is_enabled", return_value=True), \
-         patch("backend.services.social_outreach.intent.kill_switch.is_supervised", return_value=True), \
          patch("backend.services.social_outreach.intent.queue_outreach_run") as mock_q:
 
         mock_q.return_value = {"task_id": 7, "job_id": "task_7"}
@@ -272,7 +268,6 @@ def test_scout_reddit_passes_keyword_profiles_as_topics(app):
 
     with app.app_context(), \
          patch("backend.services.social_outreach.intent.kill_switch.is_enabled", return_value=True), \
-         patch("backend.services.social_outreach.intent.kill_switch.is_supervised", return_value=True), \
          patch("backend.services.social_outreach.intent.queue_outreach_run") as mock_q:
 
         mock_q.return_value = {"task_id": 99, "job_id": "task_99", "message": "queued"}
@@ -291,7 +286,11 @@ def test_scout_reddit_passes_keyword_profiles_as_topics(app):
         assert "Stable Diffusion" in (recon_call[1].get("keyword_profiles") or [])
 
 
-def test_queued_ok_unsupervised_does_not_claim_posts_require_approve(app):
+@pytest.mark.parametrize("key", ["social_outreach_supervised", "outreach_require_independent_check"])
+def test_queued_ok_always_says_posts_wait_for_approval(app, key):
+    """A setting left by an older install cannot make a scout run claim that
+    drafts may post on their own."""
+    from backend.models import Setting, db
     from backend.services.social_outreach.intent import execute_outreach_intent
 
     clf = _classifier({
@@ -305,8 +304,9 @@ def test_queued_ok_unsupervised_does_not_claim_posts_require_approve(app):
 
     with app.app_context(), \
          patch("backend.services.social_outreach.intent.kill_switch.is_enabled", return_value=True), \
-         patch("backend.services.social_outreach.intent.kill_switch.is_supervised", return_value=False), \
          patch("backend.services.social_outreach.intent.queue_outreach_run") as mock_q:
+        db.session.add(Setting(key=key, value="false"))
+        db.session.commit()
         mock_q.return_value = {"task_id": 3, "job_id": "task_3"}
         result = execute_outreach_intent(
             "comment on youtube about Ollama",
@@ -314,11 +314,29 @@ def test_queued_ok_unsupervised_does_not_claim_posts_require_approve(app):
             classifier=clf,
         )
         assert result["ok"] is True
-        assert result.get("posts_require_approve") is False
-        assert "Unsupervised" in (result.get("message") or "")
-        assert "Approve" not in (result.get("message") or "") or "auto-approve" in (
-            result.get("message") or ""
-        ).lower()
+        assert result.get("posts_require_approve") is True
+        assert result.get("supervised") is True
+        assert "nothing posts until you approve it" in (result.get("message") or "")
+
+
+def test_approving_an_x_draft_by_intent_is_refused_with_the_reason(app):
+    from backend.models import SocialOutreachLog, db
+    from backend.services.social_outreach import platforms
+    from backend.services.social_outreach.intent import execute_outreach_intent
+
+    with app.app_context():
+        row = SocialOutreachLog(platform="twitter", action="comment", status="drafted", draft_text="hi")
+        db.session.add(row)
+        db.session.commit()
+        result = execute_outreach_intent(
+            f"approve draft {row.id}",
+            created_by="test",
+            classifier=_approve_classifier(row.id),
+        )
+        assert result["ok"] is False
+        assert result["error"] == platforms.refusal_for("twitter")
+        db.session.expire_all()
+        assert db.session.get(SocialOutreachLog, row.id).status == "unsupported"
 
 
 # ---- approve and reject act only on a draft id the user typed -----------------------

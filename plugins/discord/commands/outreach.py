@@ -2,7 +2,7 @@
 Outreach cog — quietly watches configured channels for messages we can usefully
 respond to (Ollama / ComfyUI / local-AI / RAG / self-hosted topics) and drafts a
 reply via the backend's /api/social-outreach/draft-comment endpoint. The backend
-queues the draft for review, or marks it approved when it may post on its own.
+queues the draft for a person's review; it never approves one itself.
 
 Replies are sent only by poll_approved_drafts, for approved drafts, after the
 cadence check, the claim and the /submit step (where a reject still stops it).

@@ -1,12 +1,14 @@
 """A rejected draft is never published, and a reject says when it came too late.
 
-The real posting tick and the real /api/social-outreach routes run against the
-in-memory database. Posters are stand-ins that never touch a browser: they
-record "publish" where a real poster publishes. No Redis, no network.
+The real watched-post task and the real /api/social-outreach routes run
+against the in-memory database. Posters are stand-ins that never touch a
+browser: they record "publish" where a real poster publishes. Redis is a
+FakeRedis and the Agent Screen counts as open; no network.
 """
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -28,8 +30,8 @@ REDDIT_THREAD = "https://www.reddit.com/r/x/comments/abc/t/"
 
 
 @pytest.fixture
-def outreach(app, client, monkeypatch):
-    """The tick and the routes on the test app, with every outside call replaced."""
+def outreach(app, client, monkeypatch, fake_redis, watching):
+    """The watched post and the routes on the test app, with every outside call replaced."""
     app.register_blueprint(social_outreach_api.social_outreach_bp)
     events: list[str] = []
 
@@ -88,8 +90,8 @@ def outreach(app, client, monkeypatch):
                 "backend.services.social_outreach.youtube_outreach.post_youtube_comment_via_servo",
                 youtube or self.poster("youtube"))
 
-        def tick(self):
-            return tasks.tick_process_approved_drafts.run()
+        def post(self, row_id):
+            return tasks.post_watched_draft.run(row_id, time.time())
 
     helper = Outreach()
     helper.events = events
@@ -103,12 +105,12 @@ def test_reject_while_the_poster_is_working_stops_the_post(outreach):
     outreach.use_posters(reddit=outreach.poster(
         "reddit", before_gate=lambda: answers.append(outreach.reject(row_id))))
 
-    result = outreach.tick()
+    result = outreach.post(row_id)
 
     assert answers[0].status_code == 200
     assert answers[0].get_json()["rejected_from"] == "processing"
     assert outreach.events == []  # nothing published, nothing recorded
-    assert result["processed"] == 0 and result["withdrawn"] == 1
+    assert result["posted"] is False and result["status"] == "rejected"
     assert outreach.row(row_id).status == "rejected"
 
 
@@ -118,7 +120,7 @@ def test_reject_after_publishing_began_is_refused(outreach):
     outreach.use_posters(reddit=outreach.poster(
         "reddit", after_gate=lambda: answers.append(outreach.reject(row_id))))
 
-    outreach.tick()
+    outreach.post(row_id)
 
     assert answers[0].status_code == 409
     assert answers[0].get_json()["status"] == "submitting"
@@ -127,26 +129,26 @@ def test_reject_after_publishing_began_is_refused(outreach):
     assert outreach.row(row_id).status == "posted"
 
 
-def test_a_row_rejected_while_an_earlier_row_posts_is_not_claimed(outreach):
-    first = outreach.add("approved")
-    second = outreach.add("approved", platform="youtube", url="https://www.youtube.com/watch?v=abcdefghijk")
-    outreach.use_posters(reddit=outreach.poster("reddit", before_gate=lambda: outreach.reject(second)))
+def test_a_row_rejected_before_its_post_starts_is_not_claimed(outreach):
+    row_id = outreach.add("approved")
+    outreach.use_posters()
+    assert outreach.reject(row_id).status_code == 200
 
-    result = outreach.tick()
+    result = outreach.post(row_id)
 
-    assert outreach.events == ["publish reddit", "record-post 200"]
-    assert result["skipped_not_approved"] == 1
-    assert outreach.row(first).status == "posted"
-    assert outreach.row(second).status == "rejected"
+    assert outreach.events == []
+    assert result["posted"] is False
+    assert "'rejected'" in result["message"]
+    assert outreach.row(row_id).status == "rejected"
 
 
 def test_an_approved_row_still_posts(outreach):
     row_id = outreach.add("approved")
     outreach.use_posters()
 
-    result = outreach.tick()
+    result = outreach.post(row_id)
 
-    assert result["processed"] == 1
+    assert result["posted"] is True
     assert outreach.events == ["publish reddit", "record-post 200"]
     assert outreach.row(row_id).status == "posted"
 
@@ -159,7 +161,7 @@ def test_a_failed_post_does_not_turn_a_rejection_into_an_abort(outreach):
         return False, "navigate_failed"
 
     outreach.use_posters(reddit=fails_after_reject)
-    outreach.tick()
+    outreach.post(row_id)
 
     assert outreach.row(row_id).status == "rejected"
 
@@ -180,8 +182,8 @@ def test_record_post_does_not_overwrite_a_rejection(outreach):
 
 
 def test_submit_route_is_the_gate_for_posters_outside_the_backend(outreach):
-    claimed = outreach.add("processing")
-    rejected = outreach.add("rejected")
+    claimed = outreach.add("processing", platform="discord")
+    rejected = outreach.add("rejected", platform="discord")
 
     ok = outreach.client.post(f"/api/social-outreach/submit/{claimed}")
     refused = outreach.client.post(f"/api/social-outreach/submit/{rejected}")
