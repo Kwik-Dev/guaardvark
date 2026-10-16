@@ -21,32 +21,24 @@ import MemoryIcon from "@mui/icons-material/Memory";
 import SpeedIcon from "@mui/icons-material/Speed";
 import StorageIcon from "@mui/icons-material/Storage";
 
-// The levels `ollama create --quantize` takes for a merged model
-// (backend/tasks/training_tasks.py OLLAMA_QUANTIZE); the backend refuses others.
-const QUANTIZATION_OPTIONS = [
-  {
-    value: "q4_k_m",
-    label: "Q4_K_M",
-    description: "Balanced (Recommended)",
-    sizeMultiplier: 0.5,
-    quality: 3,
-    recommended: true,
-  },
-  {
-    value: "q8_0",
-    label: "Q8_0",
-    description: "Near full precision",
-    sizeMultiplier: 1.0,
-    quality: 6,
-  },
-  {
-    value: "f16",
-    label: "F16",
-    description: "Full precision (largest)",
-    sizeMultiplier: 2.0,
-    quality: 7,
-  },
-];
+// Words for each level. Which levels are offered, which is the default and the
+// share of the bf16 weights each file comes to are the backend's
+// (job.export_levels, from LEVELS in backend/services/training_gguf_converter.py);
+// the backend refuses any other level.
+const LEVEL_WORDS = {
+  q8_0: { description: "Near full precision, about half the size", quality: 6 },
+  f16: { description: "Full precision (largest)", quality: 7 },
+};
+
+const toOptions = (levels) =>
+  (levels || []).map((level) => ({
+    value: level.value,
+    label: level.label,
+    sizeShare: level.size_share,
+    recommended: Boolean(level.default),
+    description: LEVEL_WORDS[level.value]?.description || "",
+    quality: LEVEL_WORDS[level.value]?.quality || 5,
+  }));
 
 const ExportQuantizationModal = ({
   open,
@@ -56,8 +48,11 @@ const ExportQuantizationModal = ({
   isExporting,
   isReQuantize = false,
   currentQuantization = null,
+  levels = [],
 }) => {
-  const [quantization, setQuantization] = useState("q4_k_m");
+  const options = toOptions(levels);
+  const defaultLevel = (options.find((o) => o.recommended) || options[0])?.value || "";
+  const [quantization, setQuantization] = useState(defaultLevel);
   const [modelName, setModelName] = useState("");
   const [formError, setFormError] = useState(null);
 
@@ -69,13 +64,15 @@ const ExportQuantizationModal = ({
     return `guaardvark-${baseName}`;
   };
 
+  const offeredValues = options.map((o) => o.value).join(",");
   useEffect(() => {
     if (open && job) {
       setModelName(generateDefaultName(job));
-      setQuantization(currentQuantization || "q4_k_m");
+      const offered = offeredValues.split(",").includes(currentQuantization);
+      setQuantization(offered ? currentQuantization : defaultLevel);
       setFormError(null);
     }
-  }, [open, job, currentQuantization]);
+  }, [open, job, currentQuantization, defaultLevel, offeredValues]);
 
   const handleExport = () => {
     if (!modelName.trim()) {
@@ -97,14 +94,14 @@ const ExportQuantizationModal = ({
     if (!match) return null;
 
     const params = parseFloat(match[1]);
-    const option = QUANTIZATION_OPTIONS.find(o => o.value === quant);
-    if (!option) return null;
+    const option = options.find((o) => o.value === quant);
+    if (!option || !option.sizeShare) return null;
 
-    const sizeGB = (params * 2 * option.sizeMultiplier).toFixed(1);
+    const sizeGB = (params * 2 * option.sizeShare).toFixed(1);
     return `~${sizeGB} GB`;
   };
 
-  const selectedOption = QUANTIZATION_OPTIONS.find(o => o.value === quantization);
+  const selectedOption = options.find((o) => o.value === quantization);
 
   return (
     <Dialog open={open} onClose={onClose} fullWidth maxWidth="sm">
@@ -121,9 +118,15 @@ const ExportQuantizationModal = ({
         {isReQuantize && currentQuantization && (
           <Alert severity="info" sx={{ mb: 2 }}>
             Current quantization: <strong>{currentQuantization.toUpperCase()}</strong>
-            {currentQuantization === "f16" && (
-              <> - This is full precision. Quantizing to Q4_K_M will reduce size by ~75% and improve load times.</>
+            {currentQuantization === "f16" && options.some((o) => o.value === "q8_0") && (
+              <> - This is full precision. Q8_0 is about half the size at near full precision.</>
             )}
+          </Alert>
+        )}
+
+        {options.length === 0 && (
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            No export level is offered for this job.
           </Alert>
         )}
 
@@ -150,7 +153,7 @@ const ExportQuantizationModal = ({
                 onChange={(e) => setQuantization(e.target.value)}
                 disabled={isExporting}
               >
-                {QUANTIZATION_OPTIONS.map((option) => (
+                {options.map((option) => (
                   <MenuItem key={option.value} value={option.value}>
                     <Box sx={{ display: "flex", alignItems: "center", gap: 1, width: "100%" }}>
                       <Typography sx={{ minWidth: 70 }}>{option.label}</Typography>
@@ -194,7 +197,7 @@ const ExportQuantizationModal = ({
                 <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
                   <MemoryIcon fontSize="small" color="action" />
                   <Typography variant="body2">
-                    VRAM: {selectedOption.sizeMultiplier <= 0.5 ? "Low" : selectedOption.sizeMultiplier <= 0.75 ? "Medium" : "High"}
+                    VRAM: {selectedOption.sizeShare <= 0.35 ? "Low" : selectedOption.sizeShare <= 0.75 ? "Medium" : "High"}
                   </Typography>
                 </Box>
               </Box>
@@ -217,7 +220,7 @@ const ExportQuantizationModal = ({
         <Button
           onClick={handleExport}
           variant="contained"
-          disabled={isExporting}
+          disabled={isExporting || !selectedOption}
           startIcon={isExporting ? <CircularProgress size={16} /> : null}
         >
           {isExporting ? "Exporting..." : isReQuantize ? "Re-Quantize" : "Export"}

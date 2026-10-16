@@ -74,7 +74,7 @@ GEMMA4_MARKERS = {"instruction": "<|turn>user\n", "response": "<|turn>model\n"}
 # vram_mb: what a run is budgeted on the GPU at max_seq_length and
 # max_batch_size with LoRA rank 16; vram_measured says how it was arrived at.
 # export: "verified" once Export to Ollama has been run live for the model;
-# until then the Training page does not offer it.
+# until then the Training page does not offer it. export_measured says how.
 # trainable: False until a training run of the model has been measured on a
 # GPU; it can be downloaded, but no job is created for it. Left out means True.
 BASE_MODELS: tuple[dict[str, Any], ...] = (
@@ -119,7 +119,13 @@ BASE_MODELS: tuple[dict[str, Any], ...] = (
         "load_in_4bit": False,
         "response_markers": QWEN25_MARKERS,
         "vision": False,
-        "export": "unverified",
+        "export": "verified",
+        "export_measured": (
+            "2026-10-16, Ollama 0.40.1 on Linux: an adapter trained here merged, converted to "
+            "GGUF at Q8_0 and F16 and registered by the export and import tasks; both Ollama "
+            "models answered in the Qwen2.5 chat template "
+            "(training_gguf_converter.ARCHITECTURES)."
+        ),
         "ollama_tags": ("qwen2.5:1.5b", "qwen2.5:1.5b-instruct"),
         "ollama_template": QWEN25_OLLAMA_TEMPLATE,
         "ollama_stop": ("<|im_end|>",),

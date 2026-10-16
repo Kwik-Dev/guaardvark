@@ -212,8 +212,10 @@ def test_a_machine_that_is_not_practical_installs_only_anyway(env, monkeypatch):
 def test_nothing_but_the_routes_starts_a_run():
     """No task, schedule or startup step can install: the only code that
     calls start_install or start_remove is the route behind the modal. The
-    base-model Download (training_base_models) defines its own pair, called
-    from the same routes file."""
+    base-model Download (training_base_models) and the GGUF converter
+    (training_gguf_converter) define their own pairs, called from the same
+    routes file; the search reranker (utils/reranker.py) defines its own
+    start_install, called from its Settings route in api/index_mgmt_api.py."""
     backend = Path(tl.__file__).resolve().parents[1]
     skip = {"tests", "venv", ".venv", "node_modules", "__pycache__"}
     callers = set()
@@ -227,7 +229,8 @@ def test_nothing_but_the_routes_starts_a_run():
             if "start_install(" in text or "start_remove(" in text:
                 callers.add(path.relative_to(backend).as_posix())
     assert callers == {"api/training/routes.py", "services/training_libraries.py",
-                       "services/training_base_models.py"}
+                       "services/training_base_models.py", "services/training_gguf_converter.py",
+                       "api/index_mgmt_api.py", "utils/reranker.py"}
 
 
 def test_start_up_requirements_keep_what_an_install_moves():

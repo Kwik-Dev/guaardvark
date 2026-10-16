@@ -85,8 +85,10 @@ def no_gpu_claim(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def export_verified(monkeypatch):
-    """The pipeline exports only for a base model whose export is verified."""
+    """The pipeline exports only for a base model whose export is verified and
+    once the GGUF converter is installed; both count as ready here."""
     monkeypatch.setattr("backend.services.training_base_models.export_verified", lambda model_id: True)
+    monkeypatch.setattr("backend.services.training_gguf_converter.refusal_for", lambda entry: None)
 
 
 @pytest.fixture

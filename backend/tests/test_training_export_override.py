@@ -1,16 +1,20 @@
 """A run the export gate held can be exported on a person's explicit choice,
 the choice is recorded on the job, the export routes hand the export and
 import tasks the training output folder, and no export starts for a base
-model whose export to Ollama has not been verified.
+model whose export to Ollama has not been verified, or while the GGUF
+converter it runs is not installed.
 
-Export itself folds the adapter into its base model in an offline subprocess
-and registers the folder with `ollama create --quantize`, using the chat
-template the base model's entry declares; no llama.cpp is fetched or built.
+Export itself folds the adapter into its base model in an offline subprocess,
+converts the merged folder to one GGUF file with the installed converter, and
+registers that file with `ollama create`, using the chat template the base
+model's entry declares. A run folder merged before Export went through GGUF
+still registers its merged folder with `ollama create --quantize`.
 
 Seams: celery.chain and each task's apply_async, read by the routes at call
 time; training_base_models.export_verified and resolve_for_training,
-training_runner.run and subprocess.run (the ollama CLI), read at call time;
-nothing is sent to a worker and nothing runs."""
+training_gguf_converter.refusal_for and convert, training_runner.run and
+subprocess.run (the ollama CLI), read at call time; nothing is sent to a
+worker and nothing runs."""
 import json
 import os
 import sys
@@ -64,6 +68,32 @@ def verified(monkeypatch):
     monkeypatch.setattr("backend.services.training_base_models.export_verified",
                         lambda model_id: state["verified"])
     return state
+
+
+@pytest.fixture(autouse=True)
+def converter(monkeypatch):
+    """The GGUF converter counts as installed and checked with the job's
+    family unless a test says not; convert writes the file it is asked for."""
+    from backend.services import training_gguf_converter
+
+    state = SimpleNamespace(refusal=None, calls=[], fail=None)
+    monkeypatch.setattr(training_gguf_converter, "refusal_for", lambda entry: state.refusal)
+
+    def convert(merged, out_file, level, *, log_path, **kwargs):
+        state.calls.append({"merged": Path(merged), "out": Path(out_file), "level": level,
+                            "log_path": Path(log_path)})
+        if state.fail:
+            raise training_gguf_converter.ConverterFailed(state.fail)
+        Path(out_file).write_bytes(b"GGUF" * 10)
+        return Path(out_file)
+
+    monkeypatch.setattr(training_gguf_converter, "convert", convert)
+    return state
+
+
+MISSING = ("GGUF_CONVERTER_MISSING",
+           "Export to Ollama converts the trained model to GGUF with llama.cpp's converter, which "
+           "is not installed. Install it in Settings > Training libraries > GGUF converter.")
 
 
 @pytest.fixture(autouse=True)
@@ -206,10 +236,79 @@ def test_an_unknown_job_is_not_found(client, dispatched):
 def test_the_gguf_export_route_hands_over_the_training_output_folder(client, dispatched, tmp_path):
     pk, model_dir = _held_job(tmp_path, status="completed")
 
-    response = client.post(f"/api/training/jobs/{pk}/export", json={"quantization": "q4_k_m"})
+    response = client.post(f"/api/training/jobs/{pk}/export", json={"quantization": "F16"})
 
     assert response.status_code == 202
-    assert dispatched.tasks == [("export", ["held-job", str(model_dir), "q4_k_m"], {"queue": "training"})]
+    assert dispatched.tasks == [("export", ["held-job", str(model_dir), "f16"], {"queue": "training"})]
+    assert _row(pk).quantization_level == "f16"
+
+
+def test_no_level_asked_for_exports_at_the_default(client, dispatched, tmp_path):
+    pk, model_dir = _held_job(tmp_path, status="completed")
+
+    assert client.post(f"/api/training/jobs/{pk}/export-to-ollama", json={"model_name": "m"}).status_code == 202
+
+    (workflow,) = dispatched.chains
+    assert tuple(workflow["signatures"][0].args) == ("held-job", str(model_dir), "q8_0")
+
+
+@pytest.mark.parametrize("path", ["export", "export-to-ollama"])
+def test_a_level_the_converter_does_not_write_is_refused_with_the_choices(client, dispatched, tmp_path, path):
+    pk, _ = _held_job(tmp_path, status="completed")
+
+    response = client.post(f"/api/training/jobs/{pk}/{path}", json={"model_name": "m", "quantization": "q4_k_m"})
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["code"] == "UNSUPPORTED_LEVEL"
+    assert "Q8_0, F16" in response.get_json()["error"]["message"]
+    assert dispatched.chains == [] and dispatched.tasks == []
+    assert _row(pk).status == "completed"
+
+
+def test_without_the_converter_export_points_at_its_install(client, dispatched, tmp_path, converter):
+    converter.refusal = MISSING
+    pk, _ = _held_job(tmp_path, status="completed")
+
+    for path in (f"/api/training/jobs/{pk}/export", f"/api/training/jobs/{pk}/export-to-ollama"):
+        response = client.post(path, json={"model_name": "mine"})
+        assert response.status_code == 409, path
+        assert response.get_json()["error"]["code"] == "GGUF_CONVERTER_MISSING"
+        assert "Settings > Training libraries > GGUF converter" in response.get_json()["error"]["message"]
+    assert dispatched.chains == [] and dispatched.tasks == []
+    assert _row(pk).status == "completed"
+
+
+def test_the_job_list_says_what_export_waits_for_and_offers(client, tmp_path, converter):
+    _held_job(tmp_path, status="completed")
+    converter.refusal = MISSING
+
+    (job,) = client.get("/api/training/jobs").get_json()["data"]
+
+    assert job["export_verified"] is True
+    assert job["export_blocked_code"] == "GGUF_CONVERTER_MISSING"
+    assert "GGUF converter" in job["export_blocked"]
+    assert [level["value"] for level in job["export_levels"]] == ["q8_0", "f16"]
+    assert job["export_levels"][0]["default"] is True
+
+    converter.refusal = None
+    (job,) = client.get("/api/training/jobs").get_json()["data"]
+    assert job["export_blocked"] is None and job["export_blocked_code"] is None
+
+
+def test_a_gguf_at_another_level_is_exported_again(client, dispatched, tmp_path):
+    pk, model_dir = _held_job(tmp_path, status="completed")
+    gguf = model_dir / "test-out-q8_0.gguf"
+    gguf.write_bytes(b"gguf")
+    row = _row(pk)
+    row.gguf_path, row.quantization_level = str(gguf), "q8_0"
+    db.session.commit()
+
+    response = client.post(f"/api/training/jobs/{pk}/export-to-ollama",
+                           json={"model_name": "mine", "quantization": "f16"})
+
+    assert response.status_code == 202
+    (workflow,) = dispatched.chains
+    assert tuple(workflow["signatures"][0].args) == ("held-job", str(model_dir), "f16")
 
 
 def test_the_import_routes_hand_over_the_folder_holding_the_gguf(client, dispatched, tmp_path):
@@ -247,18 +346,18 @@ def test_the_export_task_refuses_before_touching_the_job(client, tmp_path, verif
     pk, model_dir = _held_job(tmp_path, status="completed")
 
     with pytest.raises(tt.ExportNotVerified):
-        tt.export_gguf_task.run("held-job", str(model_dir), "q4_k_m")
+        tt.export_gguf_task.run("held-job", str(model_dir), "q8_0")
 
     row = _row(pk)
     assert row.status == "completed" and row.pipeline_stage == "training"
 
 
-# ---- export: merge, then ollama create --quantize --------------------------------
+# ---- export: merge, convert to GGUF, then ollama create ---------------------------
 
 QWEN = "Qwen/Qwen2.5-1.5B-Instruct"
 
 
-def _trained_job(tmp_path, quantization="q4_k_m"):
+def _trained_job(tmp_path, quantization=None):
     model_dir = tmp_path / "models" / "test-out"
     (model_dir / "lora").mkdir(parents=True)
     job = TrainingJob(job_id="trained", name="trained", base_model=QWEN, output_model_name="test-out",
@@ -281,7 +380,7 @@ def merge(monkeypatch, tmp_path):
     def run(command, spec, **kwargs):
         calls.append((command, spec, kwargs))
         merged = Path(spec["out_dir"])
-        merged.mkdir(parents=True)
+        merged.mkdir(parents=True, exist_ok=True)
         (merged / "config.json").write_text("{}")
         return {"event": "done", "model_dir": str(merged)}
 
@@ -303,49 +402,111 @@ def ollama_cli(monkeypatch):
     return calls
 
 
-def test_export_merges_the_adapter_into_its_base_offline(client, tmp_path, merge):
+def test_export_merges_the_adapter_and_converts_it_to_gguf(client, tmp_path, merge, converter):
     pk, model_dir = _trained_job(tmp_path)
 
-    result = tt.export_gguf_task.run("trained", str(model_dir), "q4_k_m")
+    result = tt.export_gguf_task.run("trained", str(model_dir), None)
 
     (command, spec, kwargs), = merge.calls
     assert command == "merge"
     assert spec["base_model"] == merge.snapshot
     assert spec["lora_dir"] == str(model_dir / "lora") and spec["out_dir"] == str(model_dir / "merged")
     assert kwargs["workdir"] == model_dir
-    assert result == {"merged_path": str(model_dir / "merged")}
-    assert _row(pk).status == "running" and _row(pk).pipeline_stage == "exporting"
+    gguf = model_dir / "test-out-q8_0.gguf"
+    (call,) = converter.calls
+    assert call == {"merged": model_dir / "merged", "out": gguf, "level": "q8_0",
+                    "log_path": model_dir / "train.log"}
+    assert result == {"merged_path": str(model_dir / "merged"), "gguf_path": str(gguf),
+                      "quantization": "q8_0"}
+    row = _row(pk)
+    assert row.status == "running" and row.pipeline_stage == "exporting"
+    assert row.gguf_path == str(gguf) and row.quantization_level == "q8_0"
 
 
-def test_import_registers_the_merged_model_with_the_declared_template(client, tmp_path, merge, ollama_cli):
+def test_import_registers_the_gguf_with_the_declared_template(client, tmp_path, merge, ollama_cli):
     from backend.services import training_base_models
 
     pk, model_dir = _trained_job(tmp_path)
-    tt.export_gguf_task.run("trained", str(model_dir), "q4_k_m")
+    tt.export_gguf_task.run("trained", str(model_dir), "f16")
 
     tt.import_ollama_task.run("trained", str(model_dir), "my-model")
 
     (call,) = ollama_cli
-    assert call["cmd"] == ["ollama", "create", "my-model", "-f", str(model_dir / "Modelfile"),
-                           "--quantize", "q4_K_M"]
+    assert call["cmd"] == ["ollama", "create", "my-model", "-f", str(model_dir / "Modelfile")]
     modelfile = (model_dir / "Modelfile").read_text()
-    assert modelfile.startswith(f"FROM {model_dir / 'merged'}\n")
+    assert modelfile.startswith(f"FROM {model_dir / 'test-out-f16.gguf'}\n")
     assert f'TEMPLATE """{training_base_models.get(QWEN)["ollama_template"]}"""' in modelfile
     assert 'PARAMETER stop "<|im_end|>"' in modelfile
     row = _row(pk)
     assert row.status == "completed" and row.ollama_model_name == "my-model"
 
 
-def test_f16_registers_the_merged_model_unquantised(client, tmp_path, merge, ollama_cli):
-    _, model_dir = _trained_job(tmp_path, quantization="f16")
+def test_a_level_the_converter_does_not_write_fails_before_the_merge(client, tmp_path, merge, converter):
+    pk, model_dir = _trained_job(tmp_path)
+
+    with pytest.raises(ValueError, match="offers Q8_0, F16"):
+        tt.export_gguf_task.run("trained", str(model_dir), "q4_k_m")
+
+    assert merge.calls == [] and converter.calls == []
+    assert _row(pk).status == "completed" and _row(pk).pipeline_stage == "training"
+
+
+def test_a_failed_conversion_fails_the_job_with_the_reason(client, tmp_path, merge, converter):
+    converter.fail = "The GGUF converter exited with code 1: ERROR: Model X is not supported"
+    pk, model_dir = _trained_job(tmp_path)
+
+    with pytest.raises(Exception, match="exited with code 1"):
+        tt.export_gguf_task.run("trained", str(model_dir), "q8_0")
+
+    row = _row(pk)
+    assert row.status == "failed" and "Model X is not supported" in row.error_message
+    assert row.gguf_path is None
+
+
+def test_exporting_again_at_another_level_leaves_one_gguf(client, tmp_path, merge):
+    pk, model_dir = _trained_job(tmp_path)
+    tt.export_gguf_task.run("trained", str(model_dir), "q8_0")
+
     tt.export_gguf_task.run("trained", str(model_dir), "f16")
+
+    assert sorted(p.name for p in model_dir.glob("*.gguf")) == ["test-out-f16.gguf"]
+    assert _row(pk).gguf_path == str(model_dir / "test-out-f16.gguf")
+
+
+def test_without_the_converter_the_export_task_refuses_before_merging(client, tmp_path, merge, converter):
+    converter.refusal = MISSING
+    pk, model_dir = _trained_job(tmp_path)
+
+    with pytest.raises(tt.ExportNotVerified, match="GGUF converter"):
+        tt.export_gguf_task.run("trained", str(model_dir), "q8_0")
+
+    assert merge.calls == []
+    assert _row(pk).status == "completed" and _row(pk).pipeline_stage == "training"
+
+
+# ---- a run folder merged before Export went through GGUF -------------------------
+
+def _merged_before(model_dir):
+    (model_dir / "merged").mkdir()
+    (model_dir / "merged" / "config.json").write_text("{}")
+
+
+def test_a_folder_merged_before_registers_the_merged_model(client, tmp_path, ollama_cli):
+    pk, model_dir = _trained_job(tmp_path, quantization="q4_k_m")
+    _merged_before(model_dir)
+
     tt.import_ollama_task.run("trained", str(model_dir), "my-model")
-    assert "--quantize" not in ollama_cli[0]["cmd"]
+
+    (call,) = ollama_cli
+    assert call["cmd"] == ["ollama", "create", "my-model", "-f", str(model_dir / "Modelfile"),
+                           "--quantize", "q4_K_M"]
+    assert (model_dir / "Modelfile").read_text().startswith(f"FROM {model_dir / 'merged'}\n")
+    assert _row(pk).status == "completed"
 
 
-def test_a_level_ollama_cannot_quantize_to_is_refused_with_the_choices(client, tmp_path, merge, ollama_cli):
+def test_a_level_ollama_cannot_quantize_to_is_refused_with_the_choices(client, tmp_path, ollama_cli):
     pk, model_dir = _trained_job(tmp_path, quantization="q5_k_m")
-    tt.export_gguf_task.run("trained", str(model_dir), "q5_k_m")
+    _merged_before(model_dir)
 
     with pytest.raises(ValueError, match="cannot quantize a merged model to q5_k_m"):
         tt.import_ollama_task.run("trained", str(model_dir), "my-model")
@@ -356,47 +517,35 @@ def test_a_level_ollama_cannot_quantize_to_is_refused_with_the_choices(client, t
 
 # ---- an Ollama measured unable to import the merged model ----------------------------
 
-def test_no_export_starts_on_an_ollama_that_cannot_import(client, dispatched, tmp_path, ollama_version):
+def test_export_through_gguf_starts_on_an_ollama_that_cannot_import_safetensors(
+        client, dispatched, tmp_path, ollama_version):
     ollama_version["version"] = "0.40.1"
     pk, _ = _held_job(tmp_path, status="completed")
 
-    for path in (f"/api/training/jobs/{pk}/export", f"/api/training/jobs/{pk}/export-to-ollama"):
-        response = client.post(path, json={"model_name": "mine"})
-        assert response.status_code == 409, path
-        assert "installed Ollama 0.40.1" in response.get_json()["error"]["message"]
-    assert dispatched.chains == [] and dispatched.tasks == []
-    assert _row(pk).status == "completed"
+    response = client.post(f"/api/training/jobs/{pk}/export-to-ollama", json={"model_name": "mine"})
+
+    assert response.status_code == 202
+    assert len(dispatched.chains) == 1
 
 
-def test_a_held_run_is_not_released_for_an_export_that_cannot_run(client, dispatched, tmp_path, ollama_version):
-    ollama_version["version"] = "0.40.1"
+def test_a_held_run_is_not_released_while_the_converter_is_missing(client, dispatched, tmp_path, converter):
+    converter.refusal = MISSING
     pk, _ = _held_job(tmp_path)
 
     response = client.post(f"/api/training/jobs/{pk}/export-anyway", json={})
 
     assert response.status_code == 409
-    assert "installed Ollama 0.40.1" in response.get_json()["error"]["message"]
+    assert response.get_json()["error"]["code"] == "GGUF_CONVERTER_MISSING"
     assert _row(pk).status == tt.WORSE_THAN_BASE
     assert "export_override" not in json.loads(_row(pk).config_json)
 
 
-def test_the_export_task_refuses_before_merging_on_that_ollama(client, tmp_path, merge, ollama_version):
-    ollama_version["version"] = "0.40.1"
-    pk, model_dir = _trained_job(tmp_path)
-
-    with pytest.raises(tt.ExportNotVerified, match="installed Ollama 0.40.1"):
-        tt.export_gguf_task.run("trained", str(model_dir), "q4_k_m")
-
-    assert merge.calls == []
-    assert _row(pk).status == "completed" and _row(pk).pipeline_stage == "training"
-
-
-def test_import_refuses_on_that_ollama_without_calling_it(client, tmp_path, merge, ollama_cli, ollama_version):
-    pk, model_dir = _trained_job(tmp_path)
-    tt.export_gguf_task.run("trained", str(model_dir), "q4_k_m")
+def test_a_folder_merged_before_is_not_sent_to_that_ollama(client, tmp_path, ollama_cli, ollama_version):
+    _, model_dir = _trained_job(tmp_path)
+    _merged_before(model_dir)
     ollama_version["version"] = "0.40.1"
 
-    with pytest.raises(RuntimeError, match="installed Ollama 0.40.1"):
+    with pytest.raises(RuntimeError, match="installed Ollama 0.40.1 cannot import the merged model"):
         tt.import_ollama_task.run("trained", str(model_dir), "my-model")
 
     assert ollama_cli == []
@@ -411,7 +560,8 @@ def test_both_import_refusals_read_as_the_plain_reason(ollama_version, tail):
 
     message = tt.ollama_create_error(tail)
 
-    assert message.startswith("Export to Ollama cannot run with the installed Ollama 0.41.0")
+    assert message.startswith("The installed Ollama 0.41.0 cannot import the merged model as safetensors")
+    assert "GGUF converter" in message
     assert tail in message
 
 
