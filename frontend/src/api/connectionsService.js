@@ -74,6 +74,15 @@ export const fetchPublishes = async (params = {}) => {
 
 export const approvePublish = (id) => send(`/publishes/${id}/approve`, "POST");
 
+/** Delete on platform: remove a posted, or platform-scheduled, post. */
+export const deletePublishRemote = (id) => send(`/publishes/${id}/delete-remote`, "POST");
+
+/** Per connection: posts so far, last post, scheduled count, rate-limit usage. */
+export const fetchConnectionUsage = async (family = "social") => {
+  const data = await request(`/usage?family=${encodeURIComponent(family)}`);
+  return data.usage || {};
+};
+
 export const rejectPublish = (id, reason) =>
   send(`/publishes/${id}/reject`, "POST", { reason });
 

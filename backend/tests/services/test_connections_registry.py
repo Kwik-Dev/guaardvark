@@ -57,6 +57,69 @@ def test_youtube_defaults_to_private():
     assert caps.requires_media is True
 
 
+# --- the provider contract (base.py) -----------------------------------------
+
+@pytest.mark.parametrize("provider", ALL_PROVIDERS)
+def test_provider_honours_the_contract(provider):
+    assert registry.contract_problems(provider) == []
+
+
+@pytest.mark.parametrize("provider", ALL_PROVIDERS)
+def test_rate_limits_name_their_source(provider):
+    for limit in registry.spec_for(provider).capabilities.rate_limits:
+        assert limit.posts >= 1 and limit.window_seconds >= 60
+        assert limit.source.startswith("https://")
+        assert limit.platform_limit
+
+
+@pytest.mark.parametrize("provider", ALL_PROVIDERS)
+def test_new_capabilities_serialise(provider):
+    caps = registry.spec_for(provider).to_dict()["capabilities"]
+    for key in ("rate_limits", "ai_disclosure", "bot_label", "native_scheduling", "deletable", "delete_window_seconds"):
+        assert key in caps
+
+
+def test_contract_flags_a_declaration_without_its_function(monkeypatch):
+    import types
+
+    from backend.services.connections.base import Capabilities, ProviderSpec, RateLimit
+
+    spec = ProviderSpec(
+        provider="fake", family="social", label="Fake", auth_kinds=("api_token",),
+        capabilities=Capabilities(
+            deletable=True,
+            rate_limits=(RateLimit(posts=1, window_seconds=60, platform_limit="x", source="https://x"),),
+        ),
+    )
+    module = types.SimpleNamespace(SPEC=spec, test=lambda ctx: None, publish=lambda *a: None)
+    monkeypatch.setitem(registry._cache, "fake", module)
+    assert registry.contract_problems("fake") == ["deletable is declared but delete() is missing."]
+
+
+def test_native_scheduling_where_the_platform_has_it():
+    assert registry.spec_for("mastodon").capabilities.native_scheduling.min_lead_seconds == 300
+    youtube = registry.spec_for("youtube").capabilities.native_scheduling
+    assert youtube.field == "status.publishAt" and youtube.visibilities == ("public",)
+    for provider in ("bluesky", "telegram", "discord_webhook"):
+        assert registry.spec_for(provider).capabilities.native_scheduling is None
+
+
+def test_disclosure_rules():
+    from backend.services.connections.base import DISCLOSURE_FLAG
+
+    youtube = registry.spec_for("youtube").capabilities.ai_disclosure
+    assert youtube.mechanism == DISCLOSURE_FLAG and youtube.flag == "status.containsSyntheticMedia"
+    assert youtube.required_for(True, "ui") and not youtube.required_for(False, "chat")
+    mastodon = registry.spec_for("mastodon").capabilities.ai_disclosure
+    assert mastodon.required_for(False, "chat") and mastodon.required_for(True, "ui")
+    assert not mastodon.required_for(False, "ui")
+    assert not registry.spec_for("bluesky").capabilities.ai_disclosure.required_for(True, "chat")
+
+
+def test_telegram_declares_its_delete_window():
+    assert registry.spec_for("telegram").capabilities.delete_window_seconds == 48 * 3600
+
+
 # --- capability validation ---------------------------------------------------
 
 IMAGE = MediaItem(path="/tmp/a.png", mime="image/png", bytes=1000)

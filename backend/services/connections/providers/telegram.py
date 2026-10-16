@@ -15,15 +15,20 @@ import requests
 
 from backend.services.connections.base import (
     AUTH_API_TOKEN,
+    BOT_LABEL_AUTOMATIC,
     FAMILY_SOCIAL,
+    BotLabel,
     Capabilities,
     ConfigField,
     ConnCtx,
     CredentialField,
+    DeleteRequest,
+    DeleteResult,
     ProgressFn,
     ProviderSpec,
     PublishRequest,
     PublishResult,
+    RateLimit,
 )
 
 logger = logging.getLogger(__name__)
@@ -63,6 +68,24 @@ SPEC = ProviderSpec(
         audio=True,
         visibilities=("public",),
         default_visibility="public",
+        # A connection posts to one chat.
+        rate_limits=(
+            RateLimit(
+                posts=10,
+                window_seconds=3600,
+                platform_limit="about one message per second in a chat; 20 per minute in a group",
+                source="https://core.telegram.org/bots/faq",
+            ),
+        ),
+        bot_label=BotLabel(
+            kind=BOT_LABEL_AUTOMATIC,
+            how="Telegram shows every bot account as a bot; there is nothing to set.",
+            source="https://core.telegram.org/bots",
+        ),
+        deletable=True,
+        # deleteMessage: "A message can only be deleted if it was sent less than
+        # 48 hours ago." https://core.telegram.org/bots/api#deletemessage
+        delete_window_seconds=48 * 3600,
     ),
     hint_field="bot_token",
     docs_url="https://core.telegram.org/bots/api",
@@ -167,3 +190,33 @@ def publish(ctx: ConnCtx, req: PublishRequest, on_progress: ProgressFn) -> Publi
         remote_url=remote_url,
         message="Sent to Telegram.",
     )
+
+
+def delete(ctx: ConnCtx, req: DeleteRequest) -> DeleteResult:
+    chat_id = (ctx.config.get("chat_id") or "").strip()
+    if not chat_id:
+        return DeleteResult(ok=False, message="No chat ID configured.")
+    try:
+        resp = requests.post(
+            _api(ctx, "deleteMessage"),
+            data={"chat_id": chat_id, "message_id": req.remote_id},
+            timeout=TIMEOUT,
+        )
+    except ValueError as e:
+        return DeleteResult(ok=False, message=str(e))
+    except requests.RequestException as e:
+        return DeleteResult(ok=False, message=f"Could not reach Telegram: {e}")
+
+    detail = ""
+    try:
+        detail = (resp.json() or {}).get("description") or ""
+    except ValueError:
+        pass
+    if resp.status_code >= 400:
+        if "not found" in detail.lower():
+            return DeleteResult(ok=True, message="The message was already gone from the chat.")
+        return DeleteResult(
+            ok=False,
+            message=f"Telegram returned {resp.status_code}{f': {detail}' if detail else ''}.",
+        )
+    return DeleteResult(ok=True, message="Deleted from Telegram.")

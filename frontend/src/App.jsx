@@ -62,6 +62,8 @@ const StickyNotesPage = lazyWithReload(() => import("./pages/StickyNotesPage"));
 const DevToolsPage = lazyWithReload(() => import("./pages/DevToolsPage"));
 const PluginsPage = lazyWithReload(() => import("./pages/PluginsPage"));
 const ConnectionsPage = lazyWithReload(() => import("./pages/ConnectionsPage"));
+const SocialAccountsPage = lazyWithReload(() => import("./pages/SocialAccountsPage"));
+const SocialPostsPage = lazyWithReload(() => import("./pages/SocialPostsPage"));
 const ApprovalsPage = lazyWithReload(() => import("./pages/ApprovalsPage"));
 const SwarmPage = lazyWithReload(() => import("./pages/SwarmPage"));
 const AutoresearchPage = lazyWithReload(() => import("./pages/AutoresearchPage"));
@@ -562,6 +564,26 @@ const AppContainer = () => {
                           <AppLayout>
                             <ErrorBoundary>
                               <ConnectionsPage />
+                            </ErrorBoundary>
+                          </AppLayout>
+                        }
+                      />
+                      <Route
+                        path="/social/accounts"
+                        element={
+                          <AppLayout>
+                            <ErrorBoundary>
+                              <SocialAccountsPage />
+                            </ErrorBoundary>
+                          </AppLayout>
+                        }
+                      />
+                      <Route
+                        path="/social/posts"
+                        element={
+                          <AppLayout>
+                            <ErrorBoundary>
+                              <SocialPostsPage />
                             </ErrorBoundary>
                           </AppLayout>
                         }

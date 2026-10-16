@@ -241,17 +241,29 @@ def oauth_complete(cid):
 
 
 # --- publishing --------------------------------------------------------------
+def _disclosure_choice(payload):
+    """The composer's AI disclosure switch; absent means the default (off)."""
+    value = payload.get("ai_disclosure")
+    return None if value is None else bool(value)
+
+
 @connections_bp.route("/publish/preflight", methods=["POST"])
 def publish_preflight():
-    from backend.services.connections import publish_service
+    from backend.services.connections import publish_service, scheduling
 
     payload = request.get_json(silent=True) or {}
+    try:
+        scheduled_at = scheduling.parse_when(payload.get("scheduled_at"))
+    except ValueError as e:
+        return jsonify({"ok": False, "per_connection": {}, "violations": [str(e)]}), 200
     result = publish_service.preflight(
         payload.get("connection_ids") or [],
         payload.get("document_ids") or [],
         body=payload.get("body") or "",
         title=payload.get("title"),
         visibility=payload.get("visibility"),
+        scheduled_at=scheduled_at,
+        ai_disclosure=_disclosure_choice(payload),
     )
     return jsonify(result), 200
 
@@ -263,6 +275,7 @@ def publish_route():
         gates,
         media as media_util,
         publish_service,
+        scheduling,
     )
 
     payload = request.get_json(silent=True) or {}
@@ -276,6 +289,8 @@ def publish_route():
             tags=payload.get("tags") or [],
             visibility=payload.get("visibility"),
             requested_by=gates.normalize_source(payload.get("requested_by")),
+            scheduled_at=scheduling.parse_when(payload.get("scheduled_at")),
+            ai_disclosure=_disclosure_choice(payload),
         )
     except (ValueError, media_util.MediaResolveError) as e:
         return _error(str(e), 400)
@@ -295,12 +310,17 @@ def list_publishes():
     platform = request.args.get("platform")
     status = request.args.get("status")
     document_id = request.args.get("document_id", type=int)
+    connection_id = request.args.get("connection_id", type=int)
     if platform:
         query = query.filter_by(platform=platform)
     if status:
-        query = query.filter_by(status=status)
+        # One status, or several separated by commas.
+        statuses = [s.strip() for s in status.split(",") if s.strip()]
+        query = query.filter(PublishRecord.status.in_(statuses))
     if document_id:
         query = query.filter_by(document_id=document_id)
+    if connection_id:
+        query = query.filter_by(connection_id=connection_id)
 
     limit = min(request.args.get("limit", default=50, type=int), 200)
     rows = query.order_by(PublishRecord.created_at.desc()).limit(limit).all()
@@ -357,6 +377,72 @@ def cancel_publish(pid):
     except ValueError as e:
         return _error(str(e), 400)
     return jsonify(record.to_dict()), 200
+
+
+@connections_bp.route("/publishes/<int:pid>/delete-remote", methods=["POST"])
+def delete_publish_remote(pid):
+    """Delete on platform: remove a posted (or platform-scheduled) post."""
+    from backend.services.connections import publish_service
+
+    record, err = _get_record(pid)
+    if err:
+        return err
+    try:
+        message = publish_service.delete_remote(record)
+    except ValueError as e:
+        return _error(str(e), 400)
+    except RuntimeError as e:
+        return _error(str(e), 502)
+    return jsonify({"message": message, "publish": record.to_dict()}), 200
+
+
+@connections_bp.route("/usage", methods=["GET"])
+def connection_usage():
+    """Per connection: posts so far, last post, what is scheduled, and each
+    declared rate limit with the posts that count against it now."""
+    from sqlalchemy import func
+
+    from backend.models import Connection, PublishRecord, db
+    from backend.services.connections import rate_limits, registry
+
+    family = request.args.get("family") or "social"
+    try:
+        rows = Connection.query.filter_by(family=family).all()
+        counts = dict(
+            db.session.query(PublishRecord.connection_id, func.count(PublishRecord.id))
+            .filter(PublishRecord.status.in_(rate_limits.WENT_OUT_STATUSES))
+            .group_by(PublishRecord.connection_id)
+            .all()
+        )
+        last = dict(
+            db.session.query(PublishRecord.connection_id, func.max(PublishRecord.posted_at))
+            .group_by(PublishRecord.connection_id)
+            .all()
+        )
+        scheduled = dict(
+            db.session.query(PublishRecord.connection_id, func.count(PublishRecord.id))
+            .filter(PublishRecord.status == "scheduled")
+            .group_by(PublishRecord.connection_id)
+            .all()
+        )
+        usage = {}
+        for connection in rows:
+            try:
+                limits = registry.spec_for(connection.provider).capabilities.rate_limits
+            except KeyError:
+                limits = ()
+            last_posted = last.get(connection.id)
+            usage[str(connection.id)] = {
+                "posts": counts.get(connection.id, 0),
+                "last_posted_at": last_posted.isoformat() if last_posted else None,
+                "scheduled": scheduled.get(connection.id, 0),
+                "rate_limits": rate_limits.usage(connection.id, limits),
+            }
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        logger.error("Connection usage failed: %s", e)
+        return _error("Database error", 500, details=str(e))
+    return jsonify({"usage": usage}), 200
 
 
 # --- settings ----------------------------------------------------------------

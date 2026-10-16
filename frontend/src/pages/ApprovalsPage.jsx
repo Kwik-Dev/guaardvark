@@ -54,19 +54,22 @@ import {
   usePendingApprovals,
 } from "../hooks/usePendingApprovals";
 
-// status → chip colour. Mirrors ConnectionsPage so a publish reads the same
-// wherever it appears.
+// status → chip colour, so a publish reads the same wherever it appears.
 const STATUS_COLOR = {
   awaiting_approval: "warning",
+  scheduled: "info",
   queued: "info",
   processing: "info",
   posted: "success",
   rejected: "error",
   cancelled: "default",
   failed: "error",
+  deleted: "default",
 };
 
-const HISTORY_STATUSES = ["posted", "rejected", "cancelled", "failed"];
+const HISTORY_STATUSES = ["scheduled", "posted", "rejected", "cancelled", "failed", "deleted"];
+
+const formatAt = (iso) => (iso ? new Date(iso).toLocaleString() : "");
 
 // Sources the backend always holds for approval, whatever a connection says.
 const AGENT_SOURCES = new Set(["chat", "mcp", "schedule"]);
@@ -115,7 +118,7 @@ const ApprovalsPage = () => {
     try {
       const [conns, queuedRows] = await Promise.all([
         fetchConnections(),
-        fetchPublishes({ status: "queued", limit: 50 }),
+        fetchPublishes({ status: "queued,scheduled", limit: 50 }),
       ]);
       setConnections(conns);
       setQueued(queuedRows);
@@ -278,6 +281,10 @@ const ApprovalsPage = () => {
             color={STATUS_COLOR[selected.status] || "default"}
           />
           <Chip label={selected.visibility} size="small" variant="outlined" />
+          {selected.scheduled_at && (
+            <Chip label={`Scheduled ${formatAt(selected.scheduled_at)}`} size="small" variant="outlined" />
+          )}
+          {selected.ai_disclosure && <Chip label="AI label" size="small" variant="outlined" />}
         </Stack>
 
         {selected.title && (
@@ -330,7 +337,9 @@ const ApprovalsPage = () => {
           <>
             <Divider sx={{ my: 2 }} />
             <Typography variant="caption" color="text.secondary" sx={{ mb: 1, display: "block" }}>
-              Approving sends this to {connectionName(selected)} on the next pass.
+              {selected.scheduled_at && new Date(selected.scheduled_at).getTime() > Date.now()
+                ? `Approving schedules this for ${formatAt(selected.scheduled_at)}; it goes to ${connectionName(selected)} then.`
+                : `Approving sends this to ${connectionName(selected)} on the next pass.`}
             </Typography>
             <Stack direction="row" spacing={1}>
               <Button
@@ -408,7 +417,11 @@ const ApprovalsPage = () => {
             {queued.map((record) => (
               <ListItemButton key={record.id} disabled>
                 <ListItemText
-                  primary={connectionName(record)}
+                  primary={
+                    record.status === "scheduled"
+                      ? `${connectionName(record)} · ${formatAt(record.scheduled_at)}`
+                      : connectionName(record)
+                  }
                   secondary={record.title || record.body || "(no text)"}
                   primaryTypographyProps={{ variant: "body2" }}
                   secondaryTypographyProps={{ variant: "caption", noWrap: true }}

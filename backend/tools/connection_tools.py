@@ -59,14 +59,14 @@ def _pick_connection(
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     enabled = [c for c in connections if c.get("enabled")]
     if not enabled:
-        return None, "No social connection is set up. Add one on the Connections page first."
+        return None, "No social connection is set up. Add one on the Social Accounts page (Work) first."
     usable = [c for c in enabled if _takes_text_post(c)]
     media_only = [c for c in enabled if not _takes_text_post(c)]
     if not usable:
         return None, (
             "No connection here takes a text post: "
             + "; ".join(_label(c) for c in media_only)
-            + " needs a video. Add Discord, Bluesky, Mastodon or Telegram on the Connections page."
+            + " needs a video. Add Discord, Bluesky, Mastodon or Telegram on the Social Accounts page."
         )
     choices = "; ".join(_label(c) for c in usable)
     if wanted is None or not str(wanted).strip():
