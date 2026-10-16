@@ -115,10 +115,11 @@ def test_refusals_carry_the_code_the_web_ui_reads(client, monkeypatch):
 @pytest.mark.parametrize("value", ["false", "0", "no", "off", "FALSE", " Off "])
 def test_the_opt_out_opens_the_routes_to_other_hosts(client, app, monkeypatch, value):
     monkeypatch.setenv(auth_guard.TOOL_ENDPOINTS_ENV, value)
-    assert _execute(client, REMOTE).status_code == 200
     assert client.get(UNKNOWN_JOB, environ_base={"REMOTE_ADDR": REMOTE}).status_code == 404
     assert _protected(app, "/api/automation/mcp/status") is False
-    # Writing the MCP server config never opens.
+    # Routes that run a program never open: direct tool execution and writing
+    # the MCP server config (auth_guard RUNS_CODE_PATHS / RUNS_CODE_MUTATION_PREFIXES).
+    assert _execute(client, REMOTE).status_code == 403
     assert _protected(app, "/api/automation/mcp/servers/new", "PUT") is True
     assert _protected(app, "/api/automation/mcp/reload-config", "POST") is True
 
