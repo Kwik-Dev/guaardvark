@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any
 
 from backend.models import WordPressSite, WordPressPage, db
+from backend.services import wordpress_credentials
 from backend.services.wordpress_api_service import WordPressAPIService
 from backend.services.llamanator_api_service import LlamanatorAPIService
 from backend.utils.unified_progress_system import get_unified_progress, ProcessType, ProcessStatus
@@ -37,12 +38,13 @@ class WordPressContentPuller:
         
         # Initialize appropriate API service based on connection type
         connection_type = getattr(self.wp_site, 'connection_type', 'llamanator') or 'llamanator'
-        
+        api_key = wordpress_credentials.get_api_key(self.wp_site)
+
         if connection_type == 'llamanator':
             # Use LLAMANATOR2 plugin API
             self.wp_service = LlamanatorAPIService(
                 site_url=self.wp_site.url,
-                api_key=self.wp_site.api_key
+                api_key=api_key
             )
         else:
             # Use direct WordPress REST API (legacy)
@@ -51,7 +53,7 @@ class WordPressContentPuller:
             self.wp_service = WordPressAPIService(
                 site_url=self.wp_site.url,
                 username=self.wp_site.username,
-                api_key=self.wp_site.api_key
+                api_key=api_key
             )
         
         self.job_id = job_id or str(uuid.uuid4())

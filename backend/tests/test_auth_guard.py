@@ -72,6 +72,18 @@ def app():
     def outreach_status():
         return {"ok": True}
 
+    @test_app.route("/api/wordpress/sites", methods=["GET", "POST"])
+    def wordpress_sites():
+        return {"ok": True}
+
+    @test_app.route("/api/wordpress/pull/list", methods=["POST"])
+    def wordpress_pull_list():
+        return {"ok": True}
+
+    @test_app.route("/api/wordpress/pages", methods=["GET"])
+    def wordpress_pages():
+        return {"ok": True}
+
     @test_app.route("/api/code-execution/python", methods=["POST"])
     def code_execution_python():
         return {"ok": True}
@@ -231,6 +243,119 @@ def test_every_connections_route_refuses_another_host_without_api_key(monkeypatc
 
     # Fewer would mean the blueprint lost routes or the walk above missed them.
     assert len(checked) >= 20
+
+
+# WordPress sites hold each site's API key or Application Password, and pulling
+# sends it to the site: the same rule as Connections.
+WORDPRESS_REQUESTS = [
+    ("GET", "/api/wordpress/sites"),
+    ("POST", "/api/wordpress/sites"),
+    ("POST", "/api/wordpress/pull/list"),
+    ("GET", "/api/wordpress/pages"),
+]
+
+
+@pytest.mark.parametrize("method,path", WORDPRESS_REQUESTS)
+def test_wordpress_refuses_another_host_without_api_key(app, monkeypatch, method, path):
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    monkeypatch.delenv("GUAARDVARK_NETWORK_ACCESS", raising=False)
+    client = app.test_client()
+
+    direct = client.open(path, method=method, json={}, environ_base={"REMOTE_ADDR": "192.168.1.20"})
+    proxied = client.open(
+        path, method=method, json={},
+        headers={"X-Forwarded-For": "192.168.1.20"},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    for response in (direct, proxied):
+        assert response.status_code == 403
+        assert response.get_json()["code"] == auth_guard.LOCAL_ONLY_CODE
+
+
+@pytest.mark.parametrize("method,path", WORDPRESS_REQUESTS)
+def test_wordpress_answers_this_machine_without_api_key(app, monkeypatch, method, path):
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    monkeypatch.delenv("GUAARDVARK_NETWORK_ACCESS", raising=False)
+    client = app.test_client()
+
+    direct = client.open(path, method=method, json={}, environ_base={"REMOTE_ADDR": "127.0.0.1"})
+    proxied = client.open(
+        path, method=method, json={},
+        headers={"X-Forwarded-For": "127.0.0.1"},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert direct.status_code == 200
+    assert proxied.status_code == 200
+
+
+@pytest.mark.parametrize("method,path", WORDPRESS_REQUESTS)
+def test_wordpress_needs_the_key_once_one_is_configured(app, monkeypatch, method, path):
+    monkeypatch.setenv("GUAARDVARK_API_KEY", "secret")
+    monkeypatch.delenv("GUAARDVARK_NETWORK_ACCESS", raising=False)
+    client = app.test_client()
+
+    def send(addr, **headers):
+        return client.open(path, method=method, json={}, headers=headers, environ_base={"REMOTE_ADDR": addr})
+
+    assert send("192.168.1.20").status_code == 401
+    assert send("192.168.1.20").get_json()["code"] == auth_guard.API_KEY_CODE
+    assert send("127.0.0.1").status_code == 401
+    assert send("192.168.1.20", **{"X-API-Key": "not-it"}).status_code == 401
+    assert send("192.168.1.20", **{"X-API-Key": "secret"}).status_code == 200
+    assert send("127.0.0.1", **{"X-API-Key": "secret"}).status_code == 200
+
+
+@pytest.mark.parametrize("network_access", [None, "1"])
+@pytest.mark.parametrize("api_key", [None, "secret"])
+@pytest.mark.parametrize("addr", ["192.168.1.20", "127.0.0.1", "8.8.8.8"])
+def test_wordpress_gets_the_same_answer_as_connections(app, monkeypatch, network_access, api_key, addr):
+    """Network access opens WordPress to the local network exactly as it opens
+    the other protected routes, and an address outside it still needs the key."""
+    for name, value in (("GUAARDVARK_NETWORK_ACCESS", network_access), ("GUAARDVARK_API_KEY", api_key)):
+        if value:
+            monkeypatch.setenv(name, value)
+        else:
+            monkeypatch.delenv(name, raising=False)
+    client = app.test_client()
+
+    connections = client.get("/api/connections", environ_base={"REMOTE_ADDR": addr})
+    wordpress = client.get("/api/wordpress/sites", environ_base={"REMOTE_ADDR": addr})
+
+    assert wordpress.status_code == connections.status_code
+    assert wordpress.get_json() == connections.get_json()
+
+
+def test_every_wordpress_route_refuses_another_host_without_api_key(monkeypatch):
+    """Each route the WordPress blueprint serves, not only the sampled ones."""
+    import re
+
+    from backend.api.wordpress_api import wordpress_bp
+
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    monkeypatch.delenv("GUAARDVARK_NETWORK_ACCESS", raising=False)
+    real_app = Flask(__name__)
+    real_app.before_request(auth_guard.check_endpoint_auth)
+    real_app.register_blueprint(wordpress_bp)
+    client = real_app.test_client()
+
+    checked = []
+    for rule in real_app.url_map.iter_rules():
+        if not rule.endpoint.startswith(f"{wordpress_bp.name}."):
+            continue
+        path = re.sub(r"<(?:\w+:)?\w+>", "1", rule.rule)
+        for method in sorted(rule.methods - {"HEAD", "OPTIONS"}):
+            response = client.open(path, method=method, json={}, environ_base={"REMOTE_ADDR": "192.168.1.20"})
+            assert response.status_code == 403, f"{method} {path}"
+            checked.append((method, path))
+
+    # Fewer would mean the blueprint lost routes or the walk above missed them.
+    assert len(checked) >= 17
+
+
+def test_settings_access_lists_wordpress():
+    assert any("WordPress" in item for item in auth_guard.protected_summary())
 
 
 def test_profile_write_blocked_from_remote_host_but_readable(app, monkeypatch):

@@ -1569,6 +1569,24 @@ try:
                 except Exception as e:
                     app.logger.warning("[INDEXING] stuck row reconcile failed: %s", e)
 
+            # ---- WordPress site keys still in the database ---------------------
+            # Older installs kept them in wordpress_sites.api_key in clear text.
+            # Server only, so one process writes the credential file.
+            if os.environ.get("CELERY_WORKER_MODE", "false").lower() != "true":
+                try:
+                    from backend.services.wordpress_credentials import migrate_database_keys
+                    _wp_keys = migrate_database_keys()
+                    if any(_wp_keys.values()):
+                        (app.logger.warning if _wp_keys["failed"] else app.logger.info)(
+                            "[WORDPRESS] site keys: %d moved to the credential store, %d already there, %d left in the database",
+                            _wp_keys["moved"], _wp_keys["already_stored"], _wp_keys["failed"])
+                except Exception as e:
+                    app.logger.warning("[WORDPRESS] moving site keys to the credential store failed: %s", e)
+                    try:
+                        db.session.rollback()
+                    except Exception:
+                        pass
+
         except OperationalError as op_err:
             app.logger.error(f"Database operation error during create_all: {op_err}")
             app.logger.error("Check database connection and configuration.")
