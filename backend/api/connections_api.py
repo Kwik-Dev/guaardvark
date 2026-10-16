@@ -343,15 +343,73 @@ def get_publish(pid):
     return jsonify(record.to_dict()), 200
 
 
-@connections_bp.route("/publishes/<int:pid>/approve", methods=["POST"])
-def approve_publish(pid):
+@connections_bp.route("/publishes/<int:pid>", methods=["PATCH"])
+def edit_publish(pid):
+    """Change a publish that waits for approval; it keeps waiting.
+
+    Body: any of body, title, link_url, tags, visibility, post_options,
+    ai_disclosure, scheduled_at (null clears the time), plus ``revision`` (the
+    one the editor started from) and ``edited_by`` (a source, as requested_by).
+    """
+    from backend.models import db
+    from backend.services.connections import gates, publish_service
+
+    record, err = _get_record(pid)
+    if err:
+        return err
+    payload = request.get_json(silent=True)
+    payload = payload if isinstance(payload, dict) else {}
+    try:
+        result = publish_service.edit(
+            record,
+            publish_service.edit_changes(payload),
+            revision=payload.get("revision"),
+            edited_by=gates.normalize_source(payload.get("edited_by")),
+        )
+    except publish_service.PublishChanged as e:
+        db.session.rollback()
+        return _error(str(e), 409, code=e.code, publish=record.to_dict())
+    except ValueError as e:
+        return _error(str(e), 400)
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        return _error("Database error", 500, details=str(e))
+    return jsonify(result), 200
+
+
+@connections_bp.route("/publishes/<int:pid>/preflight", methods=["POST"])
+def edit_publish_preflight(pid):
+    """Validate an edit to a held publish without saving it (same body as PATCH)."""
     from backend.services.connections import publish_service
 
     record, err = _get_record(pid)
     if err:
         return err
+    payload = request.get_json(silent=True)
     try:
-        result = publish_service.approve(record)
+        changes = publish_service.edit_changes(payload if isinstance(payload, dict) else {})
+    except ValueError as e:
+        return jsonify({"ok": False, "per_connection": {}, "violations": [str(e)], "changed": []}), 200
+    return jsonify(publish_service.edit_preflight(record, changes)), 200
+
+
+@connections_bp.route("/publishes/<int:pid>/approve", methods=["POST"])
+def approve_publish(pid):
+    """Body: ``revision``, the one the person was shown; omitted means as queued."""
+    from backend.models import db
+    from backend.services.connections import publish_service
+
+    record, err = _get_record(pid)
+    if err:
+        return err
+    payload = request.get_json(silent=True)
+    try:
+        result = publish_service.approve(
+            record, revision=payload.get("revision") if isinstance(payload, dict) else None
+        )
+    except publish_service.PublishChanged as e:
+        db.session.rollback()
+        return _error(str(e), 409, code=e.code, publish=record.to_dict())
     except ValueError as e:
         return _error(str(e), 400)
     except RuntimeError as e:

@@ -8,6 +8,10 @@ A record moves awaiting_approval -> (approved) -> queued -> processing ->
 posted, or waits as ``scheduled`` in between when it has a time (see
 scheduling.py). Nothing leaves awaiting_approval without ``approve()`` or, when
 approval is switched off, the person's own Publish click in the UI.
+
+While it waits, ``edit()`` may change what the composer sets. Each saved edit
+raises ``revision``, and ``approve()`` takes the revision the person was shown,
+so an approval never releases text it did not show.
 """
 
 from __future__ import annotations
@@ -36,6 +40,35 @@ PUBLISH_TIME_LIMIT = 7500
 HELD_MESSAGE = (
     "Held when public posting was stopped. Approve it to send it once posting resumes."
 )
+
+# What a person may change on a publish waiting for approval: what the
+# composer sets. Media stays as queued.
+EDITABLE_FIELDS = (
+    "body", "title", "link_url", "tags", "visibility", "post_options", "ai_disclosure", "scheduled_at",
+)
+
+# PublishChanged.code values.
+EDITED_SINCE = "edited_since"
+NOT_WAITING = "not_waiting"
+
+APPROVE_EDITED_MESSAGE = (
+    "This publish was edited after it was shown to you. Review the text it has now, "
+    "then approve it again."
+)
+EDIT_CONFLICT_MESSAGE = (
+    "This publish was edited elsewhere after you opened it. Open it again to start "
+    "from its current text."
+)
+
+
+class PublishChanged(RuntimeError):
+    """The publish changed after the caller read it. ``code`` says how:
+    ``EDITED_SINCE`` (another edit was saved) or ``NOT_WAITING`` (it was
+    approved, rejected or cancelled meanwhile)."""
+
+    def __init__(self, message: str, code: str):
+        super().__init__(message)
+        self.code = code
 
 
 def preflight(
@@ -444,16 +477,25 @@ def _dispatch(record, connection, spec) -> Dict[str, Any]:
     }
 
 
-def approve(record) -> Dict[str, Any]:
+def approve(record, revision: Optional[int] = None) -> Dict[str, Any]:
     """Release a publish waiting for approval, or a held one: now, or for its time.
 
-    Raises RuntimeError while public posting is stopped, or when a post that
-    would go out now is over its account's rate limit; the record stays put.
+    ``revision`` is the one the person was shown; None means the text as
+    queued (revision 0). The approval is stamped by a compare-and-set on
+    status and revision, so a save from ``edit()`` landing first refuses it,
+    and one landing after finds the record no longer waiting.
+
+    Raises PublishChanged when the record was edited since that revision,
+    RuntimeError while public posting is stopped, or when a post that would go
+    out now is over its account's rate limit; the record stays put.
     """
-    from backend.models import Connection, db
+    from backend.models import Connection, PublishRecord, db
 
     if record.status != "awaiting_approval":
         raise ValueError(f"Cannot approve a record that is '{record.status}'.")
+    seen = 0 if revision is None else _whole_revision(revision)
+    if (record.revision or 0) != seen:
+        raise PublishChanged(APPROVE_EDITED_MESSAGE, EDITED_SINCE)
     stopped = gates.posting_stop_reason()
     if stopped:
         raise RuntimeError(stopped)
@@ -461,13 +503,284 @@ def approve(record) -> Dict[str, Any]:
     if connection is None:
         raise ValueError("The target connection no longer exists.")
 
-    record.approved_at = datetime.now()
+    now = datetime.now()
+    stamped = (
+        PublishRecord.query.filter(
+            PublishRecord.id == record.id,
+            PublishRecord.status == "awaiting_approval",
+            PublishRecord.revision == seen,
+        ).update({"approved_at": now}, synchronize_session=False)
+    )
+    if stamped != 1:
+        db.session.rollback()
+        db.session.refresh(record)
+        if record.status != "awaiting_approval":
+            raise ValueError(f"Cannot approve a record that is '{record.status}'.")
+        raise PublishChanged(APPROVE_EDITED_MESSAGE, EDITED_SINCE)
+    record.approved_at = now
     try:
         return _release(record, connection, registry.spec_for(connection.provider))
     except RuntimeError:
         # A refusal leaves the record waiting, without the approval stamp.
         db.session.rollback()
         raise
+
+
+def _whole_revision(value) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError("revision must be a whole number.") from e
+
+
+def edit_changes(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """The editable fields present in a request body, in the types the record keeps.
+
+    A field left out stays as it is. ``scheduled_at`` null clears the time, so
+    an approval sends it at once; ``visibility`` null means the platform's
+    default. Raises ValueError for a value of the wrong shape or an unreadable time.
+    """
+    changes: Dict[str, Any] = {}
+    if "body" in payload:
+        changes["body"] = "" if payload["body"] is None else str(payload["body"])
+    for key in ("title", "link_url", "visibility"):
+        if key in payload:
+            text = "" if payload[key] is None else str(payload[key])
+            if key != "title":
+                text = text.strip()
+            changes[key] = text if text.strip() else None
+    if "tags" in payload:
+        tags = payload["tags"]
+        if isinstance(tags, str):
+            tags = tags.split(",")
+        if tags is None:
+            tags = []
+        if not isinstance(tags, list):
+            raise ValueError("tags must be a list of words.")
+        changes["tags"] = [str(t).strip() for t in tags if str(t).strip()]
+    if "post_options" in payload:
+        options = payload["post_options"]
+        if options is not None and not isinstance(options, dict):
+            raise ValueError("post_options must be an object of field names and values.")
+        changes["post_options"] = options or {}
+    if "ai_disclosure" in payload:
+        changes["ai_disclosure"] = bool(payload["ai_disclosure"])
+    if "scheduled_at" in payload:
+        changes["scheduled_at"] = scheduling.parse_when(payload["scheduled_at"])
+    return changes
+
+
+def _stored_values(record) -> Dict[str, Any]:
+    return {
+        "body": record.body or "",
+        "title": record.title,
+        "link_url": record.link_url,
+        "tags": _json_list(record.tags),
+        "visibility": record.visibility,
+        "post_options": _json_dict(record.post_options),
+        "ai_disclosure": bool(record.ai_disclosure),
+        "scheduled_at": record.scheduled_at,
+    }
+
+
+def _record_media(record):
+    """The record's media as queued, with each document's model credit read
+    again: the stored refs do not keep it, and a recomposed body must."""
+    items = media_util.media_from_refs(record.media_refs)
+    for item in items:
+        item.attribution = media_util.attribution_of(item.document_id)
+    return items
+
+
+def _check_edit(record, changes: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any], str]:
+    """Validate the record with ``changes`` applied as ``queue_publish``
+    validates one target, without saving.
+
+    Returns (report, values, label): the preflight shape for this one target
+    plus ``changed`` and ``revision``, the values to store, and the platform's
+    label for messages. The publish switch, the posting stop and rate limits
+    are not judged here: an edit sends nothing, and ``approve()`` applies them.
+    """
+    from backend.models import Connection
+
+    stored = _stored_values(record)
+    wanted = {**stored, **changes}
+    scheduled_at = wanted["scheduled_at"]
+    general: List[str] = []
+    # A time already passed may stay; approving then sends it at once.
+    if scheduled_at != record.scheduled_at:
+        general += scheduling.problems(scheduled_at)
+
+    connection = Connection.query.get(record.connection_id) if record.connection_id else None
+    entry: Dict[str, Any] = {
+        "provider": record.platform,
+        "label": (connection.display_name or connection.provider) if connection else record.platform,
+    }
+    report = {
+        "per_connection": {str(record.connection_id or 0): entry},
+        "violations": general,
+        "changed": [],
+        "revision": record.revision or 0,
+    }
+    if connection is None:
+        entry["violations"] = ["The target connection no longer exists."]
+        report["ok"] = False
+        return report, {}, record.platform
+    problems = connection_problems(connection)
+    if problems:
+        entry["violations"] = problems
+        report["ok"] = False
+        try:
+            return report, {}, registry.spec_for(connection.provider).label
+        except KeyError:
+            return report, {}, connection.provider
+
+    spec = registry.spec_for(connection.provider)
+    caps = spec.capabilities
+    items = _record_media(record)
+    disclosed, required = disclosure_for(caps, items, record.requested_by, wanted["ai_disclosure"])
+    body = compose_body(wanted["body"], items, connection, caps, disclosed)
+    visibility = wanted["visibility"] or caps.default_visibility
+    options = options_for(spec, wanted["post_options"])
+    problems = media_util.validate_against(
+        caps, items, body=body, title=wanted["title"], visibility=visibility
+    )
+    problems += post_field_problems(spec, options)
+    problems += schedule_problems(caps, scheduled_at)
+    problems += bot_label_problems(caps, connection)
+
+    entry["body"] = body
+    entry["ai_disclosure"] = {**caps.ai_disclosure.to_dict(), "required": required, "applied": disclosed}
+    if scheduled_at is not None and scheduled_at > datetime.now():
+        mode = scheduling.plan(caps, scheduled_at, visibility)
+        entry["schedule"] = {"mode": mode, "note": scheduling.describe(caps, spec.label, mode)}
+    entry["violations"] = problems
+
+    values = {
+        "body": body,
+        "title": wanted["title"],
+        "link_url": wanted["link_url"],
+        "tags": wanted["tags"],
+        "visibility": visibility,
+        "post_options": options,
+        "ai_disclosure": disclosed,
+        "scheduled_at": scheduled_at,
+    }
+    report["changed"] = [name for name in EDITABLE_FIELDS if values[name] != stored[name]]
+    report["ok"] = not general and not problems
+    return report, values, spec.label
+
+
+def _not_waiting_message(status: str) -> str:
+    return f"This publish is no longer waiting for approval (it is '{status}'), so it cannot be edited."
+
+
+def edit_preflight(record, changes: Dict[str, Any]) -> Dict[str, Any]:
+    """What ``edit()`` would say about ``changes``, for live feedback while editing."""
+    if record.status != "awaiting_approval":
+        return {
+            "ok": False,
+            "per_connection": {},
+            "violations": [_not_waiting_message(record.status)],
+            "changed": [],
+            "revision": record.revision or 0,
+        }
+    return _check_edit(record, changes)[0]
+
+
+def edit(
+    record,
+    changes: Dict[str, Any],
+    *,
+    revision: Optional[int] = None,
+    edited_by: str = "ui",
+) -> Dict[str, Any]:
+    """Change a publish that waits for approval. It keeps waiting; nothing is sent.
+
+    ``changes`` comes from ``edit_changes``; ``revision`` is the one the editor
+    started from (None: the current one). The new values pass the same checks
+    as queueing, with the same messages, the AI label forced on where the
+    platform requires it for this record's source and media. A saved change
+    raises ``revision``, so an approval given for the old text is refused.
+
+    Returns {"changed": [field, ...], "publish": record dict}; nothing is
+    written when nothing differs.
+
+    Raises:
+        ValueError: a value breaks a rule of the target, or the time is too soon.
+        PublishChanged: the record left awaiting_approval, or another edit was
+            saved since ``revision``.
+    """
+    from backend.models import PublishRecord, db
+
+    if record.status != "awaiting_approval":
+        raise PublishChanged(_not_waiting_message(record.status), NOT_WAITING)
+    seen = (record.revision or 0) if revision is None else _whole_revision(revision)
+    if (record.revision or 0) != seen:
+        raise PublishChanged(EDIT_CONFLICT_MESSAGE, EDITED_SINCE)
+
+    report, values, label = _check_edit(record, changes)
+    if report["violations"]:
+        raise ValueError(report["violations"][0])
+    entry = next(iter(report["per_connection"].values()))
+    if entry["violations"]:
+        raise ValueError(f"{label}: {entry['violations'][0]}")
+    changed = report["changed"]
+    if not changed:
+        return {"changed": [], "publish": record.to_dict()}
+
+    stored = {name: _column_value(name, values[name]) for name in changed}
+    so_far = set(_json_list(record.edited_fields)) | set(changed)
+    stored.update({
+        "revision": PublishRecord.revision + 1,
+        "edited_at": datetime.now(),
+        "edited_by": edited_by,
+        "edited_fields": json.dumps([name for name in EDITABLE_FIELDS if name in so_far]),
+    })
+    saved = (
+        PublishRecord.query.filter(
+            PublishRecord.id == record.id,
+            PublishRecord.status == "awaiting_approval",
+            PublishRecord.approved_at.is_(None),
+            PublishRecord.revision == seen,
+        ).update(stored, synchronize_session=False)
+    )
+    db.session.commit()
+    db.session.refresh(record)
+    if saved != 1:
+        if record.status != "awaiting_approval":
+            raise PublishChanged(_not_waiting_message(record.status), NOT_WAITING)
+        raise PublishChanged(EDIT_CONFLICT_MESSAGE, EDITED_SINCE)
+    return {"changed": changed, "publish": record.to_dict()}
+
+
+def _column_value(name: str, value):
+    """A value from ``_check_edit`` as its PublishRecord column stores it."""
+    if name == "tags":
+        return json.dumps(value)
+    if name == "post_options":
+        return json.dumps(value) if value else None
+    return value
+
+
+def _json_list(raw) -> list:
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+        return value if isinstance(value, list) else []
+    except (ValueError, TypeError):
+        return []
+
+
+def _json_dict(raw) -> dict:
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+        return value if isinstance(value, dict) else {}
+    except (ValueError, TypeError):
+        return {}
 
 
 def hold(record, message: str = HELD_MESSAGE) -> None:
