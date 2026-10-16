@@ -24,6 +24,7 @@ data/piptmp/
 data/database/
 data/models/
 data/context/
+data/indexes/
 
 # Video editor projects + migrated session (runtime user data, per-machine)
 data/video-editor-projects/
