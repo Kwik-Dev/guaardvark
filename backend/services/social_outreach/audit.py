@@ -186,9 +186,8 @@ def mark_drafted_from_candidate(
     `posted_text` is the UTM-tagged version Content prepared so Phase 3
     doesn't have to re-tag at servo time.
 
-    ``status`` is normally ``\"drafted\"``. When unsupervised + grade/cadence
-    allow, Content passes ``\"approved\"`` so tick_process_approved_drafts can
-    post (parity with /draft-comment's would_post path).
+    ``status`` is ``\"drafted\"`` or ``\"approved\"``; the Content agent
+    passes drafted, since every draft waits for a person's approval.
     """
     if status not in ("drafted", "approved"):
         status = "drafted"

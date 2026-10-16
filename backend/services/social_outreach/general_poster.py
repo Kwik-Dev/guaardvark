@@ -7,9 +7,10 @@ prompt) tells the brain what's actually on THIS page. So instead of a hand-writt
 BiDi poster per platform, one NL-driven loop finds the composer, types the text,
 and submits — on any site the operator is logged into.
 
-Used for platforms without a dedicated calibrated fast-path (X/Twitter).
-Reddit, YouTube and Facebook comments have BiDi posters; once this loop is
-live-verified they can migrate here too, and "adding a platform" becomes "log in".
+No posting path calls this today. It served X, which is refused
+(platforms.REFUSED); Reddit, YouTube and Facebook comments have BiDi posters
+and post only as watched posts (watched_post). A platform added here must be
+in platforms.POLICIES as WATCHED, never posting on its own.
 
 Contract mirrors reddit_outreach.post_comment_via_servo: returns (success, reason).
 """

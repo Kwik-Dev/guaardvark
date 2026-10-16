@@ -588,7 +588,7 @@ def draft_via_backend(
     """Calls the social-outreach draft endpoint synchronously.
 
     ``relevance_unchecked`` says the thread-fit judge could not run on this
-    thread; the endpoint then holds an unsupervised draft for approval.
+    thread; the endpoint notes that on the draft for the person reviewing it.
     The thread's keyword label is not sent: a feature_hint on /draft-comment
     is a person asking the draft to lead with that feature, and this loop
     leaves the angle to the pitch sheet.
@@ -984,7 +984,7 @@ class RedditOutreachLoop:
             # match cannot tell a setup question from a rant against local AI.
             # A thread it grades below the bar, or says "skip" to, gets no
             # draft. When the judge cannot run, the thread is drafted marked
-            # relevance unchecked, and an unsupervised draft is then held.
+            # relevance unchecked for the person who reviews the draft.
             relevance = external_grader.score_thread_relevance(
                 title=thread.title,
                 selftext=thread.selftext,
@@ -1011,9 +1011,8 @@ class RedditOutreachLoop:
                 continue
             report["drafted"] += 1
 
-            # Draft-only: posting is exclusively via tick_process_approved_drafts
-            # (cadence + claim). When unsupervised, /draft-comment already set
-            # status=approved for would_post drafts so the next beat posts them.
+            # Draft-only: a person approves each draft and starts its post
+            # (watched_post), which checks cadence and claims the row.
             if draft_result.get("would_post"):
                 report["queued_for_post"] = report.get("queued_for_post", 0) + 1
 

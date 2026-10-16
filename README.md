@@ -247,7 +247,7 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
 
 ## More built in
 
-- **Supervised outreach.** Drafts replies to threads on Reddit, YouTube, Discord, X and Facebook, grounded in your own indexed documents, graded for relevance before they reach the queue, with nothing posted until you approve it. Kill switch, per-platform cadence limits and a JSONL audit trail.
+- **Supervised outreach.** Drafts replies to threads on Reddit, YouTube, Discord and Facebook, grounded in your own indexed documents, graded for relevance before they reach the queue, with nothing posted until you approve it. Reddit, YouTube and Facebook posts go out one at a time while you watch the Agent Screen. Kill switch, per-platform cadence limits and a JSONL audit trail.
 - **Files and projects.** A desktop-style file manager (folders as windows, drag and drop, right-click menus) with clients, projects, websites and notes linked together and indexed recursively. Files stream into the browser's own players and viewers, so video plays without a codec pack and PDFs start rendering before they finish downloading.
 - **Rules, prompts, lessons and memory.** Portable rule bundles, lessons that teach the agent from a good run, and "remember …" notes that carry across chats.
 - **Discord bot** plugin for chat, `/imagine` images and search against your own install.
@@ -258,14 +258,14 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
 <details>
 <summary>How supervised outreach works</summary>
 
-1. **Discover.** The agent scouts target threads from a URL you paste or from platform entry points (subscribed subreddits, Discord channels, Twitter feeds, Facebook groups).
-2. **Context.** For each candidate it fetches the post and top comments: Reddit through its JSON API, Discord, Twitter and Facebook through the agent's logged-in Firefox session, with a vision-model fallback when page selectors drift.
+1. **Discover.** The agent scouts target threads from a URL you paste or from platform entry points (subscribed subreddits, Discord channels, Facebook groups).
+2. **Context.** For each candidate it fetches the post and top comments: Reddit through its JSON API, Discord and Facebook through the agent's logged-in Firefox session, with a vision-model fallback when page selectors drift.
 3. **Draft.** Your local model writes a reply grounded in the thread and in citations from your indexed documents, shaped by one configurable persona (voice, expertise, citation style, what never to say).
 4. **Grade.** Every draft is scored against a relevance and quality rubric; anything below the threshold is dropped. Generic "great post!" replies don't survive.
-5. **Review.** Drafts land in a queue. In supervised mode (the default) nothing posts without your approval.
-6. **Post.** Approved drafts post through the logged-in browser session (Reddit comments and link posts, Facebook comments, YouTube) or the Discord API, cadence-gated. The Reddit and Facebook posters read the page at every step: they check the browser is still on the approved post, read the text back out of the box before submitting, and count a post only once it shows on the page. `/outreach …` in chat or `guaardvark outreach "…"` runs recon and drafting; posting still needs approval while supervised.
+5. **Review.** Drafts land in a queue. Nothing posts without your approval, and there is no setting that changes that.
+6. **Post.** Approved Discord replies go out through the Discord bot. Reddit comments and link posts, Facebook comments and YouTube comments go through the agent's logged-in browser, so each one starts only when you press **Post now, I'm watching** on the Approvals page with the Agent Screen open: one click, one post, driven on screen while you watch, cadence-gated. Closing the Agent Screen before the submit step stops it. The Reddit and Facebook posters read the page at every step: they check the browser is still on the approved post, read the text back out of the box before submitting, and count a post only once it shows on the page. `/outreach …` in chat or `guaardvark outreach "…"` runs recon and drafting; posting still needs your approval and your click. X and LinkedIn are not offered: both forbid driving an account with browser automation.
 
-Safety: a system-wide kill switch stops every pipeline mid-flight; supervised mode is the default; at most one post per 30 minutes per platform (configurable); every scout, draft, grade, approval, rejection, post and failure is recorded in a JSONL audit trail. Manual draft mode and on-demand passes for one platform or subreddit are available from the UI.
+Safety: a system-wide kill switch stops every pipeline mid-flight; every post needs a person's approval; at most one post per 30 minutes per platform; every scout, draft, grade, approval, rejection, post and failure is recorded in a JSONL audit trail. Manual draft mode and on-demand passes for one platform or subreddit are available from the UI.
 
 </details>
 

@@ -1,4 +1,4 @@
-"""The agent browser's control port is open only while the posting tick posts.
+"""The agent browser's control port is open only while a watched post posts.
 
 agent_browser_control runs against a stand-in for the process table, the
 launcher and the port; nothing here lists, closes or starts a real Firefox.
@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import os
 import subprocess
+import time
 import types
 
 import pytest
@@ -292,13 +293,13 @@ def test_only_this_installs_agent_firefox_is_found(monkeypatch, tmp_path):
     assert agent_web_gate.agent_firefox_pids(profile) == [102]
 
 
-# --- the posting tick ------------------------------------------------------
+# --- a watched post ------------------------------------------------------------
 
 
 @pytest.fixture
-def tick(app, monkeypatch, web_access_on):
-    """Run the tick with stand-in posters and a recording browser control.
-    Returns (run, events, set_refusal)."""
+def post(app, monkeypatch, web_access_on, fake_redis, watching):
+    """Run one watched post with stand-in posters and a recording browser
+    control. Returns (run, events, set_refusal)."""
     events: list[str] = []
     refusal = {"value": None}
 
@@ -311,10 +312,10 @@ def tick(app, monkeypatch, web_access_on):
             events.append("close")
 
     def stand_in(name):
-        def post(*args, **kwargs):
+        def poster(*args, **kwargs):
             events.append(name)
             return True, "ok"
-        return post
+        return poster
 
     def with_ctx(fn, *args, **kwargs):
         with app.app_context():
@@ -327,7 +328,6 @@ def tick(app, monkeypatch, web_access_on):
     for target, name in (
         ("backend.services.social_outreach.reddit_outreach.post_comment_via_servo", "reddit_comment"),
         ("backend.services.social_outreach.youtube_outreach.post_youtube_comment_via_servo", "youtube_comment"),
-        ("backend.services.social_outreach.general_poster.post_via_agent_loop", "agent_loop"),
         ("backend.services.social_outreach.reddit_outreach.record_post_via_backend", "record_post"),
     ):
         monkeypatch.setattr(target, stand_in(name))
@@ -335,7 +335,7 @@ def tick(app, monkeypatch, web_access_on):
     def set_refusal(value):
         refusal["value"] = value
 
-    return (lambda: tasks.tick_process_approved_drafts.run()), events, set_refusal
+    return (lambda row_id: tasks.post_watched_draft.run(row_id, time.time())), events, set_refusal
 
 
 def _approved(platform, action="comment", url="https://www.reddit.com/r/x/comments/abc/t/"):
@@ -353,62 +353,58 @@ def _status(row_id):
     return db.session.get(SocialOutreachLog, row_id).status
 
 
-def test_the_tick_opens_the_port_once_around_all_its_posts(app, tick):
-    run, events, _ = tick
-    _approved("reddit")
-    _approved("youtube", url="https://www.youtube.com/watch?v=abcdefghijk")
-    _approved("x", url="https://x.com/someone/status/1")
+def test_a_watched_post_opens_the_port_around_its_one_post(app, post):
+    run, events, _ = post
+    first = _approved("reddit")
+    second = _approved("youtube", url="https://www.youtube.com/watch?v=abcdefghijk")
 
-    result = run()
+    result = run(first)
 
-    assert result["processed"] == 3
-    assert events[0] == "open" and events[-1] == "close"
-    assert sorted(events[1:-1]) == sorted([
-        "reddit_comment", "youtube_comment", "agent_loop", "record_post", "record_post", "record_post",
-    ])
+    assert result["posted"] is True
+    assert events == ["open", "reddit_comment", "record_post", "close"]
+    assert _status(second) == "approved"  # one click, one post
 
 
-def test_a_busy_agent_leaves_rows_approved_and_unclaimed(app, tick):
-    run, events, set_refusal = tick
+def test_a_busy_agent_leaves_the_row_approved_and_unclaimed(app, post):
+    run, events, set_refusal = post
     set_refusal("agent_busy")
-    ids = [_approved("reddit"), _approved("youtube", url="https://www.youtube.com/watch?v=abcdefghijk")]
+    row_id = _approved("reddit")
 
-    result = run()
+    result = run(row_id)
 
     assert events == ["open", "close"]
-    assert [_status(i) for i in ids] == ["approved", "approved"]
-    assert result["processed"] == 0
-    assert result["skipped_browser_busy"] == 2
-    assert result["browser_refusal"] == "agent_busy"
+    assert _status(row_id) == "approved"
+    assert result["posted"] is False
+    assert "agent_busy" in result["message"]
 
 
-def test_a_tick_with_nothing_to_post_never_touches_the_browser(app, tick, monkeypatch):
-    run, events, _ = tick
+def test_a_refused_post_never_touches_the_browser(app, post, monkeypatch):
+    run, events, _ = post
     monkeypatch.setattr(kill_switch, "cadence_allows_post", lambda platform: (False, "daily cap hit"))
-    unsupported = _approved("reddit", action="reply")
-    capped = _approved("youtube", url="https://www.youtube.com/watch?v=abcdefghijk")
+    row_id = _approved("youtube", url="https://www.youtube.com/watch?v=abcdefghijk")
 
-    run()
+    result = run(row_id)
 
     assert events == []
-    assert _status(unsupported) == "unsupported"
-    assert _status(capped) == "approved"
+    assert _status(row_id) == "approved"
+    assert "daily cap hit" in result["message"]
 
 
-def test_the_port_closes_when_a_poster_raises(app, tick, monkeypatch):
-    run, events, _ = tick
+def test_the_port_closes_when_a_poster_raises(app, post, monkeypatch):
+    run, events, _ = post
 
     def crash(*args, **kwargs):
         events.append("reddit_comment")
         raise RuntimeError("servo crashed")
 
     monkeypatch.setattr("backend.services.social_outreach.reddit_outreach.post_comment_via_servo", crash)
-    _approved("reddit")
+    row_id = _approved("reddit")
 
     with pytest.raises(RuntimeError):
-        run()
+        run(row_id)
 
     assert events == ["open", "reddit_comment", "close"]
+    assert _status(row_id) == "aborted"
 
 
 def test_the_display_counts_as_in_use_while_a_post_holds_it(tmp_path, monkeypatch):

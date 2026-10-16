@@ -7,13 +7,11 @@ alike, is never set on a fresh install, and is its own setting rather than
 social_outreach_enabled, which defaults off and must not hold back a publish.
 stop_all_posting() engages it and holds what is queued; resume_posting() lifts it.
 
-Three layers of brakes for outreach:
+Brakes for outreach, under that stop:
   1. is_enabled() — global on/off via Setting('social_outreach_enabled', 'true'/'false'). Defaults false.
      Also false while public posting is stopped.
-  2. is_supervised() — when true, drafts wait for a person (Approvals → Outreach) instead of posting.
-     Defaults true; only an explicit "false" lets graded drafts post on their own.
-     requires_independent_check() — when unsupervised, a draft also needs a second check that
-     actually ran (gates.independent_ok). Defaults true.
+  2. A person's approval for every draft. There is no setting that lets a draft post
+     without one; what may happen after the approval is per platform (platforms.py).
   3. cadence checks — Redis-backed, per-platform. Hard caps: 1 post / 30 min / platform, 8 posts / 24h / platform.
 
 Plus task-level abort on 2 servo failures (enforced by the loop, not here).
@@ -144,59 +142,33 @@ def is_enabled() -> bool:
     return _is_on(_read_setting("social_outreach_enabled", "false")) and not posting_stopped()
 
 
-def _supervised(value: Optional[str]) -> bool:
-    # Never set means supervised: a post goes out under the user's name, so
-    # posting without a person's click has to be chosen, not defaulted into.
-    return True if value is None else _is_on(value)
-
-
-def is_supervised() -> bool:
-    """Whether drafts wait for review. True unless switched off explicitly, and
-    true when the setting cannot be read: unknown must not mean "post without
-    review"."""
-    try:
-        return _supervised(_lookup_setting("social_outreach_supervised"))
-    except Exception as e:
-        logger.warning("supervised setting unreadable, treating as supervised: %s", e)
-        return True
-
-
-def requires_independent_check() -> bool:
-    """Whether an unsupervised draft needs a second check that actually ran
-    (gates.independent_ok) before it may post. True unless the setting
-    ``outreach_require_independent_check`` is switched off explicitly, and true
-    when the setting cannot be read."""
-    try:
-        value = _lookup_setting("outreach_require_independent_check")
-    except Exception as e:
-        logger.warning("independent-check setting unreadable, treating as required: %s", e)
-        return True
-    return True if value is None else _is_on(value)
-
-
 def status_snapshot() -> dict:
     """What GET /api/social-outreach/status and outreach_status report.
 
     ``settings_readable`` is false when the settings table could not be read;
-    ``enabled`` and ``supervised`` are then the fail-closed values the posting
-    paths use, not what the user set. ``enabled`` is the outreach switch as
-    set; ``posting_stopped`` is the stop on all public posting, which holds
-    outreach back whatever ``enabled`` says.
+    ``enabled`` is then false, the value the posting paths use, not what the
+    user set. ``enabled`` is the outreach switch as set; ``posting_stopped`` is
+    the stop on all public posting, which holds outreach back whatever
+    ``enabled`` says. ``supervised`` is always true: every draft waits for a
+    person's approval, and clients that show the mode read it here.
+    ``posting_modes`` is the per-platform table (platforms.to_dict).
     """
+    from backend.services.social_outreach import platforms
+
     readable = True
     try:
         enabled = _is_on(_lookup_setting("social_outreach_enabled"))
-        supervised = _supervised(_lookup_setting("social_outreach_supervised"))
     except Exception as e:
         logger.warning("outreach settings unreadable: %s", e)
-        readable, enabled, supervised = False, False, True
+        readable, enabled = False, False
     stop_reason = posting_stop_reason()
     return {
         "enabled": enabled,
-        "supervised": supervised,
+        "supervised": True,
         "posting_stopped": stop_reason is not None,
         "posting_stop_reason": stop_reason,
         "settings_readable": readable,
+        "posting_modes": platforms.to_dict(),
         "caps": {
             "min_gap_seconds": CADENCE_MIN_GAP_SECONDS,
             "daily_cap": CADENCE_DAILY_CAP,
@@ -208,10 +180,6 @@ def status_snapshot() -> dict:
 
 def set_enabled(value: bool) -> None:
     _write_setting("social_outreach_enabled", "true" if value else "false")
-
-
-def set_supervised(value: bool) -> None:
-    _write_setting("social_outreach_supervised", "true" if value else "false")
 
 
 def _write_setting(key: str, value: str) -> None:
@@ -468,9 +436,10 @@ def stop_all_posting() -> dict:
     """Engage the stop on all public posting, outreach and Connections alike.
 
     The stop is written first, so every posting path refuses from here on;
-    then queued work is cleared. Approved outreach drafts stay approved and
-    post on the usual schedule after resume_posting(); held Connections
-    publishes need a person's approval. ``posting_stopped`` in the result is
+    then queued work is cleared, a watched post that has not reached its
+    submit step included. Approved outreach drafts stay approved and post as
+    usual after resume_posting(); held Connections publishes need a person's
+    approval. ``posting_stopped`` in the result is
     read back, so a failed write shows as false.
     """
     _write_setting(POSTING_STOP_KEY, "true")
@@ -498,10 +467,12 @@ def resume_posting() -> dict:
 
 
 def cadence_status() -> dict:
-    """Snapshot for /status endpoint."""
+    """Snapshot for /status endpoint: every platform something here posts to."""
+    from backend.services.social_outreach.platforms import POLICIES, REFUSED
+
     r = _get_redis()
     out = {}
-    platforms = ["reddit", "discord", "facebook", "youtube", "x", "twitter"]
+    platforms = sorted(name for name, policy in POLICIES.items() if policy.mode != REFUSED)
     if r is None:
         for p in platforms:
             out[p] = {"redis": "unavailable"}
