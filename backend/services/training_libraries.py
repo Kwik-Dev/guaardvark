@@ -122,8 +122,10 @@ LEFT_OUT = {
 
 # The only installed packages an install may move; every other one is held at
 # its version, so pip either adds packages or refuses. Remove puts these back.
+# backend/requirements*.txt must accept the version an install moves one to:
+# start-up runs `pip install -r` on them, which reinstalls anything outside.
 MAY_CHANGE = {
-    "accelerate": (">=1.4.0", "trl 1.13.0 needs 1.4.0 or newer (requirements.txt pins 1.2.1)"),
+    "accelerate": (">=1.4.0", "trl 1.13.0 needs 1.4.0 or newer (requirements.txt accepts any 1.x from 1.2.1)"),
     "fsspec": ("<=2026.2.0", "datasets 4.8.5 needs 2026.2.0 or older"),
     "typeguard": (">=4.0.0", "tyro, which Unsloth uses, needs 4.0 or newer"),
 }
