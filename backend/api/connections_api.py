@@ -247,6 +247,12 @@ def _disclosure_choice(payload):
     return None if value is None else bool(value)
 
 
+def _post_options(payload):
+    """Per-post field values ({name: value}); each target keeps the ones it declares."""
+    value = payload.get("post_options")
+    return value if isinstance(value, dict) else None
+
+
 @connections_bp.route("/publish/preflight", methods=["POST"])
 def publish_preflight():
     from backend.services.connections import publish_service, scheduling
@@ -264,6 +270,7 @@ def publish_preflight():
         visibility=payload.get("visibility"),
         scheduled_at=scheduled_at,
         ai_disclosure=_disclosure_choice(payload),
+        post_options=_post_options(payload),
     )
     return jsonify(result), 200
 
@@ -291,6 +298,7 @@ def publish_route():
             requested_by=gates.normalize_source(payload.get("requested_by")),
             scheduled_at=scheduling.parse_when(payload.get("scheduled_at")),
             ai_disclosure=_disclosure_choice(payload),
+            post_options=_post_options(payload),
         )
     except (ValueError, media_util.MediaResolveError) as e:
         return _error(str(e), 400)

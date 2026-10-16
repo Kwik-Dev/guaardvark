@@ -26,6 +26,7 @@ import {
   preflightPublish,
   queuePublish,
 } from "../../api/connectionsService";
+import { mergePostFields } from "../social/platformRules";
 
 /** Debounce so preflight doesn't fire on every keystroke. */
 const useDebounced = (value, delay = 400) => {
@@ -54,12 +55,16 @@ const suggestedTime = () => {
 };
 
 /**
- * Compose a post and publish selected assets to one or more connections.
- * Validation limits come from each provider's capabilities, never hardcoded;
- * the AI disclosure rule and who sends a scheduled post come back per
- * destination from preflight.
+ * Compose a post and publish selected assets, or text alone when there are
+ * none, to one or more connections. Validation limits come from each
+ * provider's capabilities, never hardcoded; the AI disclosure rule and who
+ * sends a scheduled post come back per destination from preflight. Fields a
+ * platform needs per post (its post_fields) appear while it is selected.
  */
-const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
+// One empty list, so a text-only post does not reset the form on every render.
+const NO_DOCUMENTS = [];
+
+const PublishModal = ({ open, onClose, documents = NO_DOCUMENTS, onFeedback }) => {
   const [connections, setConnections] = useState([]);
   const [specs, setSpecs] = useState({});
   const [selected, setSelected] = useState([]);
@@ -68,6 +73,7 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
   const [tags, setTags] = useState("");
   const [visibility, setVisibility] = useState("");
   const [aiDisclosure, setAiDisclosure] = useState(false);
+  const [postOptions, setPostOptions] = useState({});
   const [scheduleOn, setScheduleOn] = useState(false);
   const [scheduledAt, setScheduledAt] = useState("");
   const [preflight, setPreflight] = useState(null);
@@ -107,6 +113,7 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
     setSelected([]);
     setVisibility("");
     setAiDisclosure(false);
+    setPostOptions({});
     setScheduleOn(false);
     setScheduledAt("");
     setPreflight(null);
@@ -140,6 +147,16 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
 
   const supportsTitle = selectedSpecs.some((s) => s.capabilities?.supports_title);
   const supportsTags = selectedSpecs.some((s) => s.capabilities?.supports_tags);
+  const titleRequiredBy = selectedSpecs
+    .filter((s) => s.capabilities?.requires_title)
+    .map((s) => s.label || s.provider);
+  const titleLimit = useMemo(() => {
+    const limits = selectedSpecs
+      .map((s) => s.capabilities?.max_title_chars)
+      .filter((n) => typeof n === "number" && n > 0);
+    return limits.length ? Math.min(...limits) : null;
+  }, [selectedSpecs]);
+  const postFields = useMemo(() => mergePostFields(selectedSpecs), [selectedSpecs]);
 
   const visibilityOptions = useMemo(() => {
     const sets = selectedSpecs
@@ -151,6 +168,7 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
 
   const debouncedBody = useDebounced(body);
   const debouncedTitle = useDebounced(title);
+  const debouncedOptions = useDebounced(postOptions);
 
   useEffect(() => {
     if (!open || !selected.length) {
@@ -166,6 +184,7 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
       visibility: visibility || null,
       scheduled_at: scheduledIso,
       ai_disclosure: aiDisclosure,
+      post_options: debouncedOptions,
     })
       .then((result) => !cancelled && setPreflight(result))
       .catch(() => !cancelled && setPreflight(null));
@@ -174,7 +193,7 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
     };
   }, [
     open, selected, documentIds, debouncedBody, debouncedTitle,
-    visibility, supportsTitle, scheduledIso, aiDisclosure,
+    visibility, supportsTitle, scheduledIso, aiDisclosure, debouncedOptions,
   ]);
 
   const toggle = useCallback((id) => {
@@ -233,6 +252,7 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
         requested_by: "ui",
         scheduled_at: scheduledIso,
         ai_disclosure: aiDisclosure,
+        post_options: postOptions,
       });
       const verb = scheduledIso ? "Scheduled" : "Queued";
       onFeedback?.({
@@ -252,7 +272,7 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
     }
   }, [
     selected, documentIds, body, title, tags, visibility, supportsTitle,
-    scheduledIso, aiDisclosure, onClose, onFeedback,
+    scheduledIso, aiDisclosure, postOptions, onClose, onFeedback,
   ]);
 
   const overLimit = charLimit !== null && body.length > charLimit;
@@ -266,7 +286,9 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
   return (
     <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
       <DialogTitle>
-        Publish {documents.length > 1 ? `${documents.length} items` : "asset"}
+        {documents.length
+          ? `Publish ${documents.length > 1 ? `${documents.length} items` : "asset"}`
+          : "New post"}
       </DialogTitle>
       <DialogContent dividers>
         {loading ? (
@@ -331,11 +353,34 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
                 size="small"
+                error={titleLimit !== null && title.trim().length > titleLimit}
+                helperText={
+                  [
+                    titleRequiredBy.length ? `Required for ${titleRequiredBy.join(", ")}.` : "",
+                    titleLimit !== null ? `${title.trim().length} / ${titleLimit} characters` : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ") || undefined
+                }
               />
             )}
 
+            {postFields.map((field) => (
+              <TextField
+                key={field.name}
+                label={field.label}
+                value={postOptions[field.name] ?? ""}
+                onChange={(e) =>
+                  setPostOptions((prev) => ({ ...prev, [field.name]: e.target.value }))
+                }
+                placeholder={field.placeholder || undefined}
+                size="small"
+                helperText={`${field.required ? "Required" : "Used"} for ${field.for.join(", ")}. ${field.help || ""}`.trim()}
+              />
+            ))}
+
             <TextField
-              label="Caption"
+              label={documents.length ? "Caption" : "Text"}
               value={body}
               onChange={(e) => setBody(e.target.value)}
               multiline

@@ -225,7 +225,21 @@ def _switch_on(switch: dict) -> bool:
         return bool(str(get_setting(switch["setting_nonempty"]) or "").strip())
     if "check" in switch:
         return _check(switch["check"])
+    if "connection" in switch:
+        return _connection_on(switch["connection"])
     raise ValueError(f"unknown switch {switch!r}")
+
+
+def _connection_on(provider: str) -> bool:
+    """An enabled connection of ``provider`` with credentials, while publishing is on."""
+    from backend.models import Connection
+    from backend.utils.credential_store import get_status
+    from backend.utils.settings_utils import get_setting
+
+    if str(get_setting("connections_publish_enabled", default="true")).lower() == "false":
+        return False
+    rows = Connection.query.filter_by(provider=provider, enabled=True).all()
+    return any(get_status(row.ref).get("configured") for row in rows)
 
 
 _outbound_titles: Dict[str, dict] = {}

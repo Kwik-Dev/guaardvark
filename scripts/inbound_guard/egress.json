@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "_doc": "Every way Guaardvark reaches outside this machine, in one list. The inbound guard reads it three ways: new code that names an outside host no entry declares is held at high severity (a declared host is still held, as any new destination is); the posture check reports any entry whose switch turns on; the network monitor extension reports a Guaardvark process reaching a host no entry declares. 'switch' says what turns a path on; 'person' means it runs only when someone starts it. 'any_host' marks paths whose destination someone chooses (a URL, a configured server), which therefore declare no fixed host.",
+  "_doc": "Every way Guaardvark reaches outside this machine, in one list. The inbound guard reads it three ways: new code that names an outside host no entry declares is held at high severity (a declared host is still held, as any new destination is); the posture check reports any entry whose switch turns on; the network monitor extension reports a Guaardvark process reaching a host no entry declares. 'switch' says what turns a path on; 'person' means it runs only when someone starts it; 'connection' names a provider whose enabled connection with stored credentials turns it on while publishing is on. 'any_host' marks paths whose destination someone chooses (a URL, a configured server), which therefore declare no fixed host.",
 
   "paths": [
     {
@@ -89,6 +89,13 @@
       "any_host": true,
       "switch": {"check": "publish_connections"},
       "sends": "posts a person approves or publishes"
+    },
+    {
+      "id": "publish-linkedin",
+      "title": "LinkedIn connection: member posts through the official API, with the person's own LinkedIn app",
+      "hosts": ["api.linkedin.com", "www.linkedin.com"],
+      "switch": {"connection": "linkedin"},
+      "sends": "the app's client id and secret and the authorization code (www.linkedin.com, when a person authorizes); the access token, a profile lookup on Test, and each post a person approves or its delete (api.linkedin.com)"
     },
     {
       "id": "wordpress",

@@ -11,7 +11,8 @@ description: >-
 
 Nothing here posts. Approval happens in the Studio's Approvals page, by design, and a
 Reddit, YouTube or Facebook draft posts only when the user presses Post now there with the
-Agent Screen open. X and LinkedIn are not offered.
+Agent Screen open. X and LinkedIn are not offered for outreach; the user's own LinkedIn
+account takes posts through `request_publish` instead.
 
 | tool | use |
 |---|---|

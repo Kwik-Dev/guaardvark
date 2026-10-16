@@ -48,6 +48,7 @@ def preflight(
     scheduled_at: Optional[datetime] = None,
     ai_disclosure: Optional[bool] = None,
     requested_by: str = "ui",
+    post_options: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Validate without queueing, for live feedback in the compose modal."""
     from backend.models import Connection
@@ -80,6 +81,8 @@ def preflight(
             problems = media_util.validate_against(
                 caps, items, body=final_body, title=title, visibility=visibility
             )
+            problems += post_field_problems(spec, options_for(spec, post_options))
+            problems += schedule_problems(caps, scheduled_at)
             problems += bot_label_problems(caps, connection)
             # A post that needs no approval and has no time goes out at once,
             # so its account's limit applies now.
@@ -134,6 +137,33 @@ def compose_body(body: str, items, connection, caps, disclosed: bool) -> str:
         if rule.text not in stripped:
             text = f"{stripped}\n\n{rule.text}" if stripped else rule.text
     return text
+
+
+def options_for(spec, post_options: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """The composer's per-post values that ``spec`` declares, trimmed; the
+    rest belong to other targets of the same post."""
+    if not isinstance(post_options, dict):
+        return {}
+    out: Dict[str, str] = {}
+    for post_field in spec.post_fields:
+        value = post_options.get(post_field.name)
+        if isinstance(value, (str, int, float)) and str(value).strip():
+            out[post_field.name] = str(value).strip()
+    return out
+
+
+def post_field_problems(spec, options: Dict[str, str]) -> List[str]:
+    problems: List[str] = []
+    for post_field in spec.post_fields:
+        problems += post_field.problems(options.get(post_field.name, ""))
+    return problems
+
+
+def schedule_problems(caps, scheduled_at: Optional[datetime]) -> List[str]:
+    """A time on a post to a platform whose terms rule out scheduled posts."""
+    if scheduled_at is not None and caps.schedule_refusal:
+        return [caps.schedule_refusal]
+    return []
 
 
 def approved(record, connection) -> bool:
@@ -211,6 +241,7 @@ def queue_publish(
     requested_by: str = "ui",
     scheduled_at: Optional[datetime] = None,
     ai_disclosure: Optional[bool] = None,
+    post_options: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Create one PublishRecord (+ Task) per connection and release or hold them.
 
@@ -256,6 +287,9 @@ def queue_publish(
         problems += media_util.validate_against(
             caps, items, body=final_body, title=title, visibility=target_visibility
         )
+        options = options_for(spec, post_options)
+        problems += post_field_problems(spec, options)
+        problems += schedule_problems(caps, scheduled_at)
         problems += bot_label_problems(caps, connection)
         if problems:
             raise ValueError(f"{spec.label}: {problems[0]}")
@@ -263,10 +297,12 @@ def queue_publish(
             verdict = rate_limits.check(connection.id, caps.rate_limits)
             if not verdict.allowed:
                 raise RuntimeError(f"{spec.label}: {verdict.reason}")
-        planned.append((connection, spec, target_visibility, final_body, disclosed, needs_approval))
+        planned.append(
+            (connection, spec, target_visibility, final_body, disclosed, options, needs_approval)
+        )
 
     queued: List[Dict[str, Any]] = []
-    for connection, spec, target_visibility, final_body, disclosed, needs_approval in planned:
+    for connection, spec, target_visibility, final_body, disclosed, options, needs_approval in planned:
         record = PublishRecord(
             connection_id=connection.id,
             platform=connection.provider,
@@ -281,6 +317,7 @@ def queue_publish(
             requested_by=requested_by,
             scheduled_at=scheduled_at,
             ai_disclosure=disclosed,
+            post_options=json.dumps(options) if options else None,
         )
         db.session.add(record)
         db.session.commit()

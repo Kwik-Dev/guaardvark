@@ -206,6 +206,12 @@ def validate_against(
 
     if title and not caps.supports_title:
         problems.append("This target does not support a title.")
+    if caps.requires_title and not (title or "").strip():
+        problems.append("This target needs a title.")
+    if title and caps.max_title_chars is not None and len(title.strip()) > caps.max_title_chars:
+        problems.append(
+            f"Title is {len(title.strip())} characters; the limit is {caps.max_title_chars}."
+        )
 
     if visibility and caps.visibilities and visibility not in caps.visibilities:
         allowed = ", ".join(caps.visibilities)

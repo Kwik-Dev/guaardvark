@@ -123,6 +123,7 @@ def run(task: Dict[str, Any], update_progress: Callable[[int, str], None]) -> Di
             media=media_util.media_from_refs(record.media_refs),
             config=ctx.config,
             ai_disclosure=bool(record.ai_disclosure),
+            options=_json_dict(record.post_options),
             publish_at=record.scheduled_at if hand_off else None,
         )
         send = module.schedule if hand_off else module.publish
@@ -172,6 +173,16 @@ def _fail(record, message: str) -> Dict[str, Any]:
     record.error_message = message
     db.session.commit()
     return {"error": message}
+
+
+def _json_dict(raw) -> dict:
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+        return value if isinstance(value, dict) else {}
+    except (ValueError, TypeError):
+        return {}
 
 
 def _json_list(raw) -> list:

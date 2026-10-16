@@ -15,6 +15,7 @@ from backend.services.connections.base import (
     STATUS_CONNECTED,
     STATUS_DISABLED,
     STATUS_ERROR,
+    STATUS_EXPIRED,
     STATUS_UNCONFIGURED,
     ConnCtx,
 )
@@ -84,8 +85,11 @@ def test_connection(connection) -> Tuple[bool, str]:
             connection.config = json.dumps(merged)
         if discovered.get("capabilities"):
             connection.capabilities_cache = json.dumps(discovered["capabilities"])
+        if isinstance(discovered.get("token_expires_at"), datetime):
+            connection.token_expires_at = discovered["token_expires_at"]
     else:
-        connection.status = STATUS_ERROR
+        # Expired: the platform needs a new authorization, not a fix here.
+        connection.status = STATUS_EXPIRED if discovered.get("expired") else STATUS_ERROR
         connection.error_message = redact(message)
 
     db.session.commit()

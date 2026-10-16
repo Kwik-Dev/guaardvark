@@ -11,9 +11,11 @@ What happens after the approval depends on the platform's ``mode``:
 ``BOT``      Discord. The Discord bot plugin sends approved replies through
              the bot API, claiming each one through /claim and /submit.
 ``REFUSED``  X (Twitter) and LinkedIn. Both forbid driving an account with
-             browser automation, which is the only way this install could post
-             there, so nothing posts to them: a draft is refused when it is
-             created or approved, and a URL on them is not scouted.
+             browser automation, which is the only way outreach could post
+             there, so outreach never does: a draft is refused when it is
+             created or approved, and a URL on them is not scouted. A person's
+             own LinkedIn posts go through the official API instead, as a
+             Social Accounts connection (connections/providers/linkedin.py).
 
 A platform missing from the table (an "internal" note, for one) has no poster;
 its approved drafts are left alone. Platform names are compared lowercased.
@@ -55,8 +57,10 @@ _X_REFUSAL = (
     "automation, and the agent browser is the only way this install could post there."
 )
 _LINKEDIN_REFUSAL = (
-    "Guaardvark does not post to LinkedIn. LinkedIn's terms forbid bots and "
-    "browser automation on member accounts."
+    "Outreach does not post to LinkedIn. LinkedIn's terms forbid bots and browser "
+    "automation on member accounts, so the agent browser never posts or replies "
+    "there. To post to your own LinkedIn, connect it under Social Accounts: that "
+    "uses LinkedIn's official API, and each post waits for your approval."
 )
 
 POLICIES: dict[str, PlatformPolicy] = {

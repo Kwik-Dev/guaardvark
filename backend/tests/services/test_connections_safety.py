@@ -92,7 +92,7 @@ def test_anything_short_of_true_on_a_webhook_waits(settings, config):
     assert gates.requires_approval("ui", _connection("discord_webhook", config)) is True
 
 
-@pytest.mark.parametrize("provider", ["bluesky", "mastodon", "telegram", "youtube", "nonexistent"])
+@pytest.mark.parametrize("provider", ["bluesky", "mastodon", "telegram", "youtube", "linkedin", "nonexistent"])
 def test_only_an_owned_channel_provider_can_skip_approval(settings, provider):
     """The setting written by hand on another provider is not honoured."""
     assert gates.requires_approval("ui", _connection(provider, {"post_without_approval": True})) is True

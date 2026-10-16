@@ -23,6 +23,7 @@ PROVIDER_MODULES: Dict[str, str] = {
     "telegram": "telegram",
     "bluesky": "bluesky",
     "youtube": "youtube",
+    "linkedin": "linkedin",
 }
 
 _cache: Dict[str, ModuleType] = {}
