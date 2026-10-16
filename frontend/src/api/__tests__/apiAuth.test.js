@@ -138,6 +138,16 @@ describe("handleResponse on a refusal", () => {
     expect(seen).toEqual(["local_only"]);
   });
 
+  it("words a code route refused under network access", async () => {
+    await expect(
+      handleResponse(jsonResponse(403, { code: "runs_code_key_required", machine: "studio" }), { quiet: true }),
+    ).rejects.toMatchObject({
+      authRefused: "runs_code_key_required",
+      message: describeAuthRefusal("runs_code_key_required", false, "studio"),
+    });
+    expect(describeAuthRefusal("runs_code_key_required", false, "studio")).toContain("runs a program on studio");
+  });
+
   it("words an out-of-date sign-in differently", async () => {
     await expect(
       handleResponse(jsonResponse(401, { code: "api_key_required", credential_rejected: true }), { quiet: true }),

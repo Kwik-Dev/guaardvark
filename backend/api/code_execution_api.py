@@ -1,6 +1,7 @@
 # backend/api/code_execution_api.py
 # Code execution API for CodeEditorPage
 
+import contextlib
 import os
 import subprocess
 import tempfile
@@ -30,6 +31,56 @@ RATE_LIMIT_WINDOW = 60  # seconds
 
 # Rate limiting state
 _rate_limits = defaultdict(list)
+
+# The environment code run from the editor gets: these variables, the LC_*,
+# CUDA_* and NVIDIA_* families, and PYTHONPATH when every entry is inside this
+# install (the checkout or its virtualenv). Nothing else of the backend's
+# environment, which carries the .env secrets (the API key, database, broker
+# and result-backend URLs with their passwords, hub, bot and proxy
+# credentials), reaches the child.
+#
+# This is not a boundary. The code runs as the same user as the backend and
+# can read .env, or /proc/<pid>/environ of the backend, if it sets out to. It
+# only stops casual leakage: a script that prints os.environ, or a library
+# that dumps it in a traceback, no longer shows the secrets in the output.
+ENV_PASSTHROUGH = (
+    "PATH", "HOME", "USER", "LANG", "TERM", "TMPDIR",
+    "VIRTUAL_ENV", "LD_LIBRARY_PATH", "NODE_PATH",
+)
+ENV_PASSTHROUGH_PREFIXES = ("LC_", "CUDA_", "NVIDIA_")
+INSTALL_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _pythonpath_is_this_installs(value: str) -> bool:
+    """True when every entry of a PYTHONPATH is inside the checkout or the
+    virtualenv the backend runs in, so passing it on points the child at this
+    install's own code and nothing else."""
+    roots = [INSTALL_ROOT]
+    venv = os.environ.get("VIRTUAL_ENV")
+    if venv:
+        roots.append(Path(venv).resolve())
+    for entry in value.split(os.pathsep):
+        if not entry:
+            continue
+        try:
+            resolved = Path(entry).resolve()
+        except OSError:
+            return False
+        if not any(resolved == root or root in resolved.parents for root in roots):
+            return False
+    return True
+
+
+def execution_env() -> dict:
+    """The environment for code the editor runs (see ENV_PASSTHROUGH)."""
+    env = {
+        name: value for name, value in os.environ.items()
+        if name in ENV_PASSTHROUGH or name.startswith(ENV_PASSTHROUGH_PREFIXES)
+    }
+    pythonpath = os.environ.get("PYTHONPATH", "")
+    if pythonpath and _pythonpath_is_this_installs(pythonpath):
+        env["PYTHONPATH"] = pythonpath
+    return env
 
 
 def _check_rate_limit():
@@ -73,27 +124,39 @@ def cleanup_temp_file(file_path):
     except Exception as e:
         logger.warning(f"Failed to cleanup temp file {file_path}: {e}")
 
+@contextlib.contextmanager
+def _working_directory(cwd):
+    """`cwd` as given, or a fresh temporary folder for the duration."""
+    if cwd:
+        yield cwd
+        return
+    with tempfile.TemporaryDirectory(prefix="guaardvark-run-") as scratch:
+        yield scratch
+
+
 def execute_command(command, timeout=MAX_EXECUTION_TIME, cwd=None, use_shell=False):
     """Execute a command safely with timeout
 
     Args:
         command: Command to execute (string if use_shell=True, list otherwise)
         timeout: Execution timeout in seconds
-        cwd: Working directory
+        cwd: Working directory; None runs in a fresh temporary folder that
+            is removed afterwards, so nothing starts in the backend's folder
         use_shell: If True, execute command through shell (DANGEROUS - only for trusted input)
     """
     try:
         start_time = time.time()
 
-        result = subprocess.run(
-            command,
-            shell=use_shell,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=cwd,
-            env=os.environ.copy()
-        )
+        with _working_directory(cwd) as run_cwd:
+            result = subprocess.run(
+                command,
+                shell=use_shell,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=run_cwd,
+                env=execution_env()
+            )
 
         execution_time = time.time() - start_time
 
@@ -136,20 +199,21 @@ def execute_command_with_stdin(command, timeout=MAX_EXECUTION_TIME, stdin_data="
         command: Command to execute as list
         timeout: Execution timeout in seconds
         stdin_data: Data to pass to stdin
-        cwd: Working directory
+        cwd: Working directory; None runs in a fresh temporary folder
     """
     try:
         start_time = time.time()
 
-        result = subprocess.run(
-            command,
-            input=stdin_data,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=cwd,
-            env=os.environ.copy()
-        )
+        with _working_directory(cwd) as run_cwd:
+            result = subprocess.run(
+                command,
+                input=stdin_data,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=run_cwd,
+                env=execution_env()
+            )
 
         execution_time = time.time() - start_time
 
@@ -307,7 +371,8 @@ def execute_shell():
 
         command = data['command']
         timeout = min(data.get('timeout', MAX_EXECUTION_TIME), MAX_EXECUTION_TIME)
-        working_directory = data.get('workingDirectory', '/tmp')
+        # Unset: a fresh temporary folder (execute_command).
+        working_directory = data.get('workingDirectory') or None
 
         # Security check - block dangerous commands (defense-in-depth)
         dangerous_commands = ['rm -rf', 'sudo', 'su', 'chmod 777', 'dd if=', 'mkfs', 'fdisk',
