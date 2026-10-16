@@ -6,7 +6,9 @@ import {
   describeScheduling,
   describeWindow,
   mergePostFields,
+  sharedVisibilities,
   statusLabel,
+  strictestLimit,
 } from "../platformRules";
 
 const HOUR = 3600;
@@ -93,5 +95,23 @@ describe("deleteOnPlatform", () => {
   it("allows withdrawing a post the platform still holds", () => {
     const held = { status: "scheduled", scheduled_natively: true, remote_id: "s1" };
     expect(deleteOnPlatform(held, caps, now).ok).toBe(true);
+  });
+});
+
+describe("strictestLimit and sharedVisibilities", () => {
+  const specs = [
+    { capabilities: { max_text_chars: 300, visibilities: ["public", "unlisted"] } },
+    { capabilities: { max_text_chars: 5000, visibilities: ["unlisted", "public", "private"] } },
+    { capabilities: { max_text_chars: null, visibilities: [] } },
+  ];
+
+  it("takes the smallest declared limit, or null when none is declared", () => {
+    expect(strictestLimit(specs, "max_text_chars")).toBe(300);
+    expect(strictestLimit(specs, "max_title_chars")).toBeNull();
+  });
+
+  it("keeps the visibilities every declaring target accepts", () => {
+    expect(sharedVisibilities(specs)).toEqual(["public", "unlisted"]);
+    expect(sharedVisibilities([])).toEqual([]);
   });
 });
