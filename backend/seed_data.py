@@ -211,6 +211,9 @@ def load_lesson_bundle(path: str) -> Dict[str, int]:
                 counts["invalid"] += 1
                 continue
             existing_by_title[title.lower()] = memory
+            if memory.already_saved:
+                logger.info("Lesson %r from %s is already saved as %s", title, path, memory.id)
+                continue
             counts["inserted"] += 1
         else:
             match.content = content

@@ -941,7 +941,7 @@ DECISIONS: dict = {
      'set': None,
      'hard_negatives': ('problem_report', 'temporary_state', 'question_without_mark', 'quoted_text', 'injection'),
      'notes': 'Only decides whether the message is stored; the stored text stays the message as typed and '
-              '_existing_id still catches duplicates. Memory rows can be deleted on the Memory page. Labelled set '
+              'add_memory still catches exact copies. Memory rows can be deleted on the Memory page. Labelled set '
               'not written yet (planned: memory_fact.json).'},
     'memory_relation': {'feature': 'memory',
      'layer': 'L5',
@@ -956,7 +956,7 @@ DECISIONS: dict = {
                                 'over time (a denial or a correction)',
                  'unrelated': 'Anything else: a different subject, or both can be true together'},
      'state': {'stored_fact': ('user', 300), 'new_fact': ('user', 300)},
-     'anchor': 'backend/services/memory_capture.py _existing_id; backend/api/memory_api.py add_memory',
+     'anchor': 'backend/api/memory_api.py find_saved_copy, add_memory',
      'precheck': 'a fact is about to be written and an active fact in the same scope shares a significant token or '
                  'is an embedding near-neighbour (at most 3 candidates)',
      'fallback': 'exact normalised-text match counts as same; everything else is unrelated',

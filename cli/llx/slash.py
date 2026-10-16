@@ -1311,7 +1311,11 @@ class SlashRouter:
                     "importance": 0.7
                 })
                 if mem_res.get("success"):
-                    self._console.print("[llx.dim]  (also saved to agent long-term memory via save_memory)[/llx.dim]")
+                    meta = (mem_res.get("result") or {}).get("metadata") or {}
+                    if meta.get("already_saved"):
+                        self._console.print("[llx.dim]  (already in agent long-term memory)[/llx.dim]")
+                    else:
+                        self._console.print("[llx.dim]  (also saved to agent long-term memory via save_memory)[/llx.dim]")
             except Exception:
                 pass  # non-fatal
         elif sub in ("done", "complete", "finish") and len(args) > 1:

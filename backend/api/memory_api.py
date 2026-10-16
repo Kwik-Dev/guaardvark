@@ -27,6 +27,8 @@ from sqlalchemy import or_
 from backend.models import db, AgentMemory, AgentMemoryAudit
 from backend.tools.knowledge_tools import _contains
 from backend.services.memory_contract import (
+    EVENT_MEMORY_SOURCES,
+    EVENT_MEMORY_TYPES,
     MAX_PREFILTER_TERMS,
     MEMORY_SOURCES,
     MEMORY_STATUSES,
@@ -34,9 +36,11 @@ from backend.services.memory_contract import (
     SOURCE_TRUST_WEIGHTS,
     coerce_confidence,
     coerce_importance,
+    is_event_memory,
     memory_match_score,
     normalize_memory_source,
     normalize_memory_status,
+    normalize_memory_text,
     normalize_memory_type,
     normalize_tags,
     query_terms,
@@ -45,6 +49,7 @@ from backend.services.memory_contract import (
 )
 from backend.utils.clock import utcnow
 from backend.utils.memory_audit_log import (
+    log_memory_already_saved,
     log_memory_failed,
     log_memory_rejected,
     log_memory_saved,
@@ -124,6 +129,47 @@ def _parse_lesson_content(content: str, memory_type: str, source: str):
     return payload
 
 
+def find_saved_copy(
+    content: str,
+    *,
+    session_id=None,
+    project_id=None,
+    user_id=None,
+    workspace_root=None,
+):
+    """The active memory that already says `content` everywhere a new row
+    with this scope would be recalled, or None.
+
+    Texts match when normalize_memory_text makes them equal. Recall keeps the
+    rows that carry the asked-for session, project, user or workspace and the
+    rows that leave that column empty (see _query_memories), so a saved row
+    qualifies when each of those columns is empty or holds the new row's
+    value. A copy kept for the whole app answers a save in one chat; a copy
+    kept for another chat or project does not, since only that chat or
+    project recalls it. Event rows (is_event_memory) are records, not
+    statements, and are never a copy. The oldest match wins.
+    """
+    norm = normalize_memory_text(content)
+    if not norm:
+        return None
+    query = db.session.query(AgentMemory.id, AgentMemory.content).filter(
+        AgentMemory.status == "active",
+        or_(AgentMemory.type == None, AgentMemory.type.notin_(sorted(EVENT_MEMORY_TYPES))),
+        or_(AgentMemory.source == None, AgentMemory.source.notin_(sorted(EVENT_MEMORY_SOURCES))),
+    )
+    for column, value in (
+        (AgentMemory.session_id, session_id),
+        (AgentMemory.project_id, project_id),
+        (AgentMemory.user_id, user_id),
+        (AgentMemory.workspace_root, workspace_root),
+    ):
+        query = query.filter(column == None if value is None else or_(column == None, column == value))
+    for memory_id, saved in query.order_by(AgentMemory.created_at.asc()).all():
+        if normalize_memory_text(saved) == norm:
+            return db.session.get(AgentMemory, memory_id)
+    return None
+
+
 def add_memory(
     content: str,
     memory_type: str = "note",
@@ -149,6 +195,13 @@ def add_memory(
     Returns the created AgentMemory on success, or None on blank content /
     DB error. Errors are logged; the caller decides whether a failed memory
     write is fatal (usually not).
+
+    An active memory whose text is already saved where it would be recalled
+    (find_saved_copy) is not written twice: the saved row is returned with
+    `already_saved` set, and the caller says so rather than "saved". That row
+    is left as it was, timestamps included, and gets no audit entry, since
+    nothing in it changed; a person who wants a different type, tags or
+    importance edits it. Event rows (is_event_memory) are always written.
     """
     body = (content or "").strip()
     if not body:
@@ -171,6 +224,18 @@ def add_memory(
         extra_data = {**extra_data, "lesson": lesson_payload}
     mem_id = uuid.uuid4().hex[:12]
     try:
+        if status == "active" and not is_event_memory(memory_type, source):
+            existing = find_saved_copy(
+                body,
+                session_id=session_id,
+                project_id=project_id,
+                user_id=user_id,
+                workspace_root=workspace_root,
+            )
+            if existing is not None:
+                existing.already_saved = True
+                log_memory_already_saved(existing.id, source, body)
+                return existing
         memory = AgentMemory(
             id=mem_id,
             content=body,
@@ -207,6 +272,10 @@ def save_memory():
     Body: { content, source?, session_id?, tags?, type?, importance? }
 
     Save a memory entry. Content is the only required field.
+
+    201 with already_saved false is a new row. 200 with already_saved true
+    means the same text was already saved in that scope (see add_memory):
+    nothing was written and `memory` is the row that holds it.
     """
     data = request.get_json(silent=True)
     if not data or not data.get("content", "").strip():
@@ -238,7 +307,9 @@ def save_memory():
     )
     if memory is None:
         return jsonify({"success": False, "error": "Failed to save memory"}), 500
-    return jsonify({"success": True, "memory": memory.to_dict()}), 201
+    if memory.already_saved:
+        return jsonify({"success": True, "already_saved": True, "memory": memory.to_dict()}), 200
+    return jsonify({"success": True, "already_saved": False, "memory": memory.to_dict()}), 201
 
 
 @memory_bp.route("", methods=["GET"])

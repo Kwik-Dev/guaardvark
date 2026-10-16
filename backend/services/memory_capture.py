@@ -1,7 +1,9 @@
 """Deterministic capture of facts the user states in chat.
 
 Explicit intents only — no LLM. A match writes an ``AgentMemory`` fact via
-``add_memory``; questions, short utterances, and duplicates are skipped.
+``add_memory``; questions and short utterances are skipped, and a fact already
+saved where it would be recalled is not stored twice (``add_memory`` returns
+the saved row instead).
 
 A fact the person asks to be kept ("remember that …", "remember: …", "from now
 on …", "for future reference …") is stored without the chat's session id, so
@@ -14,10 +16,7 @@ from __future__ import annotations
 
 import re
 
-from sqlalchemy import or_
-
 from backend.api.memory_api import add_memory, _app_context
-from backend.models import AgentMemory
 
 _MIN_WORDS = 4
 
@@ -53,11 +52,6 @@ _WORD_RE = re.compile(r"\S+")
 
 def _word_count(text: str) -> int:
     return len(_WORD_RE.findall(text))
-
-
-def _normalize_content(text: str) -> str:
-    collapsed = " ".join((text or "").strip().lower().split())
-    return collapsed.rstrip(".,;:!")
 
 
 def _extract_fact(message: str, *, explicit_only: bool = False) -> str | None:
@@ -102,32 +96,6 @@ def _is_remember(message: str) -> bool:
     return any(pattern.match(message or "") for pattern in _REMEMBER_PATTERNS)
 
 
-def _existing_id(content: str, *, across_chats: bool = False, project_id=None) -> str | None:
-    """Id of an active row with the same normalised text, or None.
-
-    across_chats counts only rows every later chat in project_id recalls:
-    no session id, and no project or that project. A copy scoped to one
-    other chat does not stop a remembered fact from being stored for all.
-    """
-    norm = _normalize_content(content)
-    if not norm:
-        return None
-    query = AgentMemory.query.filter(AgentMemory.status == "active")
-    if across_chats:
-        query = query.filter(AgentMemory.session_id == None)
-        if project_id is None:
-            query = query.filter(AgentMemory.project_id == None)
-        else:
-            query = query.filter(
-                or_(AgentMemory.project_id == project_id, AgentMemory.project_id == None)
-            )
-    rows = query.all()
-    for row in rows:
-        if _normalize_content(row.content or "") == norm:
-            return row.id
-    return None
-
-
 def capture_from_message(
     message: str,
     *,
@@ -141,9 +109,11 @@ def capture_from_message(
     A remember intent is stored without session_id so later chats recall it;
     project_id is kept either way. explicit_only stores only the forms that
     ask for the fact to be kept, so a path whose traffic is task requests
-    ("my goal is to …") does not file those as facts. Returns the new (or
-    existing duplicate) memory id, or None if the message is not a remember
-    intent.
+    ("my goal is to …") does not file those as facts. Returns the new memory
+    id, the id of the row that already holds the fact where this one would be
+    recalled, or None if the message is not a remember intent. A copy kept
+    only for another chat or project does not count: this chat would not
+    recall it.
     """
     if not isinstance(message, str):
         return None
@@ -153,9 +123,6 @@ def capture_from_message(
     across_chats = _is_remember(message)
 
     with _app_context():
-        existing = _existing_id(fact, across_chats=across_chats, project_id=project_id)
-        if existing:
-            return existing
         memory = add_memory(
             content=fact,
             memory_type="fact",

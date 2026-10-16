@@ -142,6 +142,9 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
   const [newTags, setNewTags] = useState("");
   const [newType, setNewType] = useState("fact");
   const [adding, setAdding] = useState(false);
+  // Set when Add found its text already saved: the API answers with that
+  // memory instead of writing a second copy.
+  const [notice, setNotice] = useState(null);
 
   // Type-aware placeholder. Preference reads naturally in first person (it's
   // *about* the user). Everything else gets imperative/observational phrasing
@@ -388,6 +391,7 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
   const handleAddMemory = async () => {
     if (!newContent.trim()) return;
     setAdding(true);
+    setNotice(null);
     try {
       const tagsArray = newTags.split(",").map(t => t.trim()).filter(Boolean);
       const res = await fetch(`${BASE_URL}/memory`, {
@@ -401,8 +405,19 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
         }),
       });
       const data = await res.json();
-      
-      if (data.success) {
+
+      if (data.success && data.already_saved) {
+        const saved = data.memory || {};
+        const text = saved.content || "";
+        const quoted = text.length > 120 ? `${text.slice(0, 120)}…` : text;
+        setOpenAdd(false);
+        setNewContent("");
+        setNewTags("");
+        setNotice(
+          `Already saved: "${quoted}" is a ${saved.type || "memory"} from ${formatTimestamp(saved.created_at)}. Nothing new was added.`,
+        );
+        reload();
+      } else if (data.success) {
         setOpenAdd(false);
         setNewContent("");
         setNewTags("");
@@ -483,6 +498,9 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
 
       {error && (
         <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>
+      )}
+      {notice && (
+        <Alert severity="info" sx={{ mb: 2 }} onClose={() => setNotice(null)}>{notice}</Alert>
       )}
 
       <TableContainer component={Paper} variant="outlined" sx={{ maxHeight: 480 }}>

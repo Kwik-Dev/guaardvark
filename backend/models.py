@@ -2814,6 +2814,12 @@ class AgentMemory(db.Model):
     created_at = db.Column(db.DateTime, default=lambda: datetime.now())
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(), onupdate=lambda: datetime.now())
 
+    # Not a column. True on the row memory_api.add_memory returns in place of
+    # a copy it did not write, because the same text was already saved there.
+    # Read it straight after that call: the session hands the same instance
+    # to later queries, flag included.
+    already_saved = False
+
     def to_dict(self):
         tags = []
         if self.tags:

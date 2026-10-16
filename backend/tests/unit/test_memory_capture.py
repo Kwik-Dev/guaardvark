@@ -124,6 +124,24 @@ def test_dedupe_returns_existing_id(app):
     assert AgentMemory.query.filter_by(type="fact").count() == 1
 
 
+def test_note_in_another_chat_is_kept_for_that_chat(app):
+    """A copy kept for one chat is not recalled in another, so it does not
+    stop the same note from being stored there."""
+    first = capture_from_message("note that the deploy target is staging", session_id="chat-one")
+    second = capture_from_message("Note that the deploy target is staging.", session_id="chat-two")
+    assert second not in (None, first)
+    assert db.session.get(AgentMemory, second).session_id == "chat-two"
+    assert capture_from_message("note that the deploy target is staging", session_id="chat-two") == second
+    assert AgentMemory.query.count() == 2
+
+
+def test_note_reuses_a_fact_every_chat_already_recalls(app):
+    remembered = capture_from_message("remember that the deploy target is staging", session_id="chat-one")
+    noted = capture_from_message("note that the deploy target is staging", session_id="chat-two")
+    assert noted == remembered
+    assert AgentMemory.query.count() == 1
+
+
 def test_remember_in_a_project_chat_stays_in_that_project(app):
     mem_id = capture_from_message(
         "remember that the build uses ninja", session_id="s1", project_id=7
