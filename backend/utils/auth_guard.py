@@ -50,6 +50,10 @@ PROTECTED_PREFIXES = (
     # switch approval off and rotate the credential store's key. The bare path
     # is the list and create route, so there is no trailing slash.
     '/api/connections',
+    # WordPress sites and the pages pulled from them. Registering a site stores
+    # its API key or Application Password; pulling and testing send that key
+    # to the site.
+    '/api/wordpress/',
     # Raw file download for everything under data/outputs, chat exports and
     # screenshots included (backend/routes/download_route.py). Only MCP resource
     # links point here, and those are local; the web UI loads outputs through
@@ -538,6 +542,7 @@ def protected_summary() -> list[str]:
         "Reading Guaardvark's own source (self-code)",
         "Social outreach",
         "Connections and publishing",
+        "WordPress sites and their pages",
         "Changing tasks, jobs, schedules, memory and GPU state",
         "Raw file downloads under /outputs/",
         "Managing this API key",
