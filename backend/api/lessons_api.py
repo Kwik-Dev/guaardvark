@@ -266,7 +266,8 @@ def _distill_lesson_pearls(app, lesson_id: str, session_id: str) -> dict | None:
                 raise RuntimeError("lesson memory was rejected")
 
             logger.info(
-                f"[LESSON-DISTILL] saved memory {mem.id} for lesson {lesson_id[:12]}: "
+                f"[LESSON-DISTILL] {'already saved as' if mem.already_saved else 'saved'} memory "
+                f"{mem.id} for lesson {lesson_id[:12]}: "
                 f"{title} ({len(steps)} steps, {len(parameters)} params)"
             )
             return {

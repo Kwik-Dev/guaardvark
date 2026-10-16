@@ -60,6 +60,16 @@ def log_memory_saved(memory_id: str, memory_type: str, source: str, content: str
     )
 
 
+def log_memory_already_saved(memory_id: str, source: str, content: str) -> None:
+    preview = " ".join((content or "").split())[:160]
+    _memory_audit_logger().info(
+        "Memory already saved: id=%s source=%s preview=%r",
+        memory_id,
+        source,
+        preview,
+    )
+
+
 def log_memory_rejected(reason: str, source: str, content: str = "") -> None:
     preview = " ".join((content or "").split())[:160]
     _memory_audit_logger().warning(

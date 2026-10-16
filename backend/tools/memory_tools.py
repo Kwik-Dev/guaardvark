@@ -22,12 +22,15 @@ class SaveMemoryTool(BaseTool):
     destructive = False
     description = (
         "Store one fact, preference or standing instruction in Guaardvark's long-term memory; returns "
-        "'Successfully saved to long-term memory (ID: <id>).' Guaardvark's chat recalls relevant "
-        "entries into its prompts: facts as ground truth, notes as rules, preferences as defaults. Use "
-        "it when the user tells you about themselves, their projects or how they want you to behave; "
-        "run search_memory first to avoid duplicates. Each call adds a new entry (nothing is merged); "
-        "over MCP the entry is visible to every project and session. Entries are edited or deleted on "
-        "the Agent Memory page, not with this tool. Needs the Guaardvark backend running."
+        "'Successfully saved to long-term memory (ID: <id>).', or 'Already saved in long-term memory "
+        "(ID: <id>, <type>); nothing new was stored.' when the same text, ignoring case, spacing and "
+        "trailing punctuation, is already saved where this entry would be recalled. Guaardvark's chat "
+        "recalls relevant entries into its prompts: facts as ground truth, notes as rules, preferences "
+        "as defaults. Use it when the user tells you about themselves, their projects or how they want "
+        "you to behave; run search_memory first, since a reworded copy is stored as a new entry "
+        "(nothing is merged). Over MCP the entry is visible to every project and session. Entries are "
+        "edited or deleted on the Agent Memory page, not with this tool. Needs the Guaardvark backend "
+        "running."
     )
     is_dangerous = False
     requires_approval = False
@@ -97,12 +100,9 @@ class SaveMemoryTool(BaseTool):
             if memory is None:
                 return ToolResult(success=False, error="Memory was rejected or could not be saved.")
 
-            logger.info(f"Agent saved memory {memory.id}: {content[:50]}...")
-            return ToolResult(
-                success=True,
-                output=f"Successfully saved to long-term memory (ID: {memory.id}).",
-                metadata={"id": memory.id, "content": memory.content, "type": memory.type}
-            )
+            if not memory.already_saved:
+                logger.info(f"Agent saved memory {memory.id}: {content[:50]}...")
+            return _saved_result(memory.id, memory.content, memory.type, memory.already_saved)
         except Exception as e:
             try:
                 db.session.rollback()
@@ -131,11 +131,25 @@ class SaveMemoryTool(BaseTool):
         memory = (body or {}).get("memory") or {}
         if not memory.get("id"):
             return ToolResult(success=False, error="Memory was not saved: the backend returned no memory id.")
-        return ToolResult(
-            success=True,
-            output=f"Successfully saved to long-term memory (ID: {memory['id']}).",
-            metadata={"id": memory["id"], "content": memory.get("content"), "type": memory.get("type")},
+        return _saved_result(
+            memory["id"], memory.get("content"), memory.get("type"), bool((body or {}).get("already_saved")),
         )
+
+
+def _saved_result(memory_id, content, memory_type, already_saved: bool) -> ToolResult:
+    """save_memory's answer: a new entry, or the entry that already held the text."""
+    if already_saved:
+        output = (
+            f"Already saved in long-term memory (ID: {memory_id}, {memory_type}); "
+            "nothing new was stored."
+        )
+    else:
+        output = f"Successfully saved to long-term memory (ID: {memory_id})."
+    return ToolResult(
+        success=True,
+        output=output,
+        metadata={"id": memory_id, "content": content, "type": memory_type, "already_saved": already_saved},
+    )
 
 
 class SearchMemoryTool(BaseTool):

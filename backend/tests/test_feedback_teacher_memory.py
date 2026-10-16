@@ -141,6 +141,17 @@ def test_a_stated_reason_becomes_a_correction_the_prompts_read(app):
     assert mem.extra_data["feedback"]["ups"] == 1
 
 
+def test_a_reason_already_saved_as_a_memory_is_not_saved_or_undone(app):
+    _mem("m-manual", content="Do not answer in bullet lists")
+    fb, a, u = _fb("down", why="do not answer in bullet lists.")
+    taught = ft.apply(fb, a, u)
+    assert AgentMemory.query.filter_by(source="learned_from_feedback").count() == 0
+    assert any(t["kind"] == "memory_already_saved" and t["ref"] == "m-manual" for t in taught)
+    assert not any(e["kind"] == "memory_created" for e in fb.applied)
+    ft.retract(fb)
+    assert db.session.get(AgentMemory, "m-manual") is not None
+
+
 def test_a_positive_reason_is_a_keep_note(app):
     fb, a, u = _fb("up", why="Short answers like this are perfect")
     ft.apply(fb, a, u)

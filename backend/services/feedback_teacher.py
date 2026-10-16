@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -307,10 +306,6 @@ def log_entry(fb, event: str, data: Dict[str, Any], taught: List[Dict[str, Any]]
 # Teaching
 # ---------------------------------------------------------------------------
 
-def _norm_text(t: str) -> str:
-    return re.sub(r"\s+", " ", (t or "").strip().lower())
-
-
 def _memory_counter(mem, field: str, delta: int) -> None:
     extra = dict(mem.extra_data or {})
     fbk = dict(extra.get("feedback") or {})
@@ -395,13 +390,14 @@ def _teach_from_why(fb, row, user_row, verdict: str, ledger: List[Dict[str, Any]
     """A stated reason becomes a memory the next prompt sees."""
     from backend.models import db, AgentMemory
     from backend.api.memory_api import add_memory
+    from backend.services.memory_contract import normalize_memory_text
     why = (fb.why_text or "").strip()
     if not why:
         return
     label = "correction" if verdict == "down" else "keep"
-    norm = _norm_text(why)
+    norm = normalize_memory_text(why)
     for m in AgentMemory.query.filter_by(source="learned_from_feedback", status="active").all():
-        if _norm_text(m.content) == norm:
+        if normalize_memory_text(m.content) == norm:
             _memory_counter(m, "ups", 1)
             db.session.commit()
             ledger.append({"kind": "memory_counter", "ref": m.id, "field": "ups", "delta": 1})
@@ -422,7 +418,11 @@ def _teach_from_why(fb, row, user_row, verdict: str, ledger: List[Dict[str, Any]
             "task": (getattr(user_row, "content", "") or "")[:200],
         },
     )
-    if mem is not None:
+    if mem is not None and mem.already_saved:
+        # A memory the person or the assistant saved already says this. It is
+        # not this verdict's to undo, so the ledger gets nothing.
+        taught.append({"kind": "memory_already_saved", "ref": mem.id, "label": f"{label} already saved"})
+    elif mem is not None:
         ledger.append({"kind": "memory_created", "ref": mem.id})
         taught.append({"kind": "memory_created", "ref": mem.id, "label": f"{label} saved: {why[:50]}"})
 
