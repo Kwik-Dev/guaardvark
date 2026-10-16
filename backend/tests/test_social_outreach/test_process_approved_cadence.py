@@ -1,4 +1,4 @@
-"""Cadence + status guards for process-approved and approve/reject APIs."""
+"""Cadence + status guards for a watched post and the approve/reject/claim APIs."""
 from unittest.mock import patch
 
 import pytest
@@ -11,7 +11,7 @@ def _posting_needs_web_access(web_access_on):
 
 
 def _use_test_app_context(monkeypatch, app):
-    """Celery ticks call backend.app — bind them to the pytest app/db instead."""
+    """Celery tasks call backend.app — bind them to the pytest app/db instead."""
     from backend.tasks import social_outreach_tasks
 
     def _ctx(fn, *args, **kwargs):
@@ -21,9 +21,25 @@ def _use_test_app_context(monkeypatch, app):
     monkeypatch.setattr(social_outreach_tasks, "_with_app_context", _ctx)
 
 
-def test_tick_process_approved_respects_cadence(app, monkeypatch):
+def _youtube_row(db, SocialOutreachLog):
+    row = SocialOutreachLog(
+        platform="youtube",
+        action="comment",
+        status="approved",
+        draft_text="hello",
+        target_url="https://www.youtube.com/watch?v=test123",
+        target_thread_id="test123",
+    )
+    db.session.add(row)
+    db.session.commit()
+    return row.id
+
+
+def test_a_watched_post_respects_cadence(app, monkeypatch, fake_redis, watching):
+    import time
+
     from backend.models import SocialOutreachLog, db
-    from backend.tasks.social_outreach_tasks import tick_process_approved_drafts
+    from backend.tasks.social_outreach_tasks import post_watched_draft
 
     _use_test_app_context(monkeypatch, app)
 
@@ -36,65 +52,14 @@ def test_tick_process_approved_respects_cadence(app, monkeypatch):
          patch(
              "backend.services.social_outreach.youtube_outreach.post_youtube_comment_via_servo"
          ) as mock_post:
+        rid = _youtube_row(db, SocialOutreachLog)
 
-        row = SocialOutreachLog(
-            platform="youtube",
-            action="comment",
-            status="approved",
-            draft_text="hello",
-            target_url="https://www.youtube.com/watch?v=test123",
-            target_thread_id="test123",
-        )
-        db.session.add(row)
-        db.session.commit()
-        rid = row.id
-
-        result = tick_process_approved_drafts.run()
-        assert result.get("processed") == 0
-        assert result.get("skipped_cadence", 0) >= 1
+        result = post_watched_draft.run(rid, time.time())
+        assert result["posted"] is False
+        assert "daily cap hit" in result["message"]
         assert mock_post.call_count == 0
         db.session.expire_all()
         assert SocialOutreachLog.query.get(rid).status == "approved"
-
-
-def test_tick_process_approved_one_post_per_platform(app, monkeypatch):
-    from backend.models import SocialOutreachLog, db
-    from backend.tasks.social_outreach_tasks import tick_process_approved_drafts
-
-    _use_test_app_context(monkeypatch, app)
-
-    with app.app_context(), \
-         patch("backend.services.social_outreach.kill_switch.is_enabled", return_value=True), \
-         patch(
-             "backend.services.social_outreach.kill_switch.cadence_allows_post",
-             return_value=(True, None),
-         ), \
-         patch(
-             "backend.services.social_outreach.youtube_outreach.post_youtube_comment_via_servo",
-             return_value=(True, "ok"),
-         ), \
-         patch(
-             "backend.services.social_outreach.reddit_outreach.record_post_via_backend"
-         ) as mock_record:
-
-        for i in range(3):
-            db.session.add(SocialOutreachLog(
-                platform="youtube",
-                action="comment",
-                status="approved",
-                draft_text=f"draft {i}",
-                target_url=f"https://www.youtube.com/watch?v=vid{i}",
-                target_thread_id=f"vid{i}",
-            ))
-        db.session.commit()
-
-        result = tick_process_approved_drafts.run()
-        assert result.get("processed") == 1
-        assert mock_record.call_count == 1
-        remaining = SocialOutreachLog.query.filter_by(
-            platform="youtube", status="approved"
-        ).count()
-        assert remaining == 2
 
 
 def test_approve_only_from_drafted(app, client):
@@ -174,22 +139,23 @@ def test_claim_approved_to_processing(app, client):
     assert r2.status_code == 409
 
 
-def test_nothing_posts_with_web_access_off(app, monkeypatch):
+def test_nothing_posts_with_web_access_off(app, monkeypatch, fake_redis, watching):
+    import time
+
     from backend.models import Setting, SocialOutreachLog, db
-    from backend.tasks.social_outreach_tasks import tick_process_approved_drafts
+    from backend.tasks.social_outreach_tasks import post_watched_draft
 
     _use_test_app_context(monkeypatch, app)
     with app.app_context():
         db.session.get(Setting, "allow_web_search").value = "false"
-        db.session.add(SocialOutreachLog(
-            platform="youtube", action="comment", status="approved", draft_text="hello",
-            target_url="https://www.youtube.com/watch?v=test123", target_thread_id="test123",
-        ))
         db.session.commit()
+        rid = _youtube_row(db, SocialOutreachLog)
     with patch("backend.services.social_outreach.kill_switch.is_enabled", return_value=True), \
+         patch("backend.services.social_outreach.kill_switch.cadence_allows_post", return_value=(True, None)), \
          patch("backend.services.social_outreach.youtube_outreach.post_youtube_comment_via_servo") as mock_post:
-        out = tick_process_approved_drafts.run()
-    assert out == {"processed": 0, "reason": "web_access_off"}
+        out = post_watched_draft.run(rid, time.time())
+    assert out["posted"] is False
+    assert "Web access is disabled" in out["message"]
     mock_post.assert_not_called()
     with app.app_context():
         assert SocialOutreachLog.query.one().status == "approved"

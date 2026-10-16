@@ -68,13 +68,6 @@
       "sends": "requests for rules and threads with the agent browser's Reddit cookies; approved posts"
     },
     {
-      "id": "outreach-unsupervised",
-      "title": "Outreach posting without a person's approval (supervised mode switched off)",
-      "hosts": ["www.reddit.com", "*.reddit.com"],
-      "switch": {"all": [{"setting": "social_outreach_enabled"}, {"setting_equals": ["social_outreach_supervised", "false"]}]},
-      "sends": "graded drafts, posted under the user's name without review"
-    },
-    {
       "id": "google-indexing",
       "title": "Google Indexing auto-drip",
       "hosts": ["indexing.googleapis.com", "oauth2.googleapis.com", "www.googleapis.com"],

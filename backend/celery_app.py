@@ -173,6 +173,9 @@ def create_celery_app():
                 'schedule': 14400.0,  # 4 hours
                 'options': {'queue': 'default'},
             },
+            # Posts nothing: closes approved drafts nothing here will post.
+            # A Reddit/YouTube/Facebook post starts only from a person's
+            # "Post now" (social_outreach.post_watched_draft).
             'social-outreach-process-approved': {
                 'task': 'social_outreach.tick_process_approved_drafts',
                 'schedule': 60.0,  # 1 minute
@@ -441,6 +444,7 @@ def create_celery_app():
             tick_reddit_outreach,
             tick_self_share,
             tick_process_approved_drafts,
+            post_watched_draft,  # started by a person's "Post now", never scheduled
             tick_reap_stuck_processing,
             tick_recon_youtube_replies,  # on-demand only; not in beat until scrape lands
         )

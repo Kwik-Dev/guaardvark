@@ -1,9 +1,8 @@
-"""The independent-check gate shared by content_agent and /draft-comment.
+"""The independent check reports on a draft; it never lets one post.
 
-An unsupervised draft may post only when the second-opinion grader actually
-ran and passed. The setting outreach_require_independent_check (default on)
-is read from the in-memory settings table, or stubbed where the table must be
-unreadable.
+Every draft waits for a person's approval. These cover what the check's
+answer says to that person, the per-platform posting table, and that the old
+settings that could switch the wait off are no longer read.
 """
 
 from __future__ import annotations
@@ -11,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from backend.models import Setting, db
-from backend.services.social_outreach import gates, kill_switch
+from backend.services.social_outreach import gates, kill_switch, platforms
 
 PASSED = {"grade": 0.75, "passed": True, "checked": True, "skipped": False}
 FAILED = {"grade": 0.25, "passed": False, "checked": True, "skipped": False}
@@ -23,10 +22,9 @@ def _set(key, value):
     db.session.commit()
 
 
-@pytest.mark.parametrize("supervised", [True, False])
-def test_a_check_that_ran_decides_on_its_grade(app, supervised):
-    assert gates.independent_ok(PASSED, supervised=supervised) == (True, "passed")
-    assert gates.independent_ok(FAILED, supervised=supervised) == (False, "failed")
+def test_a_check_that_ran_reports_its_answer(app):
+    assert gates.independent_ok(PASSED) == (True, "passed")
+    assert gates.independent_ok(FAILED) == (False, "failed")
 
 
 @pytest.mark.parametrize("ext", [
@@ -36,34 +34,15 @@ def test_a_check_that_ran_decides_on_its_grade(app, supervised):
 ])
 def test_only_passed_true_passes(app, ext):
     assert gates.independent_check_label(ext) == "failed"
-    assert gates.independent_ok(ext, supervised=False) == (False, "failed")
+    assert gates.independent_ok(ext) == (False, "failed")
 
 
 def test_passed_decides_whatever_the_grade(app):
     assert gates.independent_check_label({"grade": 0.0, "passed": True, "checked": True}) == "passed"
 
 
-def test_unchecked_and_unsupervised_is_held(app):
-    assert gates.independent_ok(UNCHECKED, supervised=False) == (False, "no_independent_check")
-
-
-def test_unchecked_and_supervised_goes_to_a_person(app):
-    assert gates.independent_ok(UNCHECKED, supervised=True) == (True, "human_review")
-
-
-def test_unchecked_and_unsupervised_passes_when_the_check_is_switched_off(app):
-    _set("outreach_require_independent_check", "false")
-
-    assert gates.independent_ok(UNCHECKED, supervised=False) == (True, "check_not_required")
-
-
-def test_switching_the_check_off_does_not_pass_a_failed_check(app):
-    _set("outreach_require_independent_check", "false")
-
-    assert gates.independent_ok(FAILED, supervised=False) == (False, "failed")
-
-
 @pytest.mark.parametrize("ext", [
+    UNCHECKED,
     {"grade": 0.9, "skipped": False},   # no checked key
     {"grade": 0.9, "checked": None},
     {},
@@ -71,7 +50,7 @@ def test_switching_the_check_off_does_not_pass_a_failed_check(app):
 ])
 def test_anything_short_of_checked_true_is_unchecked(app, ext):
     assert gates.independent_check_label(ext) == "unavailable"
-    assert gates.independent_ok(ext, supervised=False) == (False, "no_independent_check")
+    assert gates.independent_ok(ext) == (True, "unchecked")
 
 
 @pytest.mark.parametrize("ext, label", [(PASSED, "passed"), (FAILED, "failed"), (UNCHECKED, "unavailable")])
@@ -79,63 +58,75 @@ def test_label(ext, label):
     assert gates.independent_check_label(ext) == label
 
 
-# ---- the thread-fit judge did not run --------------------------------------------------
-
-def test_a_passed_draft_on_an_unjudged_thread_is_held(app):
-    assert gates.independent_ok(PASSED, supervised=False, relevance_unchecked=True) == (False, "relevance_unchecked")
-
-
-def test_an_unjudged_thread_goes_to_a_person_when_supervised(app):
-    assert gates.independent_ok(PASSED, supervised=True, relevance_unchecked=True) == (True, "human_review")
+def test_an_unjudged_thread_is_noted(app):
+    assert gates.independent_ok(PASSED, relevance_unchecked=True) == (True, "relevance_unchecked")
 
 
 def test_an_unjudged_thread_does_not_rescue_a_failed_draft(app):
-    assert gates.independent_ok(FAILED, supervised=False, relevance_unchecked=True) == (False, "failed")
+    assert gates.independent_ok(FAILED, relevance_unchecked=True) == (False, "failed")
 
-
-def test_an_unjudged_thread_posts_when_the_check_is_switched_off(app):
-    _set("outreach_require_independent_check", "false")
-
-    assert gates.independent_ok(PASSED, supervised=False, relevance_unchecked=True) == (True, "check_not_required")
-
-
-# ---- self-shares ---------------------------------------------------------------------
 
 @pytest.mark.parametrize("ext", [PASSED, FAILED, UNCHECKED])
-def test_an_unsupervised_share_always_waits_for_a_person(app, ext):
-    assert gates.independent_ok(ext, supervised=False, action="share") == (False, "share_needs_person")
+def test_a_share_is_never_graded(app, ext):
+    assert gates.independent_ok(ext, action="share") == (True, "share_not_graded")
 
 
-def test_a_share_waits_even_when_the_check_is_switched_off(app):
-    _set("outreach_require_independent_check", "false")
+@pytest.mark.parametrize("key", ["social_outreach_supervised", "outreach_require_independent_check"])
+def test_the_old_switches_are_not_read(app, key):
+    """A setting left by an older install cannot switch the wait off."""
+    _set(key, "false")
 
-    assert gates.independent_ok(UNCHECKED, supervised=False, action="share") == (False, "share_needs_person")
-
-
-def test_a_supervised_share_goes_to_a_person(app):
-    assert gates.independent_ok(UNCHECKED, supervised=True, action="share") == (True, "human_review")
-
-
-# ---- the setting ---------------------------------------------------------------------
-
-def test_required_by_default(app):
-    assert kill_switch.requires_independent_check() is True
+    assert gates.independent_ok(UNCHECKED) == (True, "unchecked")
+    assert kill_switch.status_snapshot()["supervised"] is True
+    assert not hasattr(kill_switch, "is_supervised")
+    assert not hasattr(kill_switch, "set_supervised")
+    assert not hasattr(kill_switch, "requires_independent_check")
 
 
-@pytest.mark.parametrize("value, required", [
-    ("false", False), ("0", False), ("off", False),
-    ("true", True), ("on", True),
+# ---- the per-platform posting table ----------------------------------------------------
+
+def test_browser_platforms_are_watched_only():
+    assert set(platforms.platforms_in(platforms.WATCHED)) == {"reddit", "youtube", "facebook"}
+
+
+def test_discord_is_the_only_bot_platform():
+    assert platforms.platforms_in(platforms.BOT) == ("discord",)
+
+
+@pytest.mark.parametrize("platform", ["x", "twitter", "X", "linkedin"])
+def test_x_and_linkedin_are_refused_with_a_reason(platform):
+    policy = platforms.policy_for(platform)
+    assert policy.mode == platforms.REFUSED
+    assert policy.actions == ()
+    assert platforms.refusal_for(platform) == policy.refusal and policy.refusal
+
+
+@pytest.mark.parametrize("url, refused", [
+    ("https://x.com/someone/status/1", True),
+    ("https://mobile.twitter.com/someone/status/1", True),
+    ("https://www.linkedin.com/feed/update/1", True),
+    ("https://www.reddit.com/r/x/comments/abc/t/", False),
+    ("https://notx.com/a", False),
+    ("", False),
 ])
-def test_required_follows_the_stored_value(app, value, required):
-    _set("outreach_require_independent_check", value)
-
-    assert kill_switch.requires_independent_check() is required
+def test_urls_on_refused_platforms(url, refused):
+    assert bool(platforms.refusal_for_url(url)) is refused
 
 
-def test_required_when_the_settings_table_cannot_be_read(monkeypatch):
-    def unreadable(key):
-        raise RuntimeError("settings table unreachable")
+@pytest.mark.parametrize("platform, action, posted", [
+    ("reddit", "comment", True), ("Reddit", "share", True), ("reddit", "reply", False),
+    ("youtube", "reply", True), ("youtube", "share", False), ("facebook", "comment", True),
+    ("discord", "comment", True), ("x", "comment", False), ("internal", "comment", False),
+])
+def test_posts(platform, action, posted):
+    assert platforms.posts(platform, action) is posted
 
-    monkeypatch.setattr(kill_switch, "_lookup_setting", unreadable)
 
-    assert kill_switch.requires_independent_check() is True
+def test_status_reports_the_table_and_no_refused_cadence(app, monkeypatch):
+    monkeypatch.setattr(kill_switch, "_get_redis", lambda: None)
+
+    snapshot = kill_switch.status_snapshot()
+
+    assert snapshot["posting_modes"]["reddit"]["mode"] == platforms.WATCHED
+    assert snapshot["posting_modes"]["x"]["mode"] == platforms.REFUSED
+    assert set(snapshot["cadence"]) == {"reddit", "youtube", "facebook", "discord"}

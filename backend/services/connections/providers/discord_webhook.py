@@ -2,6 +2,9 @@
 
 The webhook URL is itself the credential — anyone holding it can post to the
 channel — so it is stored as a secret rather than in ``Connection.config``.
+Creating a webhook takes the Manage Webhooks permission on the channel, so
+it posts into a channel the person manages; that is why this connection alone
+may be set to post without a per-post approval (``posts_to_owned_channel``).
 """
 
 from __future__ import annotations
@@ -86,6 +89,7 @@ SPEC = ProviderSpec(
     hint_field="webhook_url",
     docs_url="https://discord.com/developers/docs/resources/webhook",
     setup_help="Create a webhook on the target channel and paste its URL.",
+    posts_to_owned_channel=True,
 )
 
 

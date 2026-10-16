@@ -49,7 +49,7 @@ import TravelExploreIcon from "@mui/icons-material/TravelExplore";
 import * as outreachApi from "../api/outreachService";
 
 // Per-platform character soft-caps used by the pre-flight panel.
-// Sources: reddit (10000 comment), youtube (~10000), twitter (280), discord (2000),
+// Sources: reddit (10000 comment), youtube (~10000), discord (2000),
 // facebook (~5000), internal note (no cap — display only).
 const PLATFORM_LIMITS = {
   reddit: { max: 10000, label: "Reddit comment" },
@@ -57,7 +57,6 @@ const PLATFORM_LIMITS = {
   youtube: { max: 10000, label: "YouTube comment" },
   discord: { max: 2000, label: "Discord message" },
   facebook: { max: 5000, label: "Facebook post" },
-  twitter: { max: 280, label: "Tweet" },
   internal: { max: 0, label: "Internal note" },
 };
 
@@ -70,17 +69,17 @@ const TONE_OPTIONS = [
   { value: "humorous", label: "Humorous (dry, used sparingly)" },
 ];
 
-// `auto: true` = an approved draft is posted (tick_process_approved_drafts:
-// Reddit/YouTube/Facebook BiDi posters, the agent loop for X comments,
-// the Discord cog). For the others the queue is the only output, flagged in
-// the modal so an approved draft that never goes anywhere is no surprise.
+// How an approved draft goes out (backend platforms.py, also in status.posting_modes):
+// "watched" = one post at a time, started with Post now on the Approvals page while
+// the person watches the Agent Screen; "bot" = the Discord bot sends it; null = the
+// queue is the only output, flagged in the modal so that is no surprise. X and
+// LinkedIn are not offered: nothing here posts to them.
 const PLATFORM_OPTIONS = [
-  { value: "reddit", label: "Reddit comment", auto: true },
-  { value: "youtube", label: "YouTube comment", auto: true },
-  { value: "discord", label: "Discord message", auto: true },
-  { value: "twitter", label: "Twitter / X comment", auto: true },
-  { value: "facebook", label: "Facebook comment", auto: true },
-  { value: "internal", label: "Internal note", auto: false },
+  { value: "reddit", label: "Reddit comment", posts: "watched" },
+  { value: "youtube", label: "YouTube comment", posts: "watched" },
+  { value: "discord", label: "Discord message", posts: "bot" },
+  { value: "facebook", label: "Facebook comment", posts: "watched" },
+  { value: "internal", label: "Internal note", posts: null },
 ];
 
 // Terminal statuses the History panel lists ("all" shows these together).
@@ -355,8 +354,8 @@ const OutreachPage = () => {
     setBusy(true);
     setError(null); setInfo(null);
     try {
-      await outreachApi.approveDraft(selected.id, draft);
-      setInfo(`Approved draft #${selected.id}. Will go out on the next outreach pass.`);
+      const row = await outreachApi.approveDraft(selected.id, draft);
+      setInfo(`Approved draft #${selected.id}. ${row?.next || ""}`.trim());
       setSelected(null);
       setDraft("");
       await fetchQueue();
@@ -624,19 +623,6 @@ const OutreachPage = () => {
     }
   };
 
-  const handleSupervisedToggle = async () => {
-    if (!status) return;
-    setBusy(true);
-    try {
-      await outreachApi.setSupervised(!status.supervised);
-      await fetchStatus();
-    } catch (e) {
-      setError(`supervised toggle failed: ${e.message}`);
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const closeNewDraftModal = async () => {
     if (ndBusy) return;
     if (ndSeededId) {
@@ -704,9 +690,8 @@ const OutreachPage = () => {
               <Chip
                 size="small"
                 icon={<VisibilityIcon />}
-                color={status.supervised ? "warning" : "default"}
-                label={status.supervised ? "Supervised (queue only)" : "Unsupervised"}
-                onClick={handleSupervisedToggle}
+                color="warning"
+                label="Every post needs your approval"
                 variant="outlined"
               />
               {status.cadence && Object.entries(status.cadence).map(([p, c]) => (
@@ -767,9 +752,9 @@ const OutreachPage = () => {
         )}
         {status && (
           <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1, fontSize: "0.7rem" }}>
-            {status.supervised
-              ? "Supervised: scout/draft runs queue comments here — Approve before anything posts."
-              : "Unsupervised: eligible drafts (grade ≥ 0.7, cadence OK) auto-queue for the ~60s poster. Use with care."}
+            Scout/draft runs queue comments here and nothing posts until you approve it. Approved
+            Reddit, YouTube and Facebook drafts post one at a time from the Approvals page, with
+            Post now, while you watch the Agent Screen; the Discord bot sends Discord drafts.
           </Typography>
         )}
       </Paper>
@@ -921,7 +906,12 @@ const OutreachPage = () => {
             {approved.length > 0 && (
               <Paper variant="outlined" sx={{ mb: 1, p: 1 }}>
                 <Typography variant="caption" sx={{ fontWeight: 600, display: "block", mb: 0.5 }}>
-                  Approved — posting next ({approved.length})
+                  Approved — waiting ({approved.length})
+                </Typography>
+                <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5, fontSize: "0.65rem" }}>
+                  Start Reddit, YouTube and Facebook posts from the{" "}
+                  <Link component={RouterLink} to="/approvals" underline="hover">Approvals page</Link>
+                  {" "}with Post now; the Discord bot sends Discord drafts.
                 </Typography>
                 <List dense disablePadding sx={{ maxHeight: 140, overflowY: "auto" }}>
                   {approved.map((r) => (
@@ -1227,7 +1217,9 @@ const OutreachPage = () => {
                 Reject
               </Button>
               <Typography variant="caption" color="text.secondary" sx={{ mt: 1 }}>
-                Approve marks the draft so the next outreach pass posts it. Reject removes it from the queue.
+                Approve posts nothing. An approved Reddit, YouTube or Facebook draft is posted from the
+                Approvals page with Post now while you watch the Agent Screen; the Discord bot sends
+                Discord drafts. Reject removes it from the queue.
               </Typography>
             </Stack>
           </Paper>
@@ -1401,7 +1393,7 @@ const OutreachPage = () => {
                 <Select value={ndPlatform} label="Platform" onChange={(e) => setNdPlatform(e.target.value)}>
                   {PLATFORM_OPTIONS.map(p => (
                     <MenuItem key={p.value} value={p.value}>
-                      {p.label}{p.auto ? "" : " (no auto-post yet)"}
+                      {p.label}{p.posts ? "" : " (not posted)"}
                     </MenuItem>
                   ))}
                 </Select>
@@ -1451,9 +1443,9 @@ const OutreachPage = () => {
                 onChange={(e) => setNdThreadId(e.target.value)}
                 fullWidth
               />
-              {!PLATFORM_OPTIONS.find(p => p.value === ndPlatform)?.auto && (
+              {!PLATFORM_OPTIONS.find(p => p.value === ndPlatform)?.posts && (
                 <Alert severity="info" sx={{ py: 0.5, fontSize: "0.7rem" }}>
-                  No auto-post backend for {ndPlatform} yet — approving will queue the row but not ship it.
+                  Nothing here posts to {ndPlatform}; approving keeps the row but does not ship it.
                 </Alert>
               )}
               <Divider sx={{ my: 0.5 }} />
@@ -1725,7 +1717,7 @@ const OutreachPage = () => {
         <DialogContent>
           <DialogContentText>
             {status?.posting_stopped
-              ? "Posts can go out again. Held Connections publishes stay on the Approvals page until someone approves them; approved outreach drafts post on the usual schedule while outreach is enabled."
+              ? "Posts can go out again. Held Connections publishes stay on the Approvals page until someone approves them; approved outreach drafts can be posted again while outreach is enabled (Reddit, YouTube and Facebook with Post now on the Approvals page)."
               : "Nothing is posted publicly from this install until you resume: no outreach replies or shares, and no Connections publishes, including scheduled, chat and MCP requests. Queued Connections publishes are held on the Approvals page and need approving again; approved outreach drafts stay approved. A post already being sent may still go out. This is separate from the outreach Enabled switch."}
           </DialogContentText>
         </DialogContent>
@@ -1750,7 +1742,7 @@ const OutreachPage = () => {
           <DialogContentText>
             {status?.enabled
               ? "This turns the kill switch off: scheduled ticks and new passes stop. Approved drafts will not post until you enable again."
-              : "This turns outreach on. Supervised mode still requires Approve before posts go out."}
+              : "This turns outreach on. Every draft still waits for your approval, and Reddit, YouTube and Facebook posts start only from Post now on the Approvals page."}
           </DialogContentText>
         </DialogContent>
         <DialogActions>

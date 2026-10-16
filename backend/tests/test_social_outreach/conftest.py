@@ -8,8 +8,8 @@ from backend.models import db
 
 @pytest.fixture(autouse=True)
 def _agent_browser_left_alone(monkeypatch):
-    """The posting tick restarts the agent Firefox with its control port around
-    its posts (backend/utils/agent_browser_control.py). Here that is a no-op,
+    """A watched post restarts the agent Firefox with its control port around
+    the post (backend/utils/agent_browser_control.py). Here that is a no-op,
     so no test closes or launches a real browser; test_browser_control.py
     exercises the real one against stubs."""
     @contextlib.contextmanager
@@ -17,6 +17,68 @@ def _agent_browser_left_alone(monkeypatch):
         yield None
 
     monkeypatch.setattr("backend.utils.agent_browser_control.agent_browser_control", untouched)
+
+
+class FakeRedis:
+    """The few Redis calls outreach makes, kept in a dict."""
+
+    def __init__(self):
+        self.values = {}
+        self.zsets = {}
+
+    def ping(self):
+        return True
+
+    def get(self, key):
+        return self.values.get(key)
+
+    def set(self, key, value, nx=False, ex=None):
+        if nx and key in self.values:
+            return None
+        self.values[key] = value
+        return True
+
+    def delete(self, *keys):
+        return sum(1 for key in keys if self.values.pop(key, None) is not None)
+
+    def zadd(self, key, mapping):
+        self.zsets.setdefault(key, {}).update(mapping)
+
+    def zremrangebyscore(self, key, low, high):
+        zset = self.zsets.get(key, {})
+        for member in [m for m, score in zset.items() if low <= score <= high]:
+            del zset[member]
+
+    def zcard(self, key):
+        return len(self.zsets.get(key, {}))
+
+    def expire(self, key, seconds):
+        return True
+
+
+@pytest.fixture
+def fake_redis(monkeypatch):
+    """Outreach's Redis (cadence, the watched-post slot) as a FakeRedis."""
+    r = FakeRedis()
+    monkeypatch.setattr("backend.services.social_outreach.kill_switch._get_redis", lambda: r)
+    return r
+
+
+@pytest.fixture
+def watching(monkeypatch):
+    """Whether the Agent Screen viewer counts as open; True until a test
+    sets state["watching"] = False."""
+    from backend.utils import agent_screen_presence
+
+    state = {"watching": True}
+
+    def answer(window_s=agent_screen_presence.WATCH_WINDOW_S):
+        if state["watching"]:
+            return True, None
+        return False, agent_screen_presence.NOT_WATCHING
+
+    monkeypatch.setattr(agent_screen_presence, "watching", answer)
+    return state
 
 
 @pytest.fixture

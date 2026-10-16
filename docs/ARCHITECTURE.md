@@ -212,7 +212,7 @@ All paths resolve through `backend/config.py` — **never hardcode paths.** `GUA
 These have real teeth — understand them before touching agent/self-improvement/outreach code:
 
 - **Codebase lock.** `killswitch.sh` and the `codebase_locked` / `self_improvement_enabled` rows in `system_settings` (plus the `data/.codebase_lock` lockfile) gate whether the self-improvement engine may modify code. Self-improvement runs test → agent fix → verify, optionally behind an "Uncle Claude" (Anthropic API) guardian review and a Pending Fixes approval queue.
-- **Outreach** (`backend/tasks/social_outreach_tasks.py`, `backend/tools/outreach_tools.py`) is **supervised by default** — drafts queue and nothing posts without explicit approval. Per-platform cadence limits, a JSONL audit trail, persona enforcement, and a global kill switch all apply. Operator identity is config-driven (do not hardcode a person — see commit history).
+- **Outreach** (`backend/tasks/social_outreach_tasks.py`, `backend/tools/outreach_tools.py`) is **always supervised** — drafts queue and nothing posts without explicit approval; there is no switch to turn that off. What may happen after an approval is declared per platform in `backend/services/social_outreach/platforms.py`: browser-posted platforms (Reddit, YouTube, Facebook) post one draft per "Post now, I'm watching" click with the Agent Screen open (`watched_post.py`), never on a schedule; X and LinkedIn are refused. Per-platform cadence limits, a JSONL audit trail, persona enforcement, and a global kill switch all apply. Operator identity is config-driven (do not hardcode a person — see commit history).
 - **MCP default-deny** (above) is the boundary for what external clients can invoke.
 
 ## Conventions

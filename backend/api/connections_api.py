@@ -447,14 +447,15 @@ def connection_usage():
 
 # --- settings ----------------------------------------------------------------
 def _publish_settings() -> dict:
-    """The publish switches, plus the stop on all public posting. The stop is
-    reported here but switched from the Outreach page (/api/social-outreach)."""
+    """The publish switch, plus the stop on all public posting. The stop is
+    reported here but switched from the Outreach page (/api/social-outreach).
+    Approval has no global switch: each publish waits for it, except on a
+    connection set to post without it (PUT /<id> post_without_approval)."""
     from backend.services.connections import gates
 
     stop_reason = gates.posting_stop_reason()
     return {
         "publish_enabled": gates.publish_enabled(),
-        "publish_supervised": gates.publish_supervised(),
         "posting_stopped": stop_reason is not None,
         "posting_stop_reason": stop_reason,
     }
@@ -470,8 +471,12 @@ def set_publish_settings():
     from backend.services.connections import gates
 
     payload = request.get_json(silent=True) or {}
+    if "publish_supervised" in payload:
+        return _error(
+            "Approval can no longer be switched off for all publishing. A Discord "
+            "webhook connection can be set to post without approval on its own card.",
+            400,
+        )
     if "publish_enabled" in payload:
         gates.set_publish_enabled(bool(payload["publish_enabled"]))
-    if "publish_supervised" in payload:
-        gates.set_publish_supervised(bool(payload["publish_supervised"]))
     return jsonify(_publish_settings()), 200

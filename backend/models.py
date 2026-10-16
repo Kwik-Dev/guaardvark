@@ -2125,8 +2125,8 @@ class PublishRecord(db.Model):
     scheduled_at = db.Column(db.DateTime, nullable=True, index=True)
     # The platform holds it for scheduled_at (remote_id names the held post).
     scheduled_natively = db.Column(db.Boolean, nullable=False, default=False)
-    # When a person released it: the Approvals click, or the UI publish itself
-    # when approval is switched off. The scheduler sends nothing without it.
+    # When a person approved it on the Approvals page. A scheduled record goes
+    # out only with it, or when gates.requires_approval says it needs none.
     approved_at = db.Column(db.DateTime, nullable=True)
     # The post discloses AI use, by the platform's mechanism (see AIDisclosure).
     ai_disclosure = db.Column(db.Boolean, nullable=False, default=False)

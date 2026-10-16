@@ -60,8 +60,6 @@ def preflight(
 
     general = [stopped] if stopped else []
     general += scheduling.problems(scheduled_at)
-    # Without approval a post with no time goes out at once, so its limit applies now.
-    immediate = scheduled_at is None and not gates.requires_approval(requested_by)
 
     per_connection: Dict[str, Any] = {}
     for cid in connection_ids or []:
@@ -83,7 +81,9 @@ def preflight(
                 caps, items, body=final_body, title=title, visibility=visibility
             )
             problems += bot_label_problems(caps, connection)
-            if immediate:
+            # A post that needs no approval and has no time goes out at once,
+            # so its account's limit applies now.
+            if scheduled_at is None and not gates.requires_approval(requested_by, connection):
                 verdict = rate_limits.check(connection.id, caps.rate_limits)
                 if not verdict.allowed:
                     problems.append(verdict.reason)
@@ -134,6 +134,20 @@ def compose_body(body: str, items, connection, caps, disclosed: bool) -> str:
         if rule.text not in stripped:
             text = f"{stripped}\n\n{rule.text}" if stripped else rule.text
     return text
+
+
+def approved(record, connection) -> bool:
+    """Whether a scheduled record may go out: a person approved it on the
+    Approvals page, or it needs no approval (``gates.requires_approval``, asked
+    again now, so switching a connection back to approval holds what waits).
+
+    Records without a time are not judged here: they reach the queue only
+    through ``approve()`` or the no-approval path, before this column existed
+    as well as after.
+    """
+    if record.scheduled_at is None or record.approved_at is not None:
+        return True
+    return not gates.requires_approval(record.requested_by, connection)
 
 
 def bot_label_problems(caps, connection) -> List[str]:
@@ -225,13 +239,13 @@ def queue_publish(
         raise ValueError(time_problems[0])
 
     items = media_util.resolve_media(document_ids or [])
-    needs_approval = gates.requires_approval(requested_by)
 
     planned = []
     for cid in connection_ids:
         connection = Connection.query.get(cid)
         if connection is None:
             raise ValueError(f"Connection {cid} not found.")
+        needs_approval = gates.requires_approval(requested_by, connection)
 
         problems = _connection_problems(connection)
         spec = registry.spec_for(connection.provider)
@@ -249,10 +263,10 @@ def queue_publish(
             verdict = rate_limits.check(connection.id, caps.rate_limits)
             if not verdict.allowed:
                 raise RuntimeError(f"{spec.label}: {verdict.reason}")
-        planned.append((connection, spec, target_visibility, final_body, disclosed))
+        planned.append((connection, spec, target_visibility, final_body, disclosed, needs_approval))
 
     queued: List[Dict[str, Any]] = []
-    for connection, spec, target_visibility, final_body, disclosed in planned:
+    for connection, spec, target_visibility, final_body, disclosed, needs_approval in planned:
         record = PublishRecord(
             connection_id=connection.id,
             platform=connection.provider,
@@ -279,17 +293,17 @@ def queue_publish(
             })
             continue
 
-        # Approval is switched off and a person clicked Publish in the UI.
-        record.approved_at = datetime.now()
-        try:
-            queued.append(_release(record, connection, spec))
-        except RuntimeError:
-            db.session.rollback()
-            raise
+        # A person started it from the app, to a connection set to post
+        # without approval (gates.posts_without_approval). approved_at stays
+        # empty: it records an Approvals click, and the scheduler re-asks
+        # gates.requires_approval when a timer post comes due.
+        queued.append(_release(record, connection, spec))
 
+    # True when any target waits on the Approvals page; each entry's status
+    # says which.
     return {
         "queued": queued,
-        "requires_approval": needs_approval,
+        "requires_approval": any(entry[-1] for entry in planned),
         "count": len(queued),
     }
 
@@ -394,7 +408,7 @@ def _dispatch(record, connection, spec) -> Dict[str, Any]:
 
 
 def approve(record) -> Dict[str, Any]:
-    """Release a supervised or held publish: now, or for its scheduled time.
+    """Release a publish waiting for approval, or a held one: now, or for its time.
 
     Raises RuntimeError while public posting is stopped, or when a post that
     would go out now is over its account's rate limit; the record stays put.

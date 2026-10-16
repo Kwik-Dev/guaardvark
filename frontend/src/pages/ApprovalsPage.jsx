@@ -1,9 +1,11 @@
 // frontend/src/pages/ApprovalsPage.jsx
 //
-// Everything waiting on a human. Publishes: anything an agent queues — from
-// chat, MCP or a schedule — is held here until it is approved, and so is
-// everything else when supervised mode is on. Code changes: what the inbound
-// guard holds before it lands in this checkout.
+// Everything waiting on a human. Publishes: every publish is held here until it
+// is approved, except one a person starts from the app to a Discord webhook set
+// to post without approval; anything an agent queues (chat, MCP, a schedule)
+// waits whatever that switch says. Outreach: drafts to approve, then approved
+// Reddit/YouTube/Facebook drafts to start with "Post now, I'm watching".
+// Code changes: what the inbound guard holds before it lands in this checkout.
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
@@ -69,7 +71,7 @@ const HISTORY_STATUSES = ["scheduled", "posted", "rejected", "cancelled", "faile
 
 const formatAt = (iso) => (iso ? new Date(iso).toLocaleString() : "");
 
-// Sources the backend always supervises, whatever the global setting says.
+// Sources the backend always holds for approval, whatever a connection says.
 const AGENT_SOURCES = new Set(["chat", "mcp", "schedule"]);
 
 const formatWhen = (iso) => {
@@ -96,7 +98,9 @@ const ApprovalsPage = () => {
   const [rejecting, setRejecting] = useState(null);
   const [notifyEnabled, setNotifyEnabled] = useState(desktopNotificationsGranted);
 
-  const { pending, held, outreach, loading, heldLoading, outreachLoading, error, refresh } = usePendingApprovals({
+  const {
+    pending, held, outreach, outreachWaiting, loading, heldLoading, outreachLoading, error, refresh,
+  } = usePendingApprovals({
     notify: notifyEnabled,
   });
 
@@ -443,7 +447,11 @@ const ApprovalsPage = () => {
           />
           <Tab
             value="outreach"
-            label={outreach.length ? `Outreach (${outreach.length})` : "Outreach"}
+            label={
+              outreach.length + outreachWaiting.length
+                ? `Outreach (${outreach.length + outreachWaiting.length})`
+                : "Outreach"
+            }
           />
           <Tab
             value="code"
@@ -464,6 +472,7 @@ const ApprovalsPage = () => {
         ) : tab === "outreach" ? (
           <OutreachDraftsPanel
             drafts={outreach}
+            waiting={outreachWaiting}
             loading={outreachLoading}
             onChanged={refresh}
             showMessage={showMessage}

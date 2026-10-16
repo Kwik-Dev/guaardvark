@@ -1,14 +1,14 @@
 """Status transitions for social outreach draft rows.
 
     candidate -> drafted -> approved -> processing -> submitting -> posted
-                                |            |              |
-                                |            +--> aborted <-+
-                                +--> unsupported
+                    |           |            |              |
+                    |           |            +--> aborted <-+
+                    +-----------+--> unsupported
     rejected <- (candidate, drafted, approved, processing)
 
 ``unsupported`` means nothing in this install posts that action on that
-platform (a reply anywhere but YouTube, for one); the row keeps its draft and
-is not retried.
+platform (a reply anywhere but YouTube, for one, or any draft for a platform
+``platforms.REFUSED`` lists); the row keeps its draft and is not retried.
 
 ``processing`` means a poster has claimed the row and is driving the browser
 towards the composer; the row can still be rejected. ``submitting`` means the
@@ -29,6 +29,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, NamedTuple, Optional
 
+from sqlalchemy import func
+
 # Every status a row can hold, in pipeline order.
 KNOWN_STATUSES = (
     "candidate",
@@ -42,7 +44,7 @@ KNOWN_STATUSES = (
     "unsupported",
 )
 
-# Approve only from drafted (human or unsupervised auto-approve path).
+# Approve only from drafted, by a person.
 APPROVE_FROM = frozenset({"drafted"})
 
 # Reject cancels work whose publishing step has not started.
@@ -157,9 +159,56 @@ def current_status(audit_id: int) -> Optional[str]:
     return found[0] if found else None
 
 
+def _platform(audit_id: int) -> Optional[str]:
+    from backend.models import SocialOutreachLog, db
+
+    found = (
+        db.session.query(SocialOutreachLog.platform)
+        .filter(SocialOutreachLog.id == audit_id)
+        .first()
+    )
+    return found[0] if found else None
+
+
 def approve(audit_id: int, draft_text: Optional[str] = None) -> bool:
+    """drafted -> approved. A draft for a platform nothing here posts to
+    (``platforms.REFUSED``) goes to unsupported with that platform's reason
+    instead, and False is returned; ``approval_refusal`` then says why."""
+    from backend.models import SocialOutreachLog
+    from backend.services.social_outreach import platforms
+
+    refusal = platforms.refusal_for(_platform(audit_id))
+    if refusal:
+        move(audit_id, "unsupported", APPROVE_FROM, abort_reason=refusal[:512])
+        return False
     fields = {} if draft_text is None else {"draft_text": draft_text}
-    return move(audit_id, "approved", APPROVE_FROM, **fields)
+    # The platform is matched in the same UPDATE, so a draft switched to a
+    # refused platform after the read above is not approved either.
+    refused = platforms.platforms_in(platforms.REFUSED)
+    return _update_where(
+        audit_id,
+        SocialOutreachLog.status.in_(tuple(APPROVE_FROM))
+        & func.lower(func.coalesce(SocialOutreachLog.platform, "")).not_in(refused),
+        {"status": "approved", **fields},
+    )
+
+
+def approval_refusal(audit_id: int) -> Optional[str]:
+    """Why ``approve`` did not approve this row, in words a user can act on;
+    None when there is no such row."""
+    from backend.models import SocialOutreachLog, db
+
+    found = (
+        db.session.query(SocialOutreachLog.status, SocialOutreachLog.abort_reason)
+        .filter(SocialOutreachLog.id == audit_id)
+        .first()
+    )
+    if not found:
+        return None
+    status, reason = found
+    if status == "unsupported" and reason:
+        return reason
+    return f"cannot approve from status '{status}' (only from drafted)"
 
 
 def _posting_stopped() -> bool:
@@ -176,14 +225,21 @@ def claim(audit_id: int) -> bool:
     return move(audit_id, "processing", CLAIM_FROM, abort_reason=_stamp("processing_since:"))
 
 
+def release_claim(audit_id: int) -> bool:
+    """processing -> approved: a poster hands back a row it claimed and did
+    not submit, so the draft waits instead of being abandoned. Its give-up
+    afterwards finds nothing in flight."""
+    return move(audit_id, "approved", SUBMIT_FROM, abort_reason=None)
+
+
 def begin_submit(audit_id: int) -> bool:
     """processing -> submitting. A poster calls this immediately before the
     step that publishes and must not publish when it returns False: the row was
     rejected (or reaped) while the poster was working, or public posting was
-    stopped. A stop hands the claim back (processing -> approved), so the
-    poster's give-up finds nothing in flight and the draft waits."""
+    stopped. A stop hands the claim back (``release_claim``), so the draft
+    waits."""
     if _posting_stopped():
-        move(audit_id, "approved", SUBMIT_FROM, abort_reason=None)
+        release_claim(audit_id)
         return False
     return move(audit_id, "submitting", SUBMIT_FROM, abort_reason=_stamp("submitting_since:"))
 

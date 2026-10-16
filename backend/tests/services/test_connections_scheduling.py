@@ -265,7 +265,9 @@ def test_a_very_late_post_waits_for_a_person(db_app, platform):
 def test_runner_refuses_a_scheduled_record_without_approval(db_app, platform):
     from backend.models import PublishRecord, db
 
-    row = PublishRecord(platform="bluesky", body="x", status="queued", scheduled_at=datetime.now())
+    bluesky = _connection("bluesky")
+    row = PublishRecord(connection_id=bluesky.id, platform="bluesky", body="x", status="queued",
+                        scheduled_at=datetime.now())
     db.session.add(row)
     db.session.commit()
 
@@ -273,6 +275,39 @@ def test_runner_refuses_a_scheduled_record_without_approval(db_app, platform):
 
     assert out["skipped"] is True and out["reason"] == "not approved"
     assert platform.calls == []
+
+
+def test_an_owned_channel_set_to_skip_approval_schedules_without_a_click(db_app, platform):
+    discord = _connection("discord_webhook", {"post_without_approval": True})
+    record = _queue(discord, scheduled_at=datetime.now() + LATER)
+    assert record.status == "scheduled" and record.approved_at is None
+
+    _make_due(record)
+    released = scheduler.tick()["released"]
+    assert released["publish_record_id"] == record.id
+
+
+def test_switching_approval_back_on_holds_a_waiting_post(db_app, platform):
+    from backend.models import db
+
+    discord = _connection("discord_webhook", {"post_without_approval": True})
+    record = _queue(discord, scheduled_at=datetime.now() + LATER)
+    discord.config = json.dumps({"post_without_approval": False})
+    db.session.commit()
+
+    _make_due(record)
+    out = scheduler.tick()
+
+    assert out["released"] is None and record.id in out["held"]
+    assert record.status == "awaiting_approval"
+    assert platform.dispatched == []
+
+
+@pytest.mark.parametrize("source", ["chat", "mcp"])
+def test_an_agent_scheduled_post_waits_even_on_a_no_approval_channel(db_app, platform, source):
+    discord = _connection("discord_webhook", {"post_without_approval": True})
+    record = _queue(discord, scheduled_at=datetime.now() + LATER, requested_by=source)
+    assert record.status == "awaiting_approval"
 
 
 # --- rate limits ---------------------------------------------------------------
@@ -335,17 +370,15 @@ def test_approval_over_the_limit_leaves_the_record_waiting(db_app, platform):
     assert platform.dispatched == []
 
 
-def test_an_unsupervised_publish_over_the_limit_is_refused_before_any_record(db_app, platform):
+def test_a_no_approval_publish_over_the_limit_is_refused_before_any_record(db_app, platform):
     from backend.models import PublishRecord
-    from backend.services.connections import gates
 
-    bluesky = _connection("bluesky")
-    _posted(bluesky, 10)
-    gates.set_publish_supervised(False)
+    discord = _connection("discord_webhook", {"post_without_approval": True})
+    _posted(discord, 10)
     before = PublishRecord.query.count()
 
     with pytest.raises(RuntimeError, match="limit"):
-        publish_service.queue_publish(connection_ids=[bluesky.id], body="one too many")
+        publish_service.queue_publish(connection_ids=[discord.id], body="one too many")
     assert PublishRecord.query.count() == before
 
 

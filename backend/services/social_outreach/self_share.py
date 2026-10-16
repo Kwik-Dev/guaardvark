@@ -351,9 +351,8 @@ class SelfShareLoop:
             return report
 
         report["drafted"] += 1
-        # Draft-only: when would_post, /draft-comment already marked the row
-        # approved; tick_process_approved_drafts posts with cadence. Never
-        # servo-post from this loop (avoids dual unsupervised auto-post).
+        # Draft-only: a person approves the draft and starts the post
+        # (watched_post). Never servo-post from this loop.
         if draft.get("would_post"):
             report["queued_for_post"] = 1
             report["reason"] = "queued_for_process_approved"

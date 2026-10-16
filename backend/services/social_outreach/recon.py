@@ -57,8 +57,8 @@ and rules out hostile/off-topic threads. Below this, or on a "skip" verdict
 at any grade, we skip without queuing (judged_unfit). The scheduled Reddit loop (reddit_outreach.RedditOutreachLoop) skips on the
 same bar. When the relevance model is unavailable, recon still queues the
 candidate on its keyword match, marked relevance_skipped, and the loop still
-drafts, marked relevance unchecked; either way an unsupervised draft is then
-held for approval (gates.independent_ok)."""
+drafts, marked relevance unchecked; either way the draft waits for a
+person's approval, like every draft."""
 
 
 def judged_unfit(relevance: dict) -> bool:

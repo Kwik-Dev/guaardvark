@@ -11,12 +11,9 @@ Self-contained: reads everything from the candidate row's draft_text JSON
 payload (which Recon populates with title, selftext_preview, top_comments,
 feature_hint). No live Reddit fetch — that was Recon's job.
 
-Doesn't post. Doesn't call the servo. The servo path is Phase 3 (Outreach),
-which already exists in tick_process_approved_drafts. When unsupervised
-(kill on, not supervised, grade ≥ MIN_GRADE, cadence OK, independent check
-ran and passed), Content promotes straight to ``approved`` — same would_post
-gate as /draft-comment — so YouTube chain-draft matches Reddit unsupervised
-behavior.
+Doesn't post. Doesn't call the servo, and never approves: every draft it
+writes waits as ``drafted`` for a person, who approves it and then starts
+the post (watched_post).
 """
 
 from __future__ import annotations
@@ -31,8 +28,8 @@ logger = logging.getLogger(__name__)
 
 
 MIN_GRADE = 0.7
-"""Drafts below this self-grade get rejected. Matches the threshold the existing
-draft-comment endpoint uses for the would_post gate so we stay consistent."""
+"""Drafts below this self-grade get rejected. Matches the grade_ok threshold
+the draft-comment endpoint reports so we stay consistent."""
 
 MIN_REPLY_GRADE = 0.6
 """Looser threshold for replies on the account's own videos — the rubric in
@@ -197,9 +194,7 @@ class ContentAgent:
         # tuned for outreach comments ("would a stranger flag this as
         # promotional?"), which scores replies-to-fans as low even when
         # the reply is good. We keep the self-grade threshold (MIN_REPLY_GRADE).
-        # With no independent check, an unsupervised reply waits for approval
-        # (gates.independent_ok) rather than posting on its self-grade.
-        # A share has no thread for the rubric at all; gates holds every share.
+        # A share has no thread for the rubric at all.
         if row.action == "reply":
             ext = {"checked": False, "skipped": True, "reason": "skip_for_reply_action"}
         elif row.action == "share":
@@ -209,8 +204,7 @@ class ContentAgent:
             # blind to the self-grade. Drafter is biased toward its own
             # output; this catches generic, off-tone, or oversold comments
             # that the writer rated highly. If the grader is unavailable the
-            # draft is not rejected; the would_post gate below decides
-            # whether it may still post.
+            # draft is not rejected; the person reviewing it sees that.
             ext = external_grader.grade_draft_externally(draft_text, thread_context)
         if gates.independent_check_label(ext) == "failed":
             missed = ",".join(q for q in external_grader.RUBRIC_QUESTIONS if not ext.get(q))
@@ -257,35 +251,17 @@ class ContentAgent:
                 "incoming_author": payload.get("incoming_author", ""),
             })
 
-        # Store posted_text alongside the draft so the Outreach agent
-        # doesn't have to re-tag at servo time. Goes through the audit
-        # helper (detached session) so we don't accidentally flush other
-        # caller-pending mutations under celery.
-        #
-        # Unsupervised parity with /draft-comment: when enabled, not
-        # supervised, grade ≥ MIN_GRADE, cadence allows, and the independent
-        # check ran and passed → approved so tick_process_approved_drafts can
-        # post without a human click. An unchecked draft is held as drafted,
-        # and so is one whose thread recon could not put to the thread-fit
-        # judge (relevance_skipped in the candidate payload).
-        from backend.services.social_outreach import kill_switch
-        enabled = kill_switch.is_enabled()
-        supervised = kill_switch.is_supervised()
-        cadence_ok, cadence_reason = kill_switch.cadence_allows_post(row.platform)
+        # Store posted_text alongside the draft so the poster doesn't have to
+        # re-tag at servo time. Goes through the audit helper (detached
+        # session) so we don't accidentally flush other caller-pending
+        # mutations under celery. The draft waits for a person whatever the
+        # grades say; a thread recon could not put to the thread-fit judge is
+        # noted for them (relevance_skipped in the candidate payload).
         relevance_unchecked = bool(payload.get("relevance_skipped"))
         independent_pass, independent_reason = gates.independent_ok(
-            ext, supervised=supervised, action=row.action,
-            relevance_unchecked=relevance_unchecked,
+            ext, action=row.action, relevance_unchecked=relevance_unchecked,
         )
-        would_post = (
-            enabled
-            and not supervised
-            and cadence_ok
-            and grade >= MIN_GRADE
-            and bool((draft_text or "").strip())
-            and independent_pass
-        )
-        promote_status = "approved" if would_post else "drafted"
+        promote_status = "drafted"
         hold_reason = None if independent_pass else independent_reason
 
         promoted = audit.mark_drafted_from_candidate(
@@ -322,9 +298,8 @@ class ContentAgent:
                 "external_skipped": ext.get("skipped", False),
                 "external_reason": ext.get("reason", ""),
                 "relevance_unchecked": relevance_unchecked,
+                "independent_reason": independent_reason,
                 "promoted_status": promote_status,
-                "would_post": would_post,
-                "cadence_block": cadence_reason if not cadence_ok else None,
                 "hold_reason": hold_reason,
             },
         )
@@ -334,7 +309,7 @@ class ContentAgent:
             "grade": grade,
             "reason": None,
             "external": ext,
-            "would_post": would_post,
+            "independent_reason": independent_reason,
             "hold_reason": hold_reason,
         }
 

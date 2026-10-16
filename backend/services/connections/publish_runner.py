@@ -57,8 +57,6 @@ def run(task: Dict[str, Any], update_progress: Callable[[int, str], None]) -> Di
     # publish that now waits on a person. scheduled: the timer owns it.
     if record.status in ("cancelled", "rejected", "awaiting_approval", "scheduled", "deleted"):
         return {"skipped": True, "status": record.status}
-    if record.scheduled_at is not None and record.approved_at is None:
-        return {"skipped": True, "status": record.status, "reason": "not approved"}
 
     stopped = gates.posting_stop_reason()
     if stopped:
@@ -68,6 +66,8 @@ def run(task: Dict[str, Any], update_progress: Callable[[int, str], None]) -> Di
     connection = Connection.query.get(record.connection_id)
     if connection is None:
         return _fail(record, "The target connection no longer exists.")
+    if not publish_service.approved(record, connection):
+        return {"skipped": True, "status": record.status, "reason": "not approved"}
 
     spec = registry.spec_for(connection.provider)
     caps = spec.capabilities

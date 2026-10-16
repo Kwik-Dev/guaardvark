@@ -47,8 +47,9 @@ PROTECTED_PREFIXES = (
     # which should be reachable from another machine on the LAN without an API key.
     '/api/social-outreach/',
     # Connections hold publishing accounts, approve or cancel held publishes,
-    # switch approval off and rotate the credential store's key. The bare path
-    # is the list and create route, so there is no trailing slash.
+    # let a Discord webhook post without approval and rotate the credential
+    # store's key. The bare path is the list and create route, so there is no
+    # trailing slash.
     '/api/connections',
     # WordPress sites and the pages pulled from them. Registering a site stores
     # its API key or Application Password; pulling and testing send that key

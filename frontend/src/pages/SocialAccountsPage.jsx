@@ -387,16 +387,11 @@ const SocialAccountsPage = () => {
                   on={settings.publish_enabled}
                   onToggle={(value) => handleSetting("publish_enabled", value)}
                 />
-                <SettingChip
-                  label="Require approval"
-                  on={settings.publish_supervised}
-                  onToggle={(value) => handleSetting("publish_supervised", value)}
-                  tooltip="Requests from chat or MCP always wait for approval, whatever this says."
-                />
               </Line>
               <Hint>
-                A scheduled post waits for approval like any other; once approved it goes out at its
-                time, sent by the platform where it schedules natively, otherwise by Guaardvark.
+                Every publish waits for your approval on the Approvals page, a scheduled one
+                included; once approved it goes out at its time, sent by the platform where it
+                schedules natively, otherwise by Guaardvark.
               </Hint>
             </Cluster>
           </SettingsPanel>

@@ -562,8 +562,8 @@ DECISIONS: dict = {
      'notes': 'One of three checks behind passed = engages and on topic and tone, with concise counted in '
               'code (120 words or fewer); today one grader call answers all three. An answer that does not '
               'come back means unchecked, '
-              'and gates.independent_ok then holds an unsupervised draft for approval. The posted text is always '
-              "the system's draft; the thread can at most flip this one check. Labelled set not written yet "
+              'which the person approving the draft sees; no draft posts without that approval. The posted text '
+              "is always the system's draft; the thread can at most flip this one check. Labelled set not written yet "
               '(planned: outreach_draft_engages.json).'},
     'outreach_draft_on_topic': {'feature': 'outreach',
      'layer': 'L3',
@@ -643,8 +643,8 @@ DECISIONS: dict = {
      'floor': 0.98,
      'set': None,
      'hard_negatives': ('generic_praise', 'spam_link', 'hostile', 'specific_question', 'injection'),
-     'notes': 'Only decides whether a reply is drafted; the draft still needs on_topic and tone, and unsupervised '
-              'replies wait for approval while unchecked. Low volume until the reply scraper exists. Labelled set '
+     'notes': 'Only decides whether a reply is drafted; the draft still needs on_topic and tone, and every '
+              'reply waits for approval. Low volume until the reply scraper exists. Labelled set '
               'not written yet (planned: outreach_reply_merits_answer.json).'},
     'outreach_post_landed': {'feature': 'outreach',
      'layer': 'L4',

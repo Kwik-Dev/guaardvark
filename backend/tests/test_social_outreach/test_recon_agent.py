@@ -717,16 +717,13 @@ def test_content_agent_drafts_youtube_candidate_without_crashing(app):
             ), patch(
                 "backend.services.social_outreach.kill_switch.is_enabled",
                 return_value=True,
-            ), patch(
-                "backend.services.social_outreach.kill_switch.is_supervised",
-                return_value=True,
             ):
             result = ContentAgent().draft_candidate(row.id)
         # The exact status depends on grade thresholds; what we care about is
         # that the call did NOT raise (the BLOCKER would surface as a crash
         # or a JSON-decode failure when _build_thread_context reads the YT
-        # payload). Supervised → drafted|rejected (not approved).
-        assert result["status"] in ("drafted", "rejected", "approved")
+        # payload). Never approved: drafted or rejected.
+        assert result["status"] in ("drafted", "rejected")
         # The selftext_preview alias should have flowed through to the
         # thread_context that the persona drafter saw — which is the whole
         # point of the alias fix.

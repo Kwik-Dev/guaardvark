@@ -7,10 +7,12 @@ Each tick does at most two things:
    is asked again after ``RECHECK_SECONDS``.
 2. release: send at most one approved ``scheduled`` post whose time has come,
    and only when no other publish is in flight, so posts leave one at a time.
-   A post the rate limit or the shared cadence turns away waits for a later
-   tick. A post whose time came while public posting was stopped or
-   publishing was off, or that is more than ``LATE_HOLD_SECONDS`` late, goes
-   back to Approvals for a person's click instead of going out late.
+   It goes only if a person approved it, or if it needs no approval
+   (``gates.requires_approval``, asked again at that moment). A post the rate
+   limit or the shared cadence turns away waits for a later tick. A post
+   whose time came while public posting was stopped or publishing was off,
+   or that is more than ``LATE_HOLD_SECONDS`` late, goes back to Approvals
+   for a person's click instead of going out late.
 
 With nothing scheduled the beat gate (``celery_beat_gates``) holds the task
 back, so a fresh install never runs it.
@@ -36,7 +38,7 @@ STOPPED_DUE_MESSAGE = (
     "Its time came while public posting was stopped or publishing was off. "
     "Approve it to send it now, or reject it."
 )
-NOT_APPROVED_MESSAGE = "Scheduled without a person's approval. Approve it to send it."
+NOT_APPROVED_MESSAGE = "Its time came without a person's approval. Approve it to send it."
 
 
 def _late_message(late: timedelta) -> str:
@@ -150,7 +152,12 @@ def release_due(now: datetime) -> Dict[str, Any]:
     busy = _in_flight(now)
 
     for record in due:
-        if record.approved_at is None:
+        connection = Connection.query.get(record.connection_id) if record.connection_id else None
+        if connection is None:
+            publish_service.hold(record, "The connection it was scheduled for no longer exists.")
+            out["held"].append(record.id)
+            continue
+        if not publish_service.approved(record, connection):
             publish_service.hold(record, NOT_APPROVED_MESSAGE)
             out["held"].append(record.id)
             continue
@@ -167,11 +174,6 @@ def release_due(now: datetime) -> Dict[str, Any]:
             out["waiting"].append(record.id)
             continue
 
-        connection = Connection.query.get(record.connection_id) if record.connection_id else None
-        if connection is None:
-            publish_service.hold(record, "The connection it was scheduled for no longer exists.")
-            out["held"].append(record.id)
-            continue
         try:
             spec = registry.spec_for(connection.provider)
         except KeyError:
