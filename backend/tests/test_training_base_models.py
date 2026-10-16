@@ -104,8 +104,10 @@ def test_a_model_not_yet_measured_downloads_but_takes_no_job(machine, hub):
     assert tbm.fit(entry)[0] is True  # so the Download is offered on a 16 GB card
 
 
-def test_export_is_not_offered_until_verified():
-    assert tbm.export_verified(DEFAULT) is False
+def test_export_is_offered_only_where_it_was_measured():
+    assert tbm.export_verified(DEFAULT) is True and tbm.get(DEFAULT)["export_measured"]
+    assert tbm.export_verified(SMALL) is False
+    assert tbm.export_verified(GEMMA) is False
     assert tbm.export_verified("org/unknown") is False
 
 
