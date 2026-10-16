@@ -12,7 +12,7 @@
     },
     {
       "id": "github-downloads",
-      "title": "GitHub release weights and tools a person installs (CodeFormer, facexlib, rembg, whisper.cpp; Real-ESRGAN upscaling models from Install only)",
+      "title": "GitHub release weights and tools a person installs (CodeFormer, facexlib, rembg, whisper.cpp; Real-ESRGAN upscaling models and the GGUF converter for Export to Ollama, from Install only)",
       "hosts": ["github.com", "*.github.com", "*.githubusercontent.com"],
       "switch": {"person": true},
       "sends": "requests for the files being installed"
@@ -88,7 +88,7 @@
       "hosts": ["www.googleapis.com", "oauth2.googleapis.com", "youtube.googleapis.com", "bsky.social", "*.bsky.network", "api.telegram.org", "discord.com", "discordapp.com"],
       "any_host": true,
       "switch": {"check": "publish_connections"},
-      "sends": "posts a person approves or publishes"
+      "sends": "posts a person approves or publishes, at once or at the time scheduled for them, and deletes a person asks for on Social Posts"
     },
     {
       "id": "publish-linkedin",
