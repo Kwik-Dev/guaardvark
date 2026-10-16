@@ -2132,6 +2132,8 @@ class PublishRecord(db.Model):
     ai_disclosure = db.Column(db.Boolean, nullable=False, default=False)
     # When Delete on platform removed it.
     deleted_at = db.Column(db.DateTime, nullable=True)
+    # JSON {name: value} for the provider's per-post fields (ProviderSpec.post_fields).
+    post_options = db.Column(db.Text, nullable=True)
 
     connection = db.relationship("Connection", backref=db.backref("publishes", lazy="dynamic"))
 
@@ -2175,6 +2177,7 @@ class PublishRecord(db.Model):
             "approved_at": self.approved_at.astimezone().isoformat() if self.approved_at else None,
             "ai_disclosure": bool(self.ai_disclosure),
             "deleted_at": self.deleted_at.astimezone().isoformat() if self.deleted_at else None,
+            "post_options": _json(self.post_options, {}),
         }
 
 

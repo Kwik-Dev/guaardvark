@@ -75,8 +75,22 @@ def test_rate_limits_name_their_source(provider):
 @pytest.mark.parametrize("provider", ALL_PROVIDERS)
 def test_new_capabilities_serialise(provider):
     caps = registry.spec_for(provider).to_dict()["capabilities"]
-    for key in ("rate_limits", "ai_disclosure", "bot_label", "native_scheduling", "deletable", "delete_window_seconds"):
+    for key in ("rate_limits", "ai_disclosure", "bot_label", "native_scheduling", "deletable",
+                "delete_window_seconds", "requires_title", "max_title_chars", "schedule_refusal"):
         assert key in caps
+
+
+@pytest.mark.parametrize("provider", ALL_PROVIDERS)
+def test_setup_and_post_fields_serialise(provider):
+    payload = registry.spec_for(provider).to_dict()
+    assert isinstance(payload["setup_steps"], list) and isinstance(payload["notice"], str)
+    for field in payload["post_fields"]:
+        assert field["name"] and field["label"]
+
+
+@pytest.mark.parametrize("provider", ALL_PROVIDERS)
+def test_no_provider_but_an_owned_channel_skips_approval(provider):
+    assert registry.spec_for(provider).posts_to_owned_channel == (provider == "discord_webhook")
 
 
 def test_contract_flags_a_declaration_without_its_function(monkeypatch):
@@ -176,6 +190,26 @@ def test_disallowed_mime_is_rejected():
     caps = Capabilities(images=True, max_images=4, accepted_mime=("image/jpeg",))
     problems = validate_against(caps, [IMAGE], "hi")
     assert any("image/png" in p for p in problems)
+
+
+def test_a_required_title_and_its_limit_are_enforced():
+    caps = Capabilities(supports_title=True, requires_title=True, max_title_chars=5)
+    assert "This target needs a title." in validate_against(caps, [], "hi")
+    assert "This target needs a title." in validate_against(caps, [], "hi", title="   ")
+    assert any("the limit is 5" in p for p in validate_against(caps, [], "hi", title="too long"))
+    assert validate_against(caps, [], "hi", title="ok") == []
+
+
+def test_a_post_field_checks_presence_length_and_pattern():
+    from backend.services.connections.base import PostField
+
+    field = PostField(name="room", label="Room", required=True, pattern=r"[a-z]+",
+                      pattern_message="Lowercase letters only.", max_chars=6)
+    assert field.problems("") == ["Room is required."]
+    assert field.problems("abcdefg") == ["Room is 7 characters; the limit is 6."]
+    assert field.problems("AB") == ["Lowercase letters only."]
+    assert field.problems(" abc ") == []
+    assert PostField(name="note", label="Note").problems("") == []
 
 
 def test_valid_post_produces_no_problems():

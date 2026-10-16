@@ -268,6 +268,13 @@ const SocialAccountsPage = () => {
               />
             ))}
           </Line>
+          {conn.token_expires_at && (
+            <Hint>
+              {new Date(conn.token_expires_at) < new Date()
+                ? `Authorization expired ${formatWhen(conn.token_expires_at)}; Edit, then authorize again.`
+                : `Authorization lasts until ${formatWhen(conn.token_expires_at)}.`}
+            </Hint>
+          )}
           <BotLabelLine label={spec?.capabilities?.bot_label} connection={conn} />
           {spec?.posts_to_owned_channel && conn.config?.post_without_approval === true && (
             <Line>

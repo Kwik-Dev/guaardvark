@@ -30,8 +30,18 @@ It declares, in ``SPEC = ProviderSpec(...)``:
                        state from ``test()`` as ``config["bot_label_set"]``.
   ``native_scheduling`` the platform's own scheduling field and its limits.
                        Without it, Guaardvark's timer publishes at the time.
+  ``schedule_refusal`` why the platform's terms rule out a scheduled post at
+                       all; a scheduled post to it is refused with this text.
   ``deletable`` and ``delete_window_seconds``  whether Delete on platform
                        is offered, and for how long after posting.
+
+- ``post_fields`` (``PostField``): inputs a post to this platform needs beyond
+  title, body and link, such as the subreddit a Reddit post goes to. The
+  composer shows them for a selected connection of the provider, the publish
+  path validates them, and the provider reads them from
+  ``PublishRequest.options``.
+- ``setup_steps`` and ``notice``: what the connection dialog tells a person
+  before they connect (numbered steps, and terms worth knowing).
 
 It implements:
 
@@ -47,7 +57,11 @@ It implements:
 - ``delete(ctx, request: DeleteRequest) -> DeleteResult``: required when
   ``deletable`` is declared. Removes the post (or a pending native schedule)
   from the platform.
-- OAuth providers add ``authorize_url`` and ``exchange_code``.
+- OAuth providers add ``authorize_url`` and ``exchange_code``. Their
+  ``test()`` may report ``token_expires_at`` (a datetime) among what it
+  discovered, and ``expired: True`` with a failure that only a new
+  authorization fixes; a publish that meets one calls
+  ``ctx.set_status(STATUS_EXPIRED, message)``.
 
 Providers call only their platform's official API, never a browser session,
 and raise nothing for an expected failure: they return a result with
@@ -56,6 +70,7 @@ and raise nothing for an expected failure: they return a result with
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -229,6 +244,9 @@ class Capabilities:
     requires_public_url: bool = False
     supports_link: bool = True
     supports_title: bool = False
+    # The platform refuses a post without a title.
+    requires_title: bool = False
+    max_title_chars: Optional[int] = None
     supports_tags: bool = False
     visibilities: Tuple[str, ...] = ()
     default_visibility: str = "private"
@@ -237,6 +255,9 @@ class Capabilities:
     ai_disclosure: AIDisclosure = AIDisclosure()
     bot_label: BotLabel = BotLabel()
     native_scheduling: Optional[NativeScheduling] = None
+    # Why the platform's terms rule out a post at a later time; empty when a
+    # scheduled post is fine. A scheduled post to this target is refused with it.
+    schedule_refusal: str = ""
     deletable: bool = False
     # How long after posting the platform still allows a delete; None = no limit.
     delete_window_seconds: Optional[int] = None
@@ -256,6 +277,8 @@ class Capabilities:
             "requires_public_url": self.requires_public_url,
             "supports_link": self.supports_link,
             "supports_title": self.supports_title,
+            "requires_title": self.requires_title,
+            "max_title_chars": self.max_title_chars,
             "supports_tags": self.supports_tags,
             "visibilities": list(self.visibilities),
             "default_visibility": self.default_visibility,
@@ -266,6 +289,7 @@ class Capabilities:
             "native_scheduling": (
                 self.native_scheduling.to_dict() if self.native_scheduling else None
             ),
+            "schedule_refusal": self.schedule_refusal,
             "deletable": self.deletable,
             "delete_window_seconds": self.delete_window_seconds,
         }
@@ -316,6 +340,47 @@ class ConfigField:
 
 
 @dataclass(frozen=True)
+class PostField:
+    """A per-post input a platform needs, e.g. the subreddit a post goes to.
+
+    ``pattern`` is a regular expression the whole trimmed value must match,
+    with ``pattern_message`` shown when it does not.
+    """
+
+    name: str
+    label: str
+    required: bool = False
+    help: str = ""
+    placeholder: str = ""
+    pattern: str = ""
+    pattern_message: str = ""
+    max_chars: Optional[int] = None
+
+    def problems(self, value: str) -> List[str]:
+        """Why ``value`` will not do; empty when it will."""
+        value = (value or "").strip()
+        if not value:
+            return [f"{self.label} is required."] if self.required else []
+        if self.max_chars is not None and len(value) > self.max_chars:
+            return [f"{self.label} is {len(value)} characters; the limit is {self.max_chars}."]
+        if self.pattern and not re.fullmatch(self.pattern, value):
+            return [self.pattern_message or f"{self.label} is not valid."]
+        return []
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "label": self.label,
+            "required": self.required,
+            "help": self.help,
+            "placeholder": self.placeholder,
+            "pattern": self.pattern,
+            "pattern_message": self.pattern_message,
+            "max_chars": self.max_chars,
+        }
+
+
+@dataclass(frozen=True)
 class ProviderSpec:
     """Everything the API and UI need to render and validate a provider."""
 
@@ -330,6 +395,12 @@ class ProviderSpec:
     hint_field: Optional[str] = None
     docs_url: str = ""
     setup_help: str = ""
+    # Numbered steps for the connection dialog. "{redirect_uri}" stands for the
+    # OAuth redirect URL this install uses, which the dialog fills in.
+    setup_steps: Tuple[str, ...] = ()
+    # Terms a person should know before connecting, shown as a notice.
+    notice: str = ""
+    post_fields: Tuple[PostField, ...] = ()
     review_required: bool = False
     beta: bool = False
     # True when the credential can post only into a channel its holder
@@ -349,6 +420,9 @@ class ProviderSpec:
             "env_keys": list(self.env_keys),
             "docs_url": self.docs_url,
             "setup_help": self.setup_help,
+            "setup_steps": list(self.setup_steps),
+            "notice": self.notice,
+            "post_fields": [f.to_dict() for f in self.post_fields],
             "review_required": self.review_required,
             "beta": self.beta,
             "posts_to_owned_channel": self.posts_to_owned_channel,
@@ -412,6 +486,8 @@ class PublishRequest:
     config: Dict[str, Any] = field(default_factory=dict)
     # Set the platform's AI flag when the disclosure mechanism is a flag.
     ai_disclosure: bool = False
+    # Values of the provider's post_fields, validated, keyed by field name.
+    options: Dict[str, str] = field(default_factory=dict)
     # For ``schedule()``: when the platform should publish it (naive local time).
     publish_at: Optional[datetime] = None
 

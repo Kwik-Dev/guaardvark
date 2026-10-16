@@ -285,6 +285,9 @@ const ApprovalsPage = () => {
             <Chip label={`Scheduled ${formatAt(selected.scheduled_at)}`} size="small" variant="outlined" />
           )}
           {selected.ai_disclosure && <Chip label="AI label" size="small" variant="outlined" />}
+          {Object.entries(selected.post_options || {}).map(([name, value]) => (
+            <Chip key={name} label={`${name}: ${value}`} size="small" variant="outlined" />
+          ))}
         </Stack>
 
         {selected.title && (

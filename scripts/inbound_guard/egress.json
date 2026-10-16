@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "_doc": "Every way Guaardvark reaches outside this machine, in one list. The inbound guard reads it three ways: new code that names an outside host no entry declares is held at high severity (a declared host is still held, as any new destination is); the posture check reports any entry whose switch turns on; the network monitor extension reports a Guaardvark process reaching a host no entry declares. 'switch' says what turns a path on; 'person' means it runs only when someone starts it. 'any_host' marks paths whose destination someone chooses (a URL, a configured server), which therefore declare no fixed host.",
+  "_doc": "Every way Guaardvark reaches outside this machine, in one list. The inbound guard reads it three ways: new code that names an outside host no entry declares is held at high severity (a declared host is still held, as any new destination is); the posture check reports any entry whose switch turns on; the network monitor extension reports a Guaardvark process reaching a host no entry declares. 'switch' says what turns a path on; 'person' means it runs only when someone starts it; 'connection' names a provider whose enabled connection with stored credentials turns it on while publishing is on. 'any_host' marks paths whose destination someone chooses (a URL, a configured server), which therefore declare no fixed host.",
 
   "paths": [
     {

@@ -1385,6 +1385,8 @@ try:
                 ("publish_records", "approved_at", "ALTER TABLE publish_records ADD COLUMN IF NOT EXISTS approved_at TIMESTAMP"),
                 ("publish_records", "ai_disclosure", "ALTER TABLE publish_records ADD COLUMN IF NOT EXISTS ai_disclosure BOOLEAN NOT NULL DEFAULT FALSE"),
                 ("publish_records", "deleted_at", "ALTER TABLE publish_records ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP"),
+                # Per-post fields a provider declares (the subreddit of a Reddit post).
+                ("publish_records", "post_options", "ALTER TABLE publish_records ADD COLUMN IF NOT EXISTS post_options TEXT"),
             ):
                 try:
                     from sqlalchemy import text as _sa_text

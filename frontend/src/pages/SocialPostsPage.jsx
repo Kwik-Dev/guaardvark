@@ -3,7 +3,8 @@
 // Every publish to a social account, like WordPress Pages lists a site's
 // pages: status, scheduled time, AI disclosure, the link on the platform, and
 // Delete on platform where the provider supports it. Approving stays on the
-// Approvals page; this page links there.
+// Approvals page; this page links there. New post opens the composer without
+// an asset, for text and link posts.
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
@@ -24,11 +25,13 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
+import AddIcon from "@mui/icons-material/Add";
 import OpenInNewIcon from "@mui/icons-material/OpenInNew";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import { useNavigate, useSearchParams } from "react-router-dom";
 
 import PageLayout from "../components/layout/PageLayout";
+import PublishModal from "../components/modals/PublishModal";
 import { useSnackbar } from "../components/common/SnackbarProvider";
 import { ActionButton, ConfirmActionDialog, StatusPill } from "../components/settings/ui";
 import {
@@ -70,6 +73,7 @@ const SocialPostsPage = () => {
   const [error, setError] = useState(null);
   const [deleting, setDeleting] = useState(null);
   const [busyId, setBusyId] = useState(null);
+  const [composing, setComposing] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -159,6 +163,9 @@ const SocialPostsPage = () => {
           <ActionButton kind="link" onClick={() => navigate("/approvals")}>
             Approvals
           </ActionButton>
+          <ActionButton startIcon={<AddIcon />} onClick={() => setComposing(true)}>
+            New post
+          </ActionButton>
           <Tooltip title="Refresh">
             <IconButton onClick={load} size="small">
               <RefreshIcon />
@@ -207,7 +214,8 @@ const SocialPostsPage = () => {
             No posts here yet.
           </Typography>
           <Typography variant="body2" color="text.secondary">
-            Publish from Media or the Studio with the Publish action; posts show here with their status.
+            Write one with New post, or publish from Media or the Studio with the Publish action;
+            posts show here with their status.
           </Typography>
         </Box>
       ) : (
@@ -333,6 +341,15 @@ const SocialPostsPage = () => {
           </Table>
         </TableContainer>
       )}
+
+      <PublishModal
+        open={composing}
+        onClose={() => {
+          setComposing(false);
+          load();
+        }}
+        onFeedback={(feedback) => showMessage(feedback.message, feedback.severity)}
+      />
 
       <ConfirmActionDialog
         open={Boolean(deleting)}

@@ -5,6 +5,7 @@ import {
   describeDisclosure,
   describeScheduling,
   describeWindow,
+  mergePostFields,
   statusLabel,
 } from "../platformRules";
 
@@ -40,6 +41,23 @@ describe("describeScheduling", () => {
     expect(
       describeScheduling({ native_scheduling: { field: "scheduled_at", min_lead_seconds: 300, visibilities: [] } }),
     ).toMatch(/publishes it itself \(scheduled_at\) when the time is more than 5 minutes away/);
+  });
+
+  it("gives the platform's reason where its terms rule scheduling out", () => {
+    expect(describeScheduling({ native_scheduling: null, schedule_refusal: "Terms say no." })).toBe("Terms say no.");
+  });
+});
+
+describe("mergePostFields", () => {
+  it("merges fields by name and requires one when any target does", () => {
+    const merged = mergePostFields([
+      { provider: "reddit", label: "Reddit", post_fields: [{ name: "subreddit", label: "Subreddit", required: true }] },
+      { provider: "other", label: "Other", post_fields: [{ name: "subreddit", label: "Subreddit", required: false }] },
+      { provider: "bluesky", label: "Bluesky" },
+    ]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({ name: "subreddit", required: true, for: ["Reddit", "Other"] });
+    expect(mergePostFields([])).toEqual([]);
   });
 });
 

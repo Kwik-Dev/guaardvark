@@ -56,6 +56,29 @@ const SPECS = [
   },
 ];
 
+const REDDIT_CONNECTION = {
+  id: 4,
+  provider: 'reddit',
+  display_name: 'Reddit account',
+  enabled: true,
+  has_credentials: true,
+};
+
+const REDDIT_SPEC = {
+  provider: 'reddit',
+  label: 'Reddit',
+  capabilities: {
+    max_text_chars: 40000,
+    supports_title: true,
+    requires_title: true,
+    max_title_chars: 300,
+    visibilities: ['public'],
+  },
+  post_fields: [
+    { name: 'subreddit', label: 'Subreddit', required: true, help: '', placeholder: 'r/test' },
+  ],
+};
+
 const DOCUMENT = {
   id: 42,
   filename: 'render.png',
@@ -137,6 +160,35 @@ describe('PublishModal', () => {
 
     fireEvent.click(screen.getByText('YouTube'));
     expect(await screen.findByLabelText('Title')).toBeInTheDocument();
+  });
+
+  it('composes a text-only post with the fields its platform needs', async () => {
+    connectionsService.fetchConnections.mockResolvedValue([...CONNECTIONS, REDDIT_CONNECTION]);
+    connectionsService.fetchProviders.mockResolvedValue([...SPECS, REDDIT_SPEC]);
+    open({ documents: [] });
+
+    expect(await screen.findByText('New post')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Subreddit')).not.toBeInTheDocument();
+
+    fireEvent.click(await screen.findByText('Reddit account'));
+    fireEvent.change(await screen.findByLabelText('Subreddit'), { target: { value: 'r/test' } });
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Hello' } });
+    fireEvent.change(screen.getByLabelText('Text'), { target: { value: 'Body' } });
+    // The title and the subreddit both say which destination needs them.
+    expect(screen.getAllByText(/Required for Reddit\./)).toHaveLength(2);
+    fireEvent.click(screen.getByRole('button', { name: /^publish$/i }));
+
+    await waitFor(() =>
+      expect(connectionsService.queuePublish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          connection_ids: [4],
+          document_ids: [],
+          title: 'Hello',
+          body: 'Body',
+          post_options: { subreddit: 'r/test' },
+        }),
+      ),
+    );
   });
 
   it('submits the selected targets and document', async () => {

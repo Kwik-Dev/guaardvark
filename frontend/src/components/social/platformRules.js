@@ -30,6 +30,7 @@ export const describeDisclosure = (rule) => {
 };
 
 export const describeScheduling = (capabilities) => {
+  if (capabilities?.schedule_refusal) return capabilities.schedule_refusal;
   const native = capabilities?.native_scheduling;
   if (!native) {
     return "Guaardvark publishes a scheduled post at its time, so Guaardvark must be running then.";
@@ -81,6 +82,24 @@ export const statusLabel = (record, platformLabel) => {
     return `Held by ${platformLabel || record.platform}`;
   }
   return STATUS_LABELS[record.status] || record.status;
+};
+
+/**
+ * The per-post fields the selected targets declare, merged by name: one input
+ * serves every target that asks for it, required when any of them requires it.
+ * @returns {Array<object & { for: string[] }>}
+ */
+export const mergePostFields = (specs) => {
+  const byName = new Map();
+  for (const spec of specs || []) {
+    for (const field of spec?.post_fields || []) {
+      const entry = byName.get(field.name) || { ...field, required: false, for: [] };
+      entry.required = entry.required || Boolean(field.required);
+      entry.for.push(spec.label || spec.provider);
+      byName.set(field.name, entry);
+    }
+  }
+  return [...byName.values()];
 };
 
 /**
