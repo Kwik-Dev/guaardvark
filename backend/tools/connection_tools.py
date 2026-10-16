@@ -66,7 +66,8 @@ def _pick_connection(
         return None, (
             "No connection here takes a text post: "
             + "; ".join(_label(c) for c in media_only)
-            + " needs a video. Add Discord, Bluesky, Mastodon or Telegram on the Social Accounts page."
+            + " needs a video. Add Discord, Bluesky, Mastodon, Telegram or LinkedIn on the "
+            "Social Accounts page."
         )
     choices = "; ".join(_label(c) for c in usable)
     if wanted is None or not str(wanted).strip():
@@ -111,8 +112,8 @@ class RequestPublishTool(BaseTool):
     requires_approval = False
     description = (
         "Ask to publish a text post, optionally with a link, to one of the user's social "
-        "connections that takes text (Discord webhook, Bluesky, Mastodon, Telegram; a YouTube "
-        "connection needs a video and is not offered). This does NOT post: the request waits "
+        "connections that takes text (Discord webhook, Bluesky, Mastodon, Telegram, LinkedIn; a "
+        "YouTube connection needs a video and is not offered). This does NOT post: the request waits "
         "on the Approvals page until a person approves, rejects or cancels it, whatever the "
         "publish settings say. Omit connection when only one text connection is set up; "
         "otherwise pass its id or name. Returns the publish record ids and their status. "

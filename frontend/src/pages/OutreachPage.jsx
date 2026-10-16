@@ -73,7 +73,8 @@ const TONE_OPTIONS = [
 // "watched" = one post at a time, started with Post now on the Approvals page while
 // the person watches the Agent Screen; "bot" = the Discord bot sends it; null = the
 // queue is the only output, flagged in the modal so that is no surprise. X and
-// LinkedIn are not offered: nothing here posts to them.
+// LinkedIn are not offered: outreach never posts to them (a person's own
+// LinkedIn posts go through Social Accounts).
 const PLATFORM_OPTIONS = [
   { value: "reddit", label: "Reddit comment", posts: "watched" },
   { value: "youtube", label: "YouTube comment", posts: "watched" },

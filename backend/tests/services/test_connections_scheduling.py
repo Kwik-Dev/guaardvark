@@ -508,3 +508,33 @@ def test_routes_take_a_time_and_report_usage(db_app, platform):
     assert [r["scheduled_at"] is not None for r in rows.get_json()["publishes"]] == [True]
     usage = client.get("/api/connections/usage").get_json()["usage"][str(discord.id)]
     assert usage["posts"] == 0 and usage["rate_limits"][0]["posts"] == 10
+
+
+# --- terms that rule out scheduling, authorization expiry ------------------------
+def test_linkedin_refuses_a_scheduled_post(db_app, platform):
+    linkedin = _connection("linkedin")
+    when = datetime.now() + LATER
+    refusal = registry.spec_for("linkedin").capabilities.schedule_refusal
+
+    result = publish_service.preflight([linkedin.id], [], body="x", scheduled_at=when)
+
+    assert result["per_connection"][str(linkedin.id)]["violations"] == [refusal]
+    with pytest.raises(ValueError, match="LinkedIn: LinkedIn's API Terms"):
+        _queue(linkedin, scheduled_at=when)
+    assert _queue(linkedin).status == "awaiting_approval"
+
+
+def test_test_records_when_authorization_ends_and_when_it_has(db_app, monkeypatch):
+    expires = datetime(2030, 1, 1, 12, 0)
+    answers = [(True, "ok", {"token_expires_at": expires}), (False, "expired", {"expired": True})]
+    module = types.SimpleNamespace(SPEC=registry.spec_for("linkedin"), test=lambda ctx: answers.pop(0))
+    monkeypatch.setitem(registry._cache, "linkedin", module)
+    monkeypatch.setattr(service, "build_ctx", lambda c: base.ConnCtx(connection={}, config={}, secrets={}))
+    monkeypatch.setattr(service, "redact", lambda text: text)
+    linkedin = _connection("linkedin")
+
+    assert service.test_connection(linkedin) == (True, "ok")
+    assert linkedin.token_expires_at == expires and linkedin.status == "connected"
+    assert service.test_connection(linkedin) == (False, "expired")
+    assert linkedin.status == "expired"
+    assert publish_service.connection_problems(linkedin) == ["expired"]

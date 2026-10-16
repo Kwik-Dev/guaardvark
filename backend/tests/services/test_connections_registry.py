@@ -114,8 +114,13 @@ def test_native_scheduling_where_the_platform_has_it():
     assert registry.spec_for("mastodon").capabilities.native_scheduling.min_lead_seconds == 300
     youtube = registry.spec_for("youtube").capabilities.native_scheduling
     assert youtube.field == "status.publishAt" and youtube.visibilities == ("public",)
-    for provider in ("bluesky", "telegram", "discord_webhook"):
+    for provider in ("bluesky", "telegram", "discord_webhook", "linkedin"):
         assert registry.spec_for(provider).capabilities.native_scheduling is None
+
+
+def test_only_linkedin_rules_out_scheduled_posts():
+    refusing = [s.provider for s in registry.list_specs() if s.capabilities.schedule_refusal]
+    assert refusing == ["linkedin"]
 
 
 def test_disclosure_rules():

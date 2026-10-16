@@ -91,6 +91,13 @@
       "sends": "posts a person approves or publishes"
     },
     {
+      "id": "publish-linkedin",
+      "title": "LinkedIn connection: member posts through the official API, with the person's own LinkedIn app",
+      "hosts": ["api.linkedin.com", "www.linkedin.com"],
+      "switch": {"connection": "linkedin"},
+      "sends": "the app's client id and secret and the authorization code (www.linkedin.com, when a person authorizes); the access token, a profile lookup on Test, and each post a person approves or its delete (api.linkedin.com)"
+    },
+    {
       "id": "wordpress",
       "title": "WordPress REST to a site a person configured",
       "hosts": [],

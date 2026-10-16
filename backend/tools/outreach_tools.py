@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 
 # Shared platform vocabulary so the LLM doesn't invent values like "x.com".
-# X and LinkedIn are not here: nothing posts to them (platforms.REFUSED).
+# X and LinkedIn are not here: outreach never posts to them (platforms.REFUSED).
 _KNOWN_PLATFORMS = ("reddit", "discord", "facebook", "youtube")
 _KNOWN_RUN_PLATFORMS = (
     "reddit", "self_share", "recon", "draft", "youtube", "youtube_recon",
@@ -257,7 +257,7 @@ class OutreachDraftPostTool(BaseTool):
     description = (
         "Draft a social outreach comment or share post (does NOT post). "
         "Platforms: reddit, discord, facebook, youtube. X and LinkedIn are not "
-        "offered: nothing here posts to them. "
+        "offered for outreach. "
         "For mode='comment' you must supply either thread_context (the OP/comment/video "
         "description) or target_url (we'll scout it — for YouTube URLs, scrapes the video "
         "title + description). mode='share' drafts a Reddit link post: platform must be "
@@ -265,8 +265,8 @@ class OutreachDraftPostTool(BaseTool):
         "optional (defaults to the site URL in the outreach profile). "
         "The draft lands in the queue at status='drafted' for human approval — nothing "
         "posts until the user approves it on the Approvals page (Outreach tab). For a post "
-        "to the user's own connected accounts (Discord webhook, Bluesky, Mastodon, Telegram) "
-        "use request_publish."
+        "to the user's own connected accounts (Discord webhook, Bluesky, Mastodon, Telegram, "
+        "LinkedIn) use request_publish."
     )
     parameters = {
         "platform": ToolParameter(
@@ -537,7 +537,7 @@ class OutreachApproveDraftTool(BaseTool):
         "the text before approving (handy when the user asks to tweak it). "
         "Approving does not post: a Reddit, YouTube or Facebook draft posts only when "
         "the user presses Post now on the Approvals page with the Agent Screen open, "
-        "and the Discord bot sends a Discord draft. X and LinkedIn drafts are refused."
+        "and the Discord bot sends a Discord draft. X and LinkedIn outreach drafts are refused."
     )
     requires_approval = True  # surfaces a confirmation card in the chat UI
     parameters = {
