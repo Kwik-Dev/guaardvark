@@ -2,9 +2,10 @@
 //
 // Every publish to a social account, like WordPress Pages lists a site's
 // pages: status, scheduled time, AI disclosure, the link on the platform, and
-// Delete on platform where the provider supports it. Approving stays on the
-// Approvals page; this page links there. New post opens the composer without
-// an asset, for text and link posts.
+// Delete on platform where the provider supports it. A post waiting for
+// approval can be edited here; approving stays on the Approvals page, which
+// this page links to. New post opens the composer without an asset, for text
+// and link posts.
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
@@ -32,6 +33,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 
 import PageLayout from "../components/layout/PageLayout";
 import PublishModal from "../components/modals/PublishModal";
+import EditPublishDialog from "../components/connections/EditPublishDialog";
 import { useSnackbar } from "../components/common/SnackbarProvider";
 import { ActionButton, ConfirmActionDialog, StatusPill } from "../components/settings/ui";
 import {
@@ -74,6 +76,7 @@ const SocialPostsPage = () => {
   const [deleting, setDeleting] = useState(null);
   const [busyId, setBusyId] = useState(null);
   const [composing, setComposing] = useState(false);
+  const [editing, setEditing] = useState(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -313,9 +316,12 @@ const SocialPostsPage = () => {
                           </Tooltip>
                         )}
                         {record.status === "awaiting_approval" && (
-                          <ActionButton kind="link" onClick={() => navigate("/approvals")}>
-                            Review
-                          </ActionButton>
+                          <>
+                            <ActionButton onClick={() => setEditing(record)}>Edit</ActionButton>
+                            <ActionButton kind="link" onClick={() => navigate("/approvals")}>
+                              Review
+                            </ActionButton>
+                          </>
                         )}
                         {CANCELLABLE.has(record.status) && !record.scheduled_natively && (
                           <ActionButton loading={busyId === record.id} onClick={() => handleCancel(record)}>
@@ -349,6 +355,19 @@ const SocialPostsPage = () => {
           load();
         }}
         onFeedback={(feedback) => showMessage(feedback.message, feedback.severity)}
+      />
+
+      <EditPublishDialog
+        open={Boolean(editing)}
+        record={editing}
+        spec={editing ? specs[editing.platform] || null : null}
+        accountLabel={editing ? accountName(editing) : ""}
+        onClose={() => setEditing(null)}
+        onSaved={async () => {
+          setEditing(null);
+          showMessage("Saved. It still waits for approval on the Approvals page.", "success");
+          await load();
+        }}
       />
 
       <ConfirmActionDialog

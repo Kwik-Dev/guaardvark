@@ -85,6 +85,26 @@ export const statusLabel = (record, platformLabel) => {
 };
 
 /**
+ * The strictest (smallest positive) value of a numeric capability across the
+ * targets, or null when none declares one.
+ */
+export const strictestLimit = (specs, key) => {
+  const limits = (specs || [])
+    .map((s) => s?.capabilities?.[key])
+    .filter((n) => typeof n === "number" && n > 0);
+  return limits.length ? Math.min(...limits) : null;
+};
+
+/** The visibilities every target that declares any accepts. */
+export const sharedVisibilities = (specs) => {
+  const sets = (specs || [])
+    .map((s) => s?.capabilities?.visibilities || [])
+    .filter((v) => v.length);
+  if (!sets.length) return [];
+  return sets.reduce((acc, cur) => acc.filter((v) => cur.includes(v)));
+};
+
+/**
  * The per-post fields the selected targets declare, merged by name: one input
  * serves every target that asks for it, required when any of them requires it.
  * @returns {Array<object & { for: string[] }>}

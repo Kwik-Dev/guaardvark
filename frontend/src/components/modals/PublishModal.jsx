@@ -10,15 +10,10 @@ import {
   DialogContent,
   DialogTitle,
   Divider,
-  FormControlLabel,
-  MenuItem,
   Stack,
-  Switch,
-  TextField,
   Tooltip,
   Typography,
 } from "@mui/material";
-import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 
 import {
   fetchConnections,
@@ -26,33 +21,8 @@ import {
   preflightPublish,
   queuePublish,
 } from "../../api/connectionsService";
-import { mergePostFields } from "../social/platformRules";
-
-/** Debounce so preflight doesn't fire on every keystroke. */
-const useDebounced = (value, delay = 400) => {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const id = setTimeout(() => setDebounced(value), delay);
-    return () => clearTimeout(id);
-  }, [value, delay]);
-  return debounced;
-};
-
-/** A Date as the value a datetime-local input takes, in local time. */
-const toLocalInput = (date) => {
-  const pad = (n) => String(n).padStart(2, "0");
-  return (
-    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
-    `T${pad(date.getHours())}:${pad(date.getMinutes())}`
-  );
-};
-
-/** The next whole hour at least an hour away: a sensible first suggestion. */
-const suggestedTime = () => {
-  const date = new Date(Date.now() + 60 * 60 * 1000);
-  date.setMinutes(0, 0, 0);
-  return toLocalInput(new Date(date.getTime() + 60 * 60 * 1000));
-};
+import { strictestLimit } from "../social/platformRules";
+import PostFields, { scheduledIsoOf, useDebounced } from "../social/PostFields";
 
 /**
  * Compose a post and publish selected assets, or text alone when there are
@@ -121,11 +91,7 @@ const PublishModal = ({ open, onClose, documents = NO_DOCUMENTS, onFeedback }) =
   }, [open, documents]);
 
   // ISO with the browser's offset, so the server reads the same moment.
-  const scheduledIso = useMemo(() => {
-    if (!scheduleOn || !scheduledAt) return null;
-    const date = new Date(scheduledAt);
-    return Number.isNaN(date.getTime()) ? null : date.toISOString();
-  }, [scheduleOn, scheduledAt]);
+  const scheduledIso = useMemo(() => scheduledIsoOf(scheduleOn, scheduledAt), [scheduleOn, scheduledAt]);
 
   const selectedSpecs = useMemo(
     () =>
@@ -138,33 +104,8 @@ const PublishModal = ({ open, onClose, documents = NO_DOCUMENTS, onFeedback }) =
   );
 
   // The strictest limit across the selected targets governs the counter.
-  const charLimit = useMemo(() => {
-    const limits = selectedSpecs
-      .map((s) => s.capabilities?.max_text_chars)
-      .filter((n) => typeof n === "number" && n > 0);
-    return limits.length ? Math.min(...limits) : null;
-  }, [selectedSpecs]);
-
+  const charLimit = useMemo(() => strictestLimit(selectedSpecs, "max_text_chars"), [selectedSpecs]);
   const supportsTitle = selectedSpecs.some((s) => s.capabilities?.supports_title);
-  const supportsTags = selectedSpecs.some((s) => s.capabilities?.supports_tags);
-  const titleRequiredBy = selectedSpecs
-    .filter((s) => s.capabilities?.requires_title)
-    .map((s) => s.label || s.provider);
-  const titleLimit = useMemo(() => {
-    const limits = selectedSpecs
-      .map((s) => s.capabilities?.max_title_chars)
-      .filter((n) => typeof n === "number" && n > 0);
-    return limits.length ? Math.min(...limits) : null;
-  }, [selectedSpecs]);
-  const postFields = useMemo(() => mergePostFields(selectedSpecs), [selectedSpecs]);
-
-  const visibilityOptions = useMemo(() => {
-    const sets = selectedSpecs
-      .map((s) => s.capabilities?.visibilities || [])
-      .filter((v) => v.length);
-    if (!sets.length) return [];
-    return sets.reduce((acc, cur) => acc.filter((v) => cur.includes(v)));
-  }, [selectedSpecs]);
 
   const debouncedBody = useDebounced(body);
   const debouncedTitle = useDebounced(title);
@@ -217,23 +158,21 @@ const PublishModal = ({ open, onClose, documents = NO_DOCUMENTS, onFeedback }) =
     return [...general, ...perConnection];
   }, [preflight]);
 
-  // Destinations whose terms require the AI label for this post: the switch
-  // cannot turn it off there, and each one says why.
-  const requiredDisclosures = useMemo(
-    () =>
-      Object.values(preflight?.per_connection || {})
-        .filter((entry) => entry.ai_disclosure?.required)
-        .map((entry) => ({ label: entry.label, rule: entry.ai_disclosure.rule })),
-    [preflight],
-  );
-
-  const scheduleNotes = useMemo(
-    () =>
-      Object.values(preflight?.per_connection || {})
-        .filter((entry) => entry.schedule?.note)
-        .map((entry) => ({ label: entry.label, note: entry.schedule.note })),
-    [preflight],
-  );
+  const fieldValues = {
+    title, body, tags, visibility, aiDisclosure, postOptions, scheduleOn, scheduledAt,
+  };
+  const setters = {
+    title: setTitle,
+    body: setBody,
+    tags: setTags,
+    visibility: setVisibility,
+    aiDisclosure: setAiDisclosure,
+    postOptions: setPostOptions,
+    scheduleOn: setScheduleOn,
+    scheduledAt: setScheduledAt,
+  };
+  const handleFieldChange = (patch) =>
+    Object.entries(patch).forEach(([key, value]) => setters[key]?.(value));
 
   const handlePublish = useCallback(async () => {
     setSubmitting(true);
@@ -347,142 +286,13 @@ const PublishModal = ({ open, onClose, documents = NO_DOCUMENTS, onFeedback }) =
 
             <Divider />
 
-            {supportsTitle && (
-              <TextField
-                label="Title"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                size="small"
-                error={titleLimit !== null && title.trim().length > titleLimit}
-                helperText={
-                  [
-                    titleRequiredBy.length ? `Required for ${titleRequiredBy.join(", ")}.` : "",
-                    titleLimit !== null ? `${title.trim().length} / ${titleLimit} characters` : "",
-                  ]
-                    .filter(Boolean)
-                    .join(" ") || undefined
-                }
-              />
-            )}
-
-            {postFields.map((field) => (
-              <TextField
-                key={field.name}
-                label={field.label}
-                value={postOptions[field.name] ?? ""}
-                onChange={(e) =>
-                  setPostOptions((prev) => ({ ...prev, [field.name]: e.target.value }))
-                }
-                placeholder={field.placeholder || undefined}
-                size="small"
-                helperText={`${field.required ? "Required" : "Used"} for ${field.for.join(", ")}. ${field.help || ""}`.trim()}
-              />
-            ))}
-
-            <TextField
-              label={documents.length ? "Caption" : "Text"}
-              value={body}
-              onChange={(e) => setBody(e.target.value)}
-              multiline
-              minRows={3}
-              size="small"
-              error={overLimit}
-              helperText={
-                charLimit !== null
-                  ? `${body.length} / ${charLimit} characters`
-                  : `${body.length} characters`
-              }
+            <PostFields
+              specs={selectedSpecs}
+              values={fieldValues}
+              onChange={handleFieldChange}
+              preflight={preflight}
+              bodyLabel={documents.length ? "Caption" : "Text"}
             />
-
-            {supportsTags && (
-              <TextField
-                label="Tags"
-                value={tags}
-                onChange={(e) => setTags(e.target.value)}
-                size="small"
-                helperText="Comma separated."
-              />
-            )}
-
-            {visibilityOptions.length > 0 && (
-              <TextField
-                select
-                label="Visibility"
-                value={visibility || visibilityOptions[0]}
-                onChange={(e) => setVisibility(e.target.value)}
-                size="small"
-              >
-                {visibilityOptions.map((option) => (
-                  <MenuItem key={option} value={option}>
-                    {option}
-                    {option !== "private" && (
-                      <WarningAmberIcon
-                        fontSize="small"
-                        color="warning"
-                        sx={{ ml: 1, verticalAlign: "middle" }}
-                      />
-                    )}
-                  </MenuItem>
-                ))}
-              </TextField>
-            )}
-
-            <Box>
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={aiDisclosure}
-                    onChange={(e) => setAiDisclosure(e.target.checked)}
-                    size="small"
-                  />
-                }
-                label="Label as made with AI"
-              />
-              {requiredDisclosures.map((entry) => (
-                <Typography
-                  key={entry.label}
-                  variant="caption"
-                  color="text.secondary"
-                  sx={{ display: "block" }}
-                >
-                  Always on for {entry.label}: {entry.rule}
-                </Typography>
-              ))}
-            </Box>
-
-            <Box>
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={scheduleOn}
-                    onChange={(e) => {
-                      setScheduleOn(e.target.checked);
-                      if (e.target.checked && !scheduledAt) setScheduledAt(suggestedTime());
-                    }}
-                    size="small"
-                  />
-                }
-                label="Schedule for later"
-              />
-              {scheduleOn && (
-                <Stack spacing={0.5} sx={{ mt: 1 }}>
-                  <TextField
-                    type="datetime-local"
-                    label="Goes out at"
-                    value={scheduledAt}
-                    onChange={(e) => setScheduledAt(e.target.value)}
-                    size="small"
-                    InputLabelProps={{ shrink: true }}
-                    helperText="Still waits for approval first when approval is required."
-                  />
-                  {scheduleNotes.map((entry) => (
-                    <Typography key={entry.label} variant="caption" color="text.secondary">
-                      {entry.label}: {entry.note}
-                    </Typography>
-                  ))}
-                </Stack>
-              )}
-            </Box>
 
             {allViolations.length > 0 && (
               <Alert severity="warning">

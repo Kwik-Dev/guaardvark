@@ -3,7 +3,8 @@
 // Everything waiting on a human. Publishes: every publish is held here until it
 // is approved, except one a person starts from the app to a Discord webhook set
 // to post without approval; anything an agent queues (chat, MCP, a schedule)
-// waits whatever that switch says. Outreach: drafts to approve, then approved
+// waits whatever that switch says. A waiting publish can be edited here first;
+// Approve sends the revision on screen. Outreach: drafts to approve, then approved
 // Reddit/YouTube/Facebook drafts to start with "Post now, I'm watching".
 // Code changes: what the inbound guard holds before it lands in this checkout.
 import React, { useCallback, useEffect, useMemo, useState } from "react";
@@ -32,10 +33,13 @@ import {
   Cancel as CancelIcon,
   CheckCircle as CheckCircleIcon,
   DoNotDisturb as DoNotDisturbIcon,
+  Edit as EditIcon,
   Refresh as RefreshIcon,
 } from "@mui/icons-material";
 import PageLayout from "../components/layout/PageLayout";
 import RejectPublishDialog from "../components/connections/RejectPublishDialog";
+import EditPublishDialog from "../components/connections/EditPublishDialog";
+import { draftedBy, editedFieldWords } from "../components/connections/publishEdit";
 import HeldChangesPanel from "../components/approvals/HeldChangesPanel";
 import OutreachDraftsPanel from "../components/approvals/OutreachDraftsPanel";
 import AlwaysApprovedToolsPanel from "../components/approvals/AlwaysApprovedToolsPanel";
@@ -96,6 +100,7 @@ const ApprovalsPage = () => {
   const [selectedId, setSelectedId] = useState(null);
   const [busyId, setBusyId] = useState(null);
   const [rejecting, setRejecting] = useState(null);
+  const [editing, setEditing] = useState(null);
   const [notifyEnabled, setNotifyEnabled] = useState(desktopNotificationsGranted);
 
   const {
@@ -168,7 +173,13 @@ const ApprovalsPage = () => {
       if (tab === "history") await loadHistory();
       setSelectedId(null);
     } catch (err) {
-      showMessage(err?.message || `Could not ${verb.replace(/ed$/, "")}`, "error");
+      // Edited or decided elsewhere since this page loaded it: show what it is now.
+      if (err?.status === 409 && err?.data?.code) {
+        showMessage(err.message, "warning");
+        await Promise.all([refresh(), loadSupporting()]);
+      } else {
+        showMessage(err?.message || `Could not ${verb.replace(/ed$/, "")}`, "error");
+      }
     } finally {
       setBusyId(null);
       setRejecting(null);
@@ -231,6 +242,7 @@ const ApprovalsPage = () => {
                   {AGENT_SOURCES.has(record.requested_by) && (
                     <Chip label={record.requested_by} size="small" variant="outlined" />
                   )}
+                  {record.edited_at && <Chip label="edited" size="small" variant="outlined" />}
                 </Stack>
               }
               secondary={
@@ -271,8 +283,15 @@ const ApprovalsPage = () => {
     }
     const isPending = selected.status === "awaiting_approval";
     const busy = busyId === selected.id;
+    const drafted = draftedBy(selected);
     return (
       <Box sx={{ p: 3 }}>
+        {drafted && isPending && (
+          <Alert severity="info" sx={{ mb: 2 }}>
+            {drafted} You are reviewing pre-filled text: read it, and use Edit to change anything
+            before you approve. Nothing is sent until you approve.
+          </Alert>
+        )}
         <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 2 }}>
           <Typography variant="h6">{connectionName(selected)}</Typography>
           <Chip
@@ -312,6 +331,13 @@ const ApprovalsPage = () => {
           <Typography variant="caption" color="text.secondary">
             Requested by {selected.requested_by} · {formatWhen(selected.created_at)}
           </Typography>
+          {selected.edited_at && (
+            <Typography variant="caption" color="text.secondary">
+              Edited {formatWhen(selected.edited_at)}
+              {selected.edited_by && selected.edited_by !== "ui" ? ` by ${selected.edited_by}` : ""}
+              {editedFieldWords(selected) ? `: ${editedFieldWords(selected)}` : ""}
+            </Typography>
+          )}
           {!!selected.media_refs?.length && (
             <Typography variant="caption" color="text.secondary">
               {selected.media_refs.length} media item(s)
@@ -350,10 +376,17 @@ const ApprovalsPage = () => {
                 startIcon={<CheckCircleIcon />}
                 disabled={busy}
                 onClick={() =>
-                  runAction(selected, () => approvePublish(selected.id), "approved")
+                  runAction(
+                    selected,
+                    () => approvePublish(selected.id, selected.revision ?? 0),
+                    "approved",
+                  )
                 }
               >
                 {busy ? "Working…" : "Approve"}
+              </Button>
+              <Button startIcon={<EditIcon />} disabled={busy} onClick={() => setEditing(selected)}>
+                Edit
               </Button>
               <Button
                 color="error"
@@ -489,6 +522,18 @@ const ApprovalsPage = () => {
           </Box>
         )}
       </Paper>
+
+      <EditPublishDialog
+        open={!!editing}
+        record={editing}
+        accountLabel={editing ? connectionName(editing) : ""}
+        onClose={() => setEditing(null)}
+        onSaved={async () => {
+          setEditing(null);
+          showMessage("Saved. It still waits for your approval.");
+          await Promise.all([refresh(), loadSupporting()]);
+        }}
+      />
 
       <RejectPublishDialog
         open={!!rejecting}

@@ -2134,6 +2134,14 @@ class PublishRecord(db.Model):
     deleted_at = db.Column(db.DateTime, nullable=True)
     # JSON {name: value} for the provider's per-post fields (ProviderSpec.post_fields).
     post_options = db.Column(db.Text, nullable=True)
+    # Raised by each saved edit while it waits for approval; an approval names
+    # the revision the person was shown (publish_service.approve).
+    revision = db.Column(db.Integer, nullable=False, default=0)
+    # The last edit: when, from which source (gates.KNOWN_SOURCES), and a JSON
+    # list of every field changed since it was queued.
+    edited_at = db.Column(db.DateTime, nullable=True)
+    edited_by = db.Column(db.String(64), nullable=True)
+    edited_fields = db.Column(db.Text, nullable=True)
 
     connection = db.relationship("Connection", backref=db.backref("publishes", lazy="dynamic"))
 
@@ -2178,6 +2186,10 @@ class PublishRecord(db.Model):
             "ai_disclosure": bool(self.ai_disclosure),
             "deleted_at": self.deleted_at.astimezone().isoformat() if self.deleted_at else None,
             "post_options": _json(self.post_options, {}),
+            "revision": self.revision or 0,
+            "edited_at": self.edited_at.astimezone().isoformat() if self.edited_at else None,
+            "edited_by": self.edited_by,
+            "edited_fields": _json(self.edited_fields, []),
         }
 
 

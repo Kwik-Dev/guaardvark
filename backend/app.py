@@ -1387,6 +1387,11 @@ try:
                 ("publish_records", "deleted_at", "ALTER TABLE publish_records ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP"),
                 # Per-post fields a provider declares (the subreddit of a Reddit post).
                 ("publish_records", "post_options", "ALTER TABLE publish_records ADD COLUMN IF NOT EXISTS post_options TEXT"),
+                # Edits to a held publish before approval, and the revision an approval names.
+                ("publish_records", "revision", "ALTER TABLE publish_records ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 0"),
+                ("publish_records", "edited_at", "ALTER TABLE publish_records ADD COLUMN IF NOT EXISTS edited_at TIMESTAMP"),
+                ("publish_records", "edited_by", "ALTER TABLE publish_records ADD COLUMN IF NOT EXISTS edited_by VARCHAR(64)"),
+                ("publish_records", "edited_fields", "ALTER TABLE publish_records ADD COLUMN IF NOT EXISTS edited_fields TEXT"),
             ):
                 try:
                     from sqlalchemy import text as _sa_text

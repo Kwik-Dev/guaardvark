@@ -64,6 +64,16 @@ def _document_meta(doc) -> Dict[str, Any]:
     return meta if isinstance(meta, dict) else {}
 
 
+def attribution_of(document_id: Optional[int]) -> Optional[str]:
+    """The model credit a Document's metadata names, or None (also when the
+    document is gone)."""
+    if not document_id:
+        return None
+    from backend.models import Document
+
+    return _document_meta(Document.query.get(document_id)).get("attribution") or None
+
+
 def _generated(doc, meta: Dict[str, Any]) -> bool:
     """Generated itself, or an editor render of a generated source clip."""
     if is_generated(meta):
