@@ -61,6 +61,7 @@ const WordPressPagesPage = lazyWithReload(() => import("./pages/WordPressPagesPa
 const StickyNotesPage = lazyWithReload(() => import("./pages/StickyNotesPage"));
 const DevToolsPage = lazyWithReload(() => import("./pages/DevToolsPage"));
 const PluginsPage = lazyWithReload(() => import("./pages/PluginsPage"));
+const ConnectionsPage = lazyWithReload(() => import("./pages/ConnectionsPage"));
 const SocialAccountsPage = lazyWithReload(() => import("./pages/SocialAccountsPage"));
 const SocialPostsPage = lazyWithReload(() => import("./pages/SocialPostsPage"));
 const ApprovalsPage = lazyWithReload(() => import("./pages/ApprovalsPage"));
@@ -93,13 +94,6 @@ import FloatingChatProvider from "./components/chat/FloatingChatProvider";
 import KeyboardShortcutsOverlay from "./components/common/KeyboardShortcutsOverlay";
 import DidYouKnowTip from "./components/common/DidYouKnowTip";
 import useUncleNotifications from "./hooks/useUncleNotifications";
-
-// /connections moved to Social Accounts. The query is kept: OAuth providers
-// redirect to /connections with the authorization code in it.
-function ConnectionsRedirect() {
-  const { search, hash } = useLocation();
-  return <Navigate to={`/social/accounts${search}${hash}`} replace />;
-}
 
 function UncleNotificationListener() {
   useUncleNotifications();
@@ -564,7 +558,16 @@ const AppContainer = () => {
                           </AppLayout>
                         }
                       />
-                      <Route path="/connections" element={<ConnectionsRedirect />} />
+                      <Route
+                        path="/connections"
+                        element={
+                          <AppLayout>
+                            <ErrorBoundary>
+                              <ConnectionsPage />
+                            </ErrorBoundary>
+                          </AppLayout>
+                        }
+                      />
                       <Route
                         path="/social/accounts"
                         element={

@@ -5,6 +5,8 @@
 // ConnectionModal. Each platform's rules (rate limits, AI disclosure, how an
 // account declares automation, scheduling, delete) come from its provider
 // spec; nothing here knows a platform by name. Social Posts lists what went out.
+// No approval switch lives here: the one exception to per-post approval (an
+// owned-channel connection) is set on the Connections page and only shown here.
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
@@ -15,13 +17,12 @@ import {
   Menu,
   MenuItem,
   Stack,
-  TextField,
   Tooltip,
   Typography,
 } from "@mui/material";
 import AddIcon from "@mui/icons-material/Add";
 import RefreshIcon from "@mui/icons-material/Refresh";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 
 import PageLayout from "../components/layout/PageLayout";
 import ConnectionModal from "../components/modals/ConnectionModal";
@@ -53,7 +54,6 @@ import {
   describeRateLimit,
   describeScheduling,
 } from "../components/social/platformRules";
-import copyText from "../utils/copyText";
 
 const STATUS_TONE = {
   connected: "ok",
@@ -137,7 +137,6 @@ const RulesBlock = ({ capabilities }) => {
 
 const SocialAccountsPage = () => {
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
   const { showMessage } = useSnackbar();
 
   const [connections, setConnections] = useState([]);
@@ -154,10 +153,6 @@ const SocialAccountsPage = () => {
   const [removing, setRemoving] = useState(null);
   const [busy, setBusy] = useState(false);
   const [rulesOpen, setRulesOpen] = useState({});
-
-  // The OAuth redirect (ConnectionModal) lands on /connections, which forwards
-  // here with the query intact; the code is pasted in the tab that started it.
-  const oauthCode = searchParams.get("code");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -235,12 +230,6 @@ const SocialAccountsPage = () => {
   const openPosts = (connection) =>
     navigate(connection ? `/social/posts?connection_id=${connection.id}` : "/social/posts");
 
-  const dismissCode = () => {
-    const next = new URLSearchParams(searchParams);
-    ["code", "scope", "state", "authuser", "prompt"].forEach((key) => next.delete(key));
-    setSearchParams(next, { replace: true });
-  };
-
   const renderAccount = (conn, spec) => {
     const stats = usage[String(conn.id)] || {};
     return (
@@ -280,6 +269,15 @@ const SocialAccountsPage = () => {
             ))}
           </Line>
           <BotLabelLine label={spec?.capabilities?.bot_label} connection={conn} />
+          {spec?.posts_to_owned_channel && conn.config?.post_without_approval === true && (
+            <Line>
+              <StatusPill
+                label="Posts without approval"
+                tone="warn"
+                tooltip="Set on this account's card on the Connections page. Publishes you start in the app go out without waiting on Approvals; requests from chat, MCP or a schedule still wait."
+              />
+            </Line>
+          )}
           {conn.error_message && (
             <Alert severity="error" sx={{ py: 0 }}>
               {conn.error_message}
@@ -313,6 +311,9 @@ const SocialAccountsPage = () => {
           <ActionButton kind="link" onClick={() => navigate("/approvals")}>
             Approvals
           </ActionButton>
+          <ActionButton kind="link" onClick={() => navigate("/connections")}>
+            Connections
+          </ActionButton>
           <ActionButton startIcon={<AddIcon />} onClick={(e) => setAddAnchor(e.currentTarget)} disabled={!providers.length}>
             Add account
           </ActionButton>
@@ -337,27 +338,6 @@ const SocialAccountsPage = () => {
           </MenuItem>
         ))}
       </Menu>
-
-      {oauthCode && (
-        <Alert severity="info" sx={{ mb: 2 }} onClose={dismissCode}>
-          <Stack spacing={1}>
-            <Typography variant="body2">
-              The platform sent an authorization code. Copy it into the Authorize step of the
-              account dialog in the tab where you started.
-            </Typography>
-            <Stack direction="row" spacing={1} alignItems="center">
-              <TextField
-                value={oauthCode}
-                size="small"
-                InputProps={{ readOnly: true }}
-                onFocus={(e) => e.target.select()}
-                sx={{ flex: 1, maxWidth: 520 }}
-              />
-              <ActionButton onClick={() => copyText(oauthCode)}>Copy</ActionButton>
-            </Stack>
-          </Stack>
-        </Alert>
-      )}
 
       {error && (
         <Alert severity="error" sx={{ mb: 2 }}>
@@ -391,7 +371,8 @@ const SocialAccountsPage = () => {
               <Hint>
                 Every publish waits for your approval on the Approvals page, a scheduled one
                 included; once approved it goes out at its time, sent by the platform where it
-                schedules natively, otherwise by Guaardvark.
+                schedules natively, otherwise by Guaardvark. The one exception, a Discord webhook
+                into a channel you manage, is set on the Connections page.
               </Hint>
             </Cluster>
           </SettingsPanel>

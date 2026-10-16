@@ -23,6 +23,7 @@ import BuildIcon from "@mui/icons-material/Build";
 import SmartToyIcon from "@mui/icons-material/SmartToy";
 import StickyNote2Icon from "@mui/icons-material/StickyNote2";
 import ExtensionIcon from "@mui/icons-material/Extension";
+import HubIcon from "@mui/icons-material/Hub";
 import RuleIcon from "@mui/icons-material/Rule";
 import HiveIcon from "@mui/icons-material/Hive";
 import CampaignIcon from "@mui/icons-material/Campaign";
@@ -449,6 +450,16 @@ export const CORE_NAV_CATALOG = Object.freeze([
     menu: "View",
     workspace: "system",
     stripOrder: 20,
+  }),
+  page({
+    id: "connections",
+    path: "/connections",
+    label: "Connections",
+    icon: <HubIcon />,
+    sidebarGroup: "Configuration",
+    menu: "View",
+    workspace: "system",
+    stripOrder: 30,
   }),
   page({
     id: "approvals",

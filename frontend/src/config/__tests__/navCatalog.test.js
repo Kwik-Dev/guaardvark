@@ -62,6 +62,7 @@ describe("catalogToNavGroups", () => {
       ["Configuration", "CSVGen", "/content-library", null],
       ["Configuration", "Autoresearch", "/autoresearch", null],
       ["Configuration", "Plugins", "/plugins", null],
+      ["Configuration", "Connections", "/connections", null],
       ["Configuration", "Approvals", "/approvals", "pendingApprovals"],
       ["Configuration", "Settings", "/settings", null],
     ]);
