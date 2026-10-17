@@ -26,6 +26,7 @@ from backend.services.brain_state import (
 )
 from backend.services.step_budget import StepBudget, TierTelemetry
 from backend.utils.llm_debug_logger import log_decision
+from backend.utils.request_phrases import declines_media
 from backend.services.unified_chat_engine import (
     begin_turn,
     end_turn,
@@ -189,6 +190,8 @@ def is_pure_image_request(message: str, options: Optional[Dict[str, Any]] = None
     click, a canvas, a paint program or a pencil is about the screen.
     """
     if options and options.get("agent_mode"):
+        return False
+    if declines_media(message):
         return False
     msg = (message or "").lower()
     wants_image = any(p in msg for p in _PURE_IMAGE_PHRASES) or re.search(r"\bdraw\b", msg) is not None

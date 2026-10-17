@@ -151,6 +151,7 @@ TRIGGER_ROUTES: Dict[str, Tuple[Route, ...]] = {
     "memory": (),
     "camera": (),
     "declines_tools": (),
+    "declines_media": (),
 }
 
 # Tools whose registration decides an intercept; checked per turn with get_tool.
@@ -504,6 +505,7 @@ def compute_triggers(message: str, options: Optional[Mapping[str, Any]], facts: 
     from backend.services.agent_router import declines_tools
     from backend.services.memory_capture import will_capture
     from backend.tools.video_pipeline_tools import _FILM_CREW_RE, _MUSIC_VIDEO_RE
+    from backend.utils.request_phrases import declines_media
 
     opts = options if isinstance(options, Mapping) else {}
     msg = message or ""
@@ -544,6 +546,7 @@ def compute_triggers(message: str, options: Optional[Mapping[str, Any]], facts: 
     check("memory", will_capture(msg))
     check("camera", facts["camera_frame"])
     check("declines_tools", declines_tools(msg))
+    check("declines_media", declines_media(msg))
 
     candidates = [Route.CHAT]
     for family in fired:
