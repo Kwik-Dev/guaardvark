@@ -799,7 +799,7 @@ class RAGAutoresearchService:
             db.session.add(learning)
             db.session.commit()
         except Exception as e:
-            logger.debug(f"Family learning row skipped: {e}")
+            logger.warning(f"Family learning row not recorded: {e}")
             try:
                 from backend.models import db
                 db.session.rollback()
@@ -812,7 +812,7 @@ class RAGAutoresearchService:
                 reason="autoresearch promotion",
             )
         except Exception as e:
-            logger.debug(f"Family broadcast skipped: {e}")
+            logger.warning(f"Family broadcast failed: {e}")
 
     def _emit_socket_event(self, result: dict):
         """Emit real-time update via Socket.IO."""
