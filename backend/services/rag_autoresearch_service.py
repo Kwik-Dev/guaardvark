@@ -788,8 +788,9 @@ class RAGAutoresearchService:
         )
         try:
             from backend.models import InterconnectorLearning, db
+            from backend.utils.node_identity import local_node_id
             learning = InterconnectorLearning(
-                source_node_id=os.environ.get("GUAARDVARK_NODE_ID", "local"),
+                source_node_id=local_node_id(),
                 learning_type="rag_optimization",
                 description=description,
                 confidence=min(1.0, max(0.0, result.get("delta", 0.0))),

@@ -676,7 +676,6 @@ def handle_chat_send(payload):
             return
     try:
         from flask import current_app, request as _req
-        import os as _os
         if current_app.config.get("CLUSTER_ENABLED", False):
             from backend.services.cluster_routing import get_routing_store
             from backend.services.fleet_map import get_fleet_map
@@ -688,7 +687,8 @@ def handle_chat_send(payload):
             if table is not None:
                 model_name = (payload or {}).get("model") if isinstance(payload, dict) else None
                 route = store.route_for_chat(model_name, fleet=get_fleet_map())
-                local_id = _os.environ.get("CLUSTER_NODE_ID", "unknown")
+                from backend.utils.node_identity import local_node_id
+                local_id = local_node_id()
                 if (route is not None and route.primary is not None
                         and route.primary != local_id):
                     node = InterconnectorNode.query.filter_by(

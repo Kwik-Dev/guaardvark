@@ -6,7 +6,6 @@ Handles serialization and synchronization of entities between nodes.
 
 import json
 import logging
-import os
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
 import uuid
@@ -91,7 +90,9 @@ class InterconnectorSyncService:
         from backend.models import db, InterconnectorNode, InterconnectorBroadcast, InterconnectorBroadcastTarget
         import requests
 
-        local_node_id = os.environ.get("GUAARDVARK_NODE_ID", "local")
+        from backend.utils.node_identity import local_node_id as _local_node_id
+
+        local_node_id = _local_node_id()
         nodes = db.session.query(InterconnectorNode).filter(InterconnectorNode.status == "active").all()
         broadcast = InterconnectorBroadcast(
             broadcast_type="uncle_directive",

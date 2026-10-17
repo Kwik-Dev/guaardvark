@@ -214,7 +214,7 @@ class HttpProxyForwarder:
         )
 
     def _sanitize_headers(self, incoming: dict, target, request) -> dict:
-        import os
+        from backend.utils.node_identity import local_node_id
         # X-API-Key and the browser's sign-in cookie belong to this install;
         # another node has its own key and gets target.api_key below.
         # Origin and Sec-Fetch-* say how the browser reached this install,
@@ -241,6 +241,6 @@ class HttpProxyForwarder:
             prev_hops = 0
         out["X-Guaardvark-Proxy"] = "1"
         out["X-Guaardvark-Hops"] = str(prev_hops + 1)
-        out["X-Guaardvark-Source-Node"] = os.environ.get("CLUSTER_NODE_ID", "unknown")
+        out["X-Guaardvark-Source-Node"] = local_node_id()
         out["X-Guaardvark-API-Key"] = target.api_key
         return out

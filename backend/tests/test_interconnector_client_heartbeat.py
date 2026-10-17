@@ -106,12 +106,16 @@ def test_master_unreachable_is_non_fatal(app, monkeypatch):
         assert result == {"error": "master_unreachable"}
 
 
-def test_falls_back_to_profile_node_id_without_env(app, monkeypatch):
+def test_uses_the_node_id_file_without_env(app, monkeypatch, tmp_path):
+    from backend.utils import node_identity
     monkeypatch.delenv("CLUSTER_NODE_ID", raising=False)
+    id_file = tmp_path / "node_id"
+    id_file.write_text("file-id\n")
+    monkeypatch.setattr(node_identity, "DEFAULT_NODE_ID_PATH", id_file)
     with app.app_context():
         _set_config(CLIENT_CFG)
         with patch.object(hb.requests, "post",
                           return_value=MagicMock(status_code=200, ok=True)) as post:
             result = hb._do_client_heartbeat()
-        assert result["node_id"] == "prof-id"  # from the hardware profile
-        assert post.call_args[0][0].endswith("/nodes/prof-id/heartbeat")
+        assert result["node_id"] == "file-id"
+        assert post.call_args[0][0].endswith("/nodes/file-id/heartbeat")

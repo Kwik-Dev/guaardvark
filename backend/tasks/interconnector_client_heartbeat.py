@@ -51,10 +51,6 @@ def _local_profile() -> dict:
     return profile
 
 
-def _local_node_id(profile: dict) -> str:
-    return os.environ.get("CLUSTER_NODE_ID") or (profile.get("node_id") if profile else "") or ""
-
-
 def _register(master_url: str, headers: dict, node_id: str, node_name: str,
               profile: dict, config: dict) -> None:
     """Self-register with the master. Idempotent: the master keys on the
@@ -82,8 +78,10 @@ def _do_client_heartbeat() -> dict:
     if not master_url:
         return {"skipped": "no_master_url"}
 
+    from backend.utils.node_identity import local_node_id
+
     profile = _local_profile()
-    node_id = _local_node_id(profile)
+    node_id = local_node_id()
     if not node_id:
         return {"skipped": "no_node_id"}
 

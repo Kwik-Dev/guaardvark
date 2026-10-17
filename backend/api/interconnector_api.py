@@ -51,6 +51,8 @@ from backend.utils.response_utils import (
 )
 from backend.utils.path_guard import PathEscapesRoot, contained, contained_path
 from backend.utils import update_state
+# Named apart from the local_node_id variables in the sync routes.
+from backend.utils.node_identity import local_node_id as this_node_id
 
 # Try to import psutil for system capabilities detection
 try:
@@ -837,12 +839,6 @@ def _prune_duplicate_nodes(keep_id: str, fingerprint: Optional[str]) -> int:
         return 0
 
 
-def _stable_local_node_id(config: dict, fallback: str = "local_node") -> str:
-    """This node's stable id for local records — the machine id (CLUSTER_NODE_ID),
-    falling back to the configured node_name for very old setups."""
-    return os.environ.get("CLUSTER_NODE_ID") or config.get("node_name") or fallback
-
-
 def _ensure_local_self_node(node_id: str, node_name: Optional[str],
                             node_mode: str = "client"):
     """Ensure a row exists for THIS node so local sync-history writes (which FK to
@@ -880,20 +876,12 @@ def local_identity():
     every install out of the box; needs no master mode (a node asking itself).
     """
     import socket
-    node_id = os.environ.get("CLUSTER_NODE_ID") or ""
+    node_id = this_node_id()
     hostname = None
     try:
         hostname = socket.gethostname()
     except Exception:
         pass
-    if not node_id:
-        try:
-            from backend.services.hardware_detector import HardwareDetector
-            prof = HardwareDetector().detect()
-            node_id = prof.get("node_id") or ""
-            hostname = prof.get("hostname") or hostname
-        except Exception as exc:
-            logger.debug("[SYNC] local-identity hardware detect failed: %s", exc)
     return success_response({"node_id": node_id, "hostname": hostname}, "Local identity")
 
 
@@ -2519,7 +2507,7 @@ def trigger_manual_sync():
 
         # Local node identity = the machine-stable id; ensure a self-row exists
         # so the sync-history FK and last_sync_time update below succeed.
-        local_node_id = _stable_local_node_id(config)
+        local_node_id = this_node_id()
         _ensure_local_self_node(local_node_id, config.get("node_name"),
                                 config.get("node_mode", "client"))
 
@@ -3861,7 +3849,7 @@ def apply_updates():
         # The files themselves are persisted on disk by apply_files_atomic (written + hash-matched
         # on future checks).
         try:
-            local_node_id = _stable_local_node_id(config, fallback="local_client")
+            local_node_id = this_node_id()
             _ensure_local_self_node(local_node_id, config.get("node_name"),
                                     config.get("node_mode", "client"))
             sync_history = InterconnectorSyncHistory(
