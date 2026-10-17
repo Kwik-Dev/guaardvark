@@ -171,6 +171,8 @@ ENV_VAR_MAP = {
     # Per-decision off/shadow/on overrides (decision_settings); the rows are
     # decision_mode.<id>, and this variable wins over them where it is set.
     "decision_modes": "GUAARDVARK_DECISION_MODES",
+    # Job order (get_job_priority_enabled); off unless set.
+    "job_priority_enabled": "GUAARDVARK_JOB_PRIORITY",
 }
 
 _BOOL_TRUTHY = {"true", "1", "yes"}
@@ -318,3 +320,51 @@ def set_image_keep_loaded_minutes(minutes) -> int:
     save_setting("image_keep_loaded_minutes", str(minutes))
     _image_keep_loaded_minutes = minutes
     return minutes
+
+
+# Job order: whether the job arbiter (services/job_arbiter.py) ranks waiting
+# work by class, by the person's moves and by waiting time. Off (the default)
+# keeps every queue's own order exactly. GPU jobs ask it from worker threads
+# with no app context and from Celery processes, so each process keeps the
+# value for JOB_PRIORITY_CACHE_S; a change made in Settings reaches the other
+# processes within that time and this one at once.
+JOB_PRIORITY_CACHE_S = 30.0
+_job_priority_seen: dict = {"value": None, "at": 0.0}
+
+
+def _read_job_priority() -> bool:
+    if db and has_app_context():
+        return bool(get_setting("job_priority_enabled", default=False, cast=bool))
+    from backend.celery_beat_gates import _read_setting
+
+    raw = _read_setting("job_priority_enabled", None)
+    if raw is None:
+        raw = os.environ.get(ENV_VAR_MAP["job_priority_enabled"], "")
+    return raw.strip().lower() in _BOOL_TRUTHY
+
+
+def get_job_priority_enabled() -> bool:
+    import time
+
+    now = time.monotonic()
+    seen = _job_priority_seen
+    if seen["value"] is not None and now - seen["at"] < JOB_PRIORITY_CACHE_S:
+        return seen["value"]
+    try:
+        value = _read_job_priority()
+    except Exception as e:  # an unreadable setting keeps today's order
+        logger.warning("job_priority_enabled unreadable (%s); treating it as off", e)
+        value = False
+    seen.update(value=bool(value), at=now)
+    return seen["value"]
+
+
+def set_job_priority_enabled(enabled: bool) -> bool:
+    """Store the job order setting. Needs an app context (a route)."""
+    import time
+
+    save_setting("job_priority_enabled", "true" if enabled else "false")
+    # Read back: save_setting logs a failed write instead of raising.
+    stored = bool(get_setting("job_priority_enabled", default=False, cast=bool))
+    _job_priority_seen.update(value=stored, at=time.monotonic())
+    return stored

@@ -163,3 +163,39 @@ def _isolate_gpu_lock_file(tmp_path_factory):
         yield
     finally:
         coord.LOCK_FILE = original
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_job_queue_ledger(tmp_path_factory):
+    """Keep the test session off the production job queue ledger.
+
+    The job arbiter (services/job_arbiter.py) shares pids/job_queue.json with
+    every process on the box; a test must not add to, or read, the line a real
+    backend on the same checkout is using.
+    """
+    try:
+        from backend.services import job_arbiter
+    except Exception:
+        yield
+        return
+    original = job_arbiter._LEDGER
+    job_arbiter._LEDGER = job_arbiter.Ledger(tmp_path_factory.mktemp("pids") / "job_queue.json")
+    try:
+        yield
+    finally:
+        job_arbiter._LEDGER = original
+
+
+@pytest.fixture(autouse=True)
+def _job_order_off(monkeypatch):
+    """Run every test with job order off, the default, unless it switches it on.
+
+    The setting is read from the database; with it pinned off here the suite
+    exercises today's order and never asks the database for it. Tests of the
+    arbiter turn it on themselves (backend/tests/unit/test_job_arbiter.py).
+    """
+    try:
+        from backend.services import job_arbiter
+    except Exception:
+        return
+    monkeypatch.setattr(job_arbiter, "enabled", lambda: False)

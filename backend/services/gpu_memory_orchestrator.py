@@ -435,6 +435,12 @@ class GPUMemoryOrchestrator:
             slot.last_used = time.time()
             logger.debug(f"Model {slot_id} end_use (in_use={slot.in_use})")
 
+    def pins(self, slot_id: str) -> int:
+        """How many begin_use pins ``slot_id`` holds now (0 when not registered)."""
+        with self._lock:
+            slot = self._registry.get(slot_id)
+            return max(0, int(getattr(slot, "in_use", 0) or 0)) if slot else 0
+
     def set_idle_timeout(self, slot_id: str, seconds: Optional[int]) -> bool:
         """Give one slot its own idle timeout (None returns it to the default).
 

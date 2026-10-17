@@ -15,6 +15,9 @@ Endpoints:
     GET  /api/jobs/<id>         Detail for one job (id="kind:native_id")
     GET  /api/jobs/active       Currently in-flight (terminal jobs excluded)
     GET  /api/jobs/summary      Counts per (kind, status) for dashboard chips
+    GET  /api/jobs/queue        The job arbiter's line (job order setting)
+    POST /api/jobs/queue/<id>/move     Move a waiting item up or down
+    POST /api/jobs/queue/<id>/run-now  Go ahead despite a swarm GPU hold
 
 Cancel-by-id (POST /api/jobs/<id>/cancel) lands in Phase 7. History
 (GET /api/jobs/history) lands in Phase 5 with the job_history table.
@@ -514,6 +517,42 @@ def gate_snapshot():
     """
     from backend.services.job_operation_gate import get_gate
     return jsonify(get_gate().snapshot()), 200
+
+
+@unified_jobs_resource_bp.route("/queue", methods=["GET"])
+def queue_snapshot():
+    """The job arbiter's line: what waits for the GPU in order, what is paused
+    for interactive work, what runs, and any swarm GPU hold.
+
+    ``enabled`` is the job order setting; with it off the lists are empty and
+    the Activity page shows nothing extra. See backend/services/job_arbiter.py.
+    """
+    from backend.services import job_arbiter
+    return jsonify(job_arbiter.snapshot()), 200
+
+
+@unified_jobs_resource_bp.route("/queue/<ticket_id>/move", methods=["POST"])
+def queue_move(ticket_id: str):
+    """Move a waiting item one place: body {"direction": "up" | "down"}.
+
+    409 with the reason when job order is off or the item no longer waits.
+    """
+    from backend.services import job_arbiter
+    direction = str((request.get_json(silent=True) or {}).get("direction") or "")
+    try:
+        return jsonify(job_arbiter.move(ticket_id, direction)), 200
+    except job_arbiter.QueueError as e:
+        return jsonify({"error": str(e)}), 409
+
+
+@unified_jobs_resource_bp.route("/queue/<ticket_id>/run-now", methods=["POST"])
+def queue_run_now(ticket_id: str):
+    """Let an item waiting on a swarm agent's GPU hold go ahead (it unloads the agent's model)."""
+    from backend.services import job_arbiter
+    try:
+        return jsonify(job_arbiter.run_now(ticket_id)), 200
+    except job_arbiter.QueueError as e:
+        return jsonify({"error": str(e)}), 409
 
 
 @unified_jobs_resource_bp.route("/<path:job_id>/cancel", methods=["POST"])

@@ -701,6 +701,21 @@ def _load_release(weight) -> None:
         log.warning("GlobalLoadGate release failed (%s)", e)
 
 
+def _noting_wait(admission, on_wait):
+    """``on_wait`` that also records the reason on the job's place in line, so
+    the Activity page says what an admitted job still waits for. With no
+    admission (job order off) it is ``on_wait`` itself."""
+    if admission is None:
+        return on_wait
+
+    def _on_wait(reason):
+        admission.note(reason)
+        if on_wait is not None:
+            on_wait(reason)
+
+    return _on_wait
+
+
 # --- The front door -----------------------------------------------------------
 
 @contextlib.contextmanager
@@ -748,6 +763,11 @@ def gpu_session(
     cooldown: nothing touched the card. Teardown runs in reverse order and before
     the gate release, so ComfyUI's /free and the lease release precede it.
 
+    With the job order setting on, the claim is admitted by the job arbiter
+    first (job_arbiter.gpu_admission): only the head of the line tries the gate,
+    and a job that would unload Ollama waits while a swarm agent holds a model.
+    With it off the arbiter is not consulted.
+
     With all defaults this is a pure pass-through to the gate (no eviction, no budget),
     so adopting it in one caller never changes another's behavior. Yields the gate's
     acquired bool (False only in the degraded ``on_busy='register'`` path).
@@ -760,10 +780,18 @@ def gpu_session(
         yield True
         return
 
+    from backend.services import job_arbiter
     from backend.services.job_operation_gate import GpuBusyError, get_gate
 
     gate = get_gate()
     _slot = slot_id or f"{getattr(kind, 'value', kind)}:{op_id}"
+    # The caller's place in line; None while job order is off.
+    admission_scope = contextlib.ExitStack()
+    admission = admission_scope.enter_context(
+        job_arbiter.gpu_admission(
+            kind, op_id, evicts_ollama=evict_ollama, slot_id=slot_id, polls=(on_busy == "wait"),
+        )
+    )
     acquired = False
     lease_held = False
     heartbeat_stop = None
@@ -807,9 +835,10 @@ def gpu_session(
                 _release_cross_process_lease(_slot)
                 lease_held = False
 
-    with gate.gpu_exclusive(
+    with admission_scope, gate.gpu_exclusive(
         kind, op_id, on_busy=on_busy, wait_timeout=wait_timeout,
-        cancel_event=cancel_event, on_wait=on_wait,
+        cancel_event=cancel_event, on_wait=_noting_wait(admission, on_wait),
+        admit=job_arbiter.admit_callable(admission),
     ) as acq:
         acquired = acq
         if acquired:
@@ -877,6 +906,8 @@ def gpu_session(
                 _session_tls.held = False
                 _teardown()
                 raise
+        if admission is not None:
+            admission.started()
         try:
             yield acquired
             # Clean exit: LOADING -> LOADED so the orchestrator's tracked VRAM
@@ -891,6 +922,8 @@ def gpu_session(
             if acquired:
                 _session_tls.held = False
                 _teardown()
+            if admission is not None:
+                admission.finished()
 
 
 class GpuWaitStopped(Exception):
@@ -919,37 +952,74 @@ def gpu_session_when_free(
 
     ``on_wait(reason)`` is called before each retry. ``should_stop()`` is
     polled while waiting; True ends the wait with ``GpuWaitStopped``.
-    """
-    from backend.services.job_operation_gate import GpuBusyError, GpuCapacityError
 
-    deadline = time.monotonic() + max(0.0, float(wait_s))
-    backoff = 2.0
-    while True:
-        if should_stop and should_stop():
-            raise GpuWaitStopped("stopped while waiting for the GPU")
-        stack = contextlib.ExitStack()
-        try:
-            held = stack.enter_context(
-                gpu_session(kind, op_id, on_busy="raise", **session_kwargs)
-            )
-        except GpuCapacityError:
-            raise
-        except GpuBusyError as e:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+    With job order on, the whole wait is one place in the job arbiter's line,
+    and the ticket is kept fresh through backoff sleeps so the job does not
+    lose its turn. A refusal that is cheap to ask again (another job is ahead,
+    ``GpuQueuedError``, or the card is held or cooling down) is retried every
+    job_priority_data.POLL_S without growing the backoff, so the head of the
+    line does not sleep through the release it is waiting for. A refusal over
+    free VRAM keeps the backoff: each try of that kind may evict residents.
+    """
+    from backend.services import job_arbiter
+    from backend.services.job_operation_gate import (
+        GpuBusyError, GpuCapacityError, GpuQueuedError, gpu_holder_label,
+    )
+    from backend.services.job_priority_data import POLL_S
+
+    # Nested inside a session this thread already holds, the inner gpu_session
+    # is a pass-through, so this wait never queues and takes no place in line.
+    if getattr(_session_tls, "held", False):
+        admission_cm = contextlib.nullcontext(None)
+    else:
+        # The whole wait is one place in line; giving up leaves it.
+        admission_cm = job_arbiter.gpu_admission(
+            kind, op_id, evicts_ollama=bool(session_kwargs.get("evict_ollama")),
+            slot_id=session_kwargs.get("slot_id"), keep_on_refusal=False,
+        )
+    with admission_cm as admission:
+        deadline = time.monotonic() + max(0.0, float(wait_s))
+        backoff = 2.0
+        while True:
+            if should_stop and should_stop():
+                raise GpuWaitStopped("stopped while waiting for the GPU")
+            stack = contextlib.ExitStack()
+            try:
+                held = stack.enter_context(
+                    gpu_session(kind, op_id, on_busy="raise", **session_kwargs)
+                )
+            except GpuCapacityError:
                 raise
-            if on_wait:
-                try:
-                    on_wait(str(e))
-                except Exception:  # noqa: BLE001 — a status line must not end the wait
-                    pass
-            end = time.monotonic() + min(backoff, remaining)
-            while time.monotonic() < end:
-                if should_stop and should_stop():
-                    raise GpuWaitStopped("stopped while waiting for the GPU") from e
-                time.sleep(max(0.0, min(0.5, end - time.monotonic())))
-            backoff = min(15.0, backoff * 1.5)
-            continue
-        with stack:
-            yield held
-        return
+            except GpuBusyError as e:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                if on_wait:
+                    try:
+                        on_wait(str(e))
+                    except Exception:  # noqa: BLE001 — a status line must not end the wait
+                        pass
+                if admission is not None and not isinstance(e, GpuQueuedError):
+                    admission.note(str(e))
+                queued = isinstance(e, GpuQueuedError) or (
+                    admission is not None
+                    and (gpu_holder_label(e) is not None or "cooling down" in str(e))
+                )
+                end = time.monotonic() + min(POLL_S if queued else backoff, remaining)
+                touched = time.monotonic()
+                while time.monotonic() < end:
+                    if should_stop and should_stop():
+                        raise GpuWaitStopped("stopped while waiting for the GPU") from e
+                    time.sleep(max(0.0, min(0.5, end - time.monotonic())))
+                    if admission is not None and time.monotonic() - touched >= POLL_S:
+                        touched = time.monotonic()
+                        try:
+                            admission.touch()
+                        except Exception:  # noqa: BLE001 — a missed touch only risks the turn
+                            pass
+                if not queued:
+                    backoff = min(15.0, backoff * 1.5)
+                continue
+            with stack:
+                yield held
+            return
