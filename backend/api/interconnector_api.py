@@ -4377,24 +4377,30 @@ def sync_status():
 
 @interconnector_bp.route("/receive-directive", methods=["POST"])
 def receive_directive():
-    """Receive an Uncle Claude directive from another node."""
-    # Validate API key to prevent unauthorized directive injection
-    config = _get_config()
-    if config.get("is_enabled"):
-        api_key = request.headers.get("X-API-Key")
-        is_valid, error_msg = _check_api_key(config, api_key)
-        if not is_valid:
-            logger.warning(f"[SYNC] Rejected directive from {request.remote_addr}: {error_msg}")
-            return error_response("Unauthorized: invalid or missing API key", 401)
+    """Receive an Uncle Claude directive from the fleet's master.
 
-    data = request.get_json()
-    if not data or "directive" not in data:
+    A directive reaches the code-manipulation kill switches, so it is taken
+    only in a request signed with the master's own key, the one this machine
+    pinned at enrolment (backend/utils/node_auth.py): unsigned 401, signed by
+    any other machine 403. A machine that never enrolled has no master and
+    takes none. Every refusal is logged.
+    """
+    try:
+        cert = node_auth.verify_flask_request_from_master()
+    except node_auth.NodeAuthError as exc:
+        logger.warning(f"[SYNC] Refused directive from {request.remote_addr}: {exc.reason}")
+        return _node_auth_refusal(exc)
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or "directive" not in data:
         return error_response("directive is required", 400)
 
     directive = data["directive"]
     reason = data.get("reason", "No reason provided")
 
-    logger.critical(f"Received Uncle Claude directive from {request.remote_addr}: {directive} — {reason}")
+    logger.critical(
+        f"Received Uncle Claude directive from master {_node_log_label(cert.node)}: {directive} — {reason}"
+    )
 
     from backend.tools.agent_tools.code_manipulation_tools import _handle_uncle_directive
     _handle_uncle_directive(directive, reason)
