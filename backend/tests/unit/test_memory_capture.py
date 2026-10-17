@@ -344,6 +344,8 @@ def test_engine_path_keeps_the_whole_remainder():
         ("Remember that my favourite tea is peppermint.", True),
         ("note that the build takes ten minutes", True),
         ("my favourite colour is green", True),
+        ("remember my favourite tea is peppermint", True),
+        ("my code is throwing an error", False),
         ("Save a memory that my desk lamp is warm white.", False),
         ("what is my favourite tea?", False),
     ],
@@ -352,3 +354,94 @@ def test_will_capture_matches_what_capture_stores(message, captured):
     """The engine drops save_memory from a turn the capture already stores,
     so the two must agree on which messages those are."""
     assert will_capture(message) is captured
+
+
+
+@pytest.mark.parametrize("explicit_only", [False, True])
+def test_remember_my_x_is_y_is_kept_for_every_chat(app, explicit_only):
+    mem_id = capture_from_message(
+        "remember my favourite colour is teal", session_id="s1", project_id=7,
+        explicit_only=explicit_only,
+    )
+    row = db.session.get(AgentMemory, mem_id)
+    assert row.content == "my favourite colour is teal"
+    assert row.session_id is None
+    assert row.project_id == 7
+
+
+@pytest.mark.parametrize("message", [
+    "remember my keys before leaving",
+    "remember to call the plumber tomorrow",
+])
+def test_remember_without_a_fact_is_not_captured(app, message):
+    assert capture_from_message(message, session_id="s1") is None
+    assert AgentMemory.query.count() == 0
+
+
+@pytest.mark.parametrize("message", [
+    "my code is throwing an error",
+    "our build is failing on the second step",
+    "my script is not working after the update",
+    "my app is broken since this morning",
+    "my laptop is in the shop until Friday",
+    "my connection is slow right now",
+])
+def test_a_problem_report_or_passing_state_is_not_a_fact(app, message):
+    """The chat's "my X is Y" capture keeps lasting facts only; the memory_fact
+    question in decision_data.py names these as not facts."""
+    assert capture_from_message(message, session_id="s1") is None
+    assert AgentMemory.query.count() == 0
+
+
+@pytest.mark.parametrize("message", [
+    "my favourite colour is teal",
+    "our office is in Leeds",
+    "my server is at 10.0.0.5",
+])
+def test_lasting_facts_are_still_captured(app, message):
+    assert capture_from_message(message, session_id="s1") is not None
+
+
+def test_an_explicit_remember_keeps_whatever_it_says(app):
+    mem_id = capture_from_message("remember that my code is throwing an error", session_id="s1")
+    assert db.session.get(AgentMemory, mem_id).content == "my code is throwing an error"
+
+
+def test_a_chat_outside_any_project_does_not_recall_project_facts(app):
+    capture_from_message("remember that the build uses ninja", session_id="chat-one", project_id=7)
+    capture_from_message("remember that the build log lives in ci", session_id="chat-one")
+
+    no_project = get_memories_for_context(query="build", session_id="chat-two")
+    in_project = get_memories_for_context(query="build", session_id="chat-two", project_id=7)
+    no_session = get_memories_for_context(query="build")
+
+    assert "build uses ninja" not in no_project
+    assert "build log lives in ci" in no_project
+    assert "build uses ninja" in in_project and "build log lives in ci" in in_project
+    # A caller with no session (the agent executor's prompt) may not know its
+    # project, so it is not narrowed.
+    assert "build uses ninja" in no_session
+
+
+def test_save_memory_in_a_project_chat_keeps_the_project(app):
+    from backend.tools.memory_tools import SaveMemoryTool
+
+    result = SaveMemoryTool().execute(
+        content="Prefers metric units",
+        _agent_context={"transport": "chat", "project_id": 7},
+    )
+    assert result.success
+    row = AgentMemory.query.filter_by(content="Prefers metric units").one()
+    assert row.project_id == 7
+    assert row.session_id is None
+
+
+def test_the_engine_hands_save_memory_the_chats_project():
+    """The model's tool calls and the direct path (/remember) both pass the
+    chat's project to the tool."""
+    text = ENGINE_PATH.read_text()
+    loop = text[text.index('"transport": "chat",'):]
+    assert '"project_id": getattr(self, "_project_id", None)' in loop[:400]
+    direct = text[text.index("def _run_direct_tool_execution"):]
+    direct = direct[direct.index("self.registry.execute_tool("):][:300]
+    assert '"project_id": getattr(self, "_project_id", None)' in direct

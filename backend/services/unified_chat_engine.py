@@ -3391,6 +3391,11 @@ class UnifiedChatEngine:
                             on_output=on_output,
                             agent_context={
                                 "transport": "chat",
+                                # save_memory keeps what it stores in this
+                                # chat's project. No session id: what the model
+                                # saves is for later chats too, like a
+                                # "remember that …" turn.
+                                "project_id": getattr(self, "_project_id", None),
                                 "user_message": message,
                                 "message": message,
                                 "project_root": (
@@ -4093,7 +4098,12 @@ class UnifiedChatEngine:
         emit_fn("chat:tool_call", {"tool": tool_name, "params": display_params(params), "iteration": 1})
         _t0 = time.time()
         try:
-            result = self.registry.execute_tool(tool_name, **params)
+            # /remember (save_memory) keeps what it stores in this chat's project.
+            result = self.registry.execute_tool(
+                tool_name,
+                agent_context={"transport": "chat", "project_id": getattr(self, "_project_id", None)},
+                **params,
+            )
         except Exception as exc:
             _dur_ms = int((time.time() - _t0) * 1000)
             text = f"{tool_name} failed: {exc}"

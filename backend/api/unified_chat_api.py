@@ -357,6 +357,7 @@ def unified_chat():
                         pass
                     eng = UnifiedChatEngine(tool_registry=reg, llm_instance=llm or object())
                     eng.app = app
+                    eng._project_id = project_id
                     rid = str(uuid.uuid4())
                     disp = message or f"/{options.get('slash_command', d_tool)}"
                     try:
