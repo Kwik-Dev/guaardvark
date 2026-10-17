@@ -62,24 +62,34 @@ CHAT_KB_CONTEXT_HEADER = (
     "from your own knowledge as usual and do not mention them or the knowledge base."
 )
 
-# Sent when a turn's media tools are withheld: the user turned an image down,
-# or asked for writing. Without it the model called generate_image anyway and,
-# refused, answered that it could not write the text.
+# Sent in the user turn when its media tools are withheld: the user turned an
+# image down, or asked for writing. Measured on gemma4:e2b replaying "write 300
+# words ... for Z Image Turbo ... try one version now": with no note the model
+# called a media tool in 5 of 5 runs; this wording gave the text with no tool
+# call and no disclaimer in 5 of 5 (205-389 words). Naming the tools or saying
+# "cannot" drew "I cannot generate images" openings, and a terse version drew
+# that line alone in 5 of 5.
 WRITE_THE_TEXT_NOTE = (
-    "This request is for written text. Write it yourself in this reply, in full. Do not "
-    "call generate_image or any other media tool, and do not say you cannot write it."
+    "Answer this with the written text the user asked for, in full, in this reply. They want "
+    "the text itself (for example a prompt to paste into an image model), not a picture, so no "
+    "tool is needed. Start directly with the text."
 )
 
-# Sent with a picture attached mid-conversation. Without it a small vision
-# model describes the picture and stops, even when it is a render of the prompt
-# it just wrote and the user is saying it came out wrong.
+# Sent in the user turn with a picture attached mid-conversation. Without it a
+# small vision model describes the picture and stops, even when it is a render
+# of the prompt it just wrote and the user is saying it came out wrong.
+# Measured on gemma4:e2b replaying such a turn ("That did not work, here is how
+# it came out." with the render attached): this wording compared the render
+# with the request and gave a rewritten prompt in 8 of 8 runs, and still
+# answered a plain question about the picture in 5 of 5. A softer "read it
+# against what was discussed" managed 1 of 3, and the same text sent as a
+# system message made the model call edit_image instead.
 ATTACHED_PICTURE_IN_CONVERSATION = (
-    "The user attached the picture with this message as part of the conversation above. "
-    "Read it against what was discussed. If it shows the result of something from earlier "
-    "(a render of a prompt you wrote, a screenshot of an error, a draft or a design), compare "
-    "it with what was wanted, say what differs and the likely reason, and give the fix, such "
-    "as a revised prompt. Describe the picture only if the user asks for a description or "
-    "nothing earlier relates to it."
+    "The attached picture belongs to the conversation above; it is most likely what the user got "
+    "from something discussed there, such as an image rendered from the prompt in your last reply. "
+    "Do not just describe it and do not talk about tools. Compare the picture with what was asked "
+    "for, name what came out differently, and give the fix: for a prompt, a rewritten prompt that "
+    "gets the missing parts. Describe the picture only if the user asks for a description."
 )
 
 
