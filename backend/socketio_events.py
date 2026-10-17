@@ -543,6 +543,10 @@ def _handle_chat_send_local(payload):
     options.pop("attached_image_urls", None)
     if len(attached_images) > 1:
         options["attached_images"] = attached_images
+    # Named here so the brain's turn decision and its telemetry row say where
+    # the turn came from; AgentBrain reuses an id it is given.
+    options["surface"] = "cluster"
+    options.setdefault("request_id", str(uuid.uuid4()))
     is_voice_message = bool(payload.get("is_voice_message", False))
     project_id = payload.get("project_id")
     if project_id is not None:
@@ -631,6 +635,12 @@ def _handle_chat_send_local(payload):
                     eng.app = app
                     rid = str(uuid.uuid4())
                     disp = message or f"/{options.get('slash_command', d_tool)}"
+                    try:
+                        from backend.services.turn_router import direct_turn
+                        with app.app_context():
+                            direct_turn(disp, d_tool, surface=options.get("surface"), request_id=rid)
+                    except Exception as _turn_e:
+                        logger.debug(f"direct turn not recorded: {_turn_e}")
                     with app.app_context():
                         eng._run_direct_tool_execution(d_tool, d_params, session_id, emit_fn, rid, disp, options)
                     return  # direct path handled

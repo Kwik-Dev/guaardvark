@@ -646,6 +646,18 @@ def surface_of(value: Any) -> Surface:
         return Surface.API
 
 
+# The Discord plugin names its sessions discord_user_<id>, discord_channel_<id>
+# and discord_voice_<guild> (plugins/discord/core); the web UI uses UUIDs.
+_DISCORD_SESSION_PREFIX = "discord_"
+
+
+def chat_surface(session_id: Optional[str], is_voice_message: bool = False) -> Surface:
+    """The surface of a POST /api/chat/unified turn."""
+    if str(session_id or "").startswith(_DISCORD_SESSION_PREFIX):
+        return Surface.DISCORD
+    return Surface.VOICE if is_voice_message else Surface.WEB
+
+
 def route_turn(
     message: str,
     options: Optional[Mapping[str, Any]] = None,
