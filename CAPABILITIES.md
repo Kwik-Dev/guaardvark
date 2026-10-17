@@ -747,7 +747,7 @@ Each plugin lives in `plugins/<name>/` with a `plugin.json` manifest declaring i
 | **Swarm** | 8210 | Parallel agent orchestration in isolated worktrees |
 | **LoRA Trainer** | — | Train character/environment/prop LoRAs for the Film Crew (CUDA, bf16) |
 | **Discord Bot** | 8200 | Discord bot integration — chat, image generation, search via Guaardvark backend |
-| **GPU Embedding** | 5002 | GPU-accelerated text embeddings for faster indexing (CPU fallback) |
+| **GPU Embedding** | 8204 | GPU-accelerated text embeddings for faster indexing (CPU fallback) |
 | **Training** | — | Vision/servo training data collection and dataset management |
 
 ### Plugins Page (GPU Management)

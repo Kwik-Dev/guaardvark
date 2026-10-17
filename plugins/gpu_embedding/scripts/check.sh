@@ -14,8 +14,8 @@ if [ ! -f "$PLUGIN_CONFIG" ]; then
     exit 1
 fi
 
-# Extract port from plugin.json (default: 5002)
-PORT=$(python3 -c "import json; f=open('$PLUGIN_CONFIG'); d=json.load(f); print(d.get('port', 5002))" 2>/dev/null || echo "5002")
+# Extract port from plugin.json (default: 8204)
+PORT=$(python3 -c "import json; f=open('$PLUGIN_CONFIG'); d=json.load(f); print(d.get('port', 8204))" 2>/dev/null || echo "8204")
 
 # Check if service is running
 if ! lsof -Pi :$PORT -sTCP:LISTEN -t >/dev/null 2>&1 ; then

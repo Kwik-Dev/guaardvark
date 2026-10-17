@@ -34,7 +34,7 @@ def get_config():
     config = {
         "port": int(os.environ.get(
             "PLUGIN_GPU_EMBEDDING_PORT",
-            plugin_config.get("port", 5002)
+            plugin_config.get("port", 8204)
         )),
         "host": os.environ.get(
             "PLUGIN_GPU_EMBEDDING_HOST",

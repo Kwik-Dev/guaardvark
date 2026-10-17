@@ -34,7 +34,7 @@ Edit `plugin.json` to configure the service:
 {
   "config": {
     "enabled": false,
-    "service_url": "http://localhost:5002",
+    "service_url": "http://localhost:8204",
     "timeout": 30,
     "model": "embeddinggemma:latest",
     "use_system_model": true
@@ -65,7 +65,7 @@ Edit `plugin.json` to configure the service:
 ```bash
 ./plugins/gpu_embedding/scripts/check.sh
 # Or
-curl http://localhost:5002/health
+curl http://localhost:8204/health
 ```
 
 ### Via UI
@@ -100,7 +100,7 @@ python -m pytest tests/
 python -m plugins.gpu_embedding.service.app
 
 # In another terminal, test embedding
-curl -X POST http://localhost:5002/embed \
+curl -X POST http://localhost:8204/embed \
   -H "Content-Type: application/json" \
   -d '{"text": "Hello world"}'
 ```
@@ -108,7 +108,7 @@ curl -X POST http://localhost:5002/embed \
 ## Troubleshooting
 
 ### Service won't start
-- Check that port 5002 is not in use
+- Check that port 8204 is not in use
 - Verify Ollama is running: `curl http://localhost:11434/api/tags`
 - Check logs: `tail -f logs/gpu_embedding_service.log`
 
