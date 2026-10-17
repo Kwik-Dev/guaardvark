@@ -20,10 +20,11 @@ fleet key, when the master requires one; the route checks that) when:
   keeps the machine alive: the old Settings page heartbeats from whatever
   computer the page is open on.
 
-The window opens by itself once, the first time a legacy client calls the
-updated master, for WINDOW_HOURS. It closes at that deadline, or when the
-operator closes it (POST /api/interconnector/transition); the operator can
-also open it again for a client that was offline. A machine that has enrolled
+The window opens only when the operator opens it (Settings → Interconnector,
+POST /api/interconnector/transition), for WINDOW_HOURS by default. It closes at
+that deadline, or when the operator closes it; the operator can open it again
+for a client that was offline. Until it is opened, a legacy client's unsigned
+requests are refused. A machine that has enrolled
 is no longer a legacy client, so its unsigned requests are refused while the
 window is still open. Every request taken on the old rule, and every one
 refused after the window closed, is logged as a warning (at most once per
@@ -210,14 +211,11 @@ def legacy_caller(address: str, path: str, url_node_id: Optional[str] = None,
     label = f"{node.node_name or 'node'} ({node.node_id[:8]})"
 
     state = read_state()
-    if not state:
-        state = open_window(WINDOW_HOURS, opened_by="first call from a client that joined before enrolment",
-                            now=now)
     if not window_open(state, now):
         _log("refused", node.node_id, path,
-             "[SYNC] Refused unsigned %s from %s at %s: the transition window is closed. Update "
-             "Guaardvark on that machine, or open the window again in Settings → Interconnector "
-             "on the master", path, label, address)
+             "[SYNC] Refused unsigned %s from %s at %s: the transition window is closed. To update "
+             "that machine through the Interconnector, open the window in Settings → Interconnector "
+             "on the master (Allow for %s hours)", path, label, address, WINDOW_HOURS)
         return None
 
     if url_node_id is not None and may_move and host_only(node.host) != address:

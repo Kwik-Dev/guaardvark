@@ -84,10 +84,19 @@ def _state(app):
         return transition.read_state()
 
 
-def test_the_first_old_call_opens_the_window_and_is_taken(master):
+def _open(app):
+    """The operator's "Allow for N hours" click."""
+    with app.app_context():
+        transition.open_window(transition.WINDOW_HOURS)
+
+
+def test_old_calls_are_refused_until_the_operator_opens_the_window(master):
     client = master.test_client()
+    assert _pull(client).status_code == 401
+    assert _heartbeat(client).status_code == 401
     assert _state(master) == {}
 
+    _open(master)
     response = _pull(client)
 
     assert response.status_code == 200, response.get_data(as_text=True)
@@ -97,6 +106,7 @@ def test_the_first_old_call_opens_the_window_and_is_taken(master):
 
 
 def test_an_old_heartbeat_keeps_the_client_alive(master):
+    _open(master)
     response = _heartbeat(master.test_client())
     assert response.status_code == 200, response.get_data(as_text=True)
     assert "certificate" not in response.get_json()["data"]
@@ -111,6 +121,7 @@ def test_another_address_is_not_taken_and_opens_nothing(master):
 
 
 def test_a_heartbeat_naming_the_client_moves_its_address(master):
+    _open(master)
     client = master.test_client()
     assert _heartbeat(client, address="192.0.2.51").status_code == 200
     with master.app_context():
@@ -121,6 +132,7 @@ def test_a_heartbeat_naming_the_client_moves_its_address(master):
 
 
 def test_a_browser_heartbeat_keeps_the_client_alive_without_moving_it(master):
+    _open(master)
     client = master.test_client()
     response = _heartbeat(client, address="192.0.2.77", headers={"Origin": "http://192.0.2.50:5173"})
     assert response.status_code == 200
@@ -140,6 +152,7 @@ def test_a_closed_window_refuses_and_does_not_reopen(master):
 
 
 def test_the_operator_closes_and_reopens_the_window(master):
+    _open(master)
     client = master.test_client()
     assert _pull(client).status_code == 200
 
@@ -172,6 +185,7 @@ def test_only_the_operator_changes_the_window(master):
 
 
 def test_a_client_that_has_enrolled_is_no_longer_taken_unsigned(master):
+    _open(master)
     client = master.test_client()
     assert _pull(client).status_code == 200
     with master.app_context():
@@ -190,16 +204,19 @@ def test_the_fleet_key_is_still_asked_when_the_master_requires_one(master):
     assert _pull(client).status_code == 401
     assert _pull(client, headers={"X-API-Key": "wrong"}).status_code == 401
     assert _state(master) == {}
+    _open(master)
     assert _pull(client, headers={"X-API-Key": "fleet-key"}).status_code == 200
 
 
 def test_the_master_lists_who_still_needs_the_window(master):
     client = master.test_client()
     _pull(client)
-    response = client.get("/api/interconnector/enrolments", environ_base=LOCAL)
-    data = response.get_json()["data"]["transition"]
-    assert data["open"] is True
+    data = client.get("/api/interconnector/enrolments", environ_base=LOCAL).get_json()["data"]["transition"]
+    assert data["open"] is False
     assert [m["node_id"] for m in data["legacy_machines"]] == [OLD_CLIENT]
+    _open(master)
+    data = client.get("/api/interconnector/enrolments", environ_base=LOCAL).get_json()["data"]["transition"]
+    assert data["open"] is True
 
 
 @pytest.mark.parametrize("stored,address,same", [
