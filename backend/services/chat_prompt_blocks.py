@@ -16,7 +16,11 @@ Examples:
 <tool_call>
 <tool>web_search</tool>
 <query>current weather in Cleveland</query>
-</tool_call>
+</tool_call>"""
+
+# Shown only when generate_image is on offer: a small model copies an example
+# it was shown, and called generate_image for a request to write a prompt.
+CHAT_IMAGE_TOOL_EXAMPLE = """
 
 <tool_call>
 <tool>generate_image</tool>
@@ -58,6 +62,14 @@ CHAT_KB_CONTEXT_HEADER = (
     "from your own knowledge as usual and do not mention them or the knowledge base."
 )
 
+# Sent when a turn's media tools are withheld: the user turned an image down,
+# or asked for writing. Without it the model called generate_image anyway and,
+# refused, answered that it could not write the text.
+WRITE_THE_TEXT_NOTE = (
+    "This request is for written text. Write it yourself in this reply, in full. Do not "
+    "call generate_image or any other media tool, and do not say you cannot write it."
+)
+
 # Sent with a picture attached mid-conversation. Without it a small vision
 # model describes the picture and stops, even when it is a render of the prompt
 # it just wrote and the user is saying it came out wrong.
@@ -79,6 +91,7 @@ def build_chat_tools_prompt_tail(tool_list: str, voice_suffix: str = "") -> str:
         "For greetings, casual conversation, or simple requests — respond directly "
         "WITHOUT calling any tools.\n\n"
         f"TOOLS:\n{tool_list}\n\n"
-        f"{CHAT_TOOL_XML_FORMAT}\n\n"
+        f"{CHAT_TOOL_XML_FORMAT}"
+        f"{CHAT_IMAGE_TOOL_EXAMPLE if 'generate_image' in tool_list else ''}\n\n"
         f"{CHAT_TOOL_RULES_BLOCK}{voice_suffix}"
     )
