@@ -69,7 +69,7 @@ Other ways in: [Docker](INSTALL.md#alternative-docker-linux-core-stack-only) · 
 - **Directors.** A beat-synced music-video director, a five-role Film Crew that turns a logline into a finished video, and a built-in video editor. [▶ Ep 8](https://www.youtube.com/watch?v=l2LqKA9GQDc) · [▶ Ep 9](https://www.youtube.com/watch?v=sq104u9N4Qg)
 - **Self-improvement.** Guaardvark tests itself, drafts fixes and stages them for your review behind a codebase lock; the System Map draws the whole codebase from its real imports. [▶ Ep 11](https://www.youtube.com/watch?v=7kHvi_2vT6U) · [▶ Ep 14](https://www.youtube.com/watch?v=yEy1tVKxsF0)
 - **Command center.** A GPU orchestrator, a plugin manager with a live VRAM budget, jobs and scheduling, schema-aware backups, and a multi-machine Interconnector. [▶ Ep 12](https://www.youtube.com/watch?v=A1-_ykcHOhQ)
-- **Terminal and API.** The `guaardvark` [CLI](#cli) with an interactive REPL, plus REST, GraphQL and Socket.IO. [▶ Ep 20](https://www.youtube.com/watch?v=Z3nXVtfdlSI)
+- **Terminal and API.** The `guaardvark` [CLI](#cli) with an interactive REPL, plus REST and Socket.IO. [▶ Ep 20](https://www.youtube.com/watch?v=Z3nXVtfdlSI)
 
 The complete, enumerated list of models, tools, plugins and pages is in **[CAPABILITIES.md](CAPABILITIES.md)**.
 
@@ -477,7 +477,7 @@ Config: `~/.guaardvark/cli.json` (legacy `~/.llx/config.json` is still read). Th
 Browser / CLI (PyPI: guaardvark) / MCP Client (Claude Desktop, Cursor, etc.)
     | HTTP + WebSocket / stdio MCP
     v
-Flask (~100 API blueprints, auto-discovered) + GraphQL + Socket.IO
+Flask (~100 API blueprints, auto-discovered) + Socket.IO
     |
     +-- AgentBrain (3-tier routing: Reflex → Instinct → Deliberation)
     |
@@ -502,7 +502,7 @@ PostgreSQL  Redis  Ollama  Agent Display (:99, on-demand)  ComfyUI / Audio Found
 - Many components (blueprints, tool registry, plugins) are discovered or declared at runtime; exact counts drift between releases.
 - `backend/mcp/config.py` controls the MCP server's default-deny policy.
 
-**Frontend:** React 18 · Vite · Material-UI v5 · Zustand · Apollo Client · Monaco Editor · Socket.IO<br>
+**Frontend:** React 18 · Vite · Material-UI v5 · Zustand · Monaco Editor · Socket.IO<br>
 **Core models and engines:** Gemma4 / Llama-family / Moondream (vision) · Z-Image / FLUX.1 / Krea 2 / SDXL · Wan 2.2 / LTX / HunyuanVideo / CogVideoX / MiniMax H3 · ACE-Step / Stable Audio Open / Chatterbox / Kokoro / Piper · Real-ESRGAN family + HAT · Whisper
 
 More: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [agent mental model](docs/AGENT_MENTAL_MODEL.md).

@@ -12,7 +12,7 @@ export const BASE_URL = (import.meta.env.VITE_API_BASE_URL || "/api").replace(
 );
 
 // Absolute backend origin for URLs that can't use relative paths
-// (audio playback, Socket.IO connections, GraphQL)
+// (audio playback, Socket.IO connections)
 // Uses window.location.origin so Vite proxy handles routing in dev,
 // and same-origin works in production. Override with VITE_SOCKET_URL if needed.
 export const BACKEND_URL = (

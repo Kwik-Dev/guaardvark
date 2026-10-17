@@ -203,7 +203,7 @@ refactor(api): extract indexing logic into dedicated service
 - Functional components with hooks
 - Material-UI v5 for all UI elements
 - Zustand for global state, React Context for layout/status
-- Apollo Client for GraphQL, Axios for REST
+- Axios or fetch for REST, Socket.IO for streamed replies
 
 ### Comments and Docstrings
 
