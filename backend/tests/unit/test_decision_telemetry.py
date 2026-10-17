@@ -64,3 +64,10 @@ def test_the_file_rotates_at_its_cap(telemetry_file, monkeypatch):
     assert os.path.exists(f"{telemetry_file}.1") and os.path.exists(f"{telemetry_file}.2")
     assert not os.path.exists(f"{telemetry_file}.3")
     assert os.path.getsize(telemetry_file) < 200 + 100
+
+def test_a_shadow_question_is_written_with_the_switch_off(telemetry_file, monkeypatch):
+    monkeypatch.setenv(dt.ENV_SWITCH, "false")
+    assert dt.write_question("needs_live_data", mode="off", state={"message": "x"}) is False
+    assert dt.write_question("needs_live_data", mode="shadow", state={"message": "x"}) is True
+    rows = [json.loads(line) for line in telemetry_file.read_text().splitlines()]
+    assert [r["mode"] for r in rows] == ["shadow"]
