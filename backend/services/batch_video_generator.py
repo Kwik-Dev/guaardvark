@@ -313,13 +313,17 @@ def clip_quality_record(
     The frame checker's flags (``flags``: code and a plain message) mark a clip
     that finished but is not usable; ``expected`` holds the width, height and
     frame count the request resolved to. ``cinematic`` with a ``keyframe_path``
-    adds the keyframe colour match; ``vlm_review`` adds the vision review.
+    compares the keyframe with the middle frame: by the image encoder
+    (``keyframe_match``) once it is installed, by colour (``colour_match``)
+    until then or when the encoder could not score the clip. ``vlm_review``
+    adds the vision review.
     """
     try:
         from backend.services.video_consistency_metrics import (
             compute_basic_video_stats,
             inspect_video_frames,
             colour_match,
+            keyframe_match,
             QUALITY_THRESHOLDS,
             review_video_quality,
             not_reviewed,
@@ -347,21 +351,40 @@ def clip_quality_record(
         logger.warning("frame quality check skipped for %s: %s", video_path, e)
 
     if cinematic and keyframe_path and Path(keyframe_path).exists():
-        # The keyframe's palette against the middle frame: a colour match,
-        # not a check of who is in the shot.
-        match = colour_match(
-            keyframe_path, video_path, frame_count=(quality.get("frames") or {}).get("frames"),
-        )
-        quality["colour_match"] = match
-        score = match.get("score")
-        if isinstance(score, (int, float)) and score < QUALITY_THRESHOLDS["colour_match_floor"]["value"]:
-            quality["flagged"] = True
-            quality["flag_reasons"].append(f"low_colour_match:{score:.2f}")
-            quality["flags"].append({
-                "code": "low_colour_match",
-                "message": (f"colours drift from the keyframe: colour match {score:.2f} "
-                            f"at frame {match['frame_index']} of {match['frames']}"),
-            })
+        frame_count = (quality.get("frames") or {}).get("frames")
+        try:
+            seen = keyframe_match(keyframe_path, video_path, frame_count=frame_count)
+        except Exception as e:  # noqa: BLE001 — the check must never fail a render
+            logger.warning("keyframe match skipped for %s: %s", video_path, e)
+            seen = None
+        if seen is not None:
+            quality["keyframe_match"] = seen
+        score = (seen or {}).get("score")
+        if isinstance(score, (int, float)):
+            if score < QUALITY_THRESHOLDS["keyframe_match_floor"]["value"]:
+                quality["flagged"] = True
+                quality["flag_reasons"].append(f"low_keyframe_match:{score:.2f}")
+                quality["flags"].append({
+                    "code": "low_keyframe_match",
+                    "message": (f"the middle of the clip no longer shows what the keyframe "
+                                f"showed: keyframe match {score:.2f} at frame "
+                                f"{seen['frame_index']} of {seen['frames']}"),
+                })
+        else:
+            # No encoder, or it could not score this clip: the keyframe's
+            # palette against the middle frame, which is a colour match and not
+            # a check of what is in the shot.
+            match = colour_match(keyframe_path, video_path, frame_count=frame_count)
+            quality["colour_match"] = match
+            score = match.get("score")
+            if isinstance(score, (int, float)) and score < QUALITY_THRESHOLDS["colour_match_floor"]["value"]:
+                quality["flagged"] = True
+                quality["flag_reasons"].append(f"low_colour_match:{score:.2f}")
+                quality["flags"].append({
+                    "code": "low_colour_match",
+                    "message": (f"colours drift from the keyframe: colour match {score:.2f} "
+                                f"at frame {match['frame_index']} of {match['frames']}"),
+                })
 
     # The VLM review, where the caller enables it. A review that did not
     # produce a score is recorded as "not reviewed" with its reason, never

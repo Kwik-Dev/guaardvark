@@ -120,6 +120,30 @@ def pytest_sessionfinish(session, exitstatus):
 
 
 @pytest.fixture(scope="session", autouse=True)
+def _isolate_identity_encoder(tmp_path_factory):
+    """Keep the test session off an identity encoder installed on this machine.
+
+    Once a person clicks Install it lives under data/models/identity_encoder,
+    and with it present the Cast identity check and the clip keyframe check
+    take another path than they do in CI. The session reads an empty install
+    root instead; a test that wants the encoder lays out a stand-in
+    (backend/tests/fixtures/identity_encoder_stub.py) under its own tmp_path.
+    """
+    try:
+        from backend.services import identity_encoder
+    except Exception:
+        yield
+        return
+    original = identity_encoder.install_root
+    empty = tmp_path_factory.mktemp("identity_encoder")
+    identity_encoder.install_root = lambda: empty
+    try:
+        yield
+    finally:
+        identity_encoder.install_root = original
+
+
+@pytest.fixture(scope="session", autouse=True)
 def _isolate_gpu_lock_file(tmp_path_factory):
     """Keep the test session off the production GPU lock file.
 

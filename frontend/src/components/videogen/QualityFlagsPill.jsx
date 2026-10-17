@@ -19,6 +19,7 @@ const SHORT = {
   wrong_size: "Wrong size",
   wrong_frame_count: "Wrong length",
   low_colour_match: "Colour drift",
+  low_keyframe_match: "Keyframe drift",
   // Older batches: the same histogram check under its former name.
   low_identity_score: "Colour drift",
   low_vlm_score: "Low review score",

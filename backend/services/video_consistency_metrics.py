@@ -102,6 +102,22 @@ def _clip_frame(video_path: str | Path, index: int):
     return None
 
 
+def _middle_frame(video_path: str | Path, frame_count: Optional[int]):
+    """(frame, index, total) for the middle of a clip, or (None, None, reason).
+
+    The middle, not the start: an image-to-video clip begins on its keyframe, so
+    an early frame matches by construction and drift only shows later.
+    """
+    total = int(frame_count or 0) or _clip_frame_count(video_path)
+    if total <= 0:
+        return None, None, "the clip has no frames"
+    index = total // 2
+    frame = _clip_frame(video_path, index)
+    if frame is None:
+        return None, None, f"frame {index} of {total} could not be decoded"
+    return frame, index, total
+
+
 def colour_match(
     reference_path: str | Path, video_path: str | Path, *, frame_count: Optional[int] = None
 ) -> Dict[str, Any]:
@@ -109,11 +125,10 @@ def colour_match(
 
     Cosine of the two images' RGB histograms (``_histogram_vec``). It compares
     palettes and says nothing about who or what is in the frame, so the record
-    carries ``label`` "colour match". The frame is the middle of the clip: an
-    image-to-video clip starts from its keyframe, so an early frame matches by
-    construction and drift only shows later. ``frame_count`` is the decoded
-    length when the caller has it. Never raises; ``score`` is None with a
-    ``reason`` when the match could not run.
+    carries ``label`` "colour match". ``frame_count`` is the decoded length when
+    the caller has it. Never raises; ``score`` is None with a ``reason`` when the
+    match could not run. ``keyframe_match`` replaces it once the image encoder is
+    installed.
     """
     out: Dict[str, Any] = {
         "label": COLOUR_MATCH_LABEL, "method": "rgb_histogram", "score": None,
@@ -121,19 +136,55 @@ def colour_match(
     }
     try:
         import numpy as np
-        total = int(frame_count or 0) or _clip_frame_count(video_path)
-        if total <= 0:
-            out["reason"] = "the clip has no frames"
-            return out
-        index = total // 2
-        frame = _clip_frame(video_path, index)
+        frame, index, total = _middle_frame(video_path, frame_count)
         if frame is None:
-            out["reason"] = f"frame {index} of {total} could not be decoded"
+            out["reason"] = total
             return out
         cosine = float(np.dot(_histogram_vec(frame), _histogram_vec(str(reference_path))))
         out.update(score=round(max(0.0, min(1.0, cosine)), 4), frame_index=index, frames=total)
     except Exception as e:  # noqa: BLE001 — a measurement that cannot run is a reason
         out["reason"] = f"the colour match could not run ({str(e)[:160]})"
+    return out
+
+
+KEYFRAME_MATCH_LABEL = "keyframe match"
+
+
+def keyframe_match(
+    reference_path: str | Path, video_path: str | Path, *, frame_count: Optional[int] = None
+) -> Optional[Dict[str, Any]]:
+    """How much the middle frame of a clip still shows what its keyframe showed.
+
+    Cosine of the image encoder's embeddings of the keyframe and the middle
+    frame (the same encoder and pooling as the Cast identity check), judged
+    against QUALITY_THRESHOLDS["keyframe_match_floor"]. Unlike the colour match
+    it reacts to the subject changing — a face that morphs, a figure lost in
+    blur — and not to a palette shift. None when the encoder is not installed,
+    which tells the caller to fall back to ``colour_match``; otherwise never
+    raises, and ``score`` is None with a ``reason`` when the match could not run.
+    """
+    repo_id, folder, digest = _installed_encoder()
+    if folder is None:
+        return None
+    out: Dict[str, Any] = {
+        "label": KEYFRAME_MATCH_LABEL, "method": "embed", "model": repo_id,
+        "digest": (digest or "")[:12], "score": None, "frame_index": None,
+        "frames": None, "threshold": QUALITY_THRESHOLDS["keyframe_match_floor"]["value"],
+        "reason": None,
+    }
+    try:
+        processor, model = _load_image_encoder(repo_id, folder)
+        frame, index, total = _middle_frame(video_path, frame_count)
+        if frame is None:
+            out["reason"] = total
+            return out
+        cosine = float((
+            _image_embedding(processor, model, str(reference_path))
+            * _image_embedding(processor, model, frame)
+        ).sum())
+        out.update(score=round(max(0.0, min(1.0, cosine)), 4), frame_index=index, frames=total)
+    except Exception as e:  # noqa: BLE001 — a measurement that cannot run is a reason
+        out["reason"] = f"the keyframe match could not run ({str(e)[:160]})"
     return out
 
 
@@ -288,16 +339,18 @@ def _identity_not_measured(
 
 
 def _identity_measured_or_withheld(
-    method: str, model: Optional[str], score: float, details: Dict[str, Any]
+    method: str, model: Optional[str], score: float, details: Dict[str, Any],
+    *, digest: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Return the score only when this model has earned it on labelled pairs.
 
     The raw value stays in ``details`` either way — the measurement harness reads
-    it, and a withheld score is still worth having in a log.
+    it, and a withheld score is still worth having in a log. ``digest`` is the
+    build that produced the score, when the method knows it.
     """
     spec = IDENTITY_METHODS.get(method) or {}
     details = {**details, "raw_score": round(float(score), 4)}
-    if not proven_for_model(method, model):
+    if not proven_for_model(method, model, digest=digest):
         return _identity_not_measured(method, NOT_PROVEN_REASON, model=model, details=details)
     threshold = spec.get("threshold")
     return {
@@ -393,6 +446,10 @@ def _identity_via_vlm(
 
 _ENCODER_CACHE: Dict[str, Any] = {}
 
+ENCODER_NOT_INSTALLED = (
+    "the image encoder is not installed — Settings > Generation > Cast identity check"
+)
+
 
 def _image_encoder_classes():
     """The transformers classes the encoder loads through.
@@ -404,30 +461,44 @@ def _image_encoder_classes():
     return AutoImageProcessor, AutoModel
 
 
-def _load_image_encoder(repo_id: str):
-    """(processor, model) for ``repo_id`` from this machine only. Cached on success."""
+def forget_image_encoder(repo_id: str) -> None:
+    """Drop a loaded encoder, so a Remove frees it and no later check scores with
+    weights that are no longer on disk."""
+    _ENCODER_CACHE.pop(repo_id, None)
+
+
+def _load_image_encoder(repo_id: str, folder: Path):
+    """(processor, model) for ``repo_id`` read from its install ``folder`` only.
+
+    Cached per folder on success. Runs on the CPU: a smoke still or a clip frame
+    is a handful of 224 px passes, and the GPU is usually busy with the render
+    that produced it.
+    """
     cached = _ENCODER_CACHE.get(repo_id)
-    if cached is not None:
-        return cached
+    if cached is not None and cached[2] == str(folder):
+        return cached[0], cached[1]
     from backend.services.local_weights import from_pretrained_local
     processor_cls, model_cls = _image_encoder_classes()
-    hint = "Install the image encoder first; the identity check never downloads it."
+    hint = "Install it in Settings > Generation > Cast identity check."
     processor = from_pretrained_local(
-        processor_cls, repo_id, purpose="Cast identity check", install_hint=hint
+        processor_cls, str(folder), purpose="Cast identity check", install_hint=hint
     )
     model = from_pretrained_local(
-        model_cls, repo_id, purpose="Cast identity check", install_hint=hint
+        model_cls, str(folder), purpose="Cast identity check", install_hint=hint
     )
     model.eval()
-    _ENCODER_CACHE[repo_id] = (processor, model)
-    return _ENCODER_CACHE[repo_id]
+    _ENCODER_CACHE[repo_id] = (processor, model, str(folder))
+    return processor, model
 
 
-def _image_embedding(processor, model, path: str):
-    """L2-normalised pooled embedding of one image, so a dot product is a cosine."""
+def _image_embedding(processor, model, image):
+    """L2-normalised pooled embedding of one image (a path or a PIL image), so a
+    dot product is a cosine."""
     import torch
     from PIL import Image
-    image = Image.open(path).convert("RGB")
+    if not isinstance(image, Image.Image):
+        image = Image.open(image)
+    image = image.convert("RGB")
     with torch.no_grad():
         out = model(**processor(images=image, return_tensors="pt"))
     vec = getattr(out, "pooler_output", None)
@@ -437,20 +508,34 @@ def _image_embedding(processor, model, path: str):
     return flat / flat.norm().clamp_min(1e-6)
 
 
+def _installed_encoder():
+    """(repo_id, folder, weights sha256) of the embed method's encoder, or
+    (repo_id, None, None) when no verified install of the pinned commit is here."""
+    from backend.services import identity_encoder
+    repo_id = (IDENTITY_METHODS.get("embed") or {}).get("encoder") or ""
+    folder = identity_encoder.installed_path(repo_id)
+    if folder is None:
+        forget_image_encoder(repo_id)
+        return repo_id, None, None
+    return repo_id, folder, identity_encoder.encoder_entry(repo_id)["weights_sha256"]
+
+
 def _identity_via_embed(ref_paths: list[str], candidate_path: str) -> Dict[str, Any]:
     """Mean cosine between the candidate and each reference, from a local encoder.
 
     The encoder is self-supervised and not a face recogniser: insightface's
     pretrained models are licensed for non-commercial research only, so they are
-    not an option here however well they would work.
+    not an option here however well they would work. Not installed means not
+    loaded at all: the check never reaches for the network or the hub cache.
     """
-    spec = IDENTITY_METHODS.get("embed") or {}
-    repo_id = spec.get("encoder") or ""
+    repo_id, folder, digest = _installed_encoder()
+    if folder is None:
+        return _identity_not_measured("embed", ENCODER_NOT_INSTALLED, model=repo_id)
     from backend.services.local_weights import WeightsNotInstalled
     try:
-        processor, model = _load_image_encoder(repo_id)
+        processor, model = _load_image_encoder(repo_id, folder)
     except WeightsNotInstalled:
-        return _identity_not_measured("embed", "image encoder not installed", model=repo_id)
+        return _identity_not_measured("embed", ENCODER_NOT_INSTALLED, model=repo_id)
     except Exception as e:  # noqa: BLE001
         return _identity_not_measured(
             "embed", f"the image encoder could not be loaded ({e})", model=repo_id
@@ -480,6 +565,7 @@ def _identity_via_embed(ref_paths: list[str], candidate_path: str) -> Dict[str, 
             "min_cosine": round(min(sims), 4),
             "max_cosine": round(max(sims), 4),
         },
+        digest=digest,
     )
 
 
@@ -511,9 +597,12 @@ def score_smoke_identity(
 
     if not reasons:
         return _identity_not_measured(None, "no identity method is available")
-    if set(reasons) == {NOT_PROVEN_REASON}:
+    # A method that tried and said why outranks one that was skipped for having
+    # no evidence: "the encoder is not installed" is the reason a person can act on.
+    specific = [r for r in reasons if r != NOT_PROVEN_REASON]
+    if not specific:
         return _identity_not_measured(None, NOT_PROVEN_REASON)
-    return _identity_not_measured(None, "; ".join(reasons))
+    return _identity_not_measured(None, "; ".join(specific))
 
 
 
@@ -608,7 +697,20 @@ QUALITY_THRESHOLDS: Dict[str, Dict[str, Any]] = {
         "Frames of one scene usually sit between 0.7 and 0.99, so under 0.5 the palette has moved "
         "well away from the keyframe. It says nothing about who is in the shot. Uncalibrated; measured on "
         "a frame from the first second it would almost never fire, since an image-to-video clip "
-        "starts from its keyframe.")},
+        "starts from its keyframe. Used only while the image encoder is not installed: on the "
+        "128 clips behind keyframe_match_floor it passed 117 keyframes paired with another "
+        "shot's middle frame, and a face that morphed into a fanged grimace scored 0.98.")},
+    "keyframe_match_floor": {"value": 0.5, "why": (
+        "Image-encoder cosine between a cinematic clip's keyframe and its middle frame "
+        "(keyframe_match, DINOv2 base at the pinned revision). Measured 2026-10-16 on 128 "
+        "music-video cuts from one machine (four videos: a saloon card game, a night forest "
+        "with a wolf, an animated lakeside story, a neon city): a keyframe against its own "
+        "clip scored 0.41-0.99, median 0.93; against the middle of another shot of the same "
+        "video, median 0.33. The three own clips under 0.5 are ones a person should see: a "
+        "face that morphs into a fanged grimace (0.45), a running figure smeared into motion "
+        "blur (0.41) and a shot that fades to near black (0.498). The next three up (0.52-0.55) "
+        "are a man turning round, an explosion and a figure seen from a new angle, which are "
+        "the shot working, so the floor stays under them.")},
     "vlm_score_floor": {"value": 5, "why": (
         "The vision review's 0-10 quality_score (review_video_quality); under 5 the reviewer "
         "itself calls the clip below average. Not yet measured against clips a person has "
@@ -629,6 +731,7 @@ _FLAG_TEXT = {
     "wrong_size": "wrong frame size",
     "wrong_frame_count": "wrong number of frames",
     "low_colour_match": "colours drift from the keyframe",
+    "low_keyframe_match": "the middle of the clip no longer shows what the keyframe showed",
 }
 
 
@@ -666,13 +769,15 @@ OBSERVED_ONLY: Dict[str, str] = {
 # go black, two blown-out Wan 14B T2V renders and one high-key CogVideoX shot.
 # So about 1 clip in 40 waits for a person. low_vlm_score and low_colour_match
 # (QUALITY_THRESHOLDS vlm_score_floor, colour_match_floor) are not measured on
-# that set yet. A render that is blank or fully black never reaches this:
-# comfyui_video_generator._looks_like_blank_video fails it outright.
+# that set yet; low_keyframe_match (keyframe_match_floor) held 3 of 128
+# music-video cuts, see its entry. A render that is blank or fully black never
+# reaches this: comfyui_video_generator._looks_like_blank_video fails it outright.
 NEEDS_REVIEW = "needs_review"
 QUALITY_FLAG_OUTCOME: Dict[str, str] = {
     code: NEEDS_REVIEW for code in (
         "unreadable", "black_frames", "clipped_highlights", "washed_out",
         "wrong_size", "wrong_frame_count", "low_vlm_score", "low_colour_match", "flashes",
+        "low_keyframe_match",
         # Records written before the colour match was named for what it is.
         "low_identity_score",
     )

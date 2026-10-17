@@ -78,6 +78,7 @@ import {
 } from "../components/settings/ui";
 import IndexProfileChips from "../components/settings/IndexProfileChips";
 import RerankerControl from "../components/settings/RerankerControl";
+import IdentityCheckControl from "../components/settings/IdentityCheckControl";
 import RebuildIndexDialog from "../components/settings/RebuildIndexDialog";
 import IndexProfileEditDialog from "../components/settings/IndexProfileEditDialog";
 import RefreshIcon from "@mui/icons-material/Refresh";
@@ -3215,6 +3216,12 @@ const SettingsPage = () => {
             </Box>
           ))}
         </Line>
+      </Cluster>
+      <Cluster
+        label="Cast identity check"
+        help="An image encoder that compares a character's post-training test picture with its reference photos, and each cinematic clip's middle frame with its keyframe. Optional: without it there is no identity score and clips are compared by colour."
+      >
+        <IdentityCheckControl showMessage={showMessage} />
       </Cluster>
       <Cluster
         label="Model libraries"

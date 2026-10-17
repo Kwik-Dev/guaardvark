@@ -75,6 +75,7 @@ import {
 import QualityFlagsPill from "../components/videogen/QualityFlagsPill";
 import VlmReviewPill from "../components/videogen/VlmReviewPill";
 import ColourMatchPill from "../components/videogen/ColourMatchPill";
+import KeyframeMatchPill from "../components/videogen/KeyframeMatchPill";
 import ClipReviewHold, { ReviewStatePill } from "../components/videogen/ClipReviewHold";
 import RenderFailureNote from "../components/videogen/RenderFailureNote";
 import { refusalText } from "../utils/renderFailure";
@@ -2923,6 +2924,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                               <Chip label={`${res.frame_paths.length}f`} size="small" variant="outlined" />
                             )}
                             <VlmReviewPill review={res.metadata?.quality?.vlm_review} />
+                            <KeyframeMatchPill quality={res.metadata?.quality} />
                             <ColourMatchPill quality={res.metadata?.quality} />
                             <QualityFlagsPill quality={res.metadata?.quality} />
                           </Stack>
