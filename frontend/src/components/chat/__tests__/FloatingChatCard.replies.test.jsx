@@ -22,6 +22,9 @@ const fakeSocket = {
     socketHandlers[event]?.delete(cb);
   },
 };
+const emitFromServer = (event, data) => {
+  for (const cb of [...(socketHandlers[event] || [])]) cb(data);
+};
 
 vi.mock("../../../contexts/UnifiedProgressContext", () => ({
   useUnifiedProgress: () => ({ socketRef: { current: fakeSocket } }),
@@ -174,4 +177,36 @@ describe("FloatingChatCard replies", () => {
     expect(sendMessage.mock.calls[0][2]).not.toHaveProperty("direct_tool");
   });
 
+  it("ends the turn on chat:error, keeping what had streamed", async () => {
+    renderCard();
+    await typeAndSend("draw a fox");
+    expect(useFloatingChatStore.getState().isSending).toBe(true);
+    expect(screen.getByTestId("StopIcon")).toBeInTheDocument();
+    stream.partial = { content: "Working on it", images: [FOX] };
+
+    await act(async () => {
+      emitFromServer("chat:error", { error: "LLM error: boom", session_id: "floating_test" });
+    });
+
+    expect(useFloatingChatStore.getState().isSending).toBe(false);
+    expect(screen.queryByTestId("StopIcon")).toBeNull();
+    expect(screen.getByTestId("SendIcon")).toBeInTheDocument();
+    expect(screen.queryByTestId("streaming")).toBeNull();
+    expect(screen.getByText("Working on it")).toBeInTheDocument();
+    expect(screen.getByAltText("A fox")).toBeInTheDocument();
+    expect(screen.getByText("Error: LLM error: boom")).toBeInTheDocument();
+    expect(screen.getByText("LLM error: boom")).toBeInTheDocument();
+  });
+
+  it("leaves the thread alone for a chat:error from another session", async () => {
+    renderCard();
+    await typeAndSend("hello");
+
+    await act(async () => {
+      emitFromServer("chat:error", { error: "elsewhere", session_id: "floating_other" });
+    });
+
+    expect(useFloatingChatStore.getState().isSending).toBe(true);
+    expect(screen.queryByText("Error: elsewhere")).toBeNull();
+  });
 });

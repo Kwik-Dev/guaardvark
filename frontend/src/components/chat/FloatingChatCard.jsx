@@ -189,21 +189,6 @@ const FloatingChatCard = () => {
     };
   }, [sessionId, socketRef?.current]);
 
-  // chat:error on the composer. Raw socket so it does not overwrite
-  // StreamingMessage's UnifiedChatService.onError listener.
-  useEffect(() => {
-    const socket = socketRef?.current;
-    if (!socket || !sessionId) return;
-    const handleChatError = (data) => {
-      if (!data || (data.session_id && data.session_id !== sessionId)) return;
-      setError(chatErrorMessage(data));
-    };
-    socket.on("chat:error", handleChatError);
-    return () => {
-      socket.off("chat:error", handleChatError);
-    };
-  }, [sessionId, socketRef, setError]);
-
   // Hydrate session mode from backend on sessionId change so `/agent` state
   // survives reloads / re-mounts. Without this, the floating card's
   // `inAgentMode` is always false and `agent_screen_active` falls back to
@@ -607,6 +592,41 @@ const FloatingChatCard = () => {
     setIsSending(false);
     finishVoiceReply();
   }, [unifiedChatService, sessionId, setIsSending, addMessage, finishVoiceReply]);
+
+  // The engine sends no chat:complete after a chat:error, so the error closes
+  // the turn in flight: what had streamed is kept, the error joins the thread,
+  // and the button goes back from Stop to Send.
+  const handleTurnError = useCallback((errorText) => {
+    if (!useFloatingChatStore.getState().isSending) return;
+    const kept = partialReplyMessage(streamingMessageRef.current?.getPartialState() || {}, "error");
+    if (kept) addMessage(kept);
+    addMessage({
+      id: `err_${Date.now()}`,
+      role: "system",
+      content: `Error: ${errorText}`,
+      timestamp: new Date().toISOString(),
+    });
+    setIsStreamingMessage(false);
+    setIsSending(false);
+    finishVoiceReply();
+  }, [addMessage, setIsSending, finishVoiceReply]);
+
+  // chat:error on the composer. Raw socket so it does not overwrite
+  // StreamingMessage's UnifiedChatService.onError listener.
+  useEffect(() => {
+    const socket = socketRef?.current;
+    if (!socket || !sessionId) return;
+    const handleChatError = (data) => {
+      if (!data || (data.session_id && data.session_id !== sessionId)) return;
+      const errorText = chatErrorMessage(data);
+      setError(errorText);
+      handleTurnError(errorText);
+    };
+    socket.on("chat:error", handleChatError);
+    return () => {
+      socket.off("chat:error", handleChatError);
+    };
+  }, [sessionId, socketRef, setError, handleTurnError]);
 
   const handleKeyDown = (e) => {
     // Slash command popup navigation intercepts first
