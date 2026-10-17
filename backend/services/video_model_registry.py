@@ -957,9 +957,10 @@ VIDEO_MODEL_REGISTRY = {
         "type": "encoder",
     },
     "facexlib-face": {
-        "name": "facexlib face detector and parser (PuLID)",
+        "name": "facexlib face detector and parser (PuLID, face restoration)",
         "description": "RetinaFace ResNet50 detector and ParseNet parser PuLID crops the "
-                       "face with. Lands in facexlib's weights folder.",
+                       "face with, also used by image face restoration (GFPGAN). Lands in "
+                       "facexlib's weights folder.",
         "dest": "facexlib",
         "local_subdir": "facedetection",
         "direct_urls": [
