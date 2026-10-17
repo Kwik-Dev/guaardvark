@@ -22,7 +22,7 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { a11yDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { inboundGuardService } from "../../api/inboundGuardService";
 import { approveHeldChange, isActionable, rejectHeldChange } from "../../api/heldChanges";
-import { FindingList } from "../settings/InboundGuardSection";
+import { FindingList, scanSize } from "../settings/InboundGuardSection";
 import { ConfirmActionDialog } from "../settings/ui";
 
 const VERDICT_COLOR = { block: "error", hold: "warning" };
@@ -50,16 +50,19 @@ const APPROVED_MESSAGE = {
   "allow-again": "Approved; nothing was applied. The same change goes through if it is made again",
 };
 
+// Scan times are stored as naive UTC (backend/utils/clock.py); read without a
+// zone, the browser would take them as local time and put them hours off.
 const formatWhen = (iso) => {
   if (!iso) return "";
-  const then = new Date(iso).getTime();
+  const text = String(iso);
+  const then = new Date(/[zZ]|[+-]\d\d:\d\d$/.test(text) ? text : `${text}Z`).getTime();
   if (Number.isNaN(then)) return "";
   const mins = Math.round((Date.now() - then) / 60000);
   if (mins < 1) return "just now";
   if (mins < 60) return `${mins}m ago`;
   const hours = Math.round(mins / 60);
   if (hours < 24) return `${hours}h ago`;
-  return new Date(iso).toLocaleDateString();
+  return new Date(then).toLocaleDateString();
 };
 
 const HeldChangesPanel = ({ held, loading, onChanged, showMessage }) => {
@@ -198,7 +201,7 @@ const HeldChangesPanel = ({ held, loading, onChanged, showMessage }) => {
           {detail.fix && <Chip label={`pending fix #${detail.fix.id}`} size="small" variant="outlined" />}
         </Stack>
         <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 2 }}>
-          {detail.files} file(s), +{detail.added_lines} line(s) · {formatWhen(detail.created_at)} · digest {detail.digest}
+          {scanSize(detail)} · {formatWhen(detail.created_at)} · digest {detail.digest}
         </Typography>
 
         <Typography variant="subtitle2" sx={{ mb: 1 }}>
