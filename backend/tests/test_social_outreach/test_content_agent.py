@@ -481,26 +481,64 @@ def test_grader_result_without_checked_counts_as_unchecked(app):
         assert outcome["independent_reason"] == "unchecked"
 
 
-def test_a_reply_is_not_graded_and_waits_for_a_person(app):
-    """Replies skip the comment rubric, so they have no independent check."""
-    with app.app_context():
-        row = _make_candidate(
-            payload={
-                "stage": "recon",
-                "title": "My local AI setup",
-                "parent_text": "Here is how I run it.",
-                "incoming_text": "Does this work on a 12GB card?",
-                "incoming_author": "someone",
-            },
-            platform="youtube",
-            action="reply",
-        )
-        outcome, extra, grader = _draft_with_gates(row.id, EXT_PASS, draft="Yes, 12GB is enough.")
+REPLY_PAYLOAD = {
+    "stage": "recon",
+    "title": "My local AI setup",
+    "parent_text": "Here is how I run it.",
+    "incoming_text": "Does this work on a 12GB card?",
+    "incoming_author": "someone",
+}
+REPLY_QUESTIONS = ["on_topic", "appropriate_tone"]
+EXT_REPLY_PASS = {"grade": 1.0, "passed": True, "checked": True, "skipped": False, "model": "test",
+                  "reason": "answers the viewer", "on_topic": 1, "appropriate_tone": 1, "concise": 1,
+                  "questions": REPLY_QUESTIONS}
+EXT_REPLY_FAIL = {"grade": 2 / 3, "passed": False, "checked": True, "skipped": False, "model": "test",
+                  "reason": "talks about something else", "on_topic": 0, "appropriate_tone": 1, "concise": 1,
+                  "questions": REPLY_QUESTIONS}
 
-        grader.assert_not_called()
+
+def test_a_reply_is_graded_on_the_reply_rubric_and_waits_for_a_person(app):
+    """A reply on the account's own video is checked (answers the viewer, right
+    tone) against the video title, our comment and their reply."""
+    with app.app_context():
+        row = _make_candidate(payload=REPLY_PAYLOAD, platform="youtube", action="reply")
+        outcome, extra, grader = _draft_with_gates(row.id, EXT_REPLY_PASS, draft="Yes, 12GB is enough.")
+
+        grader.assert_called_once()
+        (draft, context), kwargs = grader.call_args
+        assert draft == "Yes, 12GB is enough."
+        assert kwargs == {"kind": "reply"}
+        assert "VIDEO TITLE: My local AI setup" in context
+        assert "OUR EARLIER COMMENT:\nHere is how I run it." in context
+        assert "THEIR REPLY (someone):\nDoes this work on a 12GB card?" in context
+        assert outcome["status"] == "drafted"
+        assert outcome["independent_reason"] == "passed"
+        assert extra["external_checked"] is True
+        db.session.expire_all()
+        assert SocialOutreachLog.query.get(row.id).status == "drafted"
+
+
+def test_a_reply_the_check_fails_is_rejected_naming_the_reply_questions(app):
+    with app.app_context():
+        row = _make_candidate(payload=REPLY_PAYLOAD, platform="youtube", action="reply")
+        outcome, _, _ = _draft_with_gates(row.id, EXT_REPLY_FAIL, draft="Check out our new release!")
+
+        assert outcome["status"] == "rejected"
+        assert outcome["reason"] == "external_check_failed"
+        db.session.expire_all()
+        assert SocialOutreachLog.query.get(row.id).abort_reason == (
+            "external_check_failed:on_topic (talks about something else)"
+        )
+
+
+def test_an_unchecked_reply_waits_and_says_so(app):
+    with app.app_context():
+        row = _make_candidate(payload=REPLY_PAYLOAD, platform="youtube", action="reply")
+        outcome, extra, _ = _draft_with_gates(row.id, EXT_SKIPPED, draft="Yes, 12GB is enough.")
+
         assert outcome["status"] == "drafted"
         assert outcome["independent_reason"] == "unchecked"
-        assert extra["external_reason"] == "skip_for_reply_action"
+        assert extra["external_checked"] is False
 
 
 def test_a_share_candidate_is_not_graded_and_waits_for_a_person(app):

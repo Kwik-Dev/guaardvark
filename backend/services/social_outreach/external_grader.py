@@ -7,11 +7,12 @@ believes is good. An independent grader, run on a different model family
 with a fixed rubric, catches drafts that the writer overrated.
 
 This is intentionally NOT a generation model — it's a binary fitness check.
-The grader is asked only three yes/no questions (engages, on_topic,
-appropriate_tone); concise is counted in code. A draft passes only when all
-three answers are yes. Grade is the four items over 4, for display. No
-answer here posts a draft: every draft waits for a person, who sees what the
-check concluded (gates.py).
+A comment on a thread is asked three yes/no questions (engages, on_topic,
+appropriate_tone); a reply on the account's own video is asked two
+(on_topic, appropriate_tone; RUBRICS). Concise is counted in code. A draft
+passes only when every question asked is answered yes. Grade is those items
+plus concise over their count, for display. No answer here posts a draft:
+every draft waits for a person, who sees what the check concluded (gates.py).
 """
 
 from __future__ import annotations
@@ -52,7 +53,26 @@ Return ONLY this JSON shape:
 
 
 RUBRIC_QUESTIONS = ("engages", "on_topic", "appropriate_tone")
-"""The items the grader answers; a draft passes only when all are yes."""
+"""The items the grader answers about a comment; it passes only when all are yes."""
+
+REPLY_GRADER_SYSTEM = """You are a strict grader of a reply that a video's creator wants to post under their own video, answering a viewer. You did NOT write this reply. Answer each question below about it with 1 (yes) or 0 (no) and return only JSON.
+
+Questions:
+  on_topic: Does the reply respond to what the viewer actually said?
+  appropriate_tone: Is the tone right for a creator answering a viewer (friendly and genuine, not corporate, not sycophantic, not a sales pitch)?
+
+Return ONLY this JSON shape:
+{"on_topic": 1, "appropriate_tone": 0, "reason": "Answers the question but turns into a sales pitch."}"""
+
+REPLY_RUBRIC_QUESTIONS = ("on_topic", "appropriate_tone")
+"""The items asked about a reply on the account's own video. Not engages: the
+reply answers one viewer and is not trying to add to someone else's thread."""
+
+RUBRICS = {
+    "comment": (GRADER_SYSTEM, RUBRIC_QUESTIONS),
+    "reply": (REPLY_GRADER_SYSTEM, REPLY_RUBRIC_QUESTIONS),
+}
+"""kind -> (system prompt, questions) for grade_draft_externally."""
 
 CONCISE_MAX_WORDS = 120
 """A draft of this many words or fewer is concise (Reddit favours short
@@ -126,33 +146,39 @@ def _resolve_grader_model() -> Optional[str]:
     return None
 
 
-def grade_draft_externally(draft_text: str, thread_context: str) -> dict:
-    """Score a draft against the rubric using a different-family LLM.
+def grade_draft_externally(draft_text: str, thread_context: str, *, kind: str = "comment") -> dict:
+    """Score a draft against the rubric for ``kind`` using a second LLM.
 
-    For replies to a thread only. A self-share has no thread to engage with,
-    so callers do not grade it.
+    ``kind`` is "comment" (a reply to someone else's thread) or "reply" (a
+    reply on the account's own video; ``thread_context`` is then the video
+    title, our earlier comment and the viewer's reply). A self-share has no
+    thread to engage with, so callers do not grade it.
 
     Returns:
         {
-            "grade": float in [0, 1],   # the four items over 4, for display
-            "passed": bool,             # engages and on_topic and appropriate_tone
-            "engages": int 0/1,
+            "grade": float in [0, 1],   # the asked items plus concise over their count, for display
+            "passed": bool,             # every asked question answered yes
+            "engages": int 0/1,         # comment only
             "on_topic": int 0/1,
             "appropriate_tone": int 0/1,
             "concise": int 0/1,         # CONCISE_MAX_WORDS or fewer, counted here
+            "questions": [str],         # the questions asked (RUBRICS[kind])
             "reason": str,
             "checked": bool,    # true only when the grader's answers came back
             "skipped": bool,    # not checked (model unavailable, call or parse error)
             "model": str | None,
         }
 
-    Only the three answers are read; a "grade" or "concise" in the reply is
+    Only the asked answers are read; a "grade" or "concise" in the reply is
     ignored. A question answered with anything but true/yes/1 or false/no/0,
     or not answered, leaves the draft unchecked, reason "grader_reply_unparsed".
 
     An unchecked result is not a rejection, but it is no independent signal
     either; the person reviewing the draft is told it went unchecked.
     """
+    if kind not in RUBRICS:
+        raise ValueError(f"unknown rubric kind: {kind!r}")
+    system, questions = RUBRICS[kind]
     model = _resolve_grader_model()
     if model is None:
         return {"grade": 0.0, "checked": False, "skipped": True, "model": None,
@@ -170,7 +196,7 @@ def grade_draft_externally(draft_text: str, thread_context: str) -> dict:
                 "model": model,
                 "stream": False,
                 "messages": [
-                    {"role": "system", "content": GRADER_SYSTEM},
+                    {"role": "system", "content": system},
                     {"role": "user", "content": user_msg},
                 ],
                 "options": {"temperature": 0.1, "num_ctx": 4096},
@@ -192,7 +218,7 @@ def grade_draft_externally(draft_text: str, thread_context: str) -> dict:
         return {"grade": 0.0, "checked": False, "skipped": True, "model": model,
                 "reason": f"grader_call_failed: {e}"}
 
-    answers = {name: _rubric_bit(data.get(name)) for name in RUBRIC_QUESTIONS}
+    answers = {name: _rubric_bit(data.get(name)) for name in questions}
     if None in answers.values():
         logger.warning("external grader reply unparsed: %.300r", data)
         return {"grade": 0.0, "checked": False, "skipped": True, "model": model,
@@ -200,10 +226,11 @@ def grade_draft_externally(draft_text: str, thread_context: str) -> dict:
 
     concise = _is_concise(draft_text)
     return {
-        "grade": (sum(answers.values()) + concise) / 4,
+        "grade": (sum(answers.values()) + concise) / (len(questions) + 1),
         "passed": all(answers.values()),
         **answers,
         "concise": concise,
+        "questions": list(questions),
         "reason": str(data.get("reason") or "")[:300],
         "checked": True,
         "skipped": False,

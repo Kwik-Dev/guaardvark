@@ -205,3 +205,67 @@ def test_a_verdict_or_reason_that_is_not_text_does_not_raise():
     assert result["skipped"] is False
     assert result["verdict"] == ""
     assert "rant" in result["reason"]
+
+
+# ---- a reply on the account's own video --------------------------------------------------
+
+def _grade_reply(reply, draft="Yes, 12GB is enough."):
+    sent = []
+
+    def post(url, json=None, timeout=None):
+        sent.append(json)
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"message": {"content": reply}})
+
+    with patch.object(external_grader, "_resolve_grader_model", return_value="gemma4:e2b"), \
+            patch.object(external_grader.requests, "post", post):
+        result = external_grader.grade_draft_externally(draft, "VIDEO TITLE: t", kind="reply")
+    return result, sent
+
+
+def test_a_reply_is_asked_only_the_reply_questions():
+    result, sent = _grade_reply('{"on_topic": 1, "appropriate_tone": 1, "reason": "answers them"}')
+
+    assert result["checked"] is True
+    assert result["passed"] is True
+    assert result["questions"] == ["on_topic", "appropriate_tone"]
+    assert "engages" not in result
+    assert result["grade"] == pytest.approx(1.0)
+    assert sent[0]["messages"][0]["content"] == external_grader.REPLY_GRADER_SYSTEM
+
+
+@pytest.mark.parametrize("failing", ["on_topic", "appropriate_tone"])
+def test_a_reply_failing_either_question_fails(failing):
+    answers = {"on_topic": 1, "appropriate_tone": 1, failing: 0}
+
+    result, _ = _grade_reply(json.dumps({**answers, "reason": "r"}))
+
+    assert result["passed"] is False
+    assert result["grade"] == pytest.approx(2 / 3)
+
+
+def test_engages_is_not_read_for_a_reply():
+    result, _ = _grade_reply('{"engages": 0, "on_topic": 1, "appropriate_tone": 1, "reason": "r"}')
+
+    assert result["passed"] is True
+
+
+def test_the_reply_prompt_asks_only_for_the_two_answers():
+    prompt = external_grader.REPLY_GRADER_SYSTEM
+    for question in external_grader.REPLY_RUBRIC_QUESTIONS:
+        assert f"{question}:" in prompt
+    assert "engages" not in prompt
+    assert "concise" not in prompt
+    assert "grade" not in prompt.replace("grader", "")
+    example = json.loads(prompt[prompt.index("{"):prompt.rindex("}") + 1])
+    assert set(example) == {*external_grader.REPLY_RUBRIC_QUESTIONS, "reason"}
+
+
+def test_a_comment_still_reports_its_three_questions():
+    result = _grade('{"engages": 1, "on_topic": 1, "appropriate_tone": 1, "reason": "fits"}')
+
+    assert result["questions"] == ["engages", "on_topic", "appropriate_tone"]
+
+
+def test_an_unknown_rubric_kind_is_refused():
+    with pytest.raises(ValueError):
+        external_grader.grade_draft_externally("draft", "thread", kind="share")
