@@ -465,7 +465,8 @@ DECISIONS: dict = {
      'choices': None,
      'state': {'message': ('user', 300)},
      'anchor': 'backend/services/unified_chat_engine.py match_workstation_direct, _WORKSTATION_DIRECT',
-     'precheck': 'a _WORKSTATION_DIRECT pattern matches',
+     'precheck': 'a WORKSTATION_KEYWORDS phrase appears in a message that is not a whole-message '
+                 '_WORKSTATION_DIRECT command (those run with no question asked)',
      'fallback': 'match_workstation_direct(message)',
      'safe_side': False,
      'side_effect': 'prompt',

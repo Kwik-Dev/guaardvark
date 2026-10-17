@@ -26,6 +26,7 @@ from backend.services.agent_tools import (
     tool_needs_approval_card as _tool_needs_approval_card,
 )
 from backend.utils.text_cut import cut_on_whitespace
+from backend.utils.request_phrases import normalise_message, whole_message_pattern
 from backend.utils.inline_reasoning import (
     InlineReasoningStream, REASONING, RETRACT, VISIBLE, split_inline_reasoning,
 )
@@ -1187,30 +1188,30 @@ def _pin_knowledge_nav_tools(message: str, selected: List[str], all_tool_names: 
     return pinned + list(selected) if pinned else selected
 
 
+# Workstation tools that run with no model when the whole message asks for one,
+# optionally after "please" / "can you" and before "now": "check the logs",
+# "can you show me the logs?". The same words inside a longer message ("how do
+# I check the logs in docker?", "review the logs for the last celery crash")
+# go to the chat model, which is still offered the tools (_pin_workstation_tools).
 _WORKSTATION_DIRECT = (
-    (re.compile(
-        r"\b(?:use (?:the )?system mapper|system mapper|system map|"
-        r"map (?:the |this )?(?:codebase|repo))\b",
-        re.I,
+    (whole_message_pattern(
+        r"use (?:the )?system mapper|system mapper|system map|"
+        r"map (?:the |this )?(?:codebase|repo)"
     ), "map_codebase", {}),
-    (re.compile(
-        r"\b(?:debug gpu(?: issues?)?|gpu issues?|gpu status|"
-        r"inspect gpu|what'?s using vram|who'?s using (?:the )?gpu)\b",
-        re.I,
+    (whole_message_pattern(
+        r"debug gpu(?: issues?)?|gpu issues?|gpu status|"
+        r"inspect gpu|what'?s using vram|who'?s using (?:the )?gpu"
     ), "inspect_gpu", {}),
-    (re.compile(
-        r"\b(?:review the logs|check the logs|read the logs|"
-        r"show (?:me )?(?:the )?logs|tail the logs?)\b",
-        re.I,
+    (whole_message_pattern(
+        r"review the logs|check the logs|read the logs|"
+        r"show (?:me )?(?:the )?logs|tail the logs?"
     ), "read_logs", {}),
-    (re.compile(
-        r"\b(?:swarm status|is (?:the )?swarm (?:running|up|online))\b",
-        re.I,
+    (whole_message_pattern(
+        r"swarm status|is (?:the )?swarm (?:running|up|online)"
     ), "swarm_status", {}),
-    (re.compile(
-        r"\b(?:self[- ]improvement status|pending fixes|"
-        r"is self[- ]improvement (?:on|enabled))\b",
-        re.I,
+    (whole_message_pattern(
+        r"self[- ]improvement status|(?:any |are there (?:any )?)?pending fixes|"
+        r"is self[- ]improvement (?:on|enabled)"
     ), "self_improvement_status", {}),
 )
 
@@ -1231,12 +1232,16 @@ _TOOL_PROSE_SYSTEM = (
 
 
 def match_workstation_direct(message: str) -> Optional[tuple]:
-    """Unambiguous NL → tool, so small local models cannot narrate instead of acting."""
-    msg = (message or "").strip()
+    """(tool, params) when the whole message is a workstation command, else None.
+
+    Runs the tool without the model, so small local models cannot narrate
+    instead of acting.
+    """
+    msg = normalise_message(message)
     if not msg or len(msg) > 240:
         return None
     for pattern, tool, params in _WORKSTATION_DIRECT:
-        if pattern.search(msg):
+        if pattern.match(msg):
             return tool, dict(params)
     return None
 

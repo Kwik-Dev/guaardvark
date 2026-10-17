@@ -47,6 +47,31 @@ class TestWorkstationPinning:
         assert match_workstation_direct("play some music") is None
         assert match_workstation_direct("launch a coding swarm to rewrite auth") is None
 
+    @pytest.mark.parametrize("message, tool", [
+        ("check the logs", "read_logs"),
+        ("Please review the logs.", "read_logs"),
+        ("can you show me the logs now?", "read_logs"),
+        ("could you please tail the log", "read_logs"),
+        ("what’s using VRAM?", "inspect_gpu"),
+        ("who's using the gpu right now", "inspect_gpu"),
+        ("is the swarm running?", "swarm_status"),
+        ("any pending fixes?", "self_improvement_status"),
+    ])
+    def test_a_whole_message_command_runs_directly(self, message, tool):
+        assert match_workstation_direct(message)[0] == tool
+
+    @pytest.mark.parametrize("message", [
+        "how do I check the logs in docker?",
+        "review the logs for the last celery crash",
+        "what's the best GPU for gaming, given the gpu issues I read about?",
+        "can you explain what a system map is",
+        "I want to read the logs my server writes, where are they?",
+    ])
+    def test_the_same_words_inside_a_longer_message_go_to_the_model(self, message):
+        assert match_workstation_direct(message) is None
+        names = list(WORKSTATION_TOOLS) + ["web_search"]
+        assert _pin_workstation_tools(message, [], names), "the model is still offered the tools"
+
     def test_keyword_selector_includes_map_on_sysmap_phrase(self):
         names = list(WORKSTATION_TOOLS) + ["web_search", "system_command"]
         selected = select_tools_for_context("use the system mapper please", names)

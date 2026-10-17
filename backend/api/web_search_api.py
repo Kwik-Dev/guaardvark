@@ -15,6 +15,7 @@ from backend.utils.settings_utils import get_web_access
 from backend.utils.safe_math import evaluate_arithmetic
 from backend.utils.hosts import no_netrc_session
 from backend.utils.text_focus import focus_window
+from backend.utils.request_phrases import QUESTION_LEAD_IN, TRAILING_WHEN, normalise_message
 from backend.utils.web_fetch import (
     LOCAL_FILE_ADVICE, FetchFailed, FetchRefused, decode_page, fetch_page,
 )
@@ -426,15 +427,10 @@ def _urls_in_text(text: str) -> List[str]:
 # merely contains 'time', 'temperature', 'forecast' or '=' ('python requests
 # timeout', 'LLM temperature setting explained', 'equation of a line y = 2x + 3')
 # goes to the search. Chat passes the person's whole message, so a short polite
-# lead-in and a trailing "now" / "today" are allowed around each form.
-_LEAD_IN = (
-    r"(?:(?:hey|hi|ok|okay|so|please)[,!]?\s+)*"
-    r"(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?(?:tell\s+me|check|look\s+up|find\s+out)\s+"
-    r"|(?:do|does)\s+(?:you|anyone)\s+know\s+"
-    r"|(?:please\s+)?tell\s+me\s+"
-    r"|i\s+(?:want|need|would\s+like)\s+to\s+know\s+)?"
-)
-_WHEN = r"(?:\s+(?:now|right\s+now|today|tonight|currently|at\s+the\s+moment|please))*"
+# lead-in and a trailing "now" / "today" are allowed around each form
+# (backend.utils.request_phrases, shared with the chat's workstation shortcuts).
+_LEAD_IN = QUESTION_LEAD_IN
+_WHEN = TRAILING_WHEN
 # Every shortcut form is a short question; a longer query is always searched,
 # which also keeps the matchers below cheap on very long input.
 _SHORTCUT_MAX_CHARS = 200
@@ -482,14 +478,7 @@ _MATH_BINARY_OP = re.compile(r"[\d.)]\s*(?:\*\*|//|[-+*/%^])\s*[-+(\s]*[\d.]")
 # front they are searched, not subtracted or divided.
 _MATH_IDENTIFIER = re.compile(r"^\d+(?:-\d+){2,}$|^\d+(?:/\d+){2,}$")
 
-
-# Typographic apostrophe, multiplication, division and minus signs.
-_QUERY_CHARACTERS = str.maketrans({"\u2019": "'", "\u00d7": "*", "\u00f7": "/", "\u2212": "-"})
-
-
-def _normalise_query(query: str) -> str:
-    text = (query or "").translate(_QUERY_CHARACTERS)
-    return re.sub(r"\s+", " ", text).strip().lower().rstrip("?!. ")
+_normalise_query = normalise_message
 
 
 def _is_time_query(normalised: str) -> bool:
