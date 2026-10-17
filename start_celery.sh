@@ -217,6 +217,11 @@ export GUAARDVARK_ROOT="$SCRIPT_DIR"
 export CELERY_WORKER_MODE=true
 # Must match start.sh: both processes share the card and the allocator policy.
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:512,garbage_collection_threshold:0.8"
+# Same quiet-library settings as start.sh, for workers started on their own.
+export HF_HUB_DISABLE_TELEMETRY="${HF_HUB_DISABLE_TELEMETRY:-1}"
+export DO_NOT_TRACK="${DO_NOT_TRACK:-1}"
+export UNSLOTH_DISABLE_STATISTICS="${UNSLOTH_DISABLE_STATISTICS:-1}"
+export PIP_DISABLE_PIP_VERSION_CHECK="${PIP_DISABLE_PIP_VERSION_CHECK:-1}"
 
 ulimit -n 65535
 vader_info "File descriptor limit set to: $(ulimit -n)"
