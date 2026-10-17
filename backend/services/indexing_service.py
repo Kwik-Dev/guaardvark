@@ -1227,8 +1227,11 @@ def drop_vector_store(project_id=None, profile: Optional[str] = None) -> Dict[st
 
 
 
-def drop_all_vector_stores() -> Dict[str, Any]:
+def drop_all_vector_stores(keep_width: Optional[int] = None) -> Dict[str, Any]:
     """Drop every vector table this installation owns, whatever its scope or dimension.
+
+    Tables of ``keep_width`` are left for the caller, which empties them instead
+    (see :func:`empty_vector_tables`).
 
     `drop_vector_store` derives one table name from the *active* embedding
     dimension, which is the wrong tool for a reset. Changing the embedding model
@@ -1253,7 +1256,8 @@ def drop_all_vector_stores() -> Dict[str, Any]:
                     "WHERE schemaname = current_schema() AND tablename LIKE %s",
                     ("data_guaardvark%",),
                 )
-                tables = [r[0] for r in cur.fetchall()]
+                tables = [r[0] for r in cur.fetchall()
+                          if not (keep_width and r[0].endswith(f"_{int(keep_width)}"))]
                 for t in tables:
                     try:
                         cur.execute(f'DROP TABLE IF EXISTS "{t}" CASCADE')
@@ -1267,6 +1271,43 @@ def drop_all_vector_stores() -> Dict[str, Any]:
         return {"backend": "pgvector", "dropped": dropped, "error": str(e)[:200]}
     logger.info("Dropped %d vector table(s): %s", len(dropped), ", ".join(dropped) or "none")
     return {"backend": "pgvector", "dropped": dropped, "failed": failed}
+
+
+def empty_vector_tables(dim: int) -> Dict[str, Any]:
+    """Empty every vector table of one width, keeping the tables.
+
+    A new embedding model of the same width reads and writes the same tables as
+    the one before it, and its vectors are not comparable with the old ones, so
+    the old rows have to go. Emptied rather than dropped: a Celery worker that
+    already set its store up on a table goes on inserting into it.
+    """
+    if _vector_backend() != "pgvector":
+        return {"backend": "simple", "emptied": []}
+    emptied, failed = [], []
+    try:
+        conn = _pg_connect()
+        try:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT tablename FROM pg_tables "
+                    "WHERE schemaname = current_schema() AND tablename LIKE %s",
+                    ("data_guaardvark%",),
+                )
+                tables = [r[0] for r in cur.fetchall() if r[0].endswith(f"_{int(dim)}")]
+                for t in tables:
+                    try:
+                        cur.execute(f'TRUNCATE TABLE "{t}"')
+                        emptied.append(t)
+                    except Exception as e:  # noqa: BLE001
+                        failed.append({"table": t, "error": str(e)[:160]})
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.error("Could not enumerate vector tables to empty: %s", e)
+        return {"backend": "pgvector", "emptied": emptied, "error": str(e)[:200]}
+    logger.info("Emptied %d vector table(s): %s", len(emptied), ", ".join(emptied) or "none")
+    return {"backend": "pgvector", "emptied": emptied, "failed": failed}
 
 
 
