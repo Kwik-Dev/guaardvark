@@ -9,8 +9,10 @@ match it against :func:`normalise_message`, which lowercases the text, folds
 typographic punctuation and drops the closing "?", "!" or ".".
 
 Generation shortcuts (image, video, music video) start a job from a request
-found anywhere in the message, and stand down for :data:`HOW_TO_QUESTION_RE`
-and, for video, :data:`VIDEO_SOFTWARE_PATTERN`.
+found anywhere in the message, and stand down for :data:`HOW_TO_QUESTION_RE`,
+for a request turned down with :func:`declines_media` and, for video,
+:data:`VIDEO_SOFTWARE_PATTERN`. :func:`asks_for_writing` marks a request for
+text, which the chat model answers without its media tools.
 """
 
 from __future__ import annotations
@@ -62,3 +64,53 @@ VIDEO_SOFTWARE_PATTERN = (
     r"|vegas\s+pro)\b"
     r"|\b(?:in|with|using)\s+(?:adobe\s+)?(?:premiere|resolve|obs|canva|blender|powerpoint)\b"
 )
+
+# Turning media down: "do not generate an image", "don't make a video yet",
+# "without rendering a picture", "no image, just the text", "the words, not an
+# image". The noun ends its clause, so an instruction about the picture being
+# asked for ("draw a cat, but don't make the picture too dark") is not a refusal,
+# and a scene's own content ("a gallery wall with no pictures") is not either.
+_MEDIA_NOUN = (
+    r"(?:image|picture|photo|pic|render|rendering|illustration|drawing|artwork|video|clip"
+    r"|gif|animation)s?"
+)
+_CLAUSE_END = (
+    r"(?=\s*(?:$|[.,;:!?)\]—–-]"
+    r"|(?:yet|now|just|instead|until|unless|for|of|and|but|please|this\s+time|i|we)\b))"
+)
+_DECLINES_MEDIA_RE = re.compile(
+    r"\b(?:do\s+not|don['’]?t|never|no\s+need\s+to)\s+(?:\w+\s+){0,3}?"
+    r"(?:generate|create|make|render|draw|produce|paint|sketch|animate)\s+(?:me\s+|us\s+)?"
+    r"(?:(?:an?|any|the|another|more|new|other)\s+)?(?:[\w-]+\s+){0,2}?" + _MEDIA_NOUN + _CLAUSE_END
+    + r"|\b(?:without|stop)\s+(?:generating|creating|making|rendering|drawing|producing)\s+"
+    r"(?:(?:an?|any|the|more)\s+)?" + _MEDIA_NOUN + r"\b"
+    r"|(?:^|[.,;:!?]\s*)no\s+(?:images?|pictures?|photos?|renders?|videos?)(?:\s+please)?\s*(?:[.,;:!?]|$)"
+    r"|\bno\s+image[\s-]gen(?:eration)?\b"
+    r"|\b(?:words|text|prose|description|prompt)\s*,?\s+not\s+(?:an?\s+)?" + _MEDIA_NOUN + r"\b"
+    r"|\b(?:do\s+not|don['’]?t)\s+(?:use|call|run)\s+(?:the\s+)?"
+    r"(?:image(?:[\s-]gen(?:eration)?)?\s+tools?|generate_image)\b",
+    re.IGNORECASE,
+)
+
+
+def declines_media(message: str) -> bool:
+    """True when the message turns down a generated image, video or animation."""
+    return bool(_DECLINES_MEDIA_RE.search(message or ""))
+
+
+# A request for text: a sentence that opens with write, draft, describe and the
+# like ("please write 300 words describing ...", "No. Write the words."), or asks
+# for a word count, a prompt for some model, or a description of something.
+_WRITING_REQUEST_RE = re.compile(
+    r"(?:^|[.!?]\s+)" + COMMAND_LEAD_IN
+    + r"(?:write|draft|compose|describe|outline|brainstorm|come\s+up\s+with|craft)\b"
+    r"|\b\d+\s*\+?\s*(?:or\s+more\s+)?words\b"
+    r"|\b(?:an?|the|your)\s+(?:[\w-]+\s+){0,2}?prompts?\s+(?:for|to\s+use|i\s+can\s+use)\b"
+    r"|\b(?:an?|the)\s+(?:\w+\s+)?description\s+of\b",
+    re.IGNORECASE,
+)
+
+
+def asks_for_writing(message: str) -> bool:
+    """True when the message asks for written text rather than a rendered result."""
+    return bool(_WRITING_REQUEST_RE.search(message or ""))

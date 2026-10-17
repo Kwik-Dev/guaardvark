@@ -574,3 +574,98 @@ class TestCommandOnlyMode:
         assert "remove_background" not in GPU_HEAVY_TOOLS
         assert "generate_music_video" not in GPU_HEAVY_TOOLS
         assert "start_film_crew" not in GPU_HEAVY_TOOLS
+
+
+_DECLINED = [
+    "No, do not generate an image. Write the words.",
+    "write me a prompt for Z Image Turbo, don't make an image",
+    "no image please, just the text",
+    "Don't generate an image yet, first write the prompt",
+    "I want the words, not an image",
+    "write the prompt without generating an image",
+]
+_WRITING_FOR_AN_IMAGE_MODEL = (
+    "Please write 300 words or more describing (for Z Image Turbo) Jesus walking through "
+    "an Old West town but with some Quentin Tarantino camera angle styles and shots. "
+    "Wearing traditional Jesus robes. Angles should be dynamic, like worm's eye view "
+    "(low angle), and dramatic lighting and such. Try one version now and I will test it."
+)
+
+
+class TestDeclinedOrWrittenMediaIsNotRendered:
+    """"Do not generate an image" started a render: the direct path matched
+    "generate an image" and never looked at the "do not". A request to write a
+    prompt for an image model was rendered by the chat model, which the
+    semantic selector had offered generate_image."""
+
+    @pytest.mark.parametrize("message", _DECLINED)
+    def test_a_declined_image_is_not_generated(self, message):
+        from backend.services.unified_chat_engine import user_wants_image_generation, _wants_image_tools
+        assert user_wants_image_generation(message) is False
+        assert _wants_image_tools(message) is False
+
+    @pytest.mark.parametrize("message", _DECLINED)
+    def test_a_declined_image_is_not_pinned(self, message):
+        from backend.services.unified_chat_engine import _pin_image_generation_tools
+        selected = _pin_image_generation_tools(message, [], ["web_search", "generate_image"])
+        assert "generate_image" not in selected
+
+    def test_direct_path_stands_down_for_a_decline(self):
+        from backend.services.unified_chat_engine import UnifiedChatEngine
+
+        engine = UnifiedChatEngine.__new__(UnifiedChatEngine)
+        engine.registry = type("R", (), {"get_tool": lambda self, n: object()})()
+        result = engine._try_image_generate_direct(
+            "No, do not generate an image. Write the words.",
+            "sess", lambda *a, **k: None, "req", {},
+        )
+        assert result is None
+
+    @pytest.mark.parametrize("message", _DECLINED + [
+        _WRITING_FOR_AN_IMAGE_MODEL,
+        "describe a sunset over Tucson",
+        "can you write an image prompt for flux",
+    ])
+    def test_media_tools_are_withheld(self, message):
+        from backend.services.unified_chat_engine import _withholds_media_tools
+        assert _withholds_media_tools(message) is True
+
+    @pytest.mark.parametrize("message", [
+        "generate an image of a cat",
+        "draw me a chicken",
+        "generate a cat but don't make the picture too dark",
+        "draw a cat, don't use any tools",
+        "make an image of a gallery wall with no pictures",
+        "write a prompt for Z-Image and render it",
+        "write a prompt for a lighthouse at dusk and generate an image of it",
+        "/imagine a red fox, no people",
+        "/video a fox, don't make it dark",
+        "what is the weather",
+    ])
+    def test_media_tools_are_kept(self, message):
+        from backend.services.unified_chat_engine import _withholds_media_tools
+        assert _withholds_media_tools(message) is False
+
+    @pytest.mark.parametrize("message", [
+        "generate a cat but don't make the picture too dark",
+        "draw me a dragon, don't make the image look cartoonish",
+    ])
+    def test_an_instruction_about_the_picture_still_renders(self, message):
+        from backend.services.unified_chat_engine import user_wants_image_generation
+        assert user_wants_image_generation(message) is True
+
+    def test_slash_command_renders_whatever_follows(self):
+        from backend.services.unified_chat_engine import user_wants_image_generation
+        assert user_wants_image_generation("/imagine a sign that reads do not generate an image") is True
+
+    def test_declined_video_and_music_video(self):
+        from backend.services.unified_chat_engine import user_wants_video_generation
+        from backend.tools.video_pipeline_tools import wants_music_video
+        assert user_wants_video_generation("do not make a video of this, describe it") is False
+        assert user_wants_video_generation("make a video of a fox running") is True
+        assert wants_music_video("don't make a music video, just write the treatment") is False
+
+    def test_screen_agent_honours_a_decline(self):
+        from backend.services.agent_brain import is_pure_image_request
+        assert is_pure_image_request("draw a cat") is True
+        assert is_pure_image_request("don't draw a picture, describe a cat") is False

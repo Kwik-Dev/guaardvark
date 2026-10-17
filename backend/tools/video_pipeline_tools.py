@@ -13,7 +13,7 @@ from pathlib import Path
 
 from backend.services.agent_tools import BaseTool, ToolParameter, ToolResult
 from backend.utils.backend_http import is_mcp_caller, is_mcp_transport, run_tool_in_backend
-from backend.utils.request_phrases import HOW_TO_QUESTION_RE, VIDEO_SOFTWARE_PATTERN
+from backend.utils.request_phrases import HOW_TO_QUESTION_RE, VIDEO_SOFTWARE_PATTERN, declines_media
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,8 @@ _SCRIPT_LEAD_RE = re.compile(r"^\s*(?:with\b)?\s*:?\s*")
 def wants_music_video(message: str) -> bool:
     if not (message and _MUSIC_VIDEO_RE.search(message)):
         return False
-    return not (HOW_TO_QUESTION_RE.search(message) or _VIDEO_SOFTWARE_RE.search(message))
+    return not (HOW_TO_QUESTION_RE.search(message) or _VIDEO_SOFTWARE_RE.search(message)
+                or declines_media(message))
 
 
 def wants_film_crew(message: str) -> bool:

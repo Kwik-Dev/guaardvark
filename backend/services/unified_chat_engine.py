@@ -27,7 +27,8 @@ from backend.services.agent_tools import (
 )
 from backend.utils.text_cut import cut_on_whitespace
 from backend.utils.request_phrases import (
-    HOW_TO_QUESTION_RE, VIDEO_SOFTWARE_PATTERN, normalise_message, whole_message_pattern,
+    HOW_TO_QUESTION_RE, VIDEO_SOFTWARE_PATTERN, asks_for_writing, declines_media,
+    normalise_message, whole_message_pattern,
 )
 from backend.utils.inline_reasoning import (
     InlineReasoningStream, REASONING, RETRACT, VISIBLE, split_inline_reasoning,
@@ -828,7 +829,7 @@ def _image_generation_gate(message: str, draw_anywhere: bool) -> bool:
     msg_lower = message.lower()
     if _SLASH_IMAGE_RE.match(msg_lower):
         return True
-    if _media_requires_explicit_command():
+    if _media_requires_explicit_command() or declines_media(message):
         return False
     if (not draw_anywhere and _VIDEO_INTENT_RE.search(msg_lower)
             and not _STILL_OR_ANIMATION_NOUN_RE.search(msg_lower)):
@@ -854,6 +855,31 @@ def _wants_image_tools(message: str) -> bool:
     start a job directly, but the model needs generate_image to act on it.
     """
     return _image_generation_gate(message, draw_anywhere=True)
+
+
+# Tools that create new media. A turn that turns them down, or asks for writing
+# without asking for a render, neither offers nor runs them.
+_MEDIA_CREATE_TOOLS = frozenset(IMAGE_TOOLS) | {"generate_music_video", "start_film_crew"}
+# "Write a prompt for Z-Image and render it": the render is asked for without
+# an image noun. "Make it" is left out, as in "make it 300 words".
+_RENDER_IT_RE = re.compile(r"\b(?:generate|render)\s+(?:it|that|this|one|them)\b", re.IGNORECASE)
+
+
+def _withholds_media_tools(message: str) -> bool:
+    """True when the chat model gets no media-creating tools this turn.
+
+    The semantic selector offers generate_image for any message that reads like a
+    scene, so "write 300 words describing ... for Z-Image" was rendered instead of
+    written. A slash command always keeps them.
+    """
+    if not message or _SLASH_IMAGE_RE.match(message) or _SLASH_VIDEO_RE.match(message):
+        return False
+    if declines_media(message):
+        return True
+    if not asks_for_writing(message):
+        return False
+    lower = message.lower()
+    return not (_has_explicit_image_gen_intent(lower, draw_anywhere=True) or _RENDER_IT_RE.search(lower))
 
 
 def user_wants_image_edit(message: str, has_recent_image: bool,
@@ -947,7 +973,7 @@ def user_wants_video_generation(message: str) -> bool:
         return True
     if _SLASH_IMAGE_RE.match(msg_lower):
         return False
-    if _media_requires_explicit_command():
+    if _media_requires_explicit_command() or declines_media(message):
         return False
     if not (_VIDEO_REQUEST_RE.search(msg_lower) or msg_lower.startswith("video of ")):
         return False
@@ -2583,6 +2609,7 @@ class UnifiedChatEngine:
             or declines_tools(message)
             or options.get("file_generation") in ("offered", "started")
         )
+        withheld_tools = _MEDIA_CREATE_TOOLS if _withholds_media_tools(message) else frozenset()
 
         if _skip_tools:
             selected_tools = []
@@ -2650,6 +2677,7 @@ class UnifiedChatEngine:
             if allowed_tools is not None:
                 known = set(self.registry.list_tools())
                 selected_tools = [t for t in allowed_tools if t in known]
+            selected_tools = [t for t in selected_tools if t not in withheld_tools]
 
             # Step 5's capture stores this message's fact itself; with save_memory
             # also offered, the model files the same fact again in its own words.
@@ -3140,7 +3168,15 @@ class UnifiedChatEngine:
             allowed_jobs = []
             blocked_observations = []
             for tc, tool_name, params in tool_jobs:
-                allowed, block_reason = guard.check_call(tool_name, params)
+                if tool_name in withheld_tools:
+                    # The model can name a tool it was not offered; the prompt's
+                    # own generate_image example invites it.
+                    allowed, block_reason = False, (
+                        "The user asked for text, not a generated image or video. "
+                        "Write the answer as text."
+                    )
+                else:
+                    allowed, block_reason = guard.check_call(tool_name, params)
                 if allowed:
                     allowed_jobs.append((tc, tool_name, params))
                 else:
