@@ -427,7 +427,10 @@ class ProcessFileTool(BaseTool):
         if fmt in ("jpg", "jpeg", "png", "gif", "bmp", "webp"):
             extraction = result.extraction_results or {}
             if not extraction.get("success"):
-                reason = extraction.get("error") or "no local vision model is available"
+                # An OCR call that raised leaves no extraction result; its
+                # reason is on the metadata.
+                reason = (extraction.get("error") or getattr(meta, "extraction_error", None)
+                          or "the image could not be read")
                 return ToolResult(success=False, error=f"Could not read text from {shown}: {reason}")
             if not extraction.get("text_content"):
                 text = "(no text found in the image)"

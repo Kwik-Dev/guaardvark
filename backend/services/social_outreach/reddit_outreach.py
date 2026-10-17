@@ -569,9 +569,8 @@ def backend_url() -> str:
     """Resolve the local Flask API base URL. Public (no underscore) because
     self_share imports it and we don't want cross-module private-name coupling
     to silently break on rename."""
-    import os
-    port = os.environ.get("FLASK_PORT", "5002")
-    return f"http://localhost:{port}/api"
+    from backend.utils.backend_http import backend_base_url
+    return f"{backend_base_url()}/api"
 
 
 # Backwards-compat alias so any in-flight callers still work.

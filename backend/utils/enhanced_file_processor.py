@@ -717,10 +717,12 @@ class ExcelProcessor(FileProcessor):
                 
                 logger.info(f"Successfully extracted Excel content from {file_path}")
             else:
-                # Excel extraction failed
-                error_msg = extraction_result.get('error', 'Unknown error')
-                text_content = f"Excel file: {Path(file_path).name} (Excel extraction failed: {error_msg})"
-                metadata.word_count = len(text_content.split())
+                # The reason goes in metadata only; in the text it would be
+                # chunked, embedded and retrieved as the workbook's content.
+                error_msg = extraction_result.get('error') or 'Unknown error'
+                text_content = ""
+                metadata.word_count = 0
+                metadata.extraction_error = f"Excel extraction failed: {error_msg}"
                 logger.warning(f"Excel extraction failed for {file_path}: {error_msg}")
                 
             return ProcessedContent(

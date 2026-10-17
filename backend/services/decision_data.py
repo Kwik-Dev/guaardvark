@@ -57,6 +57,26 @@ GATE_FLOOR = 0.98
 # confidence is not (it reports 1.0 on its misses), so no threshold applies to it.
 DECISION_MODEL_THRESHOLD = {"nimble": 0.95, "tev1": 0.8}
 
+# What a decision model's licence lets Guaardvark do with it, by model family.
+#   recommendable  may be suggested, offered for install or made a default
+#   measure_only   never suggested, offered for install or made a default;
+#                  measured, and used on that evidence, only when the person
+#                  installed it themselves
+#   blocked        never used
+# Anything that recommends or installs a decision model reads this first; a
+# family missing here counts as blocked.
+LICENCE_STATUSES = ("recommendable", "measure_only", "blocked")
+DECISION_MODEL_LICENCE = {
+    # Bespoke Labs Nimble 9B: Apache-2.0 (model card and LICENSE file).
+    "nimble": "recommendable",
+    # Together AI Tev1: the model card says the licence for the fine-tuned
+    # weights is still being finalized (checked 2026-10-06).
+    "tev1": "measure_only",
+    # Cloudflare Clef: Apache-2.0. Not measured: clef-flash did not run on
+    # Ollama when checked (2026-10-06), and it must before it is offered.
+    "clef": "recommendable",
+}
+
 DECISIONS: dict = {
     # ------------------------------------------------------------------ chat turn routing (L1)
     "accepted_offer": {
@@ -278,8 +298,9 @@ DECISIONS: dict = {
         "set": "outreach_thread_fit.json",
         "hard_negatives": ("rant", "solved", "tangent_mention", "injection"),
         "notes": (
-            "Not measured yet: shadow is blocked until the labelled set exists. Only decides whether a "
-            "draft is written; posting still needs the draft checks and approval. Topics must be generic."
+            "Measured on its labelled set (see MEASURED_ACCURACY); not asked in shadow yet. Only decides "
+            "whether a draft is written; posting still needs the draft checks and approval. Topics must be "
+            "generic."
         ),
     },
     # ------------------------------------------------------------------ chat (draft, not measured)
@@ -1051,9 +1072,10 @@ DECISIONS: dict = {
      'set': None,
      'hard_negatives': ('fluent_but_wrong', 'refusal', 'truncated', 'echo_instruction', 'injection'),
      'notes': 'Dataset text is third-party, so an answer can only remove a pair (a veto); unclear keeps it as '
-              'today. The original dataset is untouched. min_score then means the minimum kept share before the '
-              'job refuses to train. Batch only, with a model other than the one being trained. Labelled set not '
-              'written yet (planned: training_pair_keep.json).'},
+              'today. The original dataset is untouched. min_score stays the score threshold the precheck '
+              'applies; a minimum kept share below which the job refuses to train would be a setting of its own. '
+              'Batch only, with a model other than the one being trained. Labelled set not written yet (planned: '
+              'training_pair_keep.json).'},
     # ------------------------------------------------------------------ cli (draft, not measured)
     'repl_line': {'feature': 'cli',
      'layer': 'L1',

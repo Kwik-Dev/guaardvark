@@ -17,7 +17,7 @@ class GPUEmbeddingClient:
     
     def __init__(
         self,
-        service_url: str = "http://localhost:5002",
+        service_url: str = "http://localhost:8204",
         timeout: int = 30,
         max_retries: int = 3,
         retry_backoff: float = 1.0
@@ -194,13 +194,13 @@ def create_client(service_url: Optional[str] = None, timeout: Optional[int] = No
             config = plugin_config.get("config", {})
             
             if service_url is None:
-                service_url = config.get("service_url", "http://localhost:5002")
+                service_url = config.get("service_url", "http://localhost:8204")
             if timeout is None:
                 timeout = config.get("timeout", 30)
         except Exception as e:
             logger.warning(f"Failed to load plugin config: {e}, using defaults")
             if service_url is None:
-                service_url = "http://localhost:5002"
+                service_url = "http://localhost:8204"
             if timeout is None:
                 timeout = 30
     

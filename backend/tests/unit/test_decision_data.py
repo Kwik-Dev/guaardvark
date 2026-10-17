@@ -13,9 +13,12 @@ import re
 import pytest
 
 from backend.services.decision_data import (
+    DECISION_MODEL_LICENCE,
+    DECISION_MODEL_THRESHOLD,
     DECISIONS,
     GATE_FLOOR,
     LAYERS,
+    LICENCE_STATUSES,
     MEASURED_ACCURACY,
     SIDE_EFFECTS,
     SOURCES,
@@ -128,3 +131,17 @@ def test_wording_sha_tracks_only_the_wording(decision_id):
     assert wording_sha({**entry, "notes": "changed", "floor": 0.5}) == sha
     assert wording_sha({**entry, "instructions": entry["instructions"] + " "}) != sha
     assert wording_sha({**entry, "key": entry["key"] + "_x"}) != sha
+
+
+def test_every_decision_model_has_a_licence_status():
+    """Licence status is declared beside each decision model, so whatever
+    recommends one can read it; a model with a threshold but no status would
+    be read as blocked."""
+    assert set(DECISION_MODEL_LICENCE.values()) <= set(LICENCE_STATUSES)
+    assert set(DECISION_MODEL_THRESHOLD) <= set(DECISION_MODEL_LICENCE)
+
+
+def test_tev1_is_measure_only():
+    """Its weights licence is not final: measured and used only when the
+    person installed it, never suggested, offered or made a default."""
+    assert DECISION_MODEL_LICENCE["tev1"] == "measure_only"

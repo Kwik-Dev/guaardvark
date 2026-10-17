@@ -738,7 +738,7 @@ def execute_unified_task(self, task_id: int):
                 else:
                     update_progress(30, f"Launching swarm on {local_path} (git={wf.get('is_git')})")
                     import requests as _rq
-                    port = os.environ.get("FLASK_PORT", "5002")
+                    from backend.utils.backend_http import backend_base_url
                     body = {
                         "repo_path": local_path,
                         "self_code": False,  # external website folder, never the Guaardvark repo
@@ -746,7 +746,7 @@ def execute_unified_task(self, task_id: int):
                         "acknowledge_dirty_tree": True,
                     }
                     try:
-                        resp = _rq.post(f"http://localhost:{port}/api/swarm/launch", json=body, timeout=45)
+                        resp = _rq.post(f"{backend_base_url()}/api/swarm/launch", json=body, timeout=45)
                         data = resp.json() if resp.content else {}
                         if resp.status_code >= 400:
                             output = {"error": f"swarm launch failed ({resp.status_code}): {data.get('error') or data}"}

@@ -62,14 +62,21 @@ def _checkout_env_value(key: str, env_file: Optional[Path] = None) -> str:
     return value
 
 
+def backend_port() -> str:
+    """The port this checkout's backend listens on: ``FLASK_PORT`` from the
+    environment, else the one ``start.sh`` recorded in ``.env`` (macOS writes
+    5055), else 5000, the backend's own default."""
+    return ((os.environ.get("FLASK_PORT") or "").strip()
+            or _checkout_env_value("FLASK_PORT") or "5000")
+
+
 def backend_base_url() -> str:
-    """Where the backend answers HTTP. ``GUAARDVARK_URL`` wins; otherwise the
-    port ``start.sh`` recorded in ``.env`` (macOS writes 5055); otherwise 5000."""
+    """Where the backend answers HTTP. ``GUAARDVARK_URL`` wins; otherwise
+    this checkout's backend on ``backend_port()``."""
     url = (os.environ.get("GUAARDVARK_URL") or "").strip()
     if url:
         return url.rstrip("/")
-    port = (os.environ.get("FLASK_PORT") or "").strip() or _checkout_env_value("FLASK_PORT")
-    return f"http://127.0.0.1:{port or '5000'}"
+    return f"http://127.0.0.1:{backend_port()}"
 
 
 def backend_api_key() -> str:

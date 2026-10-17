@@ -15,6 +15,18 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 
 
+def _backend_base_url() -> str:
+    """backend/utils/backend_http.py's resolver (FLASK_PORT, then .env, then
+    5000), loaded by path so this script runs without the backend's packages."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_guaardvark_backend_http", REPO / "backend" / "utils" / "backend_http.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module.backend_base_url()
+
+
 def _static_gate() -> int:
     baseline_path = REPO / "data" / "quality" / "baseline.json"
     if not baseline_path.exists():
@@ -73,11 +85,12 @@ def _full_gate(base_url: str) -> int:
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--mode", choices=("static", "full"), default="static")
-    p.add_argument("--base-url", default="http://127.0.0.1:5002")
+    p.add_argument("--base-url", default=None,
+                   help="backend URL (default: this checkout's backend port)")
     args = p.parse_args()
     if args.mode == "static":
         return _static_gate()
-    return _full_gate(args.base_url)
+    return _full_gate(args.base_url or _backend_base_url())
 
 
 if __name__ == "__main__":

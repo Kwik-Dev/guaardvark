@@ -273,3 +273,78 @@ def test_the_encryption_marker_is_found_across_a_read_boundary(tmp_path):
     path = tmp_path / "split.xlsx"
     path.write_bytes(OLE + b"\x00" * (1024 * 1024 - len(OLE) - 10) + marker + b"\x00" * 100)
     assert is_encrypted_office_file(str(path))
+
+
+def test_an_ocr_crash_is_reported_as_the_crash(uploads, ocr):
+    ocr(_ocr_crash)
+    result = read(uploads, "scan.png", PNG)
+    assert not result.success
+    assert "OCR processing error: model crashed" in result.error
+    assert "no local vision model" not in result.error
+
+
+@pytest.fixture
+def legacy_reader(monkeypatch):
+    """get_documents_from_file's own loaders, without EnhancedFileProcessor."""
+    from llama_index.core import Document
+    from backend.services import indexing_service
+    monkeypatch.setattr(indexing_service, "LlamaDocument", Document)
+    monkeypatch.setattr(indexing_service, "_docling_supports", lambda ext: False)
+    monkeypatch.setattr("backend.utils.file_processor_adapter.is_enhanced_processing_available",
+                        lambda path: False)
+    return indexing_service.get_documents_from_file
+
+
+def _workbook(path):
+    openpyxl = pytest.importorskip("openpyxl")
+    workbook = openpyxl.Workbook()
+    workbook.active.append(["name", "qty"])
+    workbook.save(path)
+    return str(path)
+
+
+def _excel_fails(path):
+    return {"success": False, "error": "sheet parser exploded"}
+
+
+def _excel_crashes(path):
+    raise RuntimeError("sheet parser exploded")
+
+
+def test_a_failed_workbook_indexes_without_the_failure_text(tmp_path, monkeypatch):
+    from backend.utils.file_processor_adapter import process_file_to_llamaindex
+    book = _workbook(tmp_path / "book.xlsx")
+    monkeypatch.setattr(excel_content_service.excel_extractor, "extract_excel_content", _excel_fails)
+    processed = create_file_processor().process_file(book)
+    assert processed.text_content == ""
+    assert processed.metadata.extraction_error == "Excel extraction failed: sheet parser exploded"
+    docs = process_file_to_llamaindex(book)
+    assert len(docs) == 1
+    assert "exploded" not in docs[0].text and "failed" not in docs[0].text
+    assert docs[0].metadata["extraction_error"] == "Excel extraction failed: sheet parser exploded"
+
+
+@pytest.mark.parametrize("extract", [_excel_fails, _excel_crashes])
+def test_the_legacy_excel_reader_keeps_the_failure_out_of_the_text(tmp_path, monkeypatch,
+                                                                   legacy_reader, extract):
+    book = _workbook(tmp_path / "book.xlsx")
+    monkeypatch.setattr(excel_content_service, "extract_excel_content", extract)
+    docs = legacy_reader(book)
+    assert len(docs) == 1
+    assert "exploded" not in docs[0].text and "failed" not in docs[0].text
+    meta = docs[0].metadata
+    assert "sheet parser exploded" in (meta.get("extraction_error") or meta.get("processing_error"))
+
+
+def test_the_legacy_code_reader_keeps_the_failure_out_of_the_text(tmp_path, monkeypatch,
+                                                                  legacy_reader):
+    import hashlib
+
+    def broken_md5(*args, **kwargs):
+        raise RuntimeError("hash unavailable")
+    monkeypatch.setattr(hashlib, "md5", broken_md5)
+    (tmp_path / "app.py").write_text("print('hi')\n")
+    docs = legacy_reader(str(tmp_path / "app.py"))
+    assert len(docs) == 1
+    assert "hash unavailable" not in docs[0].text and "error" not in docs[0].text
+    assert docs[0].metadata["processing_error"] == "hash unavailable"

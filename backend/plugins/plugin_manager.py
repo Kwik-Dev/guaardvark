@@ -477,13 +477,14 @@ class PluginManager:
     
     @staticmethod
     def _backend_port() -> Optional[int]:
-        """Return the main Flask backend's port (FLASK_PORT env, default 5002).
+        """Return the main Flask backend's port (see backend_http.backend_port).
         Used to short-circuit orphan-kill logic when a plugin manifest's port
         collides with the backend's own port — see the gpu_embedding case."""
+        from backend.utils.backend_http import backend_port
         try:
-            return int(os.environ.get("FLASK_PORT", "5002"))
+            return int(backend_port())
         except (TypeError, ValueError):
-            return 5002
+            return 5000
 
     @staticmethod
     def _service_url(metadata: PluginMetadata) -> Optional[str]:

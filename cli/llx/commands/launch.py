@@ -152,7 +152,8 @@ def _start_full_stack(console, cfg: dict):
 
     # Wait for the backend to come up
     import httpx
-    server_url = cfg.get("server_url", "http://localhost:5002")
+    from llx.backend_bootstrap import resolve_flask_port
+    server_url = cfg.get("server_url", f"http://localhost:{resolve_flask_port(root)}")
     for _ in range(60):
         try:
             resp = httpx.get(f"{server_url}/api/health", timeout=2)

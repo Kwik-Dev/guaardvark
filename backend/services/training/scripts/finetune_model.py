@@ -372,6 +372,44 @@ def sft_config_kwargs(config_fields: set, *, output_dir: Path, max_steps: int, l
     return {k: v for k, v in values.items() if k in config_fields}
 
 
+def progress_callbacks(progress_callback, total_steps) -> list:
+    """Trainer callbacks that report progress to progress_callback as
+    (step, total_steps, loss, metrics): on every log line, and between logs at
+    most every two seconds. Empty when there is no progress_callback. The text
+    and vision trainers share it."""
+    if not progress_callback:
+        return []
+    from transformers import TrainerCallback
+
+    class ProgressCallback(TrainerCallback):
+        def __init__(self, callback_func, total_steps):
+            self.callback_func = callback_func
+            self.total_steps = total_steps
+            self.last_loss = None
+            self.last_sent = 0.0
+
+        def _send(self, state, logs=None):
+            metrics = {
+                "loss": (logs or {}).get("loss", self.last_loss),
+                "learning_rate": (logs or {}).get("learning_rate"),
+                "epoch": getattr(state, "epoch", None),
+            }
+            self.last_sent = time.monotonic()
+            self.callback_func(state.global_step, self.total_steps, metrics["loss"], metrics)
+
+        def on_log(self, args, state, control, logs=None, **kwargs):
+            if logs and "loss" in logs:
+                self.last_loss = logs["loss"]
+            if state.global_step:
+                self._send(state, logs)
+
+        def on_step_end(self, args, state, control, **kwargs):
+            if time.monotonic() - self.last_sent >= 2.0:
+                self._send(state)
+
+    return [ProgressCallback(progress_callback, total_steps)]
+
+
 def finetune(
     base_model: str,
     data_path: str,
@@ -563,39 +601,7 @@ def finetune(
         batch_size=batch_size, gradient_accumulation_steps=gradient_accumulation_steps,
         max_seq_length=max_seq_length, bf16=bf16))
 
-    callbacks = []
-    if progress_callback:
-        from transformers import TrainerCallback
-
-        class ProgressCallback(TrainerCallback):
-            """Reports every log line, and between logs at most every two seconds."""
-
-            def __init__(self, callback_func, total_steps):
-                self.callback_func = callback_func
-                self.total_steps = total_steps
-                self.last_loss = None
-                self.last_sent = 0.0
-
-            def _send(self, state, logs=None):
-                metrics = {
-                    "loss": (logs or {}).get("loss", self.last_loss),
-                    "learning_rate": (logs or {}).get("learning_rate"),
-                    "epoch": getattr(state, "epoch", None),
-                }
-                self.last_sent = time.monotonic()
-                self.callback_func(state.global_step, self.total_steps, metrics["loss"], metrics)
-
-            def on_log(self, args, state, control, logs=None, **kwargs):
-                if logs and "loss" in logs:
-                    self.last_loss = logs["loss"]
-                if state.global_step:
-                    self._send(state, logs)
-
-            def on_step_end(self, args, state, control, **kwargs):
-                if time.monotonic() - self.last_sent >= 2.0:
-                    self._send(state)
-
-        callbacks.append(ProgressCallback(progress_callback, max_steps))
+    callbacks = progress_callbacks(progress_callback, max_steps)
 
     trainer_kwargs = {"model": model, "train_dataset": dataset, "args": config,
                       "callbacks": callbacks or None}

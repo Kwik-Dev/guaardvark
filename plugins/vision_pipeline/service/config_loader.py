@@ -106,9 +106,18 @@ def _flatten_yaml(data: dict, prefix: str = "") -> dict:
     return flat
 
 
-def load_config(plugin_root: str, backend_url: str = "http://localhost:5002") -> PipelineConfig:
-    """Load config with three-tier merge: plugin.json → config.yaml → Settings DB."""
+def load_config(plugin_root: str, backend_url: Optional[str] = None) -> PipelineConfig:
+    """Load config with three-tier merge: plugin.json → config.yaml → Settings DB.
+
+    The Settings DB is read from the main backend: ``backend_url``, else
+    GUAARDVARK_BACKEND_URL, else localhost on FLASK_PORT (the launcher sources
+    the project .env), else 5000, the backend's default. Same rule as the
+    video_editor and audio_foundry plugins.
+    """
     config = PipelineConfig()
+    if not backend_url:
+        backend_url = (os.environ.get("GUAARDVARK_BACKEND_URL")
+                       or f"http://localhost:{os.environ.get('FLASK_PORT') or '5000'}")
 
     # Layer 1: plugin.json defaults
     plugin_json_path = os.path.join(plugin_root, "plugin.json")
