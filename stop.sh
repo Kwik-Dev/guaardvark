@@ -307,7 +307,8 @@ if [ -n "$flask_pids" ]; then
     done
 fi
 
-# Pattern catches both worker AND beat processes from this checkout.
+# Pattern catches both worker AND beat processes from this checkout, the
+# on-demand research worker (backend/services/research_worker.py) included.
 # ERE alternation — `\(worker\|beat\)` was BRE syntax that pgrep -f (ERE)
 # matched literally, so it killed nothing and leaked beat/training workers.
 celery_pids=$(pgrep -f "celery.*(worker|beat)" 2>/dev/null)

@@ -52,6 +52,7 @@ _LOG_WRITERS: Dict[str, str] = {
     "celery.log": "start.sh",
     "celery_main.log": "start_celery.sh",
     "celery_training.log": "start_celery.sh",
+    "celery_research.log": "backend/services/research_worker.py",
     "celery_beat.log": "start_celery.sh",
     "ollama_bootstrap.log": "start.sh",
     "whisper_server.log": "start.sh",

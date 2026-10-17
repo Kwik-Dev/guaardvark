@@ -95,6 +95,8 @@ class RAGExperimentAgent:
     def __init__(self):
         self._llm = None
         self.proposer_model_name = None  # recorded in the experiment ledger
+        # Called before the proposer's LLM call; see RAGEvalHarness.gpu_turn.
+        self.gpu_turn = None
 
     def _get_llm(self):
         if self._llm is None:
@@ -139,6 +141,8 @@ class RAGExperimentAgent:
         llm = self._get_llm()
         if llm is None:
             return ""
+        if self.gpu_turn is not None:
+            self.gpu_turn()
         try:
             response = llm.complete(prompt, temperature=0.7)
             return str(response).strip()
