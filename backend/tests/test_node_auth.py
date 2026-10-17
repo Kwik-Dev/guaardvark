@@ -37,7 +37,7 @@ def _pub(key):
 
 def _verify(headers, master, *, method="POST", path=PATH, body=b"{}", cache=None, now=None):
     return node_auth.verify_request(method, path, headers, body, _pub(master),
-                                    cache or node_auth.NonceCache(), now)
+                                    cache if cache is not None else node_auth.NonceCache(), now)
 
 
 # ---- keys and certificates ----------------------------------------------------
@@ -211,6 +211,40 @@ def test_a_full_nonce_cache_refuses_rather_than_forgets():
 
 def test_the_nonce_outlives_the_clock_window():
     assert node_auth.NONCE_TTL_S > 2 * node_auth.CLOCK_SKEW_S
+
+
+def test_an_empty_nonce_cache_is_still_used(node_key, cert, master):
+    """An empty cache is truthy, so `cache or default` keeps the one given and
+    the nonce lands in it (an empty cache was falsy through __len__ once,
+    and a replay went through)."""
+    cache = node_auth.NonceCache()
+    assert bool(cache) is True and len(cache) == 0
+    headers = node_auth.sign_request(node_key, "node-a", cert, "POST", PATH, b"{}")
+    _verify(headers, master, cache=cache)
+    assert len(cache) == 1
+
+
+def test_a_replay_is_refused_through_the_default_cache(node_key, cert, master):
+    headers = node_auth.sign_request(node_key, "node-a", cert, "POST", PATH, b"{}")
+    node_auth.verify_request("POST", PATH, headers, b"{}", _pub(master))
+    with pytest.raises(NodeAuthError):
+        node_auth.verify_request("POST", PATH, headers, b"{}", _pub(master))
+
+
+def test_the_nonce_cache_never_grows_past_its_limit():
+    cache = node_auth.NonceCache(ttl_s=10, limit=5)
+    accepted = 0
+    for second in range(40):
+        for n in range(3):
+            accepted += cache.claim("a", f"{second:04d}-{n}".ljust(16, "x"), now=float(second))
+            assert len(cache) <= 5
+    # Refused while full of live nonces, accepted again as they expire.
+    assert 0 < accepted < 120
+
+
+def test_enrolment_proofs_are_remembered_apart():
+    assert node_auth.enrolment_nonce_cache() is not node_auth.default_nonce_cache()
+    assert node_auth.enrolment_nonce_cache()._limit < node_auth.NONCE_CACHE_LIMIT
 
 
 # ---- requests auth ------------------------------------------------------------

@@ -1069,6 +1069,7 @@ def register_node():
                 request.headers,
                 request.get_data(cache=True),
                 str(public_key),
+                node_auth.enrolment_nonce_cache(),
             )
         except node_auth.NodeAuthError as exc:
             logger.warning(f"[SYNC] Node registration refused: {exc.reason}")

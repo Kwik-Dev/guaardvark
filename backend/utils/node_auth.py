@@ -212,7 +212,12 @@ def read_certificate(token: str, authority_public_key: str, now: Optional[int] =
 # ---- replay protection --------------------------------------------------------
 
 class NonceCache:
-    """Nonces seen in the last NONCE_TTL_S seconds, per sending machine."""
+    """Nonces seen in the last NONCE_TTL_S seconds, per sending machine.
+
+    Never holds more than `limit` entries: expired ones are dropped every few
+    seconds, and when it is full of live ones a new nonce is refused rather
+    than an old one forgotten.
+    """
 
     def __init__(self, ttl_s: int = NONCE_TTL_S, limit: int = NONCE_CACHE_LIMIT):
         self._ttl = ttl_s
@@ -220,13 +225,17 @@ class NonceCache:
         self._seen: dict[tuple[str, str], float] = {}
         self._lock = threading.Lock()
         self._next_purge = 0.0
+        self._next_full_purge = 0.0
 
     def claim(self, node_id: str, nonce: str, now: Optional[float] = None) -> bool:
         """True the first time this machine uses this nonce; False after."""
         current = time.time() if now is None else now
         key = (node_id, nonce)
         with self._lock:
-            if current >= self._next_purge or len(self._seen) >= self._limit:
+            full = len(self._seen) >= self._limit
+            # A full cache is swept at most once a second, so a flood of
+            # requests does not turn every claim into a sweep.
+            if current >= self._next_purge or (full and current >= self._next_full_purge):
                 self._purge(current)
             expiry = self._seen.get(key)
             if expiry is not None and expiry > current:
@@ -241,16 +250,31 @@ class NonceCache:
     def _purge(self, current: float) -> None:
         self._seen = {k: v for k, v in self._seen.items() if v > current}
         self._next_purge = current + 5
+        self._next_full_purge = current + 1
 
     def __len__(self) -> int:
         return len(self._seen)
 
+    def __bool__(self) -> bool:
+        # An empty cache is still a cache: without this, __len__ makes it
+        # falsy and `cache or NonceCache()` silently swaps in a fresh one,
+        # which lets every replay through.
+        return True
+
 
 _nonce_cache = NonceCache()
+# Enrolment proofs need no certificate, so anyone who may enrol can sign them
+# with keys of their own. They are remembered apart, in a smaller cache, so a
+# flood of them cannot fill the one certified requests use.
+_enrolment_nonce_cache = NonceCache(limit=50_000)
 
 
 def default_nonce_cache() -> NonceCache:
     return _nonce_cache
+
+
+def enrolment_nonce_cache() -> NonceCache:
+    return _enrolment_nonce_cache
 
 
 # ---- signing ------------------------------------------------------------------
