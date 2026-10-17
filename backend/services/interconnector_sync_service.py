@@ -19,6 +19,10 @@ from backend.models import (
 
 logger = logging.getLogger(__name__)
 
+# apply_entity's strategy for a change a person chose on the approvals page:
+# the incoming version replaces the local row whichever was edited last.
+REMOTE_WINS = "remote_wins"
+
 
 class InterconnectorSyncService:
     """Service for synchronizing entities between interconnector nodes."""
@@ -308,7 +312,8 @@ class InterconnectorSyncService:
         Args:
             entity_type: Type of entity (clients, projects, rules)
             entity_data: Serialized entity data
-            conflict_strategy: How to handle conflicts (last_write_wins, manual)
+            conflict_strategy: How to handle conflicts (last_write_wins, manual,
+                or REMOTE_WINS to take entity_data whichever is newer)
             node_id: ID of the node this entity came from (for conflict tracking)
             push_mode: When True, applies three-tier push safeguards:
                        new entity -> add, master newer -> skip, client newer -> queue for approval
@@ -597,7 +602,8 @@ class InterconnectorSyncService:
                     return result
             # Check for conflicts
             local_updated = existing_client.updated_at
-            if local_updated and remote_updated_dt and local_updated != remote_updated_dt:
+            if (conflict_strategy != REMOTE_WINS and local_updated and remote_updated_dt
+                    and local_updated != remote_updated_dt):
                 # Conflict detected
                 if conflict_strategy == "last_write_wins":
                     # Use the one with later updated_at
@@ -656,7 +662,8 @@ class InterconnectorSyncService:
                 if result is not None:
                     return result
             local_updated = existing_website.updated_at
-            if local_updated and remote_updated_dt and local_updated != remote_updated_dt:
+            if (conflict_strategy != REMOTE_WINS and local_updated and remote_updated_dt
+                    and local_updated != remote_updated_dt):
                 if conflict_strategy == "last_write_wins":
                     if remote_updated_dt > local_updated:
                         self._update_website(existing_website, data)
@@ -711,7 +718,8 @@ class InterconnectorSyncService:
                     return result
             # Check for conflicts
             local_updated = existing_project.updated_at
-            if local_updated and remote_updated_dt and local_updated != remote_updated_dt:
+            if (conflict_strategy != REMOTE_WINS and local_updated and remote_updated_dt
+                    and local_updated != remote_updated_dt):
                 # Conflict detected
                 if conflict_strategy == "last_write_wins":
                     if remote_updated_dt > local_updated:
@@ -771,7 +779,8 @@ class InterconnectorSyncService:
                 if result is not None:
                     return result
             local_updated = existing_rule.updated_at
-            if local_updated and remote_updated_dt and local_updated != remote_updated_dt:
+            if (conflict_strategy != REMOTE_WINS and local_updated and remote_updated_dt
+                    and local_updated != remote_updated_dt):
                 if conflict_strategy == "last_write_wins":
                     if remote_updated_dt > local_updated:
                         self._update_rule(existing_rule, data)
@@ -830,7 +839,8 @@ class InterconnectorSyncService:
                 if result is not None:
                     return result
             local_updated = existing_task.updated_at
-            if local_updated and remote_updated_dt and local_updated != remote_updated_dt:
+            if (conflict_strategy != REMOTE_WINS and local_updated and remote_updated_dt
+                    and local_updated != remote_updated_dt):
                 if conflict_strategy == "last_write_wins":
                     if remote_updated_dt > local_updated:
                         self._update_task(existing_task, data)
@@ -882,7 +892,8 @@ class InterconnectorSyncService:
                 if result is not None:
                     return result
             local_updated = existing_document.updated_at
-            if local_updated and remote_updated_dt and local_updated != remote_updated_dt:
+            if (conflict_strategy != REMOTE_WINS and local_updated and remote_updated_dt
+                    and local_updated != remote_updated_dt):
                 if conflict_strategy == "last_write_wins":
                     if remote_updated_dt > local_updated:
                         self._update_document(existing_document, data)

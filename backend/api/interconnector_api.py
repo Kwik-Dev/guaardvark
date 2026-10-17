@@ -2178,7 +2178,13 @@ def get_pending_approvals():
 
 @interconnector_bp.route("/approvals/<int:approval_id>/decide", methods=["POST"])
 def decide_approval(approval_id: int):
-    """Approve or decline a pending approval."""
+    """Approve or decline a pending approval.
+
+    Approving applies what the person chose: held files replace the local
+    copy even where it is newer (remote_wins, which backs the old copy up
+    first), and a held entity change replaces the local row. When nothing
+    could be applied the approval stays pending and the answer says why.
+    """
     try:
         approval = db.session.get(InterconnectorPendingApproval, approval_id)
         if not approval:
@@ -2199,36 +2205,74 @@ def decide_approval(approval_id: int):
             return error_response(
                 "Tick at least one file to apply, or decline the whole push.", 400
             )
-        file_sync_service = get_file_sync_service()
-
-        files = approval.files_data or "[]"
-        try:
-            files_list = json.loads(files)
-        except Exception:
-            files_list = []
-
-        # Determine files to apply
-        files_to_apply = files_list
-        if decision == "partial":
-            files_to_apply = [f for f in files_list if f.get("path") in approved_files]
 
         apply_results = {"processed": 0, "created": 0, "updated": 0, "conflicts": 0, "errors": 0}
         details = []
 
-        if decision in {"approve", "partial"} and files_to_apply:
-            success, apply_result = file_sync_service.apply_files_atomic(
-                files_to_apply, "last_write_wins", create_backup=True
-            )
-            asum = apply_result.get("summary", {})
-            apply_results["processed"] = asum.get("total_processed", 0)
-            apply_results["created"] = asum.get("total_created", 0)
-            apply_results["updated"] = asum.get("total_updated", 0)
-            apply_results["conflicts"] = asum.get("total_conflicts", 0)
-            apply_results["errors"] = asum.get("total_errors", 0)
-            details = [
-                {"path": d.get("path"), "status": d.get("status", "success"), "error": d.get("error")}
-                for d in apply_result.get("details", [])
-            ]
+        if decision != "decline" and approval.sync_type == "entities":
+            if decision == "partial":
+                return validation_error_response(
+                    "A held entity change is approved or declined whole."
+                )
+            applied, outcome = _apply_entity_approval(approval)
+            if not applied:
+                db.session.rollback()
+                logger.warning(f"[APPROVAL] Approval {approval_id} not applied: {outcome}")
+                return error_response(f"{outcome} The change stays pending.", 409)
+            apply_results["processed"] = 1
+            apply_results["created"] = int(bool(outcome.get("created")))
+            apply_results["updated"] = int(bool(outcome.get("updated")))
+            details = [{"entity_type": outcome["entity_type"], "entity_id": outcome["entity_id"],
+                        "status": "success"}]
+        elif decision != "decline":
+            files = approval.files_data or "[]"
+            try:
+                files_list = json.loads(files)
+            except Exception:
+                files_list = []
+            files_to_apply = files_list
+            if decision == "partial":
+                files_to_apply = [f for f in files_list if f.get("path") in approved_files]
+
+            if files_to_apply:
+                success, apply_result = get_file_sync_service().apply_files_atomic(
+                    files_to_apply, "remote_wins", create_backup=True
+                )
+                asum = apply_result.get("summary", {})
+                apply_results["processed"] = asum.get("total_processed", 0)
+                apply_results["created"] = asum.get("total_created", 0)
+                apply_results["updated"] = asum.get("total_updated", 0)
+                apply_results["conflicts"] = asum.get("total_conflicts", 0)
+                apply_results["errors"] = asum.get("total_errors", 0)
+                details = [
+                    {
+                        "path": d.get("path"),
+                        "status": d.get("status", "success"),
+                        "created": d.get("created", False),
+                        "updated": d.get("updated", False),
+                        "skipped": d.get("skipped", False),
+                        "error": d.get("error"),
+                    }
+                    for d in apply_result.get("details", [])
+                ]
+                details += [
+                    {"path": path, "status": "error", "error": "no content in the held push"}
+                    for path in apply_result.get("invalid_files", [])
+                ]
+                if not success:
+                    # apply_files_atomic rolled back whatever it had written.
+                    failed = next((d for d in details if d["status"] != "success"), {})
+                    logger.warning(
+                        f"[APPROVAL] Approval {approval_id} not applied: "
+                        f"{failed.get('path')}: {failed.get('error')}"
+                    )
+                    return error_response(
+                        f"Nothing was applied: {failed.get('path') or 'a file'} failed "
+                        f"({failed.get('error') or 'unknown error'}). The push stays pending.",
+                        409,
+                        details={"approval_id": approval_id, "apply_results": apply_results,
+                                 "details": details},
+                    )
 
         approval.status = "approved" if decision in {"approve", "partial"} else "declined"
         approval.reviewed_at = datetime.now()
@@ -2249,6 +2293,28 @@ def decide_approval(approval_id: int):
         db.session.rollback()
         logger.error(f"[APPROVAL] Error deciding approval {approval_id}: {e}", exc_info=True)
         return error_response(f"Failed to process approval: {str(e)}", 500)
+
+
+def _apply_entity_approval(approval: InterconnectorPendingApproval):
+    """Apply the client's version of a held entity change (queued by the
+    sync service's push safeguard). Returns (True, outcome) with the row
+    changed in this session, uncommitted, or (False, reason)."""
+    from backend.services.interconnector_sync_service import REMOTE_WINS
+
+    try:
+        change = json.loads(approval.entities_data or "{}")
+    except ValueError:
+        change = {}
+    entity_type = change.get("entity_type") if isinstance(change, dict) else None
+    client_data = change.get("client_data") if isinstance(change, dict) else None
+    if not entity_type or not isinstance(client_data, dict):
+        return False, "This approval holds no entity change to apply."
+    applied, _conflict_id, stats = get_sync_service().apply_entity(
+        entity_type, client_data, REMOTE_WINS, node_id=approval.source_node
+    )
+    if not applied or not (stats.get("created") or stats.get("updated")):
+        return False, f"The {entity_type} change could not be applied."
+    return True, {"entity_type": entity_type, "entity_id": client_data.get("id"), **stats}
 
 
 def _build_client_url(node: InterconnectorNode) -> str:
