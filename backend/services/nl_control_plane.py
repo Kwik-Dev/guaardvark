@@ -437,24 +437,33 @@ def _chat(system: str, user: str, *, model: str, timeout: float, num_ctx: Option
 
 
 @dataclass(frozen=True)
-class _Asked:
+class Asked:
+    """One question put to a model: ``reason`` "ok" with its answer, or why there is none."""
+
     reason: str
     answer: Any = None
     confidence: Optional[float] = None
+    raw: str = ""
 
 
-def _ask(entry: Mapping[str, Any], state: Mapping[str, Any], model: str, timeout_s: float,
-         num_ctx: Optional[int]) -> _Asked:
-    """Ask ``model`` the entry's question with the measured prompt and read its reply."""
+def ask_question(entry: Mapping[str, Any], state: Mapping[str, Any], *, model: str, timeout_s: float,
+                 num_ctx: Optional[int]) -> Asked:
+    """Ask ``model`` the entry's question about ``state`` and read the reply.
+
+    The measured prompt (decision_prompt), temperature 0, ``num_ctx`` and
+    ``timeout_s``; the reply read with decision_prompt.parse_answer. No gate:
+    decide() checks first, and scripts/eval_decisions.py measures through
+    this same function so its rows describe what decide() would get.
+    """
     from backend.services.decision_prompt import NO_ANSWER, parse_answer, system_prompt, user_prompt
 
     reply = _chat(system_prompt(entry), user_prompt(entry, state), model=model, timeout=timeout_s, num_ctx=num_ctx)
     if reply.failure:
-        return _Asked(reply.failure)
+        return Asked(reply.failure, raw=reply.raw)
     answer, confidence = parse_answer(entry, reply.data)
     if answer is NO_ANSWER:
-        return _Asked("parse_fail", confidence=confidence)
-    return _Asked("ok", answer, confidence)
+        return Asked("parse_fail", confidence=confidence, raw=reply.raw)
+    return Asked("ok", answer, confidence, reply.raw)
 
 
 def _memo_for(ctx: Any) -> Optional[dict]:
@@ -577,7 +586,7 @@ def _decide_live(entry, decision, state, fallback, mode, timeout_s, ctx, run, au
     from backend.utils.ollama_resource_manager import _short_digest
 
     policy = BACKEND_POLICY[entry["layer"]]
-    asked: Optional[_Asked] = None
+    asked: Optional[Asked] = None
 
     def refuse(reason, model=None, digest=None):
         answer, source = fallback, "fallback"
@@ -617,8 +626,8 @@ def _decide_live(entry, decision, state, fallback, mode, timeout_s, ctx, run, au
         return refuse("below_floor", model, digest)
 
     num_ctx = resident.get("context_length")
-    asked = _ask(entry, state, model, max(0.1, float(timeout_s)),
-                 int(num_ctx) if isinstance(num_ctx, int) and num_ctx > 0 else None)
+    asked = ask_question(entry, state, model=model, timeout_s=max(0.1, float(timeout_s)),
+                         num_ctx=int(num_ctx) if isinstance(num_ctx, int) and num_ctx > 0 else None)
     if asked.reason != "ok":
         return refuse(asked.reason, model, digest)
     if asked.answer in entry["unlocks"] and any(src == "third_party" for src, _ in entry["state"].values()):
