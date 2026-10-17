@@ -183,7 +183,8 @@ def test_backend():
 
     def api_health():
         import urllib.request
-        port = os.environ.get("FLASK_PORT", "5002")
+        from backend.utils.backend_http import backend_port
+        port = backend_port()
         req = urllib.request.Request(f"http://localhost:{port}/api/health", method="GET")
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read())
@@ -192,7 +193,8 @@ def test_backend():
     def api_celery_health():
         import urllib.request
         import urllib.error
-        port = os.environ.get("FLASK_PORT", "5002")
+        from backend.utils.backend_http import backend_port
+        port = backend_port()
         req = urllib.request.Request(f"http://localhost:{port}/api/health/celery", method="GET")
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
@@ -213,7 +215,8 @@ def test_backend():
                 return {"status": "fail", "details": f"HTTP {e.code}", "error_message": str(e)}
 
     def backend_process():
-        port = int(os.environ.get("FLASK_PORT", "5002"))
+        from backend.utils.backend_http import backend_port
+        port = int(backend_port())
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(2)
         result = s.connect_ex(("localhost", port))

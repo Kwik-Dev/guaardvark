@@ -63,3 +63,24 @@ def test_env_values_last_line_wins(tmp_path):
     assert bh._checkout_env_value("GUAARDVARK_API_KEY", env) == "new"
     assert bh._checkout_env_value("MISSING", env) == ""
     assert bh._checkout_env_value("GUAARDVARK_API_KEY", tmp_path / "absent") == ""
+
+
+def test_backend_port_order(checkout_env, monkeypatch):
+    """FLASK_PORT from the environment, then the checkout's .env, then 5000:
+    the port every in-process caller (plugin manager, outreach, swarm launch,
+    film editor) uses for the backend."""
+    assert bh.backend_port() == "5000"
+    checkout_env["FLASK_PORT"] = "5055"
+    assert bh.backend_port() == "5055"
+    monkeypatch.setenv("FLASK_PORT", "5123")
+    assert bh.backend_port() == "5123"
+
+
+def test_plugin_manager_and_outreach_use_the_backend_port(checkout_env):
+    from backend.plugins.plugin_manager import PluginManager
+    from backend.services.social_outreach.reddit_outreach import backend_url
+
+    assert PluginManager._backend_port() == 5000
+    assert backend_url() == "http://127.0.0.1:5000/api"
+    checkout_env["FLASK_PORT"] = "5055"
+    assert PluginManager._backend_port() == 5055

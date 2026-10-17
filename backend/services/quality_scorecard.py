@@ -122,7 +122,10 @@ def build_scorecard(
     notes: List[str] = []
     gates: List[Dict[str, Any]] = []
 
-    base = (public_base_url or "http://127.0.0.1:5002").rstrip("/")
+    if not public_base_url:
+        from backend.utils.backend_http import backend_base_url
+        public_base_url = backend_base_url()
+    base = public_base_url.rstrip("/")
     h = _health_probe(base)
     tracks["health"] = h
     health_baseline = baselines.get("health") or {}

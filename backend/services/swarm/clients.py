@@ -267,7 +267,7 @@ class VideoEditorComposeClient:
     """
 
     def __init__(self, backend_url: str):
-        # e.g. "http://localhost:5002/api"
+        # e.g. "http://127.0.0.1:5000/api"
         self.backend_url = backend_url.rstrip("/")
 
     def compose_arrangement(

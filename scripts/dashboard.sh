@@ -117,10 +117,10 @@ echo ""
 echo -e "${CYAN}  SYSTEM${NC}"
 echo -e "${DIM}  ──────${NC}"
 
-BACKEND_UP=$(curl -sf http://localhost:${FLASK_PORT:-5002}/api/health >/dev/null 2>&1 && echo "ONLINE" || echo "OFFLINE")
+BACKEND_UP=$(curl -sf http://localhost:${FLASK_PORT:-5000}/api/health >/dev/null 2>&1 && echo "ONLINE" || echo "OFFLINE")
 BACKEND_COLOR="${GREEN}"
 [ "$BACKEND_UP" = "OFFLINE" ] && BACKEND_COLOR="${RED}"
-echo -e "  ${WHITE}Backend:${NC} ${BACKEND_COLOR}${BACKEND_UP}${NC} (port ${FLASK_PORT:-5002})"
+echo -e "  ${WHITE}Backend:${NC} ${BACKEND_COLOR}${BACKEND_UP}${NC} (port ${FLASK_PORT:-5000})"
 
 FRONTEND_UP=$(curl -sf http://localhost:${VITE_PORT:-5173} >/dev/null 2>&1 && echo "ONLINE" || echo "OFFLINE")
 FRONTEND_COLOR="${GREEN}"

@@ -606,8 +606,8 @@ def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
         if not shots:
             ctx.fail("No approved shots")
 
-        flask_port = os.environ.get("FLASK_PORT", "5002")
-        backend_url = f"http://localhost:{flask_port}/api"
+        from backend.utils.backend_http import backend_base_url
+        backend_url = f"{backend_base_url()}/api"
         ve_client = VideoEditorComposeClient(backend_url)
 
         editor = Editor(

@@ -111,7 +111,7 @@ viteLogger.error = (msg, options) => {
 
 function resolvePorts(mode) {
   // Repo .env lives at the repo root (not frontend/.env). start.sh exports these,
-  // but `npm run dev` from frontend/ must still pick up FLASK_PORT=5002 / VITE_PORT=5175.
+  // but `npm run dev` from frontend/ must still pick up FLASK_PORT / VITE_PORT from it.
   const rootEnv = loadEnv(mode, REPO_ROOT, "");
   const flaskPort =
     process.env.FLASK_PORT ||
