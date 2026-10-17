@@ -30,6 +30,7 @@ import { useVoice } from "../../contexts/VoiceContext";
 import { useVoiceSession, useVoiceSessionState } from "../../contexts/VoiceSessionContext";
 import extractSpeakableText from "../../utils/extractSpeakableText";
 import useSlashCommands from "../../hooks/useSlashCommands";
+import { directToolOptions } from "../../utils/slashCommandRegistry";
 import SlashCommandPopup from "./SlashCommandPopup";
 import FileDropOverlay from "./FileDropOverlay";
 import useFileDropZone from "../../hooks/useFileDropZone";
@@ -431,9 +432,12 @@ const FloatingChatCard = () => {
         // can render it — keeping the saved message text exactly what was typed.
         // A document notice only acknowledges the upload: no search is possible
         // on that turn, so the engine's "no search ran" nudge and note stay off.
+        // A slash command (/imagine, /removebg, ...) names its tool; the
+        // engine runs it directly instead of leaving the choice to the model.
         await unifiedChatService.sendMessage(sessionId, content, {
           use_rag: true,
           page_context: pageContext,
+          ...directToolOptions(sendOptions),
           ...(isNotice ? { skip_nudges: true } : {}),
         }, imageBase64, isVoice);
       } catch (err) {
@@ -660,7 +664,9 @@ const FloatingChatCard = () => {
       await handleChimeIn();
       return;
     }
-    if (slashCmds.isCommand) {
+    // Checked on the text too: isCommand only follows typing, and a command
+    // recalled from history (Up arrow) must run the same way.
+    if (slashCmds.isCommand || inputText.trim().startsWith("/")) {
       const result = await slashCmds.executeCommand(inputText);
       if (result?.handled) {
         setInputText("");

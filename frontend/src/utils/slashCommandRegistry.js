@@ -343,6 +343,25 @@ export function parseCommand(input) {
   };
 }
 
+/**
+ * The request options a slash command's send carries to the chat engine.
+ * Commands such as /imagine call the chat's send with
+ * `{direct_tool, direct_tool_params, slash_command, slash_args, image_model}`;
+ * the engine runs `direct_tool` without asking the model to choose a tool.
+ * Returns {} for an ordinary message.
+ */
+export function directToolOptions(sendOptions) {
+  if (!sendOptions?.direct_tool) return {};
+  const options = {
+    direct_tool: sendOptions.direct_tool,
+    direct_tool_params: sendOptions.direct_tool_params || {},
+  };
+  if (sendOptions.slash_command) options.slash_command = sendOptions.slash_command;
+  if (sendOptions.slash_args) options.slash_args = sendOptions.slash_args;
+  if (sendOptions.image_model) options.image_model = sendOptions.image_model;
+  return options;
+}
+
 export default {
   getAllCommands,
   getBuiltInCommands,
@@ -350,4 +369,5 @@ export default {
   parseCommand,
   extractCommandRules,
   resetDbCommandsCache,
+  directToolOptions,
 };

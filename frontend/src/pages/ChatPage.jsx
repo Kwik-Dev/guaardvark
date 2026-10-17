@@ -56,6 +56,7 @@ import { attachedPictures, chatErrorMessage } from "../utils/chatAttachment";
 import { createPlan } from "../api/orchestratorService";
 import { mergeActivePlanIntoMessages, hydrateOrchestratorFields } from "../utils/orchestratorChat";
 import { debugLog } from "../utils/debugLog";
+import { directToolOptions } from "../utils/slashCommandRegistry";
 
 const USE_AGENT_ROUTING = () => {
   try {
@@ -1870,18 +1871,6 @@ const ChatPage = () => {
             } catch { resolve(); }
           });
 
-          const directToolOptions = {};
-          if (voiceOptions?.direct_tool) {
-            directToolOptions.direct_tool = voiceOptions.direct_tool;
-            directToolOptions.direct_tool_params = voiceOptions.direct_tool_params || {};
-            if (voiceOptions.slash_command) {
-              directToolOptions.slash_command = voiceOptions.slash_command;
-            }
-            if (voiceOptions.slash_args) {
-              directToolOptions.slash_args = voiceOptions.slash_args;
-            }
-          }
-
           // Support for project folder analysis (e.g. "analyze /path/to/site and suggest CSS improvements")
           // Send project_root so backend auto-loads GUAARDVARK.md and injects rich context.
           // This makes the feature (project analysis, build.py review, CSS suggestions, initiative)
@@ -1890,7 +1879,7 @@ const ChatPage = () => {
             use_rag: true,
             chat_mode: chatMode,
             project_id: projectId,
-            ...directToolOptions,
+            ...directToolOptions(voiceOptions),
           };
           // An upload notice only acknowledges the file: no search is possible
           // on that turn, so the engine's "no search ran" nudge and note stay off.

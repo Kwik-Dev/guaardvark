@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { useFloatingChatStore } from "../../../stores/useFloatingChatStore";
 import { useAppStore } from "../../../stores/useAppStore";
@@ -147,6 +147,31 @@ describe("FloatingChatCard replies", () => {
     expect(screen.getByAltText("A fox")).toHaveAttribute("src", FOX.url);
     expect(screen.queryByText("(stopped before any output)")).toBeNull();
     expect(useFloatingChatStore.getState().messages.at(-1).status).toBe("aborted");
+  });
+
+  it("sends /imagine with its direct-tool options", async () => {
+    renderCard();
+    await typeAndSend("/imagine a red fox");
+
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1));
+    const [sessionId, text, options] = sendMessage.mock.calls[0];
+    expect(sessionId).toBe("floating_test");
+    expect(text).toBe("/imagine a red fox");
+    expect(options).toMatchObject({
+      use_rag: true,
+      direct_tool: "generate_image",
+      direct_tool_params: { prompt: "a red fox", model: "z-image-turbo" },
+      slash_command: "imagine",
+      slash_args: "a red fox",
+      image_model: "z-image-turbo",
+    });
+  });
+
+  it("sends an ordinary message without direct-tool options", async () => {
+    renderCard();
+    await typeAndSend("hello");
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage.mock.calls[0][2]).not.toHaveProperty("direct_tool");
   });
 
 });
