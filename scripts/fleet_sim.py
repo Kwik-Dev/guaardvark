@@ -339,6 +339,13 @@ def security_checks(master: Master, a: Machine, data_dir: Path, results: Results
         ("POST", f"{API}/ask-family", {}),
         ("POST", f"{API}/route-inference", {}),
         ("POST", f"{API}/sync/manual", {"direction": "fleet-sim-probe"}),
+        ("GET", f"{API}/nodes", None),
+        ("GET", f"{API}/debug/nodes", None),
+        ("GET", f"{API}/backups", None),
+        ("POST", f"{API}/test-connection", {}),
+        # A node id no master has: harmless even if the guard let it through.
+        ("DELETE", f"{API}/nodes/fleet-sim-no-such-node", None),
+        ("POST", f"{API}/nodes/fleet-sim-no-such-node/test", None),
     ):
         r, _ = master.send(method, path, machine=a, sign=False, body=payload)
         results.check("T438", f"{method} {path.replace(API, '')} from another host", r, {401, 403})
