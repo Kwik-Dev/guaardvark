@@ -5,12 +5,26 @@ import base64
 import logging
 import os
 import threading
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
+from urllib.parse import urlsplit
+
+from backend.utils.hosts import is_local_host
 
 logger = logging.getLogger(__name__)
+
+# How long a read of the web-access setting is reused by the request gate. A
+# page load makes dozens of requests; the setting changes by hand.
+WEB_ACCESS_RECHECK_SECONDS = 2.0
+_READ_METHODS = ("GET", "HEAD", "OPTIONS")
+
+
+def _every_url(_url: str) -> bool:
+    # A predicate rather than a glob, so no URL shape slips past the gate.
+    return True
 
 BROWSER_AUTOMATION_ENABLED = os.getenv("GUAARDVARK_BROWSER_AUTOMATION", "true").lower() == "true"
 BROWSER_HEADLESS = os.getenv("GUAARDVARK_BROWSER_HEADLESS", "true").lower() == "true"
@@ -71,8 +85,78 @@ class BrowserAutomationService:
         self._state = BrowserState()
         self._last_activity = None
         self._idle_timer = None
+        self._app = None
+        self._web_checked_at = 0.0
+        self._web_allowed = False
 
         logger.info("BrowserAutomationService initialized (lazy - browser not started yet)")
+
+    def bind_app(self, app) -> None:
+        """The Flask app whose web-access setting the request gate reads. The
+        browser runs on its own event loop thread, outside any app context."""
+        self._app = app
+
+    def _outside_allowed(self) -> bool:
+        """Web access (Settings, off by default), read through the bound app.
+        No app or a failed read means no."""
+        now = time.monotonic()
+        if now - self._web_checked_at < WEB_ACCESS_RECHECK_SECONDS:
+            return self._web_allowed
+        allowed = False
+        if self._app is not None:
+            try:
+                from backend.utils.settings_utils import get_web_access
+                with self._app.app_context():
+                    allowed = get_web_access()
+            except Exception as e:
+                logger.warning(f"Browser gate could not read web access, treating it as off: {e}")
+        self._web_allowed = allowed
+        self._web_checked_at = now
+        return allowed
+
+    @staticmethod
+    def _own_api_write(parts, method: str) -> bool:
+        """A state-changing call to this install's own API. The pages a model
+        drives must not flip settings or approve queued posts on its behalf."""
+        if method.upper() in _READ_METHODS or not parts.path.startswith("/api/"):
+            return False
+        own_ports = {os.environ.get("FLASK_PORT", "5000"), os.environ.get("VITE_PORT", "5173")}
+        return str(parts.port or "") in own_ports
+
+    async def _allows(self, url: str, method: str = "GET") -> bool:
+        parts = urlsplit(url)
+        if parts.scheme not in ("http", "https", "ws", "wss"):
+            return True
+        if is_local_host(parts.hostname):
+            return not self._own_api_write(parts, method)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._outside_allowed)
+
+    async def _gate_request(self, route) -> None:
+        """Every request any page makes, redirects and scripts' fetches included."""
+        request = route.request
+        try:
+            allowed = await self._allows(request.url, request.method)
+        except Exception as e:
+            logger.warning(f"Browser gate refused a request it could not judge: {e}")
+            allowed = False
+        if allowed:
+            await route.continue_()
+        else:
+            logger.info(f"Browser gate blocked {request.method} {urlsplit(request.url).hostname}")
+            await route.abort("blockedbyclient")
+
+    async def _gate_websocket(self, ws) -> None:
+        try:
+            allowed = await self._allows(ws.url)
+        except Exception as e:
+            logger.warning(f"Browser gate refused a WebSocket it could not judge: {e}")
+            allowed = False
+        if allowed:
+            ws.connect_to_server()
+        else:
+            logger.info(f"Browser gate blocked a WebSocket to {urlsplit(ws.url).hostname}")
+            await ws.close(code=1008, reason="Web access is disabled")
     
     def _ensure_event_loop(self) -> asyncio.AbstractEventLoop:
         try:
@@ -116,9 +200,15 @@ class BrowserAutomationService:
                 )
                 self._context = await self._browser.new_context(
                     viewport={"width": 1920, "height": 1080},
-                    user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    # A service worker's requests would not pass the gate below.
+                    service_workers="block",
                 )
-                
+                # Outside sites only with web access on, whichever tool or
+                # route opened the page and whatever the page itself loads.
+                await self._context.route(_every_url, self._gate_request)
+                await self._context.route_web_socket(_every_url, self._gate_websocket)
+
                 self._state.initialized = True
                 self._state.headless = BROWSER_HEADLESS
                 logger.info("Playwright browser started successfully")

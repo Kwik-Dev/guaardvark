@@ -1149,8 +1149,10 @@ def _initialize_app_components(app):
         app.logger.warning("Cluster proxy middleware unavailable (sync backend/middleware/): %s", e)
 
     try:
-        from backend.services.browser_automation_service import register_browser_shutdown
+        from backend.services.browser_automation_service import get_browser_service, register_browser_shutdown
         register_browser_shutdown(app)
+        # The browser's request gate reads the web-access setting through this app.
+        get_browser_service().bind_app(app)
     except Exception as e:
         app.logger.debug(f"Browser shutdown registration skipped: {e}")
 

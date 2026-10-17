@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import threading
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from backend.services.agent_tools import BaseTool, ToolParameter, ToolResult
 from backend.services.browser_automation_service import (
@@ -11,8 +11,26 @@ from backend.services.browser_automation_service import (
     run_browser_action,
     BROWSER_AUTOMATION_ENABLED
 )
+from backend.utils.hosts import is_local_host, url_host
 
 logger = logging.getLogger(__name__)
+
+
+def _outside_refusal(url: str) -> Optional[str]:
+    """Why a tool may not open ``url``, or None. Outside sites need web access
+    (Settings, off by default), and an unreadable setting counts as off. The
+    browser service gates each request the page makes as well; this names
+    the reason before a page loads. Binds the app that gate reads."""
+    try:
+        from flask import current_app, has_app_context
+        if has_app_context():
+            get_browser_service().bind_app(current_app._get_current_object())
+    except Exception as e:
+        logger.debug(f"Browser gate app binding skipped: {e}")
+    if is_local_host(url_host(url)):
+        return None
+    from backend.utils.settings_utils import web_access_block_reason
+    return web_access_block_reason("browse outside sites")
 
 _browser_loop = None
 _browser_loop_thread = None
@@ -66,6 +84,9 @@ class BrowserNavigateTool(BaseTool):
 
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
+        refusal = _outside_refusal(url)
+        if refusal:
+            return ToolResult(success=False, error=refusal)
 
         # If agent virtual display is active, navigate via xdotool on :99
         try:
@@ -80,24 +101,6 @@ class BrowserNavigateTool(BaseTool):
                 success=False,
                 error="Browser not available. Use 'analyze_website' or 'web_search' instead."
             )
-
-        # Check web access setting — allow localhost/local network even when web access is off
-        from urllib.parse import urlparse
-        parsed = urlparse(url)
-        is_local = parsed.hostname in ("localhost", "127.0.0.1", "0.0.0.0") or \
-                   (parsed.hostname and (parsed.hostname.startswith("192.168.") or
-                    parsed.hostname.startswith("10.") or parsed.hostname.startswith("172.")))
-        if not is_local:
-            try:
-                from flask import has_app_context
-                from backend.utils.settings_utils import get_web_access
-                if has_app_context() and not get_web_access():
-                    return ToolResult(
-                        success=False,
-                        error="Web access is disabled. Enable it in Settings to browse external sites."
-                    )
-            except Exception:
-                pass
 
         try:
             service = get_browser_service()
@@ -227,6 +230,9 @@ class BrowserClickTool(BaseTool):
         
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
+        refusal = _outside_refusal(url)
+        if refusal:
+            return ToolResult(success=False, error=refusal)
         
         try:
             service = get_browser_service()
@@ -306,6 +312,9 @@ class BrowserFillTool(BaseTool):
         
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
+        refusal = _outside_refusal(url)
+        if refusal:
+            return ToolResult(success=False, error=refusal)
         
         try:
             service = get_browser_service()
@@ -386,6 +395,9 @@ class BrowserScreenshotTool(BaseTool):
         
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
+        refusal = _outside_refusal(url)
+        if refusal:
+            return ToolResult(success=False, error=refusal)
         
         try:
             service = get_browser_service()
@@ -469,6 +481,9 @@ class BrowserExtractTool(BaseTool):
         
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
+        refusal = _outside_refusal(url)
+        if refusal:
+            return ToolResult(success=False, error=refusal)
         
         try:
             service = get_browser_service()
@@ -561,6 +576,9 @@ class BrowserWaitTool(BaseTool):
         
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
+        refusal = _outside_refusal(url)
+        if refusal:
+            return ToolResult(success=False, error=refusal)
         
         try:
             service = get_browser_service()
@@ -625,6 +643,9 @@ class BrowserExecuteJSTool(BaseTool):
         
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
+        refusal = _outside_refusal(url)
+        if refusal:
+            return ToolResult(success=False, error=refusal)
         
         try:
             service = get_browser_service()
@@ -691,6 +712,9 @@ class BrowserGetHTMLTool(BaseTool):
         
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
+        refusal = _outside_refusal(url)
+        if refusal:
+            return ToolResult(success=False, error=refusal)
         
         try:
             service = get_browser_service()
