@@ -13,6 +13,7 @@ from pathlib import Path
 
 from backend.services.agent_tools import BaseTool, ToolParameter, ToolResult
 from backend.utils.backend_http import is_mcp_caller, is_mcp_transport, run_tool_in_backend
+from backend.utils.request_phrases import HOW_TO_QUESTION_RE, VIDEO_SOFTWARE_PATTERN
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,10 @@ _MUSIC_VIDEO_RE = re.compile(
     r"\b(generate|create|make|produce)\b.{0,40}\bmusic[\s-]?video\b",
     re.IGNORECASE,
 )
+# The video gate's exclusions: asking how to make one, or making one in video
+# software, is a question for the chat model ("how do I make a music video in
+# Premiere?", "can you make a music video in After Effects for me").
+_VIDEO_SOFTWARE_RE = re.compile(VIDEO_SOFTWARE_PATTERN, re.IGNORECASE)
 # A Film Crew request opens the message, as in cli/llx/intent_router.py: "run the
 # film crew on this: ...", "produce this script: INT. ...". The same words later in a
 # sentence ("can you produce a python script that ...", "I want to film a script
@@ -39,7 +44,9 @@ _SCRIPT_LEAD_RE = re.compile(r"^\s*(?:with\b)?\s*:?\s*")
 
 
 def wants_music_video(message: str) -> bool:
-    return bool(message and _MUSIC_VIDEO_RE.search(message))
+    if not (message and _MUSIC_VIDEO_RE.search(message)):
+        return False
+    return not (HOW_TO_QUESTION_RE.search(message) or _VIDEO_SOFTWARE_RE.search(message))
 
 
 def wants_film_crew(message: str) -> bool:

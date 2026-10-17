@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 from backend.utils.display_paths import display_params
 from backend.utils.settings_utils import get_setting
+from backend.utils.web_search_sources import MAX_SEARCH_QUERY_CHARS
 
 # Local imports
 try:
@@ -1467,6 +1468,7 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
                            project_id: int = None) -> Optional[Dict]:
         """Check if message is a media command and execute directly, bypassing LLM."""
         import re
+        from backend.services.unified_chat_engine import MEDIA_STATUS_REQUEST_RE
         msg = message.strip()
         msg_lower = msg.lower()
 
@@ -1491,10 +1493,8 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
             action = m.group(1).lower()
             tool_name = "media_control"
             params = {"action": "next" if action in ("next", "skip") else "previous"}
-        # What's playing
-        elif re.match(r"^(?:what'?s|what\s+is)\s+(?:this\s+)?(?:playing|this\s+song)", msg, re.IGNORECASE):
-            tool_name = "media_status"
-        elif re.match(r"^(?:current|now)\s+(?:playing|song|track)", msg, re.IGNORECASE):
+        # What's playing (the whole message, about the user's own player)
+        elif MEDIA_STATUS_REQUEST_RE.match(msg):
             tool_name = "media_status"
         # Volume with number
         elif re.match(r"^(?:set\s+)?volume\s+(?:to\s+)?(\d+)", msg, re.IGNORECASE):
@@ -1623,7 +1623,7 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
     _URL_RE = re.compile(r"(?:https?://|www\.)[^\s]+")
     # The search query is the user's message as typed, so anything longer than
     # this is a paste or a brief rather than a query and is never sent.
-    _WEB_SEARCH_MAX_CHARS = 300
+    _WEB_SEARCH_MAX_CHARS = MAX_SEARCH_QUERY_CHARS
 
     def _should_use_web_search(self, message: str) -> bool:
         """Return True only for a short message with a link, a domain or a
@@ -4869,6 +4869,8 @@ def get_chat_history(session_id: str):
         for msg in reversed(messages):  # Reverse to get chronological order
             msg_data = {
                 "id": str(msg.id),
+                # The row id as a number: what a thumb names (ChatPage, MessageItem).
+                "message_id": msg.id,
                 "role": msg.role,
                 "content": msg.content,
                 "timestamp": msg.timestamp.isoformat() if msg.timestamp else None
@@ -4877,11 +4879,12 @@ def get_chat_history(session_id: str):
             # imageUrl is the turn's primary picture; imageUrls lists every
             # picture of a multi-picture turn, in the order they were attached.
             if msg.extra_data and isinstance(msg.extra_data, dict):
-                for key in ('imageUrl', 'imageUrls', 'imageFileName', 'messageType',
-                            'relatedImageUrl', 'imageAnalysis', 'analysisDetails',
-                            'generatedImages', 'agentThinkingSteps',
-                            'orchestratorPlan', 'orchestratorPlanId',
-                            'web_search_offer'):
+                flattened = ('imageUrl', 'imageUrls', 'imageFileName', 'messageType',
+                             'relatedImageUrl', 'imageAnalysis', 'analysisDetails',
+                             'generatedImages', 'agentThinkingSteps',
+                             'orchestratorPlan', 'orchestratorPlanId',
+                             'web_search_offer')
+                for key in flattened:
                     if key in msg.extra_data:
                         msg_data[key] = msg.extra_data[key]
                 # Restore tool call steps for unified chat rendering
@@ -4890,6 +4893,13 @@ def get_chat_history(session_id: str):
                     # way the live chat:tool_call event shows them.
                     msg_data['toolCalls'] = display_params(msg.extra_data['steps'])
                     msg_data['isUnifiedChat'] = True
+                # Every other saved field (feedback, thinking, verified,
+                # provenance, ...) as extra_data, where the chat page reads it
+                # after a refresh.
+                rest = {k: v for k, v in msg.extra_data.items()
+                        if k not in flattened and k != 'steps'}
+                if rest:
+                    msg_data['extra_data'] = display_params(rest)
             formatted_messages.append(msg_data)
 
         # Check if there are more messages

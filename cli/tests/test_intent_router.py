@@ -52,13 +52,15 @@ class TestResolveReplLine:
     def test_slash_passthrough(self):
         assert resolve_repl_line("/agents list") is None
 
-    def test_local_coding_intents(self, pytest_only_path):
-        assert resolve_repl_line("read repl.py") == ("read", ["repl.py"])
-        assert resolve_repl_line("grep TODO in cli") == ("grep", ["TODO in cli"])
-        assert resolve_repl_line("ls cli/llx") == ("ls", ["cli/llx"])
-        assert resolve_repl_line("edit foo.py fix the bug") == ("edit", ["foo.py fix the bug"])
-        assert resolve_repl_line("run pytest") == ("run", ["pytest"])
-        assert resolve_repl_line("todo add write tests") == ("todo", ["add write tests"])
+    def test_local_coding_intents(self, tmp_path, pytest_only_path):
+        (tmp_path / "repl.py").write_text("")
+        (tmp_path / "foo.py").write_text("")
+        assert resolve_repl_line("read repl.py", cwd=tmp_path) == ("read", ["repl.py"])
+        assert resolve_repl_line("grep TODO in cli", cwd=tmp_path) == ("grep", ["TODO in cli"])
+        assert resolve_repl_line("ls cli/llx", cwd=tmp_path) == ("ls", ["cli/llx"])
+        assert resolve_repl_line("edit foo.py fix the bug", cwd=tmp_path) == ("edit", ["foo.py fix the bug"])
+        assert resolve_repl_line("run pytest", cwd=tmp_path) == ("run", ["pytest"])
+        assert resolve_repl_line("todo add write tests", cwd=tmp_path) == ("todo", ["add write tests"])
 
     def test_image_generation_intents(self):
         assert resolve_repl_line("generate an image of the batmobile") == (
@@ -172,3 +174,84 @@ class TestCommandWordsInEnglish:
     def test_other_command_tree_lines_unchanged(self):
         assert resolve_repl_line("files list") == ("files", ["list"])
         assert resolve_repl_line("memory clear") == ("memory", ["clear"])
+
+
+class TestEnglishSentencesAreChat:
+    """A sentence that starts with a command word is chat unless the rest of the
+    line has the command's shape: an existing file, a subcommand, a command name."""
+
+    @pytest.fixture
+    def folder(self, tmp_path):
+        (tmp_path / "foo.py").write_text("print(1)\n")
+        (tmp_path / "notes.md").write_text("")
+        (tmp_path / "cli").mkdir()
+        return tmp_path
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "help me write a cover letter",
+            "help me",
+            "fix my cover letter wording",
+            "update the plan for next week",
+            "implement a linked list in C",
+            "find a good pizza place nearby",
+            "search for flights to Lisbon",
+            "show me how closures work",
+            "read me a bedtime story",
+            "view from the top of the tower",
+            "list three ideas for dinner",
+            "listen to this idea",
+            "directions to the station",
+            "tasks for today",
+            "taskbar keeps disappearing",
+            "generate ideas for a party",
+            "rules for a board game",
+            "agents of shield",
+            "memory of my grandmother",
+            "gpu prices are crazy",
+            "tools for woodworking",
+            "suggest a name for my dog",
+            "doctor who episodes",
+            "status of my order",
+            "web design trends this year",
+        ],
+    )
+    def test_sentence_is_chat(self, line, folder):
+        assert resolve_repl_line(line, cwd=folder) is None
+
+    @pytest.mark.parametrize(
+        "line, expected",
+        [
+            ("read foo.py", ("read", ["foo.py"])),
+            ("read foo.py 10 20", ("read", ["foo.py 10 20"])),
+            ("show notes.md", ("read", ["notes.md"])),
+            ("view file foo.py", ("read", ["foo.py"])),
+            ("cat anything.txt", ("read", ["anything.txt"])),
+            ("fix foo.py the off-by-one", ("edit", ["foo.py the off-by-one"])),
+            ("update notes.md add a heading", ("edit", ["notes.md add a heading"])),
+            ("find TODO", ("grep", ["TODO"])),
+            ("find TODO in cli", ("grep", ["TODO in cli"])),
+            ("search resolve_repl_line", ("grep", ["resolve_repl_line"])),
+            ("grep anything at all", ("grep", ["anything at all"])),
+            ("list", ("ls", [])),
+            ("list files", ("ls", [])),
+            ("list cli", ("ls", ["cli"])),
+            ("list files in cli", ("ls", ["cli"])),
+            ("ls -la", ("ls", ["-la"])),
+            ("todo", ("todo", [])),
+            ("tasks list", ("todo", ["list"])),
+            ("todo done 2", ("todo", ["done 2"])),
+            ("help", ("help", [])),
+            ("help agents", ("help", ["agents"])),
+            ("web images", ("web", ["images"])),
+            ("tools", ("tools", [])),
+            ("doctor --repair", ("doctor", ["--repair"])),
+            ("generate csv report", ("generate", ["csv", "report"])),
+            ("files list", ("files", ["list"])),
+            ("agents info 3", ("agents", ["info", "3"])),
+            ("logs tail", ("logs", ["tail"])),
+        ],
+    )
+    def test_command_form_still_runs(self, line, expected, folder):
+        assert resolve_repl_line(line, cwd=folder) == expected

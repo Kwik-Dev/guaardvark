@@ -32,6 +32,19 @@ BARE_ONLY_COMMANDS: frozenset[str] = frozenset(
 # resumes session 3, "history of rome" is chat.
 BARE_OR_NUMBER_COMMANDS: frozenset[str] = frozenset({"history"})
 
+# Commands that read no words after their name, only options. Typed without a
+# slash they run bare or with options ("doctor --repair"): "doctor who
+# episodes", "tools for woodworking", "suggest a name for my dog" and "status
+# of my order" are chat.
+OPTIONS_ONLY_COMMANDS: frozenset[str] = frozenset(
+    {"status", "health", "doctor", "dashboard", "tools", "context", "suggest", "skills"}
+)
+
+# Typed without a slash these run bare or with one more word: a command name
+# for help ("help agents"), a page for web ("web images"), a theme name.
+# "help me write a cover letter" and "web design trends" are chat.
+ONE_WORD_COMMANDS: frozenset[str] = frozenset({"help", "web", "theme"})
+
 
 COMMAND_TREE: dict[str, list[str]] = OrderedDict(
     [
