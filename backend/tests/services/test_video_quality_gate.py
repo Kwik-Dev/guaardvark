@@ -326,6 +326,64 @@ def test_a_clip_whose_palette_left_the_keyframe_is_flagged_as_colour_drift(made,
     assert "identity" not in flag["message"]
 
 
+# ── The keyframe match, once the image encoder is installed ──────────────────
+
+@pytest.fixture
+def encoder(tmp_path, monkeypatch):
+    """A verified install of the pinned encoder with stand-in weights (the
+    embedding of a picture is its mean colour)."""
+    from backend.services import identity_encoder
+    from backend.tests.fixtures import identity_encoder_stub as stub
+
+    root = tmp_path / "identity_encoder"
+    monkeypatch.setattr(identity_encoder, "install_root", lambda: root)
+    stub.fake_install(root)
+    monkeypatch.setattr(vcm, "_image_encoder_classes", stub.stub_classes)
+    monkeypatch.setattr(vcm, "review_video_quality", lambda *a, **k: vcm.not_reviewed("no_frames"))
+    vcm._ENCODER_CACHE.clear()
+    yield
+    vcm._ENCODER_CACHE.clear()
+
+
+def test_keyframe_match_is_none_without_the_encoder(made, tmp_path):
+    """None tells the caller to fall back to the colour match; nothing is loaded."""
+    assert vcm.keyframe_match(_keyframe(tmp_path, clips._scene(0)), made["clean"]) is None
+
+
+def test_with_the_encoder_a_clip_records_a_keyframe_match_instead_of_colour(made, tmp_path, encoder):
+    quality = _attach(made, keyframe_path=_keyframe(tmp_path, clips._scene(0)))
+    match = quality["keyframe_match"]
+    assert "colour_match" not in quality
+    assert match["label"] == "keyframe match" and match["method"] == "embed"
+    assert match["frame_index"] == clips.FRAMES // 2 and match["frames"] == clips.FRAMES
+    assert match["threshold"] == vcm.QUALITY_THRESHOLDS["keyframe_match_floor"]["value"]
+    assert match["score"] >= match["threshold"]
+    assert not any(code.startswith("low_keyframe_match") for code in quality["flag_reasons"])
+
+
+def test_a_clip_that_no_longer_shows_its_keyframe_is_held(made, tmp_path, encoder):
+    import numpy as np
+
+    magenta = np.zeros((clips.HEIGHT, clips.WIDTH, 3), dtype=np.uint8)
+    magenta[..., 0] = magenta[..., 2] = 255
+    quality = _attach(made, keyframe_path=_keyframe(tmp_path, magenta))
+    flag = next(f for f in quality["flags"] if f["code"] == "low_keyframe_match")
+    assert flag["message"].startswith("the middle of the clip no longer shows what the keyframe showed")
+    assert f"at frame {clips.FRAMES // 2} of {clips.FRAMES}" in flag["message"]
+    assert vcm.review_hold(quality)["codes"] == ["low_keyframe_match"]
+
+
+def test_an_encoder_that_cannot_score_falls_back_to_the_colour_match(made, tmp_path, encoder, monkeypatch):
+    def broken(*_a, **_k):
+        raise RuntimeError("out of memory")
+
+    monkeypatch.setattr(vcm, "_image_embedding", broken)
+    quality = _attach(made, keyframe_path=_keyframe(tmp_path, clips._scene(0)))
+    assert quality["keyframe_match"]["score"] is None
+    assert "could not run" in quality["keyframe_match"]["reason"]
+    assert quality["colour_match"]["label"] == "colour match"
+
+
 # ── What a failed check does (T014: needs review, no automatic re-render) ────
 
 def test_every_flag_has_a_declared_outcome():

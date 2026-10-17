@@ -9,6 +9,7 @@ import { Box, Stack, Typography } from "@mui/material";
 import QualityFlagsPill from "./QualityFlagsPill";
 import VlmReviewPill from "./VlmReviewPill";
 import ColourMatchPill from "./ColourMatchPill";
+import KeyframeMatchPill from "./KeyframeMatchPill";
 import ClipReviewHold, { ReviewStatePill } from "./ClipReviewHold";
 
 /**
@@ -35,6 +36,7 @@ const CutQualityList = ({ clips, onApprove, onRerender, busy = false, clipUrl })
               <Typography variant="body2" sx={{ mr: 0.5 }}>Cut #{c.index}</Typography>
               <ReviewStatePill review={c.review} />
               <QualityFlagsPill quality={c.quality} />
+              <KeyframeMatchPill quality={c.quality} />
               <ColourMatchPill quality={c.quality} />
               <VlmReviewPill review={c.quality?.vlm_review} />
               {!c.review && !(c.quality?.flags || []).length && (

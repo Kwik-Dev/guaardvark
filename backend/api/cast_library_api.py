@@ -1288,3 +1288,33 @@ def make_default_lora(subject_id, base_model_id):
         return jsonify({"error": str(e)}), 400
     db.session.commit()
     return jsonify({"subject": _serialize(s)})
+
+
+# ── The identity check's image encoder (Settings > Generation) ───────────────
+
+@bp.get("/identity-check")
+def identity_check_status():
+    """The encoder the identity check reads: what it is, whether it is installed,
+    which check the post-train smoke still gets, and any install in progress."""
+    from backend.services import identity_encoder
+    return jsonify(identity_encoder.status()), 200
+
+
+@bp.post("/identity-check/install")
+def identity_check_install():
+    """Download the encoder. Its Install button is the only path that fetches it."""
+    from backend.services import identity_encoder
+    try:
+        return jsonify(identity_encoder.start_install()), 202
+    except identity_encoder.Refused as e:
+        return jsonify({**identity_encoder.status(), "error": str(e)}), e.status
+
+
+@bp.post("/identity-check/remove")
+def identity_check_remove():
+    """Delete the encoder's files; the checks fall back to what ran before it."""
+    from backend.services import identity_encoder
+    try:
+        return jsonify(identity_encoder.remove()), 200
+    except identity_encoder.Refused as e:
+        return jsonify({**identity_encoder.status(), "error": str(e)}), e.status
