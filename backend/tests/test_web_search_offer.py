@@ -283,6 +283,51 @@ class TestUnifiedChatOffer:
         assert e._web_search_offer(CURRENT_INFO, failed, "sess-offer")["action"] == "search"
 
 
+# ── Realtime nudge ──────────────────────────────────────────────────────────
+
+_NUDGE = "You MUST call web_search"
+_READ_CALL = "<tool_call>\n<tool>read_code</tool>\n<filepath>notes.md</filepath>\n</tool_call>"
+
+
+def _prompts_after(monkeypatch, first_reply):
+    """The prompts the model sees on a realtime question whose first reply is
+    ``first_reply``, with web_search and read_code both succeeding."""
+    e = _engine(monkeypatch, [first_reply, "Here is what I found."])
+    e.registry = _Registry(["web_search", "read_code"], _Result(True, "Results."))
+    seen = []
+    scripted = e._call_llm_streaming
+
+    def _record(messages, *args, **kwargs):
+        seen.append(" ".join(str(m.get("content", "")) for m in messages))
+        return scripted(messages, *args, **kwargs)
+
+    e._call_llm_streaming = _record
+    _run(e, CURRENT_INFO)
+    return seen
+
+
+class TestRealtimeNudge:
+    def test_no_nudge_after_a_search_followed_by_another_tool(self, monkeypatch, web_access, keyword_classifier):
+        seen = _prompts_after(monkeypatch, _search_call("merger news") + "\n" + _READ_CALL)
+        assert len(seen) >= 2
+        assert _NUDGE not in seen[1]
+
+    def test_nudge_when_no_search_ran(self, monkeypatch, web_access, keyword_classifier):
+        seen = _prompts_after(monkeypatch, _READ_CALL)
+        assert len(seen) >= 2
+        assert _NUDGE in seen[1]
+
+    def test_web_search_succeeded(self):
+        from backend.services.unified_chat_engine import _web_search_succeeded
+
+        ran = [{"tool_calls": [{"tool_name": "web_search", "success": True},
+                               {"tool_name": "read_code", "success": True}]}]
+        failed = [{"tool_calls": [{"tool_name": "web_search", "success": False}]}]
+        assert _web_search_succeeded(ran) is True
+        assert _web_search_succeeded(failed) is False
+        assert _web_search_succeeded([]) is False
+
+
 # ── Enhanced chat ───────────────────────────────────────────────────────────
 
 

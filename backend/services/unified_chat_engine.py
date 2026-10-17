@@ -1149,6 +1149,15 @@ _KB_SECONDARY_LABEL = (
 )
 
 
+def _web_search_succeeded(steps: List[Dict[str, Any]]) -> bool:
+    """True once a web_search call succeeded in any step of this turn."""
+    return any(
+        (tc.get("tool_name") if isinstance(tc, dict) else getattr(tc, "tool_name", None)) == "web_search"
+        and (tc.get("success") if isinstance(tc, dict) else getattr(tc, "success", False))
+        for step in steps for tc in (step.get("tool_calls") or [])
+    )
+
+
 def _held_rag_ready(step_info: Dict[str, Any]) -> bool:
     """True once this iteration ran search_codebase, with hits or without."""
     return any(
@@ -3526,12 +3535,7 @@ class UnifiedChatEngine:
                 and self._is_realtime_query(message)
                 and not getattr(self, "_local_facts_this_turn", False)
             ):
-                web_search_called = any(
-                    tc.tool_name == "web_search"
-                    for s in steps for tc_info in s.get("tool_calls", [])
-                    if (tc_info.get("tool_name") == "web_search" and tc_info.get("success"))
-                )
-                if not web_search_called:
+                if not _web_search_succeeded(steps):
                     log_decision("unified_chat", "REALTIME_NUDGE", {
                         "iteration": iteration, "session_id": session_id,
                     })
