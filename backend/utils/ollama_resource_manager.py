@@ -152,6 +152,23 @@ def is_text_chat_model(model_name: str) -> bool:
     return not (rec.exists and rec.embedding) and not decides_by_name(model_name)
 
 
+def known_not_to_chat(model_name: str) -> bool:
+    """True when Ollama describes the model and it cannot answer a chat
+    request: no "completion", or an embedding or decision model.
+
+    For a model a person chose. is_text_chat_model is the rule for picking a
+    default and its name rule also leaves out vision-named models (qwen3-vl,
+    llava) that chat fine. A model Ollama cannot describe is not known either way.
+    """
+    if not model_name:
+        return False
+    from backend.services.model_capabilities import capabilities_for
+    rec = capabilities_for(model_name, with_vision=False)
+    if not (rec.exists and rec.capabilities):
+        return False
+    return not rec.completion or rec.embedding or rec.decision
+
+
 def _gpu_memory_mb() -> Optional[tuple]:
     """(free_mb, total_mb) of the first visible GPU, or None."""
     index = 0
