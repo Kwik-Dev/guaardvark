@@ -1863,9 +1863,16 @@ if ! check_with_cache "npm_check" check_npm; then
 fi
 
 OLLAMA_AVAILABLE=1
+# The installer is for an Ollama these scripts manage, so it never runs for
+# someone using their own (GUAARDVARK_OLLAMA_EXTERNAL=1) or with the plugin off.
+OLLAMA_INSTALL_WANTED=1
+if ollama_flag_on "${GUAARDVARK_OLLAMA_EXTERNAL:-}" \
+   || [ "$(plugin_effective_enabled "ollama" "$SCRIPT_DIR/plugins/ollama/plugin.json")" = "False" ]; then
+    OLLAMA_INSTALL_WANTED=0
+fi
 if ! command_exists "ollama"; then
     vader_warn "ollama command line tool not found."
-    if command_exists apt-get && [ "$FAST_START" -ne 1 ]; then
+    if command_exists apt-get && [ "$FAST_START" -ne 1 ] && [ "$OLLAMA_INSTALL_WANTED" -eq 1 ]; then
         # Ollama installer's tarball is zstd-compressed — extraction silently fails on minimal images without it.
         if ! command_exists zstd; then
             vader_info "Installing zstd (required by ollama installer)..."
