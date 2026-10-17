@@ -265,6 +265,9 @@ export default defineConfig(({ mode }) => {
     chunkSizeWarningLimit: 1000,
     rollupOptions: {
       plugins: [rollupNodePolyFill()],
+      // Rolldown's timing report names the terser pass on every build. That
+      // cost is expected for this bundle, so the report is only noise.
+      checks: { bundlerTimings: false },
       output: {
         // Function form: Vite 8 bundles with Rolldown, which does not accept
         // the object form ("manualChunks is not a function"). Same groups.
@@ -283,6 +286,12 @@ export default defineConfig(({ mode }) => {
         drop_debugger: true,
         pure_funcs: ['console.debug'],  // Only strip debug, keep error/warn/log
       },
+    },
+  },
+  // Web workers are bundled separately and do not inherit build.rollupOptions.
+  worker: {
+    rolldownOptions: {
+      checks: { bundlerTimings: false },
     },
   },
   server: {
