@@ -392,6 +392,13 @@ class OutreachDraftPostTool(BaseTool):
             # server-side), which is enough context for the persona to draft a
             # comment that engages with the actual video topic.
             if not thread_context and target_url:
+                from backend.utils.settings_utils import web_access_block_reason
+                blocked = web_access_block_reason("read the thread at that link")
+                if blocked:
+                    return ToolResult(
+                        success=False,
+                        error=f"{blocked} Or pass the thread's text as thread_context.",
+                    )
                 try:
                     from backend.api.social_outreach_api import (
                         _scout_reddit_url, _scout_generic_url,
