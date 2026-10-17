@@ -184,6 +184,11 @@ def unified_chat():
     # The same id must reach the brain and the engine, so the ack, the socket
     # events and the saved row all name one turn.
     options["request_id"] = request_id
+    try:
+        from backend.services.turn_router import chat_surface
+        options["surface"] = chat_surface(session_id, is_voice_message).value
+    except Exception as e:
+        logger.debug(f"chat surface not set: {e}")
 
     # Also forward to direct-tool for slash commands etc.
     if project_root and "project_root" not in options:
@@ -354,6 +359,12 @@ def unified_chat():
                     eng.app = app
                     rid = str(uuid.uuid4())
                     disp = message or f"/{options.get('slash_command', d_tool)}"
+                    try:
+                        from backend.services.turn_router import direct_turn
+                        with app.app_context():
+                            direct_turn(disp, d_tool, surface=options.get("surface"), request_id=rid)
+                    except Exception as _turn_e:
+                        logger.debug(f"direct turn not recorded: {_turn_e}")
                     with app.app_context():
                         eng._run_direct_tool_execution(d_tool, d_params, session_id, emit_fn, rid, disp, options)
                     return  # done, direct path emitted everything
