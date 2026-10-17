@@ -485,7 +485,8 @@ def _engine_intercept(msg: str, opts: Mapping[str, Any], facts: Mapping[str, Any
         if ue.user_wants_video_generation(msg) and "generate_video" in tools:
             return Route.VIDEO, {"tool": "generate_video"}
         if (ue.user_wants_image_generation(msg) and "generate_image" in tools
-                and sanitize_image_prompt(msg)):
+                and sanitize_image_prompt(msg)
+                and (image or ue.earlier_picture_reference(msg) != "changed")):
             return Route.NEW_IMAGE, {"tool": "generate_image"}
     return None
 

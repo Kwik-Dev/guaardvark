@@ -75,6 +75,19 @@ WRITE_THE_TEXT_NOTE = (
     "tool is needed. Start directly with the text."
 )
 
+# The same note for "rewrite this so ..." over a pasted scene. Measured on
+# gemma4:e2b replaying two such turns, 4 runs each: offered the media tools, the
+# model called generate_image or wrote the call out as text in 8 of 8. With
+# WRITE_THE_TEXT_NOTE it wrote text, but half the replies to the first turn were
+# 34-word restatements of the instruction. This wording gave the whole rewritten
+# scene in 8 of 8 (188 words; 106-116 on the second turn, with the asked-for
+# changes made).
+REWRITE_THE_TEXT_NOTE = (
+    "Rewrite the text the user pasted with the changes they asked for, and reply with the whole "
+    "rewritten text, in full. Keep everything they did not ask to change. They want the text "
+    "itself, not a picture, so no tool is needed. Start directly with the text."
+)
+
 # Sent in the user turn with a picture attached mid-conversation. Without it a
 # small vision model describes the picture and stops, even when it is a render
 # of the prompt it just wrote and the user is saying it came out wrong.

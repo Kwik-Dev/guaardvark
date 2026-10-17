@@ -12,7 +12,8 @@ Generation shortcuts (image, video, music video) start a job from a request
 found anywhere in the message, and stand down for :data:`HOW_TO_QUESTION_RE`,
 for a request turned down with :func:`declines_media` and, for video,
 :data:`VIDEO_SOFTWARE_PATTERN`. :func:`asks_for_writing` marks a request for
-text, which the chat model answers without its media tools.
+text, which the chat model answers without its media tools, and
+:func:`asks_for_rewrite` the kind of it that reworks text already given.
 """
 
 from __future__ import annotations
@@ -98,12 +99,16 @@ def declines_media(message: str) -> bool:
     return bool(_DECLINES_MEDIA_RE.search(message or ""))
 
 
+_REWRITE_VERB = r"(?:re-?write|revise)"
+
 # A request for text: a sentence that opens with write, draft, describe and the
-# like ("please write 300 words describing ...", "No. Write the words."), or asks
-# for a word count, a prompt for some model, or a description of something.
+# like ("please write 300 words describing ...", "No. Write the words.", "rewrite
+# this so ..."), or asks for a word count, a prompt for some model, or a
+# description of something.
 _WRITING_REQUEST_RE = re.compile(
     r"(?:^|[.!?]\s+)" + COMMAND_LEAD_IN
-    + r"(?:write|draft|compose|describe|outline|brainstorm|come\s+up\s+with|craft)\b"
+    + r"(?:write|draft|compose|describe|outline|brainstorm|come\s+up\s+with|craft|"
+    + _REWRITE_VERB + r")\b"
     r"|\b\d+\s*\+?\s*(?:or\s+more\s+)?words\b"
     r"|\b(?:an?|the|your)\s+(?:[\w-]+\s+){0,2}?prompts?\s+(?:for|to\s+use|i\s+can\s+use)\b"
     r"|\b(?:an?|the)\s+(?:\w+\s+)?description\s+of\b",
@@ -114,3 +119,12 @@ _WRITING_REQUEST_RE = re.compile(
 def asks_for_writing(message: str) -> bool:
     """True when the message asks for written text rather than a rendered result."""
     return bool(_WRITING_REQUEST_RE.search(message or ""))
+
+
+_REWRITE_REQUEST_RE = re.compile(r"(?:^|[.!?]\s+)" + COMMAND_LEAD_IN + _REWRITE_VERB + r"\b",
+                                 re.IGNORECASE)
+
+
+def asks_for_rewrite(message: str) -> bool:
+    """True when the message asks for text it pastes or points at to be rewritten."""
+    return bool(_REWRITE_REQUEST_RE.search(message or ""))

@@ -128,6 +128,12 @@ def test_the_legacy_route_is_always_a_candidate(tmp_path):
     assert turn.route in turn.candidates and turn.candidates[0] is tr.Route.CHAT
 
 
+def test_a_picture_from_earlier_with_a_change_is_left_to_the_model(tmp_path):
+    assert _route(tmp_path, "generate that image please", dry=True).route is tr.Route.NEW_IMAGE
+    turn = _route(tmp_path, "generate that image, but make the sky stormy", dry=True)
+    assert turn.route is not tr.Route.NEW_IMAGE
+
+
 def test_flags_follow_the_engine(tmp_path):
     turn = _route(tmp_path, "hi", dry=True)
     assert turn.route is tr.Route.SOCIAL and turn.flags["skip_tools"] is True and turn.flags["use_rag"] is False
