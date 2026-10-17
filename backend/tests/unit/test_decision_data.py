@@ -1,13 +1,11 @@
 """The declared decision questions are complete, in range, and switched off by default.
 
-``wording_sha`` here is the fingerprint a MEASURED_ACCURACY row records: a row
-holds only while the key, instructions and choices it was measured with are
-unchanged.
+``wording_sha`` (backend/services/decision_prompt.py) is the fingerprint a
+MEASURED_ACCURACY row records: a row holds only while the key, instructions and
+choices it was measured with are unchanged.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 
 import pytest
@@ -24,6 +22,7 @@ from backend.services.decision_data import (
     SOURCES,
     TYPES,
 )
+from backend.services.decision_prompt import wording_sha
 from backend.tests.fixtures.decision_sets import load_set
 
 FIELDS = {
@@ -34,12 +33,6 @@ SNAKE_CASE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$")
 GENERIC_KEYS = {
     "q", "a", "answer", "result", "output", "response", "decision", "label", "value", "choice", "yes", "ok",
 }
-
-
-def wording_sha(entry: dict) -> str:
-    """First 12 hex digits of the sha256 of the wording a decision model sees."""
-    payload = {"key": entry["key"], "instructions": entry["instructions"], "choices": entry["choices"]}
-    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:12]
 
 
 DECISION_IDS = sorted(DECISIONS)

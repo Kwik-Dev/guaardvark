@@ -37,8 +37,8 @@ Field reference
 
 Measured rows live in MEASURED_ACCURACY, keyed by decision. A row holds only
 for the model build (``digest``, the Ollama manifest digest prefix) and the
-exact wording (``wording_sha``, see backend/tests/unit/test_decision_data.py)
-it was measured with; editing the key, instructions or choices voids it.
+exact wording (``wording_sha``, see backend/services/decision_prompt.py) it
+was measured with; editing the key, instructions or choices voids it.
 """
 from __future__ import annotations
 
