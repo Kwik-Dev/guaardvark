@@ -741,14 +741,17 @@ Each plugin lives in `plugins/<name>/` with a `plugin.json` manifest declaring i
 |---|---|---|
 | **Ollama** | 11434 | Local LLM and embedding inference (chat, RAG, agents) |
 | **ComfyUI** | 8188 | Image + video generation (Wan2.2, CogVideoX, LTX-2.3, LTX-2.5, RIFE, Real-ESRGAN) |
-| **Audio Foundry** | — | Voiceover (Chatterbox / Kokoro / Piper), music (ACE-Step / Suno), SFX/ambience (Stable Audio Open). Dual-venv with torch isolation |
+| **Audio Foundry** | 8206 | Voiceover (Chatterbox / Kokoro / Piper), music (ACE-Step / Suno), SFX/ambience (Stable Audio Open). Dual-venv with torch isolation |
 | **Upscaling** | 8202 | GPU image/video upscaling via spandrel + torch.compile |
 | **Vision Pipeline** | 8201 | Real-time scene narration, camera feed, video chat input |
 | **Swarm** | 8210 | Parallel agent orchestration in isolated worktrees |
-| **LoRA Trainer** | — | Train character/environment/prop LoRAs for the Film Crew (CUDA, bf16) |
+| **LoRA Trainer** | 8203 | Train character/environment/prop LoRAs for the Film Crew (CUDA, bf16) |
 | **Discord Bot** | 8200 | Discord bot integration — chat, image generation, search via Guaardvark backend |
 | **GPU Embedding** | 8204 | GPU-accelerated text embeddings for faster indexing (CPU fallback) |
-| **Training** | — | Vision/servo training data collection and dataset management |
+| **Video Editor** | 8207 | MLT/Shotcut + auto-editor timelines and renders for the Video Editor and music videos (CPU) |
+| **zvec grep** | 7999 | Hybrid code search over a checkout for the agents, by meaning, keyword or ripgrep, as two MCP tools (trial) |
+
+`plugins/training` is not a plugin: it holds command-line scripts for the text fine-tuning pipeline (transcript parsing, quality filtering, fine-tuning, export).
 
 ### Plugins Page (GPU Management)
 - **Plugin cards** — each plugin shows name, description, version, status (running/stopped/starting/error), and health indicator
