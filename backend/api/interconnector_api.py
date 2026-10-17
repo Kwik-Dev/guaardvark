@@ -2109,6 +2109,12 @@ def decide_approval(approval_id: int):
             return validation_error_response("decision must be approve|decline|partial")
 
         approved_files = set(data.get("approved_files") or [])
+        # A partial approval applies only the ticked files, so with none
+        # ticked there is nothing to apply; the push stays pending.
+        if decision == "partial" and not approved_files:
+            return error_response(
+                "Tick at least one file to apply, or decline the whole push.", 400
+            )
         file_sync_service = get_file_sync_service()
 
         files = approval.files_data or "[]"
@@ -2119,7 +2125,7 @@ def decide_approval(approval_id: int):
 
         # Determine files to apply
         files_to_apply = files_list
-        if decision == "partial" and approved_files:
+        if decision == "partial":
             files_to_apply = [f for f in files_list if f.get("path") in approved_files]
 
         apply_results = {"processed": 0, "created": 0, "updated": 0, "conflicts": 0, "errors": 0}
