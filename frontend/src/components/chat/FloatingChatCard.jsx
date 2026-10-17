@@ -82,6 +82,39 @@ const fitToViewport = (position, size, collapsed) => {
   return { position: nextPosition, size: nextSize };
 };
 
+/**
+ * The reply kept when a turn ends without chat:complete: what had streamed,
+ * pictures included. This card renders only the body, reasoning and pictures,
+ * so agent-trail steps go into the text. Returns null when nothing had arrived.
+ */
+const partialReplyMessage = (partial, status) => {
+  const ended = status === "aborted" ? "stopped" : "failed";
+  const steps = partial.agentThinkingSteps || [];
+  const stepText = steps
+    .map((s) => `step ${s.iteration}: ${s.label}${s.reasoning ? ` — ${s.reasoning}` : ""}`)
+    .join("\n");
+  const body = (partial.content || "").trim();
+  const images = partial.images || [];
+  const hasAnything =
+    body || stepText || images.length > 0 || (partial.toolCalls?.length || 0) > 0 || partial.thinking;
+  if (!hasAnything) return null;
+  const composed = [
+    body,
+    stepText ? `--- agent trail (${ended}) ---\n${stepText}` : "",
+  ].filter(Boolean).join("\n\n");
+  return {
+    id: `asst_unified_${Date.now()}_partial`,
+    role: "assistant",
+    content: composed || (images.length > 0 ? "" : `(${ended} before any output)`),
+    toolCalls: partial.toolCalls || [],
+    thinking: partial.thinking || "",
+    generatedImages: images,
+    truncated: false,
+    timestamp: new Date().toISOString(),
+    status,
+  };
+};
+
 const FloatingChatCard = () => {
   const theme = useTheme();
 
@@ -527,13 +560,15 @@ const FloatingChatCard = () => {
     }
     finishVoiceReply();
 
-    if (result.content || result.thinking) {
+    const generatedImages = result.generatedImages || [];
+    if (result.content || result.thinking || generatedImages.length > 0) {
       addMessage({
         id: `asst_unified_${Date.now()}`,
         role: "assistant",
         content: result.content || "",
         toolCalls: result.toolCalls || [],
         thinking: result.thinking || "",
+        generatedImages,
         truncated: result.truncated === true,
         synthesized: result.synthesized === true,
         timestamp: new Date().toISOString(),
@@ -549,35 +584,10 @@ const FloatingChatCard = () => {
   }, [addMessage, setIsSending, sessionId, socketRef, ttsEnabled, speak, finishVoiceReply]);
 
   const handleStop = useCallback(() => {
-    // Salvage whatever streamed so far. Floating card renders only
-    // msg.content, so we flatten any thinking-trail steps into the body
-    // text — otherwise the trail vanishes when the bubble unmounts.
+    // Salvage whatever streamed so far, or it vanishes when the bubble unmounts.
     if (streamingMessageRef.current) {
-      const partial = streamingMessageRef.current.getPartialState() || {};
-      const steps = partial.agentThinkingSteps || [];
-      const stepText = steps.length
-        ? steps
-            .map((s) => `step ${s.iteration}: ${s.label}${s.reasoning ? ` — ${s.reasoning}` : ""}`)
-            .join("\n")
-        : "";
-      const body = (partial.content || "").trim();
-      const hasAnything = body || stepText || (partial.toolCalls?.length || 0) > 0 || partial.thinking;
-      if (hasAnything) {
-        const composed = [
-          body,
-          stepText ? `--- agent trail (stopped) ---\n${stepText}` : "",
-        ].filter(Boolean).join("\n\n");
-        addMessage({
-          id: `asst_unified_${Date.now()}_partial`,
-          role: "assistant",
-          content: composed || "(stopped before any output)",
-          toolCalls: partial.toolCalls || [],
-          thinking: partial.thinking || "",
-          truncated: false,
-          timestamp: new Date().toISOString(),
-          status: "aborted",
-        });
-      }
+      const kept = partialReplyMessage(streamingMessageRef.current.getPartialState() || {}, "aborted");
+      if (kept) addMessage(kept);
     }
 
     // Abort the chat stream AND hard-kill the agent task — the socket

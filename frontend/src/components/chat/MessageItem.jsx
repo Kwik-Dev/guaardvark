@@ -27,6 +27,7 @@ import { BASE_URL } from "../../api/apiClient";
 import AgentResultDisplay from "./AgentResultDisplay";
 import { StatusChip } from "../../utils/familyColors";
 import ToolCallCard from "./ToolCallCard";
+import GeneratedMedia from "./GeneratedMedia";
 import ThinkingCard from "./ThinkingCard";
 import SynthesizedAnswerChip from "./SynthesizedAnswerChip";
 import { isSynthesizedMessage, isSynthesizedStep } from "./synthesizedAnswer";
@@ -551,66 +552,12 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate, 
         )}
 
         {/* Generated images and videos (from agent tool calls) */}
-        {message.generatedImages && message.generatedImages.length > 0 && (
-          <Box sx={{ mb: 1 }}>
-            {message.generatedImages.map((img, idx) => (
-              <Box key={idx} sx={{ mb: 1 }}>
-                {img.type === "video" ? (
-                  <Box
-                    component="video"
-                    controls
-                    autoPlay
-                    loop
-                    muted
-                    sx={{
-                      maxWidth: 400,
-                      maxHeight: 400,
-                      width: "auto",
-                      height: "auto",
-                      borderRadius: 1,
-                      border: "1px solid",
-                      borderColor: "divider",
-                      display: "block",
-                      cursor: "pointer",
-                    }}
-                    src={guardedMediaSrc(img.url)}
-                  />
-                ) : (
-                  <CardMedia
-                    component="img"
-                    sx={{
-                      maxWidth: 400,
-                      maxHeight: 400,
-                      width: "auto",
-                      height: "auto",
-                      borderRadius: 1,
-                      border: "1px solid",
-                      borderColor: "divider",
-                      objectFit: "contain",
-                      cursor: "pointer",
-                    }}
-                    image={guardedMediaSrc(img.url)}
-                    alt={img.alt || "Generated image"}
-                    onClick={() => {
-                      const images = message.generatedImages.filter(i => i.type !== "video").map(i => ({ url: i.url, name: i.alt || i.caption || "Generated image" }));
-                      const idx = images.findIndex(i => i.url === img.url);
-                      openLightbox(img.url, img.alt || "Generated image", images, Math.max(0, idx));
-                    }}
-                  />
-                )}
-                {img.caption && (
-                  <Typography
-                    variant="caption"
-                    color="text.secondary"
-                    sx={{ mt: 0.5, display: "block", fontStyle: "italic" }}
-                  >
-                    {img.caption}
-                  </Typography>
-                )}
-              </Box>
-            ))}
-          </Box>
-        )}
+        <GeneratedMedia
+          items={message.generatedImages}
+          onOpenPicture={(pictures, index) =>
+            openLightbox(pictures[index].url, pictures[index].name, pictures, index)
+          }
+        />
 
         {/* Thinking context — persisted from the streaming phase */}
         {message.thinkingText && message.toolCalls?.length > 0 && (
