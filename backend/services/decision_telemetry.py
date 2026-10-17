@@ -18,7 +18,8 @@ The file is capped at ``MAX_BYTES``; on reaching it the file moves to ``.1``
 disk. A turn row is 1.1-1.3 KB, so each file holds about 8,000 turns and the
 three together a 14-day shadow window at well over 1,000 turns a day.
 
-Set ``GUAARDVARK_DECISION_TELEMETRY=false`` to write nothing.
+Off by default. Set ``GUAARDVARK_DECISION_TELEMETRY=true`` to write rows (a shadow
+run of the decision layer needs them).
 """
 
 from __future__ import annotations
@@ -45,8 +46,8 @@ _write_lock = threading.Lock()
 
 
 def telemetry_enabled() -> bool:
-    """False when GUAARDVARK_DECISION_TELEMETRY is set to false, 0, off or no."""
-    return os.environ.get(ENV_SWITCH, "true").strip().lower() not in ("false", "0", "off", "no")
+    """True only when GUAARDVARK_DECISION_TELEMETRY is set to true, 1, on or yes."""
+    return os.environ.get(ENV_SWITCH, "").strip().lower() in ("true", "1", "on", "yes")
 
 
 def telemetry_path() -> str:
