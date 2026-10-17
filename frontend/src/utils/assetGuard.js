@@ -10,22 +10,26 @@ export function isLocalAssetUrl(url) {
   if (!url || typeof url !== "string") return false;
   const u = url.trim();
   if (!u) return false;
-  // Relative paths + inline data are always local.
-  if (u.startsWith("/") || u.startsWith("./") || u.startsWith("../")) return true;
   if (u.startsWith("data:") || u.startsWith("blob:")) return true;
+  // Resolve before judging: "//host/x" and "/\host/x" look relative, but the
+  // browser fetches both from another host.
   let host;
   try {
     host = new URL(u, window.location.origin).hostname;
   } catch {
-    // Unparseable but carries no scheme → treat as a relative/local reference.
-    return !/^[a-z][a-z0-9+.-]*:\/\//i.test(u);
+    // The browser cannot resolve it either, so there is nothing to load.
+    return false;
   }
   if (!host) return true;
   if (host === window.location.hostname) return true;
-  if (host === "127.0.0.1" || host === "localhost" || host === "::1") return true;
+  if (host === "127.0.0.1" || host === "localhost" || host === "[::1]") return true;
   // Private LAN ranges — the app is intentionally reachable on the local network.
-  if (/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host)) return true;
-  return false;
+  // IPv4 literals only: "10.example.com" is a public name.
+  const ip = host.match(/^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/);
+  if (!ip) return false;
+  const a = Number(ip[1]);
+  const b = Number(ip[2]);
+  return a === 10 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31);
 }
 
 // Inline SVG shown in place of a blocked remote image. Pure data URI — no network.
