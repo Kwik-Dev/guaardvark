@@ -19,18 +19,28 @@ import {
 import { editPublish, fetchProviders, preflightPublishEdit } from "../../api/connectionsService";
 import { ActionButton } from "../settings/ui";
 import PostFields, { useDebounced } from "../social/PostFields";
-import { describeRateLimit } from "../social/platformRules";
+import { defaultVisibility, describeRateLimit, visibilityChoices } from "../social/platformRules";
 import { draftedBy, editChanges, editableValues, withDisclosureLine } from "./publishEdit";
 
 /**
  * @param {boolean}  open
  * @param {object}   record      the publish record (GET /publishes/<id>)
  * @param {object}   [spec]      its provider spec; fetched when not given
+ * @param {object}   [connection] its connection (GET /connections), for the
+ *                               visibilities it has turned on
  * @param {string}   [accountLabel]
  * @param {function} onClose
  * @param {function} onSaved     called with the saved record and the changed fields
  */
-const EditPublishDialog = ({ open, record: givenRecord, spec: givenSpec = null, accountLabel = "", onClose, onSaved }) => {
+const EditPublishDialog = ({
+  open,
+  record: givenRecord,
+  spec: givenSpec = null,
+  connection = null,
+  accountLabel = "",
+  onClose,
+  onSaved,
+}) => {
   // Parents clear the record as they close the dialog; the closing fade
   // keeps showing the last one.
   const lastRecord = useRef(givenRecord);
@@ -105,6 +115,19 @@ const EditPublishDialog = ({ open, record: givenRecord, spec: givenSpec = null, 
   // The preflight answered for the debounced edit, so compare with that text.
   const checkedBody = "body" in debouncedChanges ? debouncedChanges.body : initial?.body;
   const goesOutAs = entry?.body !== undefined && entry.body !== checkedBody ? entry.body : null;
+  // A record without a stored visibility goes out with the platform's
+  // default, so that is what the select shows.
+  const visibilityTargets =
+    spec && values
+      ? [
+          {
+            key: String(record?.connection_id ?? ""),
+            label: accountLabel || platformLabel,
+            value: values.visibility || defaultVisibility(spec),
+            choices: visibilityChoices(spec, connection),
+          },
+        ]
+      : [];
 
   const handleChange = (patch) => {
     setValues((prev) => {
@@ -159,6 +182,8 @@ const EditPublishDialog = ({ open, record: givenRecord, spec: givenSpec = null, 
               specs={[spec]}
               values={values}
               onChange={handleChange}
+              visibilityTargets={visibilityTargets}
+              onVisibilityChange={(_key, value) => handleChange({ visibility: value })}
               preflight={preflight}
               bodyLabel={record?.media_refs?.length ? "Caption" : "Text"}
               showLink={Boolean(spec.capabilities?.supports_link || record?.link_url)}

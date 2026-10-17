@@ -99,6 +99,9 @@ def run(task: Dict[str, Any], update_progress: Callable[[int, str], None]) -> Di
         return _fail(record, verdict.reason)
 
     problems = publish_service.bot_label_problems(caps, connection)
+    problems += publish_service.visibility_problems(
+        connection, publish_service.visibility_for(caps, record.visibility)
+    )
     if problems:
         return _fail(record, problems[0])
 
@@ -119,7 +122,7 @@ def run(task: Dict[str, Any], update_progress: Callable[[int, str], None]) -> Di
             title=record.title,
             link_url=record.link_url,
             tags=_json_list(record.tags),
-            visibility=record.visibility or caps.default_visibility,
+            visibility=publish_service.visibility_for(caps, record.visibility),
             media=media_util.media_from_refs(record.media_refs),
             config=ctx.config,
             ai_disclosure=bool(record.ai_disclosure),

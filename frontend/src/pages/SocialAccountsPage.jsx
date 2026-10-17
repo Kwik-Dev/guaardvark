@@ -5,8 +5,9 @@
 // ConnectionModal. Each platform's rules (rate limits, AI disclosure, how an
 // account declares automation, scheduling, delete) come from its provider
 // spec; nothing here knows a platform by name. Social Posts lists what went out.
-// No approval switch lives here: the one exception to per-post approval (an
-// owned-channel connection) is set on the Connections page and only shown here.
+// No per-account switch lives here: the one exception to per-post approval (an
+// owned-channel connection) and a provider's public opt-in are set on the
+// Connections page and only shown here.
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
@@ -91,6 +92,7 @@ const BotLabelLine = ({ label, connection }) => {
 const RulesBlock = ({ capabilities }) => {
   const rule = capabilities.ai_disclosure;
   const label = capabilities.bot_label;
+  const optIn = capabilities.public_opt_in;
   const source = (url) =>
     url ? (
       <>
@@ -130,6 +132,19 @@ const RulesBlock = ({ capabilities }) => {
         Scheduling: {describeScheduling(capabilities)}
         {source(capabilities.native_scheduling?.source)}
       </Hint>
+      {optIn && (
+        <Hint>
+          {optIn.label} (set per account on the Connections page): {optIn.explanation}
+          {(optIn.sources || []).map((s) => (
+            <React.Fragment key={s.url}>
+              {" "}
+              <Link href={s.url} target="_blank" rel="noopener noreferrer">
+                {s.title}
+              </Link>
+            </React.Fragment>
+          ))}
+        </Hint>
+      )}
       <Hint>Delete: {describeDelete(capabilities)}</Hint>
     </Stack>
   );
@@ -276,6 +291,19 @@ const SocialAccountsPage = () => {
             </Hint>
           )}
           <BotLabelLine label={spec?.capabilities?.bot_label} connection={conn} />
+          {spec?.capabilities?.public_opt_in && conn.public_opt_in?.on === true && (
+            <Line>
+              <StatusPill
+                label={`${spec.capabilities.public_opt_in.label}: on`}
+                tone="warn"
+                tooltip={
+                  conn.public_opt_in.source === "setting"
+                    ? `On through the install-wide setting ${spec.capabilities.public_opt_in.legacy_setting}. Change it per account on the Connections page.`
+                    : "Set on this account's card on the Connections page. Every upload still waits for approval."
+                }
+              />
+            </Line>
+          )}
           {spec?.posts_to_owned_channel && conn.config?.post_without_approval === true && (
             <Line>
               <StatusPill
@@ -379,7 +407,8 @@ const SocialAccountsPage = () => {
                 Every publish waits for your approval on the Approvals page, a scheduled one
                 included; once approved it goes out at its time, sent by the platform where it
                 schedules natively, otherwise by Guaardvark. The one exception, a Discord webhook
-                into a channel you manage, is set on the Connections page.
+                into a channel you manage, is set on the Connections page. So is whether a
+                YouTube account may upload publicly; it uploads as private until then.
               </Hint>
             </Cluster>
           </SettingsPanel>

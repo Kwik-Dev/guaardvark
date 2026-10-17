@@ -1,14 +1,18 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  defaultVisibility,
   deleteOnPlatform,
   describeDisclosure,
   describeScheduling,
   describeWindow,
+  fixedVisibilityNote,
   mergePostFields,
+  publicOptInOn,
   sharedVisibilities,
   statusLabel,
   strictestLimit,
+  visibilityChoices,
 } from "../platformRules";
 
 const HOUR = 3600;
@@ -113,5 +117,63 @@ describe("strictestLimit and sharedVisibilities", () => {
   it("keeps the visibilities every declaring target accepts", () => {
     expect(sharedVisibilities(specs)).toEqual(["public", "unlisted"]);
     expect(sharedVisibilities([])).toEqual([]);
+  });
+});
+
+describe("visibility per target", () => {
+  const mastodon = {
+    capabilities: { visibilities: ["public", "unlisted", "private", "direct"], default_visibility: "unlisted" },
+  };
+
+  it("starts from the platform's declared default, not the first choice", () => {
+    expect(defaultVisibility(mastodon)).toBe("unlisted");
+    expect(defaultVisibility(undefined)).toBe("");
+  });
+
+  it("offers every declared visibility", () => {
+    expect(visibilityChoices(mastodon).map((c) => c.value)).toEqual(["public", "unlisted", "private", "direct"]);
+    expect(visibilityChoices(mastodon).every((c) => !c.disabled)).toBe(true);
+    expect(visibilityChoices({ capabilities: {} })).toEqual([]);
+  });
+
+  it("names the targets that have only one visibility", () => {
+    expect(fixedVisibilityNote([{ label: "Bluesky", value: "public" }])).toBe(
+      "Public on Bluesky: the only visibility it offers.",
+    );
+    expect(
+      fixedVisibilityNote([
+        { label: "Bluesky", value: "public" },
+        { label: "Telegram", value: "public" },
+        { label: "Discord", value: "public" },
+      ]),
+    ).toBe("Public on Bluesky, Telegram and Discord: the only visibility they offer.");
+  });
+});
+
+describe("visibilities held back until a connection's switch is on", () => {
+  const youtube = {
+    capabilities: {
+      visibilities: ["private", "unlisted", "public"],
+      default_visibility: "private",
+      public_opt_in: { visibilities: ["unlisted", "public"], refusal: "Turn it on first." },
+    },
+  };
+
+  it("disables them, with the reason, while the switch is off or unknown", () => {
+    for (const connection of [undefined, {}, { public_opt_in: { on: false, source: "default" } }]) {
+      expect(publicOptInOn(connection)).toBe(false);
+      expect(visibilityChoices(youtube, connection)).toEqual([
+        { value: "private", disabled: false, reason: "" },
+        { value: "unlisted", disabled: true, reason: "Turn it on first." },
+        { value: "public", disabled: true, reason: "Turn it on first." },
+      ]);
+    }
+  });
+
+  it("offers them once the switch is on, however it was set", () => {
+    for (const source of ["connection", "setting"]) {
+      const connection = { public_opt_in: { on: true, source } };
+      expect(visibilityChoices(youtube, connection).every((c) => !c.disabled)).toBe(true);
+    }
   });
 });

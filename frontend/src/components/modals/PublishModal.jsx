@@ -21,7 +21,7 @@ import {
   preflightPublish,
   queuePublish,
 } from "../../api/connectionsService";
-import { strictestLimit } from "../social/platformRules";
+import { defaultVisibility, strictestLimit, visibilityChoices } from "../social/platformRules";
 import PostFields, { scheduledIsoOf, useDebounced } from "../social/PostFields";
 
 /**
@@ -30,6 +30,9 @@ import PostFields, { scheduledIsoOf, useDebounced } from "../social/PostFields";
  * provider's capabilities, never hardcoded; the AI disclosure rule and who
  * sends a scheduled post come back per destination from preflight. Fields a
  * platform needs per post (its post_fields) appear while it is selected.
+ *
+ * Each destination has its own visibility, starting at its platform's
+ * declared default; what the select shows is what is sent, explicitly.
  */
 // One empty list, so a text-only post does not reset the form on every render.
 const NO_DOCUMENTS = [];
@@ -41,7 +44,9 @@ const PublishModal = ({ open, onClose, documents = NO_DOCUMENTS, onFeedback }) =
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [tags, setTags] = useState("");
-  const [visibility, setVisibility] = useState("");
+  // Visibilities the person picked, by connection id; the rest go out with
+  // their platform's default (visibilityTargets).
+  const [visibilities, setVisibilities] = useState({});
   const [aiDisclosure, setAiDisclosure] = useState(false);
   const [postOptions, setPostOptions] = useState({});
   const [scheduleOn, setScheduleOn] = useState(false);
@@ -81,7 +86,7 @@ const PublishModal = ({ open, onClose, documents = NO_DOCUMENTS, onFeedback }) =
     setBody(first?.metadata?.original_prompt || first?.summary || "");
     setTags(Array.isArray(first?.tags) ? first.tags.join(", ") : "");
     setSelected([]);
-    setVisibility("");
+    setVisibilities({});
     setAiDisclosure(false);
     setPostOptions({});
     setScheduleOn(false);
@@ -93,14 +98,35 @@ const PublishModal = ({ open, onClose, documents = NO_DOCUMENTS, onFeedback }) =
   // ISO with the browser's offset, so the server reads the same moment.
   const scheduledIso = useMemo(() => scheduledIsoOf(scheduleOn, scheduledAt), [scheduleOn, scheduledAt]);
 
-  const selectedSpecs = useMemo(
+  const selectedConnections = useMemo(
     () =>
       selected
         .map((id) => connections.find((c) => c.id === id))
-        .filter(Boolean)
-        .map((c) => specs[c.provider])
-        .filter(Boolean),
+        .filter((c) => c && specs[c.provider]),
     [selected, connections, specs],
+  );
+  const selectedSpecs = useMemo(
+    () => selectedConnections.map((c) => specs[c.provider]),
+    [selectedConnections, specs],
+  );
+
+  const visibilityTargets = useMemo(
+    () =>
+      selectedConnections.map((conn) => {
+        const spec = specs[conn.provider];
+        return {
+          key: String(conn.id),
+          label: conn.display_name || conn.handle || spec.label || conn.provider,
+          value: visibilities[conn.id] ?? defaultVisibility(spec),
+          choices: visibilityChoices(spec, conn),
+        };
+      }),
+    [selectedConnections, specs, visibilities],
+  );
+  // Sent for every target, so none falls back to a default the select did not show.
+  const sentVisibilities = useMemo(
+    () => Object.fromEntries(visibilityTargets.map((t) => [t.key, t.value])),
+    [visibilityTargets],
   );
 
   // The strictest limit across the selected targets governs the counter.
@@ -122,7 +148,7 @@ const PublishModal = ({ open, onClose, documents = NO_DOCUMENTS, onFeedback }) =
       document_ids: documentIds,
       body: debouncedBody,
       title: supportsTitle ? debouncedTitle : null,
-      visibility: visibility || null,
+      visibilities: sentVisibilities,
       scheduled_at: scheduledIso,
       ai_disclosure: aiDisclosure,
       post_options: debouncedOptions,
@@ -134,7 +160,7 @@ const PublishModal = ({ open, onClose, documents = NO_DOCUMENTS, onFeedback }) =
     };
   }, [
     open, selected, documentIds, debouncedBody, debouncedTitle,
-    visibility, supportsTitle, scheduledIso, aiDisclosure, debouncedOptions,
+    sentVisibilities, supportsTitle, scheduledIso, aiDisclosure, debouncedOptions,
   ]);
 
   const toggle = useCallback((id) => {
@@ -159,13 +185,12 @@ const PublishModal = ({ open, onClose, documents = NO_DOCUMENTS, onFeedback }) =
   }, [preflight]);
 
   const fieldValues = {
-    title, body, tags, visibility, aiDisclosure, postOptions, scheduleOn, scheduledAt,
+    title, body, tags, aiDisclosure, postOptions, scheduleOn, scheduledAt,
   };
   const setters = {
     title: setTitle,
     body: setBody,
     tags: setTags,
-    visibility: setVisibility,
     aiDisclosure: setAiDisclosure,
     postOptions: setPostOptions,
     scheduleOn: setScheduleOn,
@@ -173,6 +198,8 @@ const PublishModal = ({ open, onClose, documents = NO_DOCUMENTS, onFeedback }) =
   };
   const handleFieldChange = (patch) =>
     Object.entries(patch).forEach(([key, value]) => setters[key]?.(value));
+  const handleVisibilityChange = (key, value) =>
+    setVisibilities((prev) => ({ ...prev, [key]: value }));
 
   const handlePublish = useCallback(async () => {
     setSubmitting(true);
@@ -187,7 +214,7 @@ const PublishModal = ({ open, onClose, documents = NO_DOCUMENTS, onFeedback }) =
           .split(",")
           .map((t) => t.trim())
           .filter(Boolean),
-        visibility: visibility || null,
+        visibilities: sentVisibilities,
         requested_by: "ui",
         scheduled_at: scheduledIso,
         ai_disclosure: aiDisclosure,
@@ -210,7 +237,7 @@ const PublishModal = ({ open, onClose, documents = NO_DOCUMENTS, onFeedback }) =
       setSubmitting(false);
     }
   }, [
-    selected, documentIds, body, title, tags, visibility, supportsTitle,
+    selected, documentIds, body, title, tags, sentVisibilities, supportsTitle,
     scheduledIso, aiDisclosure, postOptions, onClose, onFeedback,
   ]);
 
@@ -290,6 +317,8 @@ const PublishModal = ({ open, onClose, documents = NO_DOCUMENTS, onFeedback }) =
               specs={selectedSpecs}
               values={fieldValues}
               onChange={handleFieldChange}
+              visibilityTargets={visibilityTargets}
+              onVisibilityChange={handleVisibilityChange}
               preflight={preflight}
               bodyLabel={documents.length ? "Caption" : "Text"}
             />

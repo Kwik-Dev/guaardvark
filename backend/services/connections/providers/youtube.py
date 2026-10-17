@@ -1,9 +1,11 @@
 """YouTube publishing via the Data API v3.
 
-Uploads are forced to ``private``: making a video public is a deliberate step
-the operator takes in YouTube Studio, not a side effect of generating one. A
-scheduled release (``status.publishAt``) makes the video public at that time,
-so it needs the same opt-in as a public upload.
+Uploads are ``private`` unless the person turns on "Allow public uploads" on
+the connection (``Capabilities.public_opt_in``): making a video public is a
+deliberate choice, not a side effect of generating one. A scheduled release
+(``status.publishAt``) makes the video public at that time, so it needs the
+same opt-in as a public upload. The publish path refuses such a post before
+it gets here; ``publish`` and ``schedule`` check again and refuse it too.
 
 The resumable upload protocol is driven directly over HTTPS rather than through
 google-api-python-client, which keeps the backend venv free of that dependency
@@ -20,6 +22,7 @@ from typing import Dict, Tuple
 
 import requests
 
+from backend.services.connections import gates
 from backend.services.connections.base import (
     AUTH_OAUTH2,
     BOT_LABEL_NONE,
@@ -39,6 +42,7 @@ from backend.services.connections.base import (
     NativeScheduling,
     ProgressFn,
     ProviderSpec,
+    PublicOptIn,
     PublishRequest,
     PublishResult,
     RateLimit,
@@ -55,6 +59,10 @@ UPLOAD_URL = "https://www.googleapis.com/upload/youtube/v3/videos"
 API_URL = "https://www.googleapis.com/youtube/v3"
 SCOPES = ["https://www.googleapis.com/auth/youtube"]
 CATEGORY_SCIENCE_TECH = "28"
+
+AI_DISCLOSURE_SOURCE = "https://support.google.com/youtube/answer/14328491"
+DEVELOPER_POLICIES = "https://developers.google.com/youtube/terms/developer-policies"
+VIDEOS_RESOURCE = "https://developers.google.com/youtube/v3/docs/videos"
 
 SPEC = ProviderSpec(
     provider="youtube",
@@ -105,7 +113,7 @@ SPEC = ProviderSpec(
                 "altered with AI. A generated video is uploaded with YouTube's altered or "
                 "synthetic content flag."
             ),
-            source="https://support.google.com/youtube/answer/14328491",
+            source=AI_DISCLOSURE_SOURCE,
         ),
         bot_label=BotLabel(
             kind=BOT_LABEL_NONE,
@@ -114,7 +122,7 @@ SPEC = ProviderSpec(
                 "for the channel owner's prior, specific consent to automated uploads; "
                 "Guaardvark uploads only what a person approved."
             ),
-            source="https://developers.google.com/youtube/terms/developer-policies",
+            source=DEVELOPER_POLICIES,
         ),
         native_scheduling=NativeScheduling(
             field="status.publishAt",
@@ -123,9 +131,37 @@ SPEC = ProviderSpec(
             min_lead_seconds=15 * 60,
             # publishAt is the moment a private video becomes public.
             visibilities=("public",),
-            source="https://developers.google.com/youtube/v3/docs/videos",
+            source=VIDEOS_RESOURCE,
         ),
         deletable=True,
+        public_opt_in=PublicOptIn(
+            visibilities=("unlisted", "public"),
+            label="Allow public uploads",
+            explanation=(
+                "Off: every upload from this account is private, and you make a video "
+                "public yourself in YouTube Studio. On: an upload can also be public or "
+                "unlisted, and a scheduled upload can be released publicly by YouTube at "
+                "its time (status.publishAt). Every upload still waits for your approval "
+                "on the Approvals page. YouTube's own rules apply: it requires disclosure "
+                "of realistic content made or meaningfully altered with AI (a generated "
+                "video is uploaded with its altered or synthetic content flag), and its "
+                "developer policies ask for the channel owner's prior, specific consent to "
+                "automated uploads."
+            ),
+            refusal=(
+                "Public and unlisted uploads are off for this YouTube account, so it "
+                "uploads as private only; a scheduled upload goes out as private at its "
+                "time. To allow them, and YouTube's own scheduled public release, turn on "
+                "\"Allow public uploads\" on the account's card on the Connections page."
+            ),
+            sources=(
+                ("AI disclosure", AI_DISCLOSURE_SOURCE),
+                ("Developer policies", DEVELOPER_POLICIES),
+                ("status.publishAt", VIDEOS_RESOURCE),
+            ),
+            # Read for a connection whose card has no choice stored yet.
+            legacy_setting="youtube_allow_public_publish",
+        ),
     ),
     hint_field="client_secret",
     docs_url="https://developers.google.com/youtube/v3/guides/uploading_a_video",
@@ -328,10 +364,10 @@ def _watch_url(video_id) -> str | None:
 
 
 def publish(ctx: ConnCtx, req: PublishRequest, on_progress: ProgressFn) -> PublishResult:
-    # Public requires both an explicit request and an operator opt-in.
-    visibility = req.visibility or "private"
-    if visibility != "private" and not _public_publish_allowed():
-        visibility = "private"
+    visibility = req.visibility or SPEC.capabilities.default_visibility
+    refusal = gates.visibility_refusal(SPEC.provider, ctx.config, visibility)
+    if refusal:
+        return PublishResult(ok=False, message=refusal)
 
     video_id, error = _upload(ctx, req, {"privacyStatus": visibility}, on_progress)
     if error:
@@ -348,15 +384,10 @@ def schedule(ctx: ConnCtx, req: PublishRequest, on_progress: ProgressFn) -> Publ
     """Upload as private now; YouTube makes it public at ``req.publish_at``."""
     if req.publish_at is None:
         return PublishResult(ok=False, message="No release time was given.")
-    if not _public_publish_allowed():
-        return PublishResult(
-            ok=False,
-            message=(
-                "A scheduled YouTube release makes the video public, and public YouTube "
-                "publishing is switched off (setting youtube_allow_public_publish). "
-                "Schedule it as private, or make it public later in YouTube Studio."
-            ),
-        )
+    # The release makes it public, whatever visibility the request names.
+    refusal = gates.visibility_refusal(SPEC.provider, ctx.config, "public")
+    if refusal:
+        return PublishResult(ok=False, message=refusal)
     publish_at = req.publish_at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     status = {"privacyStatus": "private", "publishAt": publish_at}
     video_id, error = _upload(ctx, req, status, on_progress)
@@ -419,17 +450,3 @@ def delete(ctx: ConnCtx, req: DeleteRequest) -> DeleteResult:
     if resp.status_code >= 400:
         return DeleteResult(ok=False, message=f"YouTube returned {resp.status_code}.")
     return DeleteResult(ok=True, message="Deleted from YouTube.")
-
-
-def _public_publish_allowed() -> bool:
-    try:
-        from backend.utils.settings_utils import get_setting
-
-        return (get_setting("youtube_allow_public_publish", "false") or "").strip().lower() in (
-            "1",
-            "true",
-            "yes",
-            "on",
-        )
-    except Exception:  # noqa: BLE001 - default to the safe answer
-        return False

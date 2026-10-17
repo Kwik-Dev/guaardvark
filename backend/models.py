@@ -2028,6 +2028,18 @@ class Connection(db.Model):
         except (ValueError, TypeError):
             return fallback
 
+    def _public_opt_in(self):
+        """Whether this connection may use the visibilities its provider holds
+        back, and why: the effective state, with the provider's legacy
+        install-wide setting applied (``gates.public_opt_in_state``). None
+        when the provider holds none back, or the state cannot be read."""
+        try:
+            from backend.services.connections.gates import public_opt_in_state
+
+            return public_opt_in_state(self.provider, self.config)
+        except Exception:  # noqa: BLE001 - must not 500 the list; the publish path re-checks
+            return None
+
     def to_dict(self, *, env_keys=()):
         """Serialise for the API. Never emits a secret value."""
         status = {
@@ -2061,6 +2073,7 @@ class Connection(db.Model):
             "scopes": self._json_field(self.scopes, []),
             "config": self._json_field(self.config, {}),
             "capabilities": self._json_field(self.capabilities_cache, {}),
+            "public_opt_in": self._public_opt_in(),
             "status": self.status,
             "enabled": self.enabled,
             "token_expires_at": self.token_expires_at.isoformat() if self.token_expires_at else None,
