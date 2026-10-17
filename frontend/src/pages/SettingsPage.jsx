@@ -2133,8 +2133,9 @@ const SettingsPage = () => {
     if (
       !window.confirm(
         "Switch the embedding model?\n\n" +
-          "Same vector width: the existing index is kept.\n" +
-          "Different width: the index is emptied and every document must be re-indexed.\n\nContinue?",
+          "Another model's vectors cannot be searched alongside the old ones, even at the same width, " +
+          "so the index is emptied and every indexed document is queued to be indexed again with the new model. " +
+          "Searches find less until that finishes.\n\nContinue?",
       )
     )
       return;
@@ -2150,11 +2151,15 @@ const SettingsPage = () => {
         setEmbeddingModel(selectedEmbeddingModel);
         const payload = payloadOf(d);
         const dims = payload?.dimensions;
+        const queued = payload?.reindex_queued ?? 0;
+        const pending = payload?.reindex_pending ?? 0;
         showMessage(
           payload?.index_cleared
-            ? `Embedding switched to ${selectedEmbeddingModel} (${dims}d). The index was emptied; re-index your documents.`
-            : `Embedding switched to ${selectedEmbeddingModel} (${dims}d). Same width, index kept.`,
-          payload?.index_cleared ? "warning" : "success",
+            ? `Embedding switched to ${selectedEmbeddingModel} (${dims}d). The index was emptied and ${queued} ` +
+                `document(s) queued to be indexed again` +
+                (pending ? `; ${pending} wait for indexing to resume.` : ".")
+            : `Embedding model is already ${selectedEmbeddingModel}; index kept.`,
+          payload?.index_cleared && pending ? "warning" : "success",
         );
         fetchResources();
         setProfilesReloadKey((k) => k + 1);

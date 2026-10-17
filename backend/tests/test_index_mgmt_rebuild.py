@@ -92,3 +92,11 @@ def test_indexer_is_called_with_path_and_row_only(app, uploads):
         (str(uploads / "other.txt"), without.id, None),
     ]
     assert db.session.get(DBDocument, missing.id).index_status == "ERROR"
+
+
+def test_a_rebuild_restores_the_documents_that_were_indexed(app):
+    was_indexed = _row("report.txt", status="PENDING")
+    _row("backlog.txt", status="PENDING")
+    _row("never.txt", status="NOT_INDEXED")
+
+    assert [d.id for d in mod._rebuild_candidates([was_indexed.id])] == [was_indexed.id]

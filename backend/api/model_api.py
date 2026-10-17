@@ -728,11 +728,12 @@ def set_embedding_model():
     """Switch the active embedding model at runtime.
 
     Reinitializes the EmbeddingRouter singleton and the LlamaIndex embed model
-    in app config. If the new model's vector width differs from the previous
-    one the existing index is unusable: the JSON store is deleted (simple
-    backend) and the in-memory index is reset so pgvector binds a fresh table
-    for the new width. Either way the caller must re-index. Same width keeps
-    the index.
+    in app config. A different model makes the existing index unusable, whatever
+    its width: two models' vectors are not comparable even when they have the
+    same length. The JSON store is deleted (simple backend), the in-memory index
+    is reset so pgvector binds the table for the new width, the tables of that
+    width are emptied, and every document that was indexed is queued to be
+    indexed again with the new model.
     """
     data = request.get_json() or {}
     model_name = data.get("model")
@@ -763,9 +764,11 @@ def set_embedding_model():
         embed_dim = len(test_vec)
         logger.info(f"Embedding model '{model_name}' produces {embed_dim}-dim vectors")
 
-        # Read the outgoing model's width BEFORE anything below replaces it in
-        # app config; reading it afterwards compares the new model with itself.
+        # Read the outgoing model and its width BEFORE anything below replaces
+        # them; reading them afterwards compares the new model with itself.
         prev_dim = _embed_dim_of(current_app.config.get("LLAMA_INDEX_EMBED_MODEL"))
+        from backend.config import get_active_embedding_model
+        prev_model = get_active_embedding_model()
 
         # Save the choice first: other processes follow it, and the router's
         # clients rebuild from it on their next call.
@@ -798,11 +801,13 @@ def set_embedding_model():
         except Exception:
             pass
 
-        # Models with the same width are interchangeable without reindexing.
         # An unknown previous width is treated as changed: keeping an index of
         # unknown width would be the mixed-dimension store this guards against.
         dimension_changed = prev_dim is None or prev_dim != embed_dim
-        if dimension_changed:
+        model_changed = prev_model != model_name
+        index_cleared = dimension_changed or model_changed
+        requeued = {"queued": 0, "pending": 0}
+        if index_cleared:
             try:
                 import os
                 storage_dir = current_app.config.get("STORAGE_DIR",
@@ -824,17 +829,34 @@ def set_embedding_model():
                 import backend.services.indexing_service as idx_svc
                 idx_svc.index = None
                 idx_svc.storage_context = None
-            except Exception:
-                pass
-            logger.info(f"Embedding dimension changed {prev_dim} → {embed_dim}: index reset, re-index required")
+                current_app.config.pop("INDEX_CACHE", None)
+                # The tables of the new width hold the old model's rows on a
+                # same-width switch, or an earlier model's on a switch back;
+                # either would be searched with the new model.
+                idx_svc.empty_vector_tables(embed_dim)
+                idx_svc._record_index_embedding_model()
+            except Exception as clear_err:
+                logger.warning(f"Failed to clear the old model's vectors: {clear_err}")
+            try:
+                from backend.api.indexing_api import requeue_indexed_documents
+                requeued = requeue_indexed_documents()
+            except Exception as queue_err:
+                logger.warning(f"Could not queue documents for re-indexing: {queue_err}")
+            logger.info(
+                f"Embedding model changed {prev_model} ({prev_dim}d) → {model_name} ({embed_dim}d): "
+                f"index cleared, {requeued['queued']} document(s) queued, {requeued['pending']} left pending"
+            )
         else:
-            logger.info(f"Embedding dimension unchanged ({embed_dim}d) — keeping existing index")
+            logger.info(f"Embedding model unchanged ({model_name}, {embed_dim}d) — keeping existing index")
 
         return success_response({
             "model": model_name,
             "dimensions": embed_dim,
             "previous_dimensions": prev_dim,
-            "index_cleared": dimension_changed,
+            "previous_model": prev_model,
+            "index_cleared": index_cleared,
+            "reindex_queued": requeued["queued"],
+            "reindex_pending": requeued["pending"],
         }, f"Embedding model switched to {model_name}")
 
     except Exception as e:

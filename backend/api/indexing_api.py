@@ -273,6 +273,39 @@ def _dispatch_document(progress_system, index_document_task, doc):
     return None
 
 
+def requeue_indexed_documents() -> dict:
+    """Index every INDEXED document again, after its vectors were cleared.
+
+    For an embedding model change: the documents that were searchable before
+    are queued straight away rather than left PENDING, where the unhurried
+    resume task would reach them behind any backlog. While indexing is paused,
+    or once the queue refuses a task, the rest are left PENDING for it (the
+    refused one ERROR, as in a bulk run). Returns {"queued": n, "pending": n},
+    where pending counts every document not queued.
+    """
+    docs = DBDocument.query.filter(DBDocument.index_status == "INDEXED").order_by(DBDocument.id).all()
+    if not docs:
+        return {"queued": 0, "pending": 0}
+    progress_system = get_unified_progress()
+    from backend.celery_tasks_isolated import index_document_task
+    queued = 0
+    stopped = _get_indexing_paused_setting()
+    for doc in docs:
+        if not stopped:
+            update_document_status(doc.id, "INDEXING")
+            refused = _dispatch_document(progress_system, index_document_task, doc)
+            if refused is None:
+                queued += 1
+                continue
+            # As in a bulk run: nothing is indexing it, and Resume pending
+            # indexing re-queues ERROR rows once the queue is back.
+            update_document_status(doc.id, "ERROR", str(refused))
+            stopped = True
+            continue
+        update_document_status(doc.id, "PENDING")
+    return {"queued": queued, "pending": len(docs) - queued}
+
+
 def _get_all_document_ids_recursive(folder_id):
     """Get all document IDs from a folder and all its subfolders recursively."""
     doc_ids = [d.id for d in DBDocument.query.filter_by(folder_id=folder_id).all()]
