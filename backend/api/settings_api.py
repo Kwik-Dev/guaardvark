@@ -423,6 +423,26 @@ def set_confine_tool_paths_route():
     return success_response({"confine_tool_paths": get_confine_tool_paths()})
 
 
+@settings_bp.route("/job_priority", methods=["GET"])
+def get_job_priority_route():
+    """Job order: whether waiting work is ranked by class (services/job_arbiter.py)."""
+    from backend.utils.settings_utils import get_job_priority_enabled
+
+    return success_response({"job_priority_enabled": get_job_priority_enabled()})
+
+
+@settings_bp.route("/job_priority", methods=["POST"])
+def set_job_priority_route():
+    payload = request.get_json(silent=True) or {}
+    enabled = payload.get("job_priority_enabled")
+    if not isinstance(enabled, bool):
+        return error_response('Send {"job_priority_enabled": true} or false.', 400)
+    from backend.utils.settings_utils import get_job_priority_enabled, set_job_priority_enabled
+
+    set_job_priority_enabled(enabled)
+    return success_response({"job_priority_enabled": get_job_priority_enabled()})
+
+
 @settings_bp.route("/llm_debug", methods=["GET"])
 def get_llm_debug():
     enabled = False

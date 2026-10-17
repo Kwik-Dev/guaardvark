@@ -63,6 +63,12 @@ class GpuCapacityError(GpuBusyError):
     """The estimate can never fit this card; retrying will not help."""
 
 
+class GpuQueuedError(GpuBusyError):
+    """Not this job's turn: the job arbiter is letting another waiting job claim
+    the GPU first (job order setting on). Retrying soon is the point; the
+    message says where the job is in line."""
+
+
 class SystemLoadBusyError(GpuBusyError):
     """The GPU could take the job but the machine cannot yet: system RAM, swap or
     CPU is short (GlobalLoadGate). ``detail`` says which, in plain words."""
@@ -310,6 +316,7 @@ class JobOperationGate:
         wait_timeout: float = 120.0,
         cancel_event: Optional[threading.Event] = None,
         on_wait: Optional[Callable[[str], None]] = None,
+        admit: Optional[Callable[[], tuple[bool, str]]] = None,
     ) -> Iterator[bool]:
         """Claim the GPU-exclusive slot for the duration of a ``with`` block.
 
@@ -331,12 +338,29 @@ class JobOperationGate:
             is called when the wait starts and whenever the holder changes, so the
             caller can show what it is queued behind.
 
+        ``admit()`` (the job arbiter's turn check, job_arbiter.admit_callable)
+        is asked before every claim attempt; while it answers (False, reason)
+        the slot is not tried, exactly as if it were busy for that reason, and
+        a refusal that ends the wait raises GpuQueuedError. None (job order
+        off) leaves every attempt a plain try_claim_gpu_exclusive.
+
         Yields True when the exclusive slot was acquired, False in the
         degraded ("register") path. Release is idempotent and always runs in
         ``finally`` — it clears both the holder and the in-progress flag, so a
         bare register_running() in the degraded path is cleaned up too.
         """
-        acquired, reason = self.try_claim_gpu_exclusive(kind, native_id)
+        queued = False
+
+        def _attempt() -> tuple[bool, str]:
+            nonlocal queued
+            if admit is not None:
+                turn, why = admit()
+                queued = not turn
+                if not turn:
+                    return False, why
+            return self.try_claim_gpu_exclusive(kind, native_id)
+
+        acquired, reason = _attempt()
         if not acquired and on_busy == "wait":
             # Serial background callers wait out a transient busy / the post-release
             # cooldown rather than fail. Poll try_claim until it frees or we time out.
@@ -352,9 +376,10 @@ class JobOperationGate:
                         logger.debug("gpu_exclusive on_wait callback failed", exc_info=True)
                 if cancel_event is not None and cancel_event.is_set():
                     reason = f"cancelled while waiting for the GPU ({reason})"
+                    queued = False
                     break
                 _t.sleep(min(1.0, max(0.05, deadline - _t.monotonic())))
-                acquired, reason = self.try_claim_gpu_exclusive(kind, native_id)
+                acquired, reason = _attempt()
             if acquired:
                 logger.info(
                     "gpu_exclusive(%s:%s) acquired after waiting out gate busy/cooldown",
@@ -373,7 +398,7 @@ class JobOperationGate:
                 finally:
                     self.release_gpu_exclusive(kind, native_id)
                 return
-            raise GpuBusyError(reason)
+            raise (GpuQueuedError if queued else GpuBusyError)(reason)
 
         try:
             yield True

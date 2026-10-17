@@ -240,6 +240,13 @@ def check_scheduled_tasks(self):
     """
     logger.info("Running scheduled task check...")
 
+    # Job order on: scheduled work is background; while a chat or voice turn
+    # runs the due rows stay pending for the next pass.
+    from backend.services import job_arbiter
+    if job_arbiter.should_yield("scheduled_task"):
+        logger.info("Scheduled task check deferred: interactive work is running")
+        return {'processed': 0, 'message': 'Deferred while interactive work runs'}
+
     try:
         scheduled_tasks = get_scheduled_tasks()
 

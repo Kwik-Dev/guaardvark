@@ -263,6 +263,11 @@ def gpu_begin_use():
 
     if not _get_orch().begin_use(slot_id):
         return jsonify({"success": False, "error": f"{slot_id} is not registered; preload it first"}), 404
+    if slot_id.lower().startswith("ollama:"):
+        # With job order on, GPU jobs that would unload Ollama wait for this
+        # hold (or the person's Run now) instead of evicting the agent's model.
+        from backend.services import job_arbiter
+        job_arbiter.record_hold(slot_id, holder=(data.get("holder") or None))
     return jsonify({"success": True, "slot_id": slot_id}), 200
 
 
@@ -275,5 +280,9 @@ def gpu_end_use():
     if not slot_id:
         return jsonify({"error": "Missing 'slot_id' field"}), 400
 
-    _get_orch().end_use(slot_id)
+    orch = _get_orch()
+    orch.end_use(slot_id)
+    if slot_id.lower().startswith("ollama:") and orch.pins(slot_id) == 0:
+        from backend.services import job_arbiter
+        job_arbiter.drop_hold(slot_id)
     return jsonify({"success": True, "slot_id": slot_id}), 200

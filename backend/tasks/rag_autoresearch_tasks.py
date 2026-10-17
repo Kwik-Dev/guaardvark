@@ -56,6 +56,20 @@ def create_autoresearch_tasks(celery_app):
             if recent is not None:
                 return
 
+            # Job order on: tonight's run starts only on an idle machine (no
+            # chat, no render running or waiting for the idle minutes). This
+            # check runs again in ten minutes. A no-op with the setting off.
+            from backend.services import job_arbiter
+            from backend.services.job_priority_data import IDLE_FOR_NIGHTLY_S
+            idle_setting = Setting.query.filter_by(key="rag_autoresearch_idle_minutes").first()
+            try:
+                idle_s = max(0.0, float(idle_setting.value) * 60.0) if idle_setting else IDLE_FOR_NIGHTLY_S
+            except (TypeError, ValueError):
+                idle_s = IDLE_FOR_NIGHTLY_S
+            if not job_arbiter.box_idle(idle_s):
+                logger.info("Nightly window open, but the machine is busy; checking again in ten minutes")
+                return
+
             remaining_min = (w_end - minutes) if w_start <= w_end else \
                 ((w_end - minutes) % (24 * 60))
             budget_hours = max(0.5, remaining_min / 60.0)

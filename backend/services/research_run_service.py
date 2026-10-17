@@ -741,6 +741,14 @@ class ResearchRunService:
                 status_at_end = "killed"
                 break
 
+            # Job order on: hold between experiments while a chat or voice turn
+            # runs. Like the GPU wait below, the held time is the run's budget.
+            from backend.services import job_arbiter
+            job_arbiter.yield_point("autoresearch", run.run_tag, label=f"Autoresearch run {run.run_tag}",
+                                    should_stop=self._kill_requested)
+            if self._kill_requested():
+                continue
+
             try:
                 from backend.utils.gpu_check import gpu_busy
                 if gpu_busy():
