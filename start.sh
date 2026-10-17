@@ -2988,9 +2988,11 @@ vader_step 10 "Starting enhanced Celery workers..."
 if [ -f "$SCRIPT_DIR/start_celery.sh" ]; then
     _vader_run "$LOGS_DIR/celery.log" -- bash "$SCRIPT_DIR/start_celery.sh" || true
     # Only workers whose cwd is this checkout count — another install on the
-    # same machine must neither satisfy this check nor lend its PID.
+    # same machine must neither satisfy this check nor lend its PID. Nor does
+    # the research worker, which autoresearch starts and stops on its own.
     CELERY_PID=""
     for _pid in $(pgrep -f "celery -A backend.celery_app.celery worker" 2>/dev/null); do
+        ps -p "$_pid" -o args= 2>/dev/null | grep -q -- "--queues=research" && continue
         _cwd=$(_proc_cwd "$_pid")
         case "$_cwd" in "$SCRIPT_DIR"|"$SCRIPT_DIR"/*) CELERY_PID="$_pid"; break ;; esac
     done

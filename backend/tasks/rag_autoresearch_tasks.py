@@ -93,7 +93,8 @@ def create_autoresearch_tasks(celery_app):
     )
     def execute_run_task(self, run_id):
         """Long-lived owner of one ResearchRun. Replaces the daemon thread
-        that died on worker_max_tasks_per_child=50."""
+        that died on worker_max_tasks_per_child=50. Routed to the research
+        worker's queue (celery_app task_routes), never the main worker's."""
         from backend.services.research_run_service import get_research_run_service
         svc = get_research_run_service()
         try:

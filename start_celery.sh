@@ -27,8 +27,20 @@ own_celery_pids() {  # $1 = worker | beat
   done
 }
 
+# The research worker (backend/services/research_worker.py) is started by the
+# backend when an autoresearch run is queued and stops itself once idle. It is
+# not one of the workers this script starts, so it never counts as "already
+# running" here: that would skip starting main and training.
+own_started_worker_pids() {
+  local pid
+  for pid in $(own_celery_pids worker); do
+    ps -p "$pid" -o args= 2>/dev/null | grep -q -- "--queues=research" && continue
+    echo "$pid"
+  done
+}
+
 check_workers() {
-  own_celery_pids worker | wc -l
+  own_started_worker_pids | wc -l
 }
 
 check_beat() {
@@ -171,7 +183,7 @@ worker_count=$(check_workers)
 if [ $worker_count -gt 0 ]; then
   vader_info "Celery workers already running ($worker_count processes)."
   vader_detail "Use ./stop.sh first to stop them, or kill them manually:"
-  own_celery_pids worker | while read pid; do
+  own_started_worker_pids | while read pid; do
     vader_detail "PID $pid: $(ps -p $pid -o command= | cut -c1-80)"
   done
   exit 0
@@ -246,9 +258,10 @@ else
   vader_success "$worker_count Celery workers running (concurrency=1 for race condition test)"
   
   vader_info "Worker processes:"
-  own_celery_pids worker | while read pid; do
+  own_started_worker_pids | while read pid; do
     vader_detail "PID $pid: $(ps -p $pid -o command= | cut -c1-100)"
   done
+  vader_detail "Autoresearch runs start their own worker (queue: research) and stop it when done"
   
   vader_info "Log files:"
   for logfile in "$LOGS_DIR"/celery_*.log; do

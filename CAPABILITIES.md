@@ -142,6 +142,7 @@ If query-time params have not plateaued: ~70% wall-clock RAG, 30% code. If plate
 - Autoresearch page: Unified / Retrieval / Code, Stop, eval-pair regenerate, promotions, code-keep PendingFixes, ledger TSV
 - Dashboard Play starts a bounded unified run
 - Beat: at most one unified run per night inside `autoresearch_nightly_window` (opt-in)
+- Runs on a worker of its own, started when a run is queued and stopped about two minutes after it ends, so chat, indexing and generation never wait behind a run; its model calls wait while a render or training job holds the GPU
 
 ---
 
@@ -792,7 +793,7 @@ Plugins can register:
 ### Backend Stack
 - **Flask 3.0** — HTTP server with 68+ REST API blueprints (auto-discovered)
 - **SQLAlchemy + PostgreSQL** — ORM with 42 models; Alembic migrations + a custom `schema_sync.py` (single master)
-- **Celery + Redis** — async task processing with two worker pools (main + training/GPU)
+- **Celery + Redis** — async task processing with two worker pools (main + training/GPU), plus a research worker that an autoresearch run starts for itself and stops when it is done
 - **LlamaIndex** — RAG pipeline with vector storage, entity extraction, hybrid retrieval
 - **Ollama** — local LLM and embedding model inference (managed plugin)
 - **ComfyUI** — video/image generation server supporting Wan2.2, CogVideoX, LTX-2.3, LTX-2.5, RIFE, Real-ESRGAN (managed plugin)
@@ -875,6 +876,7 @@ All logs in `logs/`:
 - `backend.log` — Flask application
 - `celery_main.log` — Main Celery worker (indexing, generation, health)
 - `celery_training.log` — Training/GPU worker
+- `celery_research.log` — Research worker (autoresearch runs; present only once a run has been started)
 - `frontend.log` — Vite dev server
 - `setup.log` — Dependency installation
 - `xfce_agent.log` — Agent's XFCE session output

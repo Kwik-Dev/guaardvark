@@ -134,6 +134,12 @@ class RAGEvalHarness:
         self.avg_pair_seconds = None
         self.avg_retrieval_pair_seconds = None
         self._call_budget = AUTORESEARCH_MAX_LLM_CALLS_PER_EXPERIMENT
+        # Called before every model use (a retrieval embeds the question, an
+        # answer or judgement is an LLM call). A research run sets it to wait
+        # out renders and training holding the GPU; it returns the seconds it
+        # waited. None, as in the web process, uses the models at once.
+        self.gpu_turn = None
+        self._gpu_waited_s = 0.0
 
     @staticmethod
     def _model_setting(key: str) -> Optional[str]:
@@ -270,6 +276,22 @@ class RAGEvalHarness:
             return False
         return True
 
+    def _await_gpu_turn(self) -> None:
+        """Wait for the GPU through ``gpu_turn``, off the experiment's clock.
+
+        Time spent waiting for someone else's render is added back to the
+        experiment deadline, so a wait does not cut the eval short, and kept out
+        of the per-pair timings that size later deadlines.
+        """
+        hook = self.gpu_turn
+        if hook is None:
+            return
+        waited = float(hook() or 0.0)
+        if waited > 0:
+            self._gpu_waited_s += waited
+            if self._deadline is not None:
+                self._deadline += waited
+
     def _parse_json_object(self, text: str) -> Optional[dict]:
         try:
             parsed = json.loads(_extract_json(text or ""))
@@ -288,6 +310,7 @@ class RAGEvalHarness:
             raise LLMUnavailableError(
                 f"No LLM available for eval role '{role}' — is Ollama running?"
             )
+        self._await_gpu_turn()
         try:
             response = llm.complete(prompt, temperature=temperature)
             self._llm_calls += 1
@@ -579,6 +602,7 @@ class RAGEvalHarness:
 
         try:
             set_experiment_config(config)
+            self._await_gpu_turn()
             # Query retrieval EXACTLY as production chat does: no explicit
             # max_chunks — the layered params (experiment override here)
             # decide top_k and how many chunks come back.
@@ -724,6 +748,7 @@ class RAGEvalHarness:
         from backend.services.indexing_service import search_with_llamaindex
         try:
             set_experiment_config(config)
+            self._await_gpu_turn()
             results = search_with_llamaindex(pair["question"]) or []
             retrieval = self._score_retrieval(pair, results) or {}
             return retrieval
@@ -739,6 +764,7 @@ class RAGEvalHarness:
         details = []
         for pair in pairs:
             t_pair = time.monotonic()
+            waited_before = self._gpu_waited_s
             try:
                 score = self._eval_retrieval_only(pair, config)
             except Exception as e:
@@ -746,7 +772,8 @@ class RAGEvalHarness:
                 continue
             score["eval_pair_id"] = pair.get("id")
             details.append(score)
-            self._note_retrieval_seconds(time.monotonic() - t_pair)
+            self._note_retrieval_seconds(
+                time.monotonic() - t_pair - (self._gpu_waited_s - waited_before))
         summary = self._retrieval_summary(details) or {
             "num_scored": 0, "hit_rate_at_k": 0.0, "mrr": 0.0, "ndcg_at_10": 0.0,
         }
@@ -776,6 +803,7 @@ class RAGEvalHarness:
                 logger.info("Eval pair loop stopped — experiment budget exhausted")
                 break
             t_pair = time.monotonic()
+            waited_before = self._gpu_waited_s
             try:
                 score = self._eval_single_pair(pair, config)
             except LLMUnavailableError as e:
@@ -785,7 +813,8 @@ class RAGEvalHarness:
                 raise
             score["eval_pair_id"] = pair.get("id")
             details.append(score)
-            self._note_pair_seconds(time.monotonic() - t_pair)
+            self._note_pair_seconds(
+                time.monotonic() - t_pair - (self._gpu_waited_s - waited_before))
 
         usable = [d for d in details if not d.get("judge_parse_failed")
                   and d.get("composite") is not None]

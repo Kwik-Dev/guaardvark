@@ -9,13 +9,17 @@ morning. Guardrails (all inherited from the 2026-08 runaway postmortem):
   degrades into random-proposal noise because Ollama was off or the eval set
   was empty.
 - Wall-clock hard cap + iteration hard cap + pacing floor.
-- Cross-process kill flag (`autoresearch_kill` Setting) checked every cycle.
-- GPU politeness: yields (with backoff, counted against the budget) while the
-  user's image/video generation is active.
+- Cross-process kill flag (`autoresearch_kill` Setting) checked every cycle
+  and before every model call.
+- Runs on its own worker (backend/services/research_worker.py), never the main
+  one. GPU politeness: every model call first waits while a render or training
+  job holds the GPU (counted against the run budget, not the experiment's), and
+  experiments also yield while the GPU is busy.
 - Nightly winners are stored as CANDIDATE configs; only the run-end
   confirmation eval (candidate vs currently-active, same eval set) activates
   the best one. No single-lucky-eval promotions.
 """
+import functools
 import logging
 import os
 import time
@@ -67,6 +71,18 @@ VALID_MODES = ("unified", "rag_tuning", "code_tuning")
 SWARM_POLL_S = 15
 SI_PREFLIGHT_CAP_S = 600  # 10 min — snapshot_pytest is usually far cheaper
 HALT_REASON_MAX = 200  # ResearchRun.halt_reason column width
+# A pending run whose task no worker reports yet may be waiting for the research
+# worker to boot, or behind it in the queue; it is reaped only once this old.
+PENDING_REAP_AFTER = timedelta(minutes=2)
+
+
+class ResearchRunStopped(BaseException):
+    """The run was stopped; raised in place of its next model call.
+
+    A BaseException so the eval and experiment code, which records any
+    Exception as a crashed experiment, lets it through to the run loop; it is
+    caught there and inside execute_run, never by Celery.
+    """
 
 
 def _clip(text: str, limit: int) -> str:
@@ -209,8 +225,15 @@ class ResearchRunService:
         # Clear any stale kill flag from a previous stop.
         self._set_kill(False)
 
+        from backend.services.research_worker import WorkerStartError
         try:
             self._enqueue_execute_run(run.id)
+        except WorkerStartError as e:
+            reason = f"research_worker_unavailable — {e}"
+            self._refuse(run, [reason], warnings)
+            logger.error(f"Research run {run_tag}: {reason}")
+            return {"error": reason, "not_run": True, "reasons": [reason],
+                    "run": run.to_dict()}
         except Exception as e:
             reason = f"celery_unreachable ({e.__class__.__name__})"
             self._refuse(run, [reason], warnings)
@@ -490,6 +513,10 @@ class ResearchRunService:
             f"tests_red={diagnose.get('tests_red')} "
             f"pending_fixes={diagnose.get('pending_fixes')}"
         )
+        # The swarm's arms run the eval harness and models of their own; they
+        # start only when no render or training holds the GPU, and never once
+        # the run has been stopped.
+        self._gpu_turn(run)
         launched = self._launch_code_swarm(run.run_tag, diagnosis_text)
         if launched.get("error"):
             return f"code slice skipped: {launched['error']}"
@@ -543,6 +570,45 @@ class ResearchRunService:
             return
         db.session.refresh(run)
         self._running_run_id = run_id
+        turn = functools.partial(self._gpu_turn, run)
+        svc.eval_harness.gpu_turn = turn
+        svc.agent.gpu_turn = turn
+        try:
+            self._execute_claimed(run, svc, mode)
+        except ResearchRunStopped:
+            # The run's steps handle a stop where it can happen; one raised
+            # anywhere else still closes the run as killed.
+            run.status = "killed"
+            run.halt_reason = "killed"
+            run.ended_at = utcnow()
+            run.report_md = self._write_report(run, [], promotion_note="the run was stopped")
+            db.session.commit()
+            self._emit_run_complete(run)
+        finally:
+            svc.eval_harness.gpu_turn = None
+            svc.agent.gpu_turn = None
+            self._running_run_id = None
+
+    def _gpu_turn(self, run) -> float:
+        """Every model call of the run waits here while a render or training
+        job holds the GPU. Raises ResearchRunStopped once the run is stopped."""
+        from backend.utils.gpu_check import wait_for_gpu_turn
+
+        def on_wait(reason):
+            logger.info(f"Research run {run.run_tag}: waiting for the GPU ({reason})")
+
+        waited = wait_for_gpu_turn(should_stop=self._kill_requested, on_wait=on_wait)
+        if waited is None:
+            raise ResearchRunStopped(run.run_tag)
+        if waited >= 1:
+            logger.info(f"Research run {run.run_tag}: GPU free after {waited:.0f}s")
+            meta = self._meta(run)
+            meta["gpu_wait_s"] = round(float(meta.get("gpu_wait_s") or 0) + waited)
+            self._save_meta(run, meta)
+        return waited
+
+    def _execute_claimed(self, run, svc, mode: str) -> None:
+        from backend.models import db
 
         t0 = time.time()
         budget = run.wall_clock_budget_s if run.wall_clock_budget_s is not None \
@@ -580,7 +646,6 @@ class ResearchRunService:
                 run, svc, t0, split["rag_s"],
             )
             if status_at_end == "failed_precondition":
-                self._running_run_id = None
                 return
 
         remaining = budget - (time.time() - t0)
@@ -591,6 +656,9 @@ class ResearchRunService:
             code_budget = min(int(split.get("code_s") or 0), max(0, int(remaining)))
             try:
                 code_note = self._run_code_slice(run, code_budget, diagnose)
+            except ResearchRunStopped:
+                code_note = "code half skipped: the run was stopped"
+                halt_reason, status_at_end = "killed", "killed"
             except Exception as e:
                 code_note = f"code slice failed: {e}"
                 logger.warning(f"Run {run.run_tag} code slice failed: {e}")
@@ -604,6 +672,9 @@ class ResearchRunService:
                 promotion_note = self._confirm_and_activate(
                     svc, run, candidate_ids=candidate_ids,
                 )
+            except ResearchRunStopped:
+                promotion_note = "confirmation not run: the run was stopped"
+                halt_reason, status_at_end = "killed", "killed"
             except Exception as e:
                 promotion_note = f"confirmation failed: {e}"
                 logger.warning(f"Run {run.run_tag} confirmation failed: {e}")
@@ -616,7 +687,6 @@ class ResearchRunService:
             run, ledger, promotion_note="; ".join(notes) if notes else None,
         )
         db.session.commit()
-        self._running_run_id = None
         self._emit_run_complete(run)
         logger.info(f"Research run {run.run_tag} finished: {halt_reason}, "
                     f"{len(ledger)} experiments")
@@ -641,6 +711,8 @@ class ResearchRunService:
             svc.eval_harness.avg_pair_seconds = float(cfg["avg_pair_seconds"])
         try:
             measured = self._measure_baseline(svc, cfg)
+        except ResearchRunStopped:
+            return [], [], "killed", "killed"
         except Exception as e:
             self._refuse(run, [_clip(f"baseline_eval_failed: {e}", HALT_REASON_MAX)])
             return [], [], "baseline_eval_failed", "failed_precondition"
@@ -678,10 +750,18 @@ class ResearchRunService:
             except Exception:
                 pass
 
-            result = svc.run_single_experiment(
-                run_tag=run.run_tag, promote_mode="candidate",
-                on_proposal=lambda proposal: self._note_current(run, proposal),
-            )
+            try:
+                result = svc.run_single_experiment(
+                    run_tag=run.run_tag, promote_mode="candidate",
+                    on_proposal=lambda proposal: self._note_current(run, proposal),
+                )
+            except ResearchRunStopped:
+                # Stopped mid-experiment: nothing was decided, so nothing is logged.
+                svc._current_experiment_id = None
+                svc._current_parameter = None
+                halt_reason = "killed"
+                status_at_end = "killed"
+                break
             if isinstance(result.get("retrieval_metrics"), dict):
                 result["retrieval_metrics"].setdefault("layer", "params")
             elif result.get("retrieval_metrics") is None:
@@ -932,13 +1012,17 @@ class ResearchRunService:
         return (not reasons), "; ".join(reasons)
 
     def _enqueue_execute_run(self, run_id: str) -> None:
+        """Queue the run for the research worker, starting that worker if needed."""
         from backend.celery_app import celery
-        celery.send_task(
+        from backend.services import research_worker
+
+        research_worker.dispatch(lambda: celery.send_task(
             "autoresearch.execute_run",
             args=[run_id],
+            queue=research_worker.QUEUE,
             time_limit=EXECUTE_RUN_TIME_LIMIT_S,
             soft_time_limit=EXECUTE_RUN_SOFT_LIMIT_S,
-        )
+        ))
 
     def _celery_has_live_execute_run(self):
         """True if a worker reports autoresearch.execute_run active.
@@ -965,23 +1049,26 @@ class ResearchRunService:
     def _recover_stale_runs(self) -> int:
         """Halt ResearchRun rows left `running`/`pending` after a dead worker.
 
-        A live execute_run task (celery inspect) is left alone. If inspect is
-        unavailable, only pending rows that never started and are older than
-        2 minutes are reaped — a running 6h eval is not assumed dead.
+        A live execute_run task (celery inspect) is left alone. A pending row
+        that never started is reaped only once older than PENDING_REAP_AFTER:
+        until then its task may be waiting for the research worker to boot. If
+        inspect is unavailable, only those old pending rows are reaped; a
+        running 6h eval is not assumed dead.
         """
         from backend.models import ResearchRun, db
+        from sqlalchemy import or_
         live = self._celery_has_live_execute_run()
         q = ResearchRun.query.filter(ResearchRun.status.in_(("running", "pending")))
         if live is True:
             return 0
+        old_pending = (
+            ResearchRun.started_at.is_(None)
+            & (ResearchRun.created_at < utcnow() - PENDING_REAP_AFTER)
+        )
         if live is None:
-            cutoff = utcnow() - timedelta(minutes=2)
-            rows = q.filter(
-                ResearchRun.started_at.is_(None),
-                ResearchRun.created_at < cutoff,
-            ).all()
+            rows = q.filter(old_pending).all()
         else:
-            rows = q.all()
+            rows = q.filter(or_(ResearchRun.status == "running", old_pending)).all()
         n = 0
         for row in rows:
             row.status = "halted"
@@ -1118,6 +1205,12 @@ class ResearchRunService:
 
         if meta.get("warnings"):
             lines += ["**Warnings**:", ""] + [f"- {w}" for w in meta["warnings"]] + [""]
+
+        if meta.get("gpu_wait_s"):
+            waited = int(meta["gpu_wait_s"])
+            span = f"{waited} s" if waited < 120 else f"{waited // 60} min"
+            lines += [f"**GPU**: waited {span} for renders or training to finish; "
+                      "that time counts against the run's budget.", ""]
 
         diagnose = meta.get("diagnose") or {}
         split = meta.get("split") or {}

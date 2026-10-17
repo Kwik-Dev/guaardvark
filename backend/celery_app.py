@@ -8,6 +8,8 @@ from backend.celery_dispatch import (
     apply_sender_bounds,
     restore_worker_result_retries,
 )
+from backend.services import research_worker
+from backend.services.research_worker import QUEUE as RESEARCH_QUEUE
 
 # Under memory pressure the kernel must kill THIS worker, never the desktop
 # (2026-08-04 client box lockups). Early, before any heavy allocation.
@@ -116,6 +118,12 @@ def create_celery_app():
             'google_indexing.*': {'queue': 'default'},
             # Custom-named, so routed explicitly like google_indexing.* above.
             'connections.*': {'queue': 'default'},
+            # A research run owns its worker for up to 13 hours, so it runs on
+            # the research worker, started when a run is queued
+            # (backend/services/research_worker.py). The nightly window check
+            # and the post-index check take moments and stay on main.
+            'autoresearch.execute_run': {'queue': RESEARCH_QUEUE},
+            'autoresearch.*': {'queue': 'default'},
         },
 
         beat_schedule={
@@ -497,6 +505,8 @@ def create_celery_app():
         logger.info("RAG Autoresearch Celery tasks registered successfully")
     except ImportError as e:
         logger.warning(f"Could not import autoresearch tasks: {e}")
+    # Idle exit and CPU priority of the research worker; nothing in any other process.
+    research_worker.install(celery_app)
 
     try:
         from backend.tasks.video_render_tasks import create_video_render_tasks
