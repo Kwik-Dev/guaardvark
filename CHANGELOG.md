@@ -5,8 +5,9 @@
 - **Each Interconnector machine joins with its own key.** A client enrols with the fleet key and
   waits on the master until you approve its key fingerprint in Settings → Interconnector; every
   request between machines is then signed, and directives are taken only from the master. After
-  you update a master, its existing clients keep syncing the old way for 48 hours so they can
-  fetch the update: update and restart each one, then approve it on the master.
+  you update a master, click "Allow for 48 hours" in Settings → Interconnector so its existing
+  clients can still sync the old way and fetch the update; update and restart each one, then
+  approve it on the master.
 - **The Interconnector's settings and fleet controls need this machine or the API key**, also
   while Network access is on. A new fleet key is shown only on the master itself.
 - Approving held files or entity changes applies them as chosen, or leaves them pending and says
