@@ -26,7 +26,9 @@ from backend.services.agent_tools import (
     tool_needs_approval_card as _tool_needs_approval_card,
 )
 from backend.utils.text_cut import cut_on_whitespace
-from backend.utils.request_phrases import normalise_message, whole_message_pattern
+from backend.utils.request_phrases import (
+    HOW_TO_QUESTION_RE, VIDEO_SOFTWARE_PATTERN, normalise_message, whole_message_pattern,
+)
 from backend.utils.inline_reasoning import (
     InlineReasoningStream, REASONING, RETRACT, VISIBLE, split_inline_reasoning,
 )
@@ -565,7 +567,7 @@ _IMAGE_GEN_NEGATIVE_PATTERNS = (
     r"\b(analyze|explain) (this|the|that) (image|photo|picture)\b",
 )
 # "How do I ...", "how to ...": asks how something is done, not for it to be done.
-_HOW_TO_QUESTION_RE = re.compile(r"^\s*how\s+(?:do|can|could|should|would|does|to)\b", re.IGNORECASE)
+_HOW_TO_QUESTION_RE = HOW_TO_QUESTION_RE
 # Image requests only: a how-to question or front-end work ("how do I animate a
 # CSS button", "make an image responsive") is a question for the chat model.
 _IMAGE_REQUEST_NEGATIVE_PATTERNS = _IMAGE_GEN_NEGATIVE_PATTERNS + (
@@ -908,12 +910,7 @@ _VIDEO_REQUEST_RE = re.compile(
     re.IGNORECASE,
 )
 # Video software named in the message: making a video there is the user's own job.
-_VIDEO_SOFTWARE_PATTERN = (
-    r"\b(?:premiere\s+pro|after\s+effects|davinci|final\s+cut|imovie|capcut|camtasia|filmora"
-    r"|kdenlive|shotcut|openshot|obs\s+studio|clipchamp|ffmpeg|handbrake|movie\s+maker"
-    r"|vegas\s+pro)\b"
-    r"|\b(?:in|with|using)\s+(?:adobe\s+)?(?:premiere|resolve|obs|canva|blender|powerpoint)\b"
-)
+_VIDEO_SOFTWARE_PATTERN = VIDEO_SOFTWARE_PATTERN
 # How-to and front-end questions (as for images) plus questions about video software.
 _VIDEO_REQUEST_NEGATIVE_PATTERNS = _IMAGE_REQUEST_NEGATIVE_PATTERNS + (_VIDEO_SOFTWARE_PATTERN,)
 # A picture or animation named alongside "video" keeps a message open to the image path.
