@@ -759,3 +759,103 @@ def test_network_access_off_keeps_the_local_only_refusal_for_code_routes(app, mo
 
     assert response.status_code == 403
     assert response.get_json()["code"] == auth_guard.LOCAL_ONLY_CODE
+
+
+# ---- Interconnector operator routes ---------------------------------------
+
+# Every path below starts with one of the Interconnector entries in
+# PROTECTED_PREFIXES, with the method the route answers.
+INTERCONNECTOR_OPERATOR_ROUTES = (
+    ("GET", "/api/interconnector/config"),
+    ("POST", "/api/interconnector/config"),
+    ("POST", "/api/interconnector/config/generate-key"),
+    ("GET", "/api/interconnector/approvals/pending"),
+    ("POST", "/api/interconnector/approvals/7/decide"),
+    ("POST", "/api/interconnector/broadcast/push"),
+    ("GET", "/api/interconnector/broadcast/status/b-1"),
+    ("POST", "/api/interconnector/sync/manual"),
+    ("POST", "/api/interconnector/ask-family"),
+    ("POST", "/api/interconnector/route-inference"),
+    ("POST", "/api/interconnector/nodes/test-all"),
+    ("POST", "/api/cluster/routing-table/recompute"),
+)
+INTERCONNECTOR_OPERATOR_PREFIXES = (
+    "/api/interconnector/config",
+    "/api/interconnector/approvals/",
+    "/api/interconnector/broadcast/",
+    "/api/interconnector/sync/manual",
+    "/api/interconnector/ask-family",
+    "/api/interconnector/route-inference",
+    "/api/interconnector/nodes/test-all",
+    "/api/cluster/routing-table/recompute",
+)
+# Routes other machines call. The guard leaves them to the route, which checks
+# the calling machine itself.
+INTERCONNECTOR_NODE_ROUTES = (
+    ("GET", "/api/interconnector/status"),
+    ("POST", "/api/interconnector/nodes/register"),
+    ("POST", "/api/interconnector/nodes/n-1/heartbeat"),
+    ("GET", "/api/interconnector/sync/pull"),
+    ("GET", "/api/interconnector/sync/files/pull"),
+    ("GET", "/api/interconnector/updates/manifest"),
+    ("GET", "/api/interconnector/sync/history"),
+)
+OTHER_MACHINE = {"REMOTE_ADDR": "192.0.2.44"}
+THIS_MACHINE = {"REMOTE_ADDR": "127.0.0.1"}
+
+
+@pytest.fixture
+def interconnector_app(monkeypatch):
+    # This machine is loopback only, whatever the test box's own address is.
+    monkeypatch.setattr(auth_guard, "_local_ips_cache", {"127.0.0.1", "::1", "localhost"})
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    test_app = Flask(__name__)
+    test_app.before_request(auth_guard.check_endpoint_auth)
+    routes = INTERCONNECTOR_OPERATOR_ROUTES + INTERCONNECTOR_NODE_ROUTES
+    for index, (method, path) in enumerate(routes):
+        test_app.add_url_rule(path, f"route_{index}", lambda **_kw: {"ok": True}, methods=[method])
+    return test_app
+
+
+def _call(client, method, path, environ, headers=None):
+    return client.open(path, method=method, environ_base=environ, headers=headers or {})
+
+
+def test_every_interconnector_operator_prefix_is_protected():
+    for prefix in INTERCONNECTOR_OPERATOR_PREFIXES:
+        assert prefix in auth_guard.PROTECTED_PREFIXES, prefix
+
+
+@pytest.mark.parametrize("method,path", INTERCONNECTOR_OPERATOR_ROUTES)
+def test_interconnector_operator_route_refuses_another_machine_without_a_key(interconnector_app, method, path):
+    response = _call(interconnector_app.test_client(), method, path, OTHER_MACHINE)
+    assert response.status_code == 403
+    assert response.get_json()["code"] == auth_guard.LOCAL_ONLY_CODE
+
+
+@pytest.mark.parametrize("method,path", INTERCONNECTOR_OPERATOR_ROUTES)
+def test_interconnector_operator_route_refuses_a_lan_device_behind_the_local_proxy(interconnector_app, method, path):
+    response = _call(interconnector_app.test_client(), method, path, THIS_MACHINE,
+                     headers={"X-Forwarded-For": "192.0.2.44"})
+    assert response.status_code == 403
+
+
+@pytest.mark.parametrize("method,path", INTERCONNECTOR_OPERATOR_ROUTES)
+def test_interconnector_operator_route_answers_this_machine(interconnector_app, method, path):
+    assert _call(interconnector_app.test_client(), method, path, THIS_MACHINE).status_code == 200
+
+
+@pytest.mark.parametrize("method,path", INTERCONNECTOR_OPERATOR_ROUTES)
+def test_interconnector_operator_route_takes_the_install_key_from_any_host(interconnector_app, monkeypatch, method, path):
+    monkeypatch.setenv("GUAARDVARK_API_KEY", "install-key")
+    client = interconnector_app.test_client()
+    assert _call(client, method, path, OTHER_MACHINE).status_code == 401
+    assert _call(client, method, path, OTHER_MACHINE, headers={"X-API-Key": "wrong"}).status_code == 401
+    assert _call(client, method, path, OTHER_MACHINE, headers={"X-API-Key": "install-key"}).status_code == 200
+    # Once a key is set it is asked of this machine too.
+    assert _call(client, method, path, THIS_MACHINE).status_code == 401
+
+
+@pytest.mark.parametrize("method,path", INTERCONNECTOR_NODE_ROUTES)
+def test_interconnector_node_routes_are_left_to_the_route(interconnector_app, method, path):
+    assert _call(interconnector_app.test_client(), method, path, OTHER_MACHINE).status_code == 200

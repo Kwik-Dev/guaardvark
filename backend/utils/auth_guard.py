@@ -60,6 +60,18 @@ PROTECTED_PREFIXES = (
     # links point here, and those are local; the web UI loads outputs through
     # /api/outputs, which stays open to LAN browsers.
     '/outputs/',
+    # Interconnector operator routes: its settings and fleet key, file-change
+    # approvals, broadcasts to every client, starting a sync, questions sent on
+    # to other machines, and fleet routing. The routes other machines call
+    # (status, register, heartbeat, pull, manifest) check the caller themselves.
+    '/api/interconnector/config',
+    '/api/interconnector/approvals/',
+    '/api/interconnector/broadcast/',
+    '/api/interconnector/sync/manual',
+    '/api/interconnector/ask-family',
+    '/api/interconnector/route-inference',
+    '/api/interconnector/nodes/test-all',
+    '/api/cluster/routing-table/recompute',
 )
 
 # Browser/desktop/MCP automation and direct tool execution can read files, run
@@ -544,6 +556,7 @@ def protected_summary() -> list[str]:
         "Social outreach",
         "Connections and publishing",
         "WordPress sites and their pages",
+        "Interconnector settings, approvals, broadcasts and fleet routing",
         "Changing tasks, jobs, schedules, memory and GPU state",
         "Raw file downloads under /outputs/",
         "Managing this API key",

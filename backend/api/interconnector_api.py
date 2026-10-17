@@ -8,6 +8,7 @@ import json
 import logging
 import secrets
 import hashlib
+import hmac
 import uuid
 import time
 import mimetypes
@@ -229,8 +230,14 @@ def _hash_api_key(api_key):
 
 
 def _verify_api_key(provided_key, stored_hash):
-    """Verify an API key against a stored hash."""
-    return _hash_api_key(provided_key) == stored_hash
+    """Verify an API key against a stored hash, in constant time."""
+    if not provided_key or not stored_hash:
+        return False
+    # Bytes, so a value with non-ASCII characters compares unequal instead of
+    # raising.
+    return hmac.compare_digest(
+        _hash_api_key(provided_key).encode("utf-8"), str(stored_hash).encode("utf-8")
+    )
 
 
 def _check_api_key(config, provided_key=None):
