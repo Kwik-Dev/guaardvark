@@ -4,6 +4,7 @@ import logging
 import math
 import os
 import random
+import shutil
 import subprocess
 import sys
 import time
@@ -1239,8 +1240,9 @@ def export_gguf_task(self, job_id: str, model_dir: str, quantization: str = None
     (model_dir/merged, safetensors) in an offline subprocess on the CPU, then
     convert that folder to one GGUF file at the chosen level with the GGUF
     converter (training_gguf_converter), also on the CPU. import_ollama_task
-    then registers the file with `ollama create`. Refused, before the job is
-    touched, until export is verified for the job's base model and the
+    then registers the file with `ollama create`, and only after that deletes
+    merged/ (_drop_merged); every export merges afresh. Refused, before the
+    job is touched, until export is verified for the job's base model and the
     converter is installed; a level the converter does not offer is refused
     with the choices. quantization None means its default level."""
     logger.info(f"Starting export_gguf_task for job {job_id}")
@@ -1308,6 +1310,35 @@ def _drop_other_export(previous: str, model_dir: Path, current: Path) -> None:
     if previous_path != current and previous_path in ours and previous_path.is_file():
         previous_path.unlink()
         logger.info(f"Removed the earlier export {previous_path}")
+
+
+def _drop_merged(model_dir: Path, gguf: Path) -> int:
+    """Delete the run's merged copy (model_dir/merged, the bf16 base with the
+    adapter folded in) once Ollama has registered the GGUF converted from it,
+    and return the bytes freed. Only a GGUF Export wrote in this folder
+    counts. Nothing else in the run folder is touched (lora/, checkpoints/,
+    heldout/ and the GGUF stay), and the next export merges again."""
+    from backend.services import training_gguf_converter
+    model_dir = Path(model_dir)
+    merged = model_dir / "merged"
+    ours = {export_gguf_name(model_dir, level).resolve() for level in training_gguf_converter.LEVELS}
+    if Path(gguf).resolve() not in ours or merged.is_symlink() or not merged.is_dir():
+        return 0
+    freed = 0
+    for root, _, files in os.walk(merged):
+        for name in files:
+            try:
+                freed += os.lstat(os.path.join(root, name)).st_size
+            except OSError:
+                pass
+    try:
+        shutil.rmtree(merged)
+    except OSError as e:
+        logger.warning(f"Could not remove the merged copy {merged}: {e}")
+        return 0
+    logger.info(f"Removed the merged copy {merged} ({freed / 1e9:.2f} GB) once Ollama "
+                f"registered {Path(gguf).name}")
+    return freed
 
 
 def ollama_modelfile(entry: dict, source: Path) -> str:
@@ -1430,9 +1461,14 @@ def import_ollama_task(self, job_id: str, model_dir: str, model_name: str):
         entry = training_base_models.get(base_model)
         if entry is not None and exported is not None and exported.is_file():
             created = _create_from_gguf(job_id, model_dir_obj, exported, entry, model_name, level)
+            # Only now: until Ollama has the model, a failed step keeps the merged copy.
+            freed = _drop_merged(model_dir_obj, exported)
             _update_job_status(job_id, status="completed", pipeline_stage="importing",
                                completed_at=utcnow(), progress=100, ollama_model_name=model_name)
-            _emit_progress(job_id, 100, f"Ollama import complete: {model_name}", "complete")
+            done = f"Ollama import complete: {model_name}"
+            if freed:
+                done += f" (removed the merged copy, {freed / 1e9:.1f} GB)"
+            _emit_progress(job_id, 100, done, "complete")
             logger.info(f"Import task completed for job {job_id}: {model_name} from {exported}")
             return created
 
