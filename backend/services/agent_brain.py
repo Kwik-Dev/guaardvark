@@ -205,6 +205,14 @@ VISION_PATTERNS = re.compile(
 )
 
 
+def vision_prompt_key(message: str, image_data=None) -> str:
+    """The prompt for a vision-routed turn: the screen prompt for a screen task,
+    the chat prompt for a picture pasted into the conversation."""
+    if image_data and not VISION_PATTERNS.search(message or ""):
+        return "chat"
+    return "vision"
+
+
 # ---------------------------------------------------------------------------
 # AgentBrain
 # ---------------------------------------------------------------------------
@@ -510,9 +518,11 @@ class AgentBrain:
                     escalation_reason = f"reflex '{reflex_action.name}' failed"
 
             # -- Vision routing. Two triggers:
-            #    (1) image_data present — user pasted an image. ALWAYS use the
-            #        vision prompt regardless of agent-screen state, because
-            #        the user explicitly wants the model to look at the image.
+            #    (1) image_data present — user pasted an image. It rides on the
+            #        user message whatever the prompt; the screen prompt is used
+            #        only when the message is about the screen. A pasted picture
+            #        otherwise gets the chat prompt, so it is read against the
+            #        conversation instead of under screen-control rules.
             #    (2) vision-sounding text ("click the Firefox button") AND the
             #        agent screen is being watched. Without the screen, those
             #        requests route through normal Instinct so the model can
@@ -526,7 +536,7 @@ class AgentBrain:
                     session_id, message, options, emit_fn, app,
                     project_id=project_id, image_data=image_data,
                     image_url=image_url, is_voice_message=is_voice_message,
-                    prompt_key="vision", budget=budget,
+                    prompt_key=vision_prompt_key(message, image_data), budget=budget,
                 )
 
             # -- "Yes" to the assistant's own offer: do it, with tools --
