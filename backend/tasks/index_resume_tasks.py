@@ -26,7 +26,9 @@ environmental reasons — the index not yet initialised, a model that would not
 load — that say nothing about the document. Writing ERROR on that removes the row
 from the set this task works from, so a bad half-hour becomes permanent. Failures
 are recorded and the document is left where it is, for a human or an explicit
-reindex to classify.
+reindex to classify. The exception is a file with bytes in it from which no text
+could be read (`no_content_reason`): that is about the file, so it ends ERROR
+with the reason, as it does when indexed from the upload path.
 """
 
 import logging
@@ -267,7 +269,7 @@ def resume_pending_tick(limit: int = None) -> dict:
         from backend.config import UPLOAD_DIR
         from datetime import datetime
 
-        indexed = failed = missing = 0
+        indexed = failed = missing = no_text = 0
         for doc in pending:
             rel = getattr(doc, "file_path", None) or doc.path
             path = rel if os.path.isabs(rel) else os.path.join(UPLOAD_DIR, rel)
@@ -287,6 +289,14 @@ def resume_pending_tick(limit: int = None) -> dict:
                     doc.error_message = None
                     indexed += 1
                 else:
+                    reason = isvc.no_content_reason(doc.id)
+                    if reason:
+                        doc.index_status = "ERROR"
+                        doc.error_message = reason[:500]
+                        doc.updated_at = datetime.now()
+                        db.session.commit()
+                        no_text += 1
+                        continue
                     # A falsy return here is usually the embedding call failing
                     # inside add_file_to_index. Re-check the service rather than
                     # condemning the document: if it went away mid-batch, stop and
@@ -321,9 +331,9 @@ def resume_pending_tick(limit: int = None) -> dict:
         # outcome nobody can see is one nobody can trust. A tick that deferred or
         # skipped documents is saying something needs attention, so it reports at
         # WARNING; a clean tick stays quiet.
-        summary = "index resume tick: %d indexed, %d deferred, %d missing"
-        if failed or missing:
-            logger.warning(summary, indexed, failed, missing)
+        summary = "index resume tick: %d indexed, %d deferred, %d missing, %d with no text (ERROR)"
+        if failed or missing or no_text:
+            logger.warning(summary, indexed, failed, missing, no_text)
         else:
-            logger.info(summary, indexed, failed, missing)
-        return {"indexed": indexed, "failed": failed, "missing": missing}
+            logger.info(summary, indexed, failed, missing, no_text)
+        return {"indexed": indexed, "failed": failed, "missing": missing, "no_text": no_text}

@@ -2800,8 +2800,10 @@ def get_documents_from_file(file_path: str, client: Optional[str] = None, upload
                     logger.info(f"Successfully processed Excel file {filename}: {len(text_content)} characters from {metadata.get('total_sheets', 0)} sheets")
                     
                 else:
-                    error_msg = extraction_result.get('error', 'Unknown error')
-                    text_content = f"Excel file: {filename} (Excel extraction failed: {error_msg})"
+                    # The reason goes in metadata only; in the text it would be
+                    # chunked, embedded and retrieved as the workbook's content.
+                    error_msg = extraction_result.get('error') or 'Unknown error'
+                    text_content = f"Excel file: {filename} (no text content extracted)"
                     
                     metadata = {
                         "source_filename": filename,
@@ -2824,7 +2826,7 @@ def get_documents_from_file(file_path: str, client: Optional[str] = None, upload
                 logger.warning(f"Excel content service not available for {filename}, falling back to SimpleDirectoryReader")
             except Exception as e:
                 logger.error(f"BUG FIX 9: Error processing Excel file {filename}: {e}", exc_info=True)
-                text_content = f"Excel file: {filename} (processing error: {str(e)})"
+                text_content = f"Excel file: {filename} (no text content extracted)"
                 metadata = {
                     "source_filename": filename,
                     "file_path": str(path_obj),
@@ -2903,7 +2905,7 @@ def get_documents_from_file(file_path: str, client: Optional[str] = None, upload
 
             except Exception as e:
                 logger.error(f"BUG FIX 10: Failed to process code file {filename}: {e}", exc_info=True)
-                error_content = f"Code file: {filename} (processing error: {str(e)})"
+                error_content = f"Code file: {filename} (no text content extracted)"
                 metadata = {
                     "source_filename": filename,
                     "file_path": str(path_obj),
