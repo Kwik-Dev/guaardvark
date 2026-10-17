@@ -5,15 +5,35 @@ multiple paths (LAN / VPN / Tailscale) or with a changed DHCP lease used to
 register as a brand-new node each time, piling up duplicate stale rows. Identity
 is now keyed on the machine-stable node_id (hardware_profile["node_id"]) and
 matched by hostname fingerprint, never by IP.
+
+Each machine enrols with its own key (backend/utils/node_auth.py); _register
+signs as that machine, and approves a waiting enrolment the way the operator
+would, so these tests reach the node rows.
 """
 import json
 import pytest
 
 try:
     from flask import Flask
-    from backend.models import db, InterconnectorNode, Setting
+    from backend.models import db, InterconnectorNode, InterconnectorNodeIdentity, Setting
 except Exception:
     pytest.skip("Flask or backend modules not available", allow_module_level=True)
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from backend.utils import node_auth, node_identity
+
+# One key per machine, by hostname.
+_KEYS = {}
+
+
+@pytest.fixture(autouse=True)
+def _machine_keys(tmp_path, monkeypatch):
+    # The master's own key lives under tmp, never in the home directory.
+    monkeypatch.setattr(node_identity, "DEFAULT_NODE_ID_PATH", tmp_path / "node_id")
+    _KEYS.clear()
+    yield
+    _KEYS.clear()
 
 
 @pytest.fixture
@@ -43,12 +63,31 @@ def app():
         ic_api._config_cache["expires"] = 0
 
 
-def _register(client, *, stable_id, hostname, client_ip, name=None):
-    profile = {"node_id": stable_id, "hostname": hostname, "arch": "x86_64", "services": {}}
-    return client.post("/api/interconnector/nodes/register", json={
-        "node_id": stable_id, "node_name": name or hostname, "node_mode": "client",
+def _post_register(client, key, node_id, hostname, client_ip, name):
+    path = "/api/interconnector/nodes/register"
+    profile = {"node_id": node_id, "hostname": hostname, "arch": "x86_64", "services": {}}
+    body = json.dumps({
+        "node_id": node_id, "node_name": name or hostname, "node_mode": "client",
         "client_ip": client_ip, "port": 5002, "hardware_profile": profile,
-    })
+        "public_key": node_auth.public_key_text(key),
+    }).encode()
+    headers = {"Content-Type": "application/json",
+               **node_auth.sign_request(key, node_id, None, "POST", path, body)}
+    return client.post(path, data=body, headers=headers)
+
+
+def _register(client, *, stable_id, hostname, client_ip, name=None):
+    """Register as the machine with this hostname; a first enrolment is
+    approved and sent again under the id the master gave it."""
+    key = _KEYS.setdefault(hostname, Ed25519PrivateKey.generate())
+    response = _post_register(client, key, stable_id, hostname, client_ip, name)
+    if response.status_code != 202:
+        return response
+    assigned = response.get_json()["data"]["node_id"]
+    with client.application.app_context():
+        db.session.get(InterconnectorNodeIdentity, assigned).status = "approved"
+        db.session.commit()
+    return _post_register(client, key, assigned, hostname, client_ip, name)
 
 
 def test_same_machine_two_ips_yields_one_row(app):

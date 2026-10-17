@@ -694,9 +694,8 @@ def handle_chat_send(payload):
                     node = InterconnectorNode.query.filter_by(
                         node_id=route.primary).first()
                     if node is not None and node.online:
-                        api_key = getattr(node, "api_key", None) or node.node_id
                         target = NodeTarget(node_id=node.node_id, host=node.host,
-                                            port=node.port, api_key=api_key)
+                                            port=node.port)
                         bridge = SocketIOBridgeRegistry.get_or_create(_req.sid, target)
                         bridge.forward_send(payload)
                         return
@@ -708,43 +707,51 @@ def handle_chat_send(payload):
 
 # ---- Cluster-foundation handlers (Task 14) ---------------------------------
 
+# Socket sessions opened by another machine with a signed handshake:
+# sid -> {"node": its node id, "master": whether it is the fleet's master}.
+_peer_sessions: dict = {}
+
+
 def _cluster_auth_check(auth):
     """Returns True if the handshake should be accepted.
     Cluster OFF: always True (preserve solo behavior).
-    Cluster ON: api_key → node peer; no cluster headers → local browser."""
+    Cluster ON: a handshake signed by an enrolled machine
+    (backend/utils/node_auth.py) is a peer; one that carries the old
+    api_key, or a bad signature, is refused; neither means a local browser."""
     from flask import current_app, request as _req
     if not current_app.config.get("CLUSTER_ENABLED", False):
         return True  # solo — no auth enforcement
-    key = None
-    if isinstance(auth, dict):
-        key = auth.get("api_key")
-    if key is None:
-        key = _req.headers.get("X-Guaardvark-API-Key")
-    if key:
-        if _is_valid_node_api_key(key):
-            try:
-                join_room("cluster:masters-broadcast")
-            except Exception:
-                pass
-            return True
-        return False  # key present but invalid
+    if isinstance(auth, dict) and auth.get("gx_sig"):
+        from backend.utils import node_auth
+        try:
+            cert = node_auth.verify_socket_auth(auth)
+        except Exception as exc:
+            logger.warning("[CLUSTER] refused a peer handshake: %s", getattr(exc, "reason", exc))
+            return False
+        _peer_sessions[_req.sid] = {
+            "node": cert.node,
+            "master": node_auth.is_master_certificate(cert),
+        }
+        try:
+            join_room("cluster:masters-broadcast")
+        except Exception:
+            pass
+        return True
+    if (isinstance(auth, dict) and auth.get("api_key")) or _req.headers.get("X-Guaardvark-API-Key"):
+        logger.warning("[CLUSTER] refused a peer handshake without a signature")
+        return False
     # No cluster headers/auth = local browser session — allow
     return not _looks_like_node_handshake(_req)
 
 
-def _is_valid_node_api_key(key: str) -> bool:
-    """Check if the api_key matches any known InterconnectorNode.
-    Note: the schema may or may not have an api_key column — check before asserting."""
+def _session_is_fleet_master() -> bool:
+    """True when this socket session is the fleet's master, by its signed handshake."""
+    from flask import request as _req
     try:
-        from backend.models import InterconnectorNode
-        # Legacy: if api_key field doesn't exist on the model, fall back to node_id match
-        if hasattr(InterconnectorNode, "api_key"):
-            return InterconnectorNode.query.filter_by(api_key=key).first() is not None
-        # Otherwise treat key as node_id-based auth (no hardening — matches whatever auth
-        # the Interconnector uses today)
-        return InterconnectorNode.query.filter_by(node_id=key).first() is not None
-    except Exception:
+        sid = _req.sid
+    except (AttributeError, RuntimeError):
         return False
+    return bool(_peer_sessions.get(sid, {}).get("master"))
 
 
 def _looks_like_node_handshake(request) -> bool:
@@ -757,7 +764,7 @@ def _looks_like_node_handshake(request) -> bool:
 
 @socketio.on("connect")
 def on_connect(auth=None):
-    """Gate cluster node-to-node handshakes behind api_key; browser sessions pass through."""
+    """Gate cluster node-to-node handshakes behind a signature; browser sessions pass through."""
     if not _cluster_auth_check(auth):
         return False
     return True
@@ -768,6 +775,15 @@ def handle_cluster_routing_table(data):
     """Worker-side receiver. Validates sender, persists the table."""
     import os as _os
     _logger = logging.getLogger(__name__)
+
+    # Only a session the master opened with its own signed handshake may
+    # replace this machine's routing.
+    if not _session_is_fleet_master():
+        _logger.warning("[CLUSTER] rejected routing_table from a session that is not the master")
+        return
+    if not isinstance(data, dict):
+        _logger.warning("[CLUSTER] malformed routing_table payload")
+        return
 
     expected_master = _os.environ.get("CLUSTER_MASTER_NODE_ID")
     if expected_master and data.get("computed_by") != expected_master:
@@ -790,6 +806,7 @@ def handle_cluster_routing_table(data):
 def handle_disconnect():
     """Clean up any open cluster bridge when a client disconnects."""
     from flask import request
+    _peer_sessions.pop(getattr(request, "sid", None), None)
     try:
         from backend.services.cluster_socketio_bridge import SocketIOBridgeRegistry
         SocketIOBridgeRegistry.close_for_session(request.sid)

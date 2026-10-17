@@ -3,9 +3,40 @@ import pytest
 
 try:
     from flask import Flask
-    from backend.models import db, InterconnectorNode, Setting
+    from backend.models import db, InterconnectorNode, InterconnectorNodeIdentity, Setting
 except Exception:
     pytest.skip("Flask or backend modules not available", allow_module_level=True)
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from backend.utils import node_auth, node_identity
+
+REGISTER = "/api/interconnector/nodes/register"
+
+
+@pytest.fixture(autouse=True)
+def _keys_under_tmp(tmp_path, monkeypatch):
+    # The master signs with its own key; it lives under tmp, never in the home directory.
+    monkeypatch.setattr(node_identity, "DEFAULT_NODE_ID_PATH", tmp_path / "node_id")
+
+
+def _register(client, payload):
+    """Enrol with a fresh machine key, approve as the operator would, and
+    register again: the registration an approved machine sends."""
+    key = Ed25519PrivateKey.generate()
+
+    def post():
+        body = json.dumps({**payload, "public_key": node_auth.public_key_text(key)}).encode()
+        headers = {"Content-Type": "application/json",
+                   **node_auth.sign_request(key, payload["node_id"], None, "POST", REGISTER, body)}
+        return client.post(REGISTER, data=body, headers=headers)
+
+    first = post()
+    assert first.status_code == 202, first.get_data(as_text=True)
+    with client.application.app_context():
+        db.session.get(InterconnectorNodeIdentity, payload["node_id"]).status = "approved"
+        db.session.commit()
+    return post()
 
 
 @pytest.fixture
@@ -53,13 +84,12 @@ def test_register_node_accepts_hardware_profile(app):
     profile = {"node_id": "hw-node-7", "arch": "x86_64",
                "services": {"ollama": {"installed": True}},
                "gpu": {"vendor": "nvidia", "vram_mb": 16384}}
-    r = client.post("/api/interconnector/nodes/register",
-                    json={"node_id": "hw-node-7",
-                          "node_name": "hw-node-7",
-                          "node_mode": "client",
-                          "host": "192.168.1.20",
-                          "port": 5002,
-                          "hardware_profile": profile})
+    r = _register(client, {"node_id": "hw-node-7",
+                           "node_name": "hw-node-7",
+                           "node_mode": "client",
+                           "host": "192.168.1.20",
+                           "port": 5002,
+                           "hardware_profile": profile})
     assert r.status_code in (200, 201), f"got {r.status_code}: {r.get_data(as_text=True)}"
     with app.app_context():
         node = InterconnectorNode.query.filter_by(node_id="hw-node-7").first()
@@ -72,12 +102,11 @@ def test_register_node_falls_back_to_server_side_detection(app):
     HardwareDetector so the row still has structured data."""
     from backend.models import db, InterconnectorNode
     client = app.test_client()
-    r = client.post("/api/interconnector/nodes/register",
-                    json={"node_id": "legacy-node-7",
-                          "node_name": "legacy-node-7",
-                          "node_mode": "client",
-                          "host": "192.168.1.30",
-                          "port": 5002})
+    r = _register(client, {"node_id": "legacy-node-7",
+                           "node_name": "legacy-node-7",
+                           "node_mode": "client",
+                           "host": "192.168.1.30",
+                           "port": 5002})
     assert r.status_code in (200, 201), f"got {r.status_code}: {r.get_data(as_text=True)}"
     with app.app_context():
         node = InterconnectorNode.query.filter_by(node_id="legacy-node-7").first()
@@ -94,12 +123,11 @@ def test_register_node_seeds_fleet_map(app):
     profile = {"node_id": "seed-node", "arch": "x86_64",
                "services": {"ollama": {"installed": True}},
                "gpu": {"vendor": "nvidia", "vram_mb": 8192}}
-    r = client.post("/api/interconnector/nodes/register",
-                    json={"node_id": "seed-node",
-                          "node_name": "seed-node",
-                          "node_mode": "client",
-                          "host": "h", "port": 5002,
-                          "hardware_profile": profile})
+    r = _register(client, {"node_id": "seed-node",
+                           "node_name": "seed-node",
+                           "node_mode": "client",
+                           "host": "h", "port": 5002,
+                           "hardware_profile": profile})
     assert r.status_code in (200, 201)
     fm_profile = get_fleet_map().get_profile("seed-node")
     assert fm_profile is not None

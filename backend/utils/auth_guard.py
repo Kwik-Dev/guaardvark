@@ -72,6 +72,16 @@ PROTECTED_PREFIXES = (
     '/api/interconnector/route-inference',
     '/api/interconnector/nodes/test-all',
     '/api/cluster/routing-table/recompute',
+    # Enrolling this machine with its master (/enrol), and approving,
+    # revoking or removing other machines on the master (/enrolments).
+    '/api/interconnector/enrol',
+)
+
+# Protected routes the fleet's master may also call on a client, with a
+# request signed by the master's own key (backend/utils/node_auth.py): a
+# broadcast starts a sync here.
+MASTER_SIGNED_PATHS = (
+    '/api/interconnector/sync/manual',
 )
 
 # Browser/desktop/MCP automation and direct tool execution can read files, run
@@ -527,6 +537,16 @@ def caller_is_authorized() -> bool:
     return request_is_from_this_machine()
 
 
+def _signed_by_fleet_master() -> bool:
+    """True when the fleet's master signed this request with its own key."""
+    # node_auth.HEADER_SIG, checked before importing it for unsigned requests.
+    if not request.headers.get("X-GX-Sig"):
+        return False
+    from backend.utils.node_auth import flask_request_signed_by_master
+
+    return flask_request_signed_by_master()
+
+
 def _screenshot_link_is_signed() -> bool:
     from backend.utils.screenshot_urls import SIGNATURE_PARAM, signature_valid
 
@@ -556,7 +576,7 @@ def protected_summary() -> list[str]:
         "Social outreach",
         "Connections and publishing",
         "WordPress sites and their pages",
-        "Interconnector settings, approvals, broadcasts and fleet routing",
+        "Interconnector settings, machines joining the fleet, approvals, broadcasts and fleet routing",
         "Changing tasks, jobs, schedules, memory and GPU state",
         "Raw file downloads under /outputs/",
         "Managing this API key",
@@ -600,6 +620,9 @@ def check_endpoint_auth():
         return _refusal(SCREENSHOT_LINK_MESSAGE, SCREENSHOT_LINK_CODE, 403)
 
     if not _is_protected():
+        return None
+
+    if request.path.rstrip('/') in MASTER_SIGNED_PATHS and _signed_by_fleet_master():
         return None
 
     if network_access_covers_request():

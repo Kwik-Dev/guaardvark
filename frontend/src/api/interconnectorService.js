@@ -508,82 +508,71 @@ export const testMasterConnection = async (masterUrl, apiKey) => {
 };
 
 /**
- * Register this client node with the master server
- * @param {Object} registrationData - Registration data
- * @param {string} registrationData.node_name - Name of this node
- * @param {string} registrationData.node_id - Optional node ID (for re-registration)
- * @param {Array<string>} registrationData.sync_entities - Entity types to sync
- * @param {Object} registrationData.hardware_profile - Structured hardware profile
+ * Enrol this client with its master, or heartbeat once enrolled. This
+ * machine's backend does it: it holds the node key every request to the
+ * master is signed with, so the browser never talks to the master itself.
+ * @returns {Promise<Object>} data: { pending, approved, ok, error, node_id, fingerprint, message }
  */
-export const registerWithMaster = async (masterUrl, apiKey, registrationData) => {
-  // Fetch this node's hardware profile so master has structured info on
-  // registration. If the endpoint isn't available (older master talking to
-  // newer node, or detector not run yet), proceed without — server-side
-  // fallback detects for us.
-  let hardwareProfile = null;
+export const enrolWithMaster = async () => {
   try {
-    const localRes = await fetch("/api/node/hardware-profile");
-    if (localRes.ok) {
-      hardwareProfile = await localRes.json();
-    }
-  } catch (e) {
-    console.warn("[INTERCONNECTOR API] hardware-profile fetch failed:", e);
-  }
-
-  const payload = { ...registrationData };
-  if (hardwareProfile) {
-    payload.hardware_profile = hardwareProfile;
-  }
-
-  try {
-    debugLog("[INTERCONNECTOR API] Registering with master", {
-      masterUrl: redactValue(masterUrl),
-      nodeId: redactValue(registrationData.node_id || "none"),
-      syncEntityCount: registrationData.sync_entities?.length || 0,
-    });
-
-    const baseUrl = masterUrl.replace(/\/$/, "");
-    const apiPath = baseUrl.endsWith("/api") ? "" : "/api";
-    const registerUrl = `${baseUrl}${apiPath}/interconnector/nodes/register`;
-
-    debugLog("[INTERCONNECTOR API] Registration URL:", redactValue(registerUrl));
-
-    const response = await fetchWithTimeout(registerUrl, {
+    const response = await fetchWithTimeout(`${BASE_URL}/interconnector/enrol`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-API-Key": apiKey,
-      },
-      body: JSON.stringify(payload),
-    }, 10000);
-    
-    debugLog("[INTERCONNECTOR API] Registration response status:", response.status, response.statusText);
-    
+    }, 20000);
     const result = await handleResponse(response);
-    debugLog("[INTERCONNECTOR API] Registration result", {
-      success: result?.success,
+    debugLog("[INTERCONNECTOR API] Enrolment step", {
+      pending: Boolean(result?.data?.pending),
+      ok: Boolean(result?.data?.ok || result?.data?.approved),
       nodeId: redactValue(result?.data?.node_id),
     });
     return result;
   } catch (err) {
-    console.error("[INTERCONNECTOR API] Error registering with master:", err);
-    console.error("[INTERCONNECTOR API] Registration error details:", {
-      name: err.name,
-      message: err.message,
-      stack: err.stack
-    });
-    
-    // Provide a more user-friendly error message for CORS issues
-    if (err.name === "TypeError" && err.message.includes("NetworkError")) {
-      return { 
-        error: "Connection failed. This may be a CORS issue - ensure the master node allows connections from this client's origin. The master may need to be restarted after configuration changes.",
-        isCorsError: true
-      };
-    }
-    
+    console.error("[INTERCONNECTOR API] Error enrolling with master:", err);
     return { error: err.message };
   }
 };
+
+/**
+ * This machine's node id, key fingerprint and place in the fleet.
+ */
+export const getLocalIdentity = async () => {
+  try {
+    const response = await fetchWithTimeout(`${BASE_URL}/interconnector/nodes/local-identity`);
+    return await handleResponse(response);
+  } catch (err) {
+    console.error("[INTERCONNECTOR API] Error reading local identity:", err);
+    return { error: err.message };
+  }
+};
+
+/**
+ * Master: machines that asked to join, with their key fingerprints.
+ */
+export const getEnrolments = async () => {
+  try {
+    const response = await fetchWithTimeout(`${BASE_URL}/interconnector/enrolments`);
+    return await handleResponse(response);
+  } catch (err) {
+    console.error("[INTERCONNECTOR API] Error loading enrolments:", err);
+    return { error: err.message };
+  }
+};
+
+const decideEnrolment = async (nodeId, action) => {
+  const path = action === "remove"
+    ? `${BASE_URL}/interconnector/enrolments/${encodeURIComponent(nodeId)}`
+    : `${BASE_URL}/interconnector/enrolments/${encodeURIComponent(nodeId)}/${action}`;
+  const response = await fetchWithTimeout(path, { method: action === "remove" ? "DELETE" : "POST" });
+  return await handleResponse(response);
+};
+
+/** Master: let a waiting machine join. */
+export const approveEnrolment = (nodeId) => decideEnrolment(nodeId, "approve");
+
+/** Master: stop an enrolled machine's certificate at once. */
+export const revokeEnrolment = (nodeId) => decideEnrolment(nodeId, "revoke");
+
+/** Master: decline a waiting machine, or forget an enrolled one. */
+export const removeEnrolment = (nodeId) => decideEnrolment(nodeId, "remove");
 
 // =============================================================================
 // SIMPLIFIED UPDATE ENDPOINTS (for client machines)
@@ -656,48 +645,6 @@ export const getSyncStatus = async () => {
     return await handleResponse(response);
   } catch (err) {
     console.error("[INTERCONNECTOR API] Error getting sync status:", err);
-    return { error: err.message };
-  }
-};
-
-/**
- * Send heartbeat to master server
- * @param {string} masterUrl - Master server URL
- * @param {string} apiKey - API key
- * @param {string} nodeId - This node's ID
- */
-export const sendHeartbeat = async (masterUrl, apiKey, nodeId) => {
-  try {
-    debugLog("[INTERCONNECTOR API] Sending heartbeat", {
-      nodeId: redactValue(nodeId),
-    });
-    
-    const baseUrl = masterUrl.replace(/\/$/, "");
-    const apiPath = baseUrl.endsWith("/api") ? "" : "/api";
-    const heartbeatUrl = `${baseUrl}${apiPath}/interconnector/nodes/${nodeId}/heartbeat`;
-    
-    debugLog("[INTERCONNECTOR API] Heartbeat URL:", redactValue(heartbeatUrl));
-    
-    const response = await fetchWithTimeout(heartbeatUrl, {
-      method: "POST",
-      headers: {
-        "X-API-Key": apiKey,
-      },
-    }, 5000); // Short timeout for heartbeat
-    
-    debugLog("[INTERCONNECTOR API] Heartbeat response status:", response.status, response.statusText);
-    
-    const result = await handleResponse(response);
-    debugLog("[INTERCONNECTOR API] Heartbeat result", {
-      success: result?.success,
-    });
-    return result;
-  } catch (err) {
-    console.error("[INTERCONNECTOR API] Error sending heartbeat:", err);
-    console.error("[INTERCONNECTOR API] Heartbeat error details:", {
-      name: err.name,
-      message: err.message
-    });
     return { error: err.message };
   }
 };

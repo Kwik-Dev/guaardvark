@@ -78,15 +78,51 @@ def test_recompute_skips_broadcast_when_fleet_hash_unchanged(app, monkeypatch):
         assert not emit.called
 
 
+def _from_socket(app, sid, master):
+    """A socket request context whose session opened with a signed handshake
+    as the master (master=True) or as another machine."""
+    import flask
+    import backend.socketio_events as events
+
+    ctx = app.test_request_context("/socket.io/")
+    ctx.push()
+    flask.request.sid = sid
+    events._peer_sessions[sid] = {"node": "real-master" if master else "worker-b", "master": master}
+    return ctx
+
+
 def test_worker_handler_rejects_spoofed_sender(app, monkeypatch):
     from backend.socketio_events import handle_cluster_routing_table
     monkeypatch.setenv("CLUSTER_ROLE", "worker")
     monkeypatch.setenv("CLUSTER_MASTER_NODE_ID", "real-master")
     from backend.services.cluster_routing import get_routing_store
     get_routing_store()._table = None
-    handle_cluster_routing_table({"computed_by": "evil-spoofer",
-                                  "routes": {}, "computed_at": "2026-04-22T00:00:00",
-                                  "node_count": 1, "fleet_hash": "x"})
+    ctx = _from_socket(app, "sid-master", master=True)
+    try:
+        handle_cluster_routing_table({"computed_by": "evil-spoofer",
+                                      "routes": {}, "computed_at": "2026-04-22T00:00:00",
+                                      "node_count": 1, "fleet_hash": "x"})
+    finally:
+        ctx.pop()
+    assert get_routing_store().get() is None
+
+
+def test_worker_handler_rejects_a_session_that_is_not_the_master(app, monkeypatch):
+    """The table says it is the master's; the socket that sent it is not."""
+    import backend.socketio_events as events
+    monkeypatch.setenv("CLUSTER_ROLE", "worker")
+    monkeypatch.delenv("CLUSTER_MASTER_NODE_ID", raising=False)
+    from backend.services.cluster_routing import get_routing_store
+    get_routing_store()._table = None
+    table = {"computed_by": "real-master", "routes": {}, "computed_at": "2026-04-22T00:00:00",
+             "node_count": 1, "fleet_hash": "x"}
+    # Outside any socket session (no sid), and from a peer that is not the master.
+    events.handle_cluster_routing_table(table)
+    ctx = _from_socket(app, "sid-worker", master=False)
+    try:
+        events.handle_cluster_routing_table(table)
+    finally:
+        ctx.pop()
     assert get_routing_store().get() is None
 
 
@@ -96,14 +132,18 @@ def test_worker_handler_accepts_known_master(app, monkeypatch):
     monkeypatch.setenv("CLUSTER_MASTER_NODE_ID", "real-master")
     from backend.services.cluster_routing import get_routing_store
     get_routing_store()._table = None
-    handle_cluster_routing_table({
-        "computed_by": "real-master",
-        "routes": {"llm_chat": {"workload": "llm_chat", "mode": "singular",
-                                "primary": "real-master", "fallback": [],
-                                "workers": [], "required_services": ["ollama"],
-                                "min_vram_mb": 4096, "cpu_acceptable": False}},
-        "computed_at": "2026-04-22T00:00:00",
-        "node_count": 1, "fleet_hash": "abc",
-    })
+    ctx = _from_socket(app, "sid-master", master=True)
+    try:
+        handle_cluster_routing_table({
+            "computed_by": "real-master",
+            "routes": {"llm_chat": {"workload": "llm_chat", "mode": "singular",
+                                    "primary": "real-master", "fallback": [],
+                                    "workers": [], "required_services": ["ollama"],
+                                    "min_vram_mb": 4096, "cpu_acceptable": False}},
+            "computed_at": "2026-04-22T00:00:00",
+            "node_count": 1, "fleet_hash": "abc",
+        })
+    finally:
+        ctx.pop()
     assert get_routing_store().get() is not None
     assert get_routing_store().get().fleet_hash == "abc"
