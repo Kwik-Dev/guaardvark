@@ -112,6 +112,31 @@ def append_row(row: Dict[str, Any]) -> bool:
         return False
 
 
+def record_decision(event: Mapping[str, Any], state: Optional[Mapping[str, Any]] = None) -> bool:
+    """nl_control_plane.decide()'s recorder: one question row per decision made
+    in shadow or on, from the event decide() builds. Never raises."""
+    try:
+        source = event.get("source")
+        return write_question(
+            str(event.get("decision")),
+            request_id=event.get("request_id"),
+            mode=event.get("mode") or "off",
+            model=event.get("model"),
+            digest=event.get("digest"),
+            backend=event.get("backend"),
+            state=state,
+            llm_answer=event.get("llm_answer"),
+            llm_confidence=event.get("llm_confidence"),
+            fallback_answer=event.get("fallback_answer"),
+            used="llm" if source == "llm" else (source or "fallback"),
+            reason=event.get("reason"),
+            latency_ms=event.get("latency_ms"),
+        )
+    except Exception as e:
+        logger.debug("decision telemetry record skipped: %s", e)
+        return False
+
+
 def write_question(
     decision: str,
     *,
