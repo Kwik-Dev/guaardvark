@@ -85,6 +85,9 @@ FLEET_PREFIXES = (
     # Enrolling this machine with its master (/enrol), and approving,
     # revoking or removing other machines on the master (/enrolments).
     '/api/interconnector/enrol',
+    # Letting machines that joined before enrolment existed sync on the old
+    # rule for a while, or closing that window.
+    '/api/interconnector/transition',
     # The node list's debug view, probing a master's address, applying
     # master code here, the master's file-scan test and file check, and the
     # list of pre-sync code backups.

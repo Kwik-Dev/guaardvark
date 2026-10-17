@@ -36,6 +36,7 @@ OPERATOR = {
     ("POST", "/sync/files/verify"), ("GET", "/backups"),
     ("POST", "/enrol"), ("GET", "/enrolments"), ("POST", "/enrolments/<node_id>/approve"),
     ("POST", "/enrolments/<node_id>/revoke"), ("DELETE", "/enrolments/<node_id>"),
+    ("POST", "/transition"),
 }
 # Called by other machines; each checks the signature (backend/utils/node_auth.py).
 NODE = {

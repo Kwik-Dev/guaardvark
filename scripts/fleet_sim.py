@@ -317,6 +317,11 @@ def security_checks(master: Master, a: Machine, data_dir: Path, results: Results
 
     r, _ = master.send("GET", f"{API}/sync/pull", machine=a, sign=False, query={"entities": "rules"})
     results.check("T441", "unsigned data pull", r, {401})
+    # The transition window takes unsigned calls only from machines that joined
+    # the old way and are on record; a node id the master never saw is not one.
+    r, _ = master.send("POST", f"{API}/nodes/fleet-sim-never-joined/heartbeat", machine=a,
+                       sign=False, body=body)
+    results.check("T441", "unsigned heartbeat for a node the master never saw", r, {401})
     r, _ = master.send("GET", f"{API}/sync/pull", machine=a, query={"entities": "rules"})
     results.check("T441", "signed data pull", r, {200})
 
@@ -343,6 +348,8 @@ def security_checks(master: Master, a: Machine, data_dir: Path, results: Results
         ("GET", f"{API}/debug/nodes", None),
         ("GET", f"{API}/backups", None),
         ("POST", f"{API}/test-connection", {}),
+        # Not a valid body: refused as invalid even if the guard let it through.
+        ("POST", f"{API}/transition", {"open": "fleet-sim-probe"}),
         # A node id no master has: harmless even if the guard let it through.
         ("DELETE", f"{API}/nodes/fleet-sim-no-such-node", None),
         ("POST", f"{API}/nodes/fleet-sim-no-such-node/test", None),

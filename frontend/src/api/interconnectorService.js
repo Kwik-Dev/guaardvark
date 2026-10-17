@@ -574,6 +574,20 @@ export const revokeEnrolment = (nodeId) => decideEnrolment(nodeId, "revoke");
 /** Master: decline a waiting machine, or forget an enrolled one. */
 export const removeEnrolment = (nodeId) => decideEnrolment(nodeId, "remove");
 
+/**
+ * Master: let machines that joined before keys sync on the fleet key alone
+ * for `hours` more (open), or stop that now (close).
+ */
+export const setTransitionWindow = async (open, hours) => {
+  const body = open ? { open: true, hours } : { open: false };
+  const response = await fetchWithTimeout(`${BASE_URL}/interconnector/transition`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return await handleResponse(response);
+};
+
 // =============================================================================
 // SIMPLIFIED UPDATE ENDPOINTS (for client machines)
 // =============================================================================

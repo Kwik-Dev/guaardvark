@@ -34,6 +34,7 @@ from backend.models import (
     InterconnectorLearning, Image
 )
 from backend.utils import node_auth
+from backend.services import interconnector_transition
 from backend.services.interconnector_sync_service import get_sync_service
 from backend.services.interconnector_file_sync_service import get_file_sync_service
 from backend.services.interconnector_sync_registry import (
@@ -325,14 +326,56 @@ def _require_node(url_node_id: Optional[str] = None):
     return cert, None
 
 
+class LegacyCaller:
+    """A client that joined before enrolment, taken during the transition
+    window (backend/services/interconnector_transition.py). It stands where
+    a certificate would: .node is the machine's id; it has no expiry to renew."""
+
+    legacy = True
+    exp = None
+
+    def __init__(self, node: str):
+        self.node = node
+
+
+def _legacy_caller(url_node_id: Optional[str] = None) -> Optional[LegacyCaller]:
+    """The legacy client this unsigned request may be taken from on the old
+    rule (the fleet key, when the master requires one), or None."""
+    from backend.utils.auth_guard import _effective_client_ip
+
+    if node_auth.is_signed(request.headers):
+        return None
+    is_valid, _error = _check_api_key(_get_config(), request.headers.get("X-API-Key"))
+    if not is_valid:
+        return None
+    node_id = interconnector_transition.legacy_caller(
+        _effective_client_ip(), request.path, url_node_id,
+        # A browser page sends an Origin; it may be open on another computer.
+        may_move=url_node_id is not None and not request.headers.get("Origin"),
+    )
+    return LegacyCaller(node_id) if node_id else None
+
+
+def _require_node_or_legacy(url_node_id: Optional[str] = None):
+    """_require_node, except that while the transition window is open a
+    client that joined before enrolment may still call unsigned. Only the
+    routes an old client needs to stay alive and fetch the update use this:
+    heartbeat, pulls and pushes, the manifest and registry, and outputs."""
+    legacy = _legacy_caller(url_node_id)
+    if legacy is not None:
+        return legacy, None
+    return _require_node(url_node_id)
+
+
 def _require_node_or_operator():
-    """None when an approved machine signed the request or the operator sent
-    it (this machine, or the install API key); otherwise the refusal."""
+    """None when an approved machine signed the request, a legacy client
+    called during the transition window, or the operator sent it (this
+    machine, or the install API key); otherwise the refusal."""
     from backend.utils.auth_guard import caller_is_authorized
 
     if not node_auth.is_signed(request.headers) and caller_is_authorized():
         return None
-    _cert, refusal = _require_node()
+    _cert, refusal = _require_node_or_legacy()
     return refusal
 
 
@@ -1329,8 +1372,9 @@ def node_heartbeat(node_id):
             return error_response("Heartbeat is only available in master mode", 400)
 
         # Only the machine itself, signing with its approved key, may beat for
-        # the node id in the URL.
-        cert, refusal = _require_node(node_id)
+        # the node id in the URL (or, during the transition window, a client
+        # that joined before enrolment).
+        cert, refusal = _require_node_or_legacy(node_id)
         if refusal:
             return refusal
 
@@ -1357,7 +1401,7 @@ def node_heartbeat(node_id):
 
         # The certificate is renewed here, well before it runs out.
         renewal = {}
-        if cert.exp - int(time.time()) < node_auth.CERT_RENEW_BEFORE_S:
+        if cert.exp is not None and cert.exp - int(time.time()) < node_auth.CERT_RENEW_BEFORE_S:
             renewal = _issue_node_certificate(db.session.get(InterconnectorNodeIdentity, node_id))
 
         db.session.commit()
@@ -1830,6 +1874,7 @@ def list_enrolments():
             "enrolments": [row.to_dict() for row in rows],
             "pending_count": sum(1 for row in rows if row.status == "pending"),
             "master_fingerprint": node_auth.local_fingerprint(),
+            "transition": interconnector_transition.status(),
         },
         "Enrolments retrieved",
     )
@@ -1915,6 +1960,40 @@ def remove_enrolment(node_id):
         return error_response(f"Failed to remove: {str(e)}", 500)
 
 
+@interconnector_bp.route("/transition", methods=["POST"])
+def set_transition_window():
+    """Open or close the window in which clients that joined before enrolment
+    may still sync unsigned (backend/services/interconnector_transition.py).
+    Body: {"open": true, "hours": 48} or {"open": false}."""
+    refusal = _enrolments_live_here()
+    if refusal:
+        return refusal
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data.get("open"), bool):
+        return validation_error_response("open must be true or false")
+    try:
+        if data["open"]:
+            try:
+                hours = float(data.get("hours", interconnector_transition.WINDOW_HOURS))
+            except (TypeError, ValueError):
+                return validation_error_response("hours must be a number")
+            if not 0 < hours <= interconnector_transition.MAX_WINDOW_HOURS:
+                return validation_error_response(
+                    f"hours must be more than 0 and at most {interconnector_transition.MAX_WINDOW_HOURS}"
+                )
+            interconnector_transition.open_window(hours, opened_by="operator")
+        else:
+            interconnector_transition.close_window(closed_by="operator")
+        return success_response(
+            {"transition": interconnector_transition.status()},
+            "Transition window open" if data["open"] else "Transition window closed",
+        )
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"[SYNC] Error changing the transition window: {e}", exc_info=True)
+        return error_response(f"Failed to change the transition window: {str(e)}", 500)
+
+
 @interconnector_bp.route("/sync/profiles", methods=["GET"])
 def get_sync_profiles():
     """List available sync profiles."""
@@ -1939,7 +2018,7 @@ def pull_entities():
         if config.get("node_mode") != "master":
             return error_response("Pull endpoint is only available on master nodes", 400)
 
-        _cert, refusal = _require_node()
+        _cert, refusal = _require_node_or_legacy()
         if refusal:
             return refusal
 
@@ -1991,7 +2070,7 @@ def push_entities():
         if config.get("node_mode") != "master":
             return error_response("Push endpoint is only available on master nodes", 400)
 
-        cert, refusal = _require_node()
+        cert, refusal = _require_node_or_legacy()
         if refusal:
             return refusal
 
@@ -2593,8 +2672,9 @@ def pull_files():
             logger.warning(f"[SYNC] File pull rejected: Not in master mode (mode={config.get('node_mode')})")
             return error_response("Pull files endpoint is only available on master nodes", 400)
 
-        # Code and portable credentials go only to approved machines.
-        _cert, refusal = _require_node()
+        # Code and portable credentials go only to approved machines, and
+        # during the transition window to clients that joined the old way.
+        _cert, refusal = _require_node_or_legacy()
         if refusal:
             return refusal
 
@@ -3821,7 +3901,7 @@ def get_update_manifest():
             logger.warning(f"[UPDATES] Manifest rejected: Not in master mode (mode={config.get('node_mode')})")
             return error_response("Manifest endpoint is only available on master nodes", 400)
         
-        _cert, refusal = _require_node()
+        _cert, refusal = _require_node_or_legacy()
         if refusal:
             return refusal
 
@@ -3894,7 +3974,7 @@ def get_core_files_registry():
         if config.get("node_mode") != "master":
             return error_response("Core files registry is only available on master nodes", 400)
 
-        _cert, refusal = _require_node()
+        _cert, refusal = _require_node_or_legacy()
         if refusal:
             return refusal
 

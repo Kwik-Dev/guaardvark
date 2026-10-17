@@ -790,6 +790,7 @@ INTERCONNECTOR_OPERATOR_ROUTES = (
     ("GET", "/api/interconnector/sync/files/test"),
     ("POST", "/api/interconnector/sync/files/verify"),
     ("GET", "/api/interconnector/backups"),
+    ("POST", "/api/interconnector/transition"),
 )
 INTERCONNECTOR_OPERATOR_PREFIXES = (
     "/api/interconnector/config",
@@ -807,6 +808,7 @@ INTERCONNECTOR_OPERATOR_PREFIXES = (
     "/api/interconnector/sync/files/test",
     "/api/interconnector/sync/files/verify",
     "/api/interconnector/backups",
+    "/api/interconnector/transition",
 )
 # Routes other machines call. The guard leaves them to the route, which checks
 # the calling machine itself; and reads that stay open.

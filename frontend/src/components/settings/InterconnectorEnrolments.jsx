@@ -1,7 +1,9 @@
 // frontend/src/components/settings/InterconnectorEnrolments.jsx
 // Master: machines that asked to join the fleet. Each one shows the
 // fingerprint of its key; compare it with the one on that machine's own
-// Interconnector page before approving.
+// Interconnector page before approving. Above them, the transition window
+// for machines that joined the old way, with no key of their own
+// (backend/services/interconnector_transition.py).
 
 import React, { useCallback, useEffect, useState } from "react";
 import {
@@ -38,10 +40,55 @@ const STATUS_COLOR = {
 const errorText = (err) =>
   err?.data?.error?.message || err?.data?.message || err?.message || "Unknown error";
 
+const machineNames = (machines) =>
+  machines.map((m) => m.node_name || m.node_id).join(", ");
+
+/** The transition window, while it is open or a machine still needs it. */
+const TransitionNotice = ({ transition, busy, onChange }) => {
+  const machines = transition?.legacy_machines || [];
+  if (!transition || (!transition.open && machines.length === 0)) return null;
+  const until = transition.until ? new Date(transition.until).toLocaleString() : "";
+  const hours = transition.window_hours || 48;
+  if (transition.open) {
+    return (
+      <Alert
+        severity="warning"
+        sx={{ mb: 2 }}
+        action={
+          <Button color="inherit" size="small" disabled={busy} onClick={() => onChange(false)}>
+            Close now
+          </Button>
+        }
+      >
+        Until {until}, machines that joined the fleet the old way, with no key of their own, may
+        still sync here, so they can fetch this update.
+        {machines.length > 0
+          ? ` Still on the old rule: ${machineNames(machines)}. Each stops once it restarts on the update and is approved below.`
+          : " Every machine has enrolled; you can close it."}
+      </Alert>
+    );
+  }
+  return (
+    <Alert
+      severity="info"
+      sx={{ mb: 2 }}
+      action={
+        <Button color="inherit" size="small" disabled={busy} onClick={() => onChange(true, hours)}>
+          Allow for {hours} hours
+        </Button>
+      }
+    >
+      {machineNames(machines)} joined the fleet the old way, with no key of their own, and can no
+      longer sync here. To update them through the Interconnector, allow them for a while.
+    </Alert>
+  );
+};
+
 const InterconnectorEnrolments = () => {
   const { showMessage } = useSnackbar();
   const [enrolments, setEnrolments] = useState([]);
   const [masterFingerprint, setMasterFingerprint] = useState(null);
+  const [transition, setTransition] = useState(null);
   const [loadError, setLoadError] = useState(null);
   const [busy, setBusy] = useState(null);
 
@@ -54,6 +101,7 @@ const InterconnectorEnrolments = () => {
     setLoadError(null);
     setEnrolments(result.data?.enrolments || []);
     setMasterFingerprint(result.data?.master_fingerprint || null);
+    setTransition(result.data?.transition || null);
   }, []);
 
   useEffect(() => {
@@ -81,6 +129,19 @@ const InterconnectorEnrolments = () => {
     }
   };
 
+  const changeTransition = async (open, hours) => {
+    setBusy("transition");
+    try {
+      const result = await interconnectorApi.setTransitionWindow(open, hours);
+      setTransition(result.data?.transition || null);
+      showMessage(open ? `Old-rule sync allowed for ${hours} hours` : "Old-rule sync closed", "success");
+    } catch (err) {
+      showMessage(`Could not change the transition window: ${errorText(err)}`, "error");
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const waiting = enrolments.filter((row) => row.status === "pending").length;
 
   return (
@@ -98,6 +159,8 @@ const InterconnectorEnrolments = () => {
         machine&apos;s Interconnector page.
         {masterFingerprint ? ` This master's key: ${masterFingerprint}.` : ""}
       </Typography>
+
+      <TransitionNotice transition={transition} busy={Boolean(busy)} onChange={changeTransition} />
 
       {loadError ? (
         <Alert severity="error">Could not load the machines: {loadError}</Alert>
