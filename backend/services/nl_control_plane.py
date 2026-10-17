@@ -307,15 +307,16 @@ _THIS_FILE = os.path.abspath(__file__)
 # decide() keeps its answers for a request in the request's ctx dict under this key.
 _MEMO_KEY = "_decide_memo"
 
-# Called with (event, state) for every decision that is not off. Nothing is
-# installed by default; a telemetry writer installs itself with
-# set_decision_recorder. The event never carries the state's text, only its
-# hash and size; the writer decides whether to keep the text.
+# Called with (event, state) for every decision that is not off. None means
+# decision_telemetry.record_decision, which writes a question row only while
+# GUAARDVARK_DECISION_TELEMETRY is on. The event never carries the state's text,
+# only its hash and size; the writer decides whether to keep the text.
 _recorder: Optional[Callable[[dict, Mapping[str, Any]], None]] = None
 
 
 def set_decision_recorder(recorder: Optional[Callable[[dict, Mapping[str, Any]], None]]) -> None:
-    """Install the function that records each decision made in shadow or on; None removes it."""
+    """Install the function that records each decision made in shadow or on;
+    None restores the decision telemetry writer."""
     global _recorder
     _recorder = recorder
 
@@ -323,7 +324,7 @@ def set_decision_recorder(recorder: Optional[Callable[[dict, Mapping[str, Any]],
 def _record(event: dict, state: Mapping[str, Any]) -> None:
     recorder = _recorder
     if recorder is None:
-        return
+        from backend.services.decision_telemetry import record_decision as recorder
     try:
         recorder(event, state)
     except Exception as e:  # noqa: BLE001 - a recorder failure never changes an answer
