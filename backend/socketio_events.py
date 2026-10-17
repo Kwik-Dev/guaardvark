@@ -611,7 +611,14 @@ def _handle_chat_send_local(payload):
             return
 
     def _run():
+        import contextlib
+        from backend.services import job_arbiter
         begin_turn(session_id, turn_mark)
+        # Job order on: background work holds while this turn runs.
+        interactive_turn = contextlib.ExitStack()
+        interactive_turn.enter_context(
+            job_arbiter.interactive("voice_chat" if is_voice_message else "chat", session_id)
+        )
         try:
             logger.info(f"[SOCKET-CHAT][BRIDGE-LOCAL] BACKEND THREAD START session={session_id}")
 
@@ -662,6 +669,7 @@ def _handle_chat_send_local(payload):
             logger.error("[BRIDGE-LOCAL] engine error: %s", _e, exc_info=True)
             emit_fn("chat:error", {"error": str(_e)})
         finally:
+            interactive_turn.close()
             end_turn(session_id)
 
     threading.Thread(target=_run, daemon=True, name=f"bridge-chat-{session_id[:8]}").start()

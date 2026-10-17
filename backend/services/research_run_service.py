@@ -678,6 +678,14 @@ class ResearchRunService:
             except Exception:
                 pass
 
+            # Job order on: hold between experiments while a chat or voice turn
+            # runs. Like the GPU wait above, the held time is the run's budget.
+            from backend.services import job_arbiter
+            job_arbiter.yield_point("autoresearch", run.run_tag, label=f"Autoresearch run {run.run_tag}",
+                                    should_stop=self._kill_requested)
+            if self._kill_requested():
+                continue
+
             result = svc.run_single_experiment(
                 run_tag=run.run_tag, promote_mode="candidate",
                 on_proposal=lambda proposal: self._note_current(run, proposal),

@@ -321,8 +321,15 @@ def unified_chat():
             pass
 
     def run_engine():
+        import contextlib
+        from backend.services import job_arbiter
         from backend.services.unified_chat_engine import begin_turn, end_turn
         begin_turn(session_id, turn_mark)
+        # Job order on: background work holds while this turn runs.
+        interactive_turn = contextlib.ExitStack()
+        interactive_turn.enter_context(
+            job_arbiter.interactive("voice_chat" if is_voice_message else "chat", session_id)
+        )
         try:
             logger.info(f"[SOCKET-CHAT] BACKEND THREAD START for session={session_id}; first chat:thinking may emit BEFORE client join_room completes (race window open)")
             # Wire the emit_fn into the thread-local so that agent_control tools
@@ -403,6 +410,7 @@ def unified_chat():
             logger.error(f"Chat engine thread error: {e}", exc_info=True)
             emit_fn("chat:error", {"error": str(e)})
         finally:
+            interactive_turn.close()
             end_turn(session_id)
             # Always clear the thread-local emitter when this chat turn ends
             # (success, error, or abort) so the next turn on this thread gets a fresh one.

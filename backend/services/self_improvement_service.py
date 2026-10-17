@@ -469,7 +469,12 @@ class SelfImprovementService:
             # its closing answer alone ("I could not find the problem") is not one.
             changes = []
             verifications = []
+            from backend.services import job_arbiter
             for i, failure in enumerate(failures):
+                # Job order on: each fix is a step; hold before it while a chat
+                # or voice turn runs.
+                job_arbiter.yield_point("self_improvement", run_id, label="Self-improvement",
+                                        should_stop=lambda: self._cancel_requested(run_id))
                 if self._cancel_requested(run_id):
                     return self._finish_cancelled(run_record, start_time, changes)
                 # Not _is_safe_to_run: this run is the one running, so it would always stop here.

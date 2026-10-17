@@ -358,6 +358,11 @@ def index_document_task(document_id, process_id=None):
             pass
         return {"skipped": True, "reason": "indexing_paused", "document_id": document_id}
 
+    # Job order on: a document is the safe point; hold here while a chat or
+    # voice turn runs (job_arbiter.yield_point; a no-op with the setting off).
+    from backend.services import job_arbiter
+    job_arbiter.yield_point("indexing", document_id, label=f"Indexing document {document_id}")
+
     logger.info(f"Starting isolated indexing task for document {document_id} with process ID: {process_id}")
 
     # Get progress system for updates

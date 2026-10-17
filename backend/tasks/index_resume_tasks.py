@@ -270,7 +270,10 @@ def resume_pending_tick(limit: int = None) -> dict:
         from datetime import datetime
 
         indexed = failed = missing = no_text = 0
+        from backend.services import job_arbiter
         for doc in pending:
+            # Job order on: hold between documents while a chat or voice turn runs.
+            job_arbiter.yield_point("indexing", doc.id, label=f"Indexing document {doc.id}")
             rel = getattr(doc, "file_path", None) or doc.path
             path = rel if os.path.isabs(rel) else os.path.join(UPLOAD_DIR, rel)
             if not os.path.exists(path):

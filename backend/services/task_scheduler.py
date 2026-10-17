@@ -262,6 +262,10 @@ def _write_output(app, filename: str, content: str) -> None:
 
 def process_pending_tasks(app) -> None:
     """Process all tasks in the pending state that are due."""
+    # Job order on: while a chat or voice turn runs, due rows wait for a later pass.
+    from backend.services import job_arbiter
+    if job_arbiter.should_yield("scheduled_task"):
+        return
     with app.app_context():
         try:
             now = datetime.datetime.now(datetime.timezone.utc)
