@@ -1389,6 +1389,20 @@ def is_default_picture_message(user_message: Optional[str]) -> bool:
     return text.lower() in DEFAULT_PICTURE_MESSAGES or bool(_COMPOSER_DEFAULT_PICTURE_MESSAGE.match(text))
 
 
+def attached_picture_note(message: Optional[str], history, has_picture: bool) -> Optional[str]:
+    """What the chat model is told about a picture attached mid-conversation.
+
+    None on a first message, or on one an entry point wrote in place of the
+    user's words ("Describe this image."), where a description is the answer.
+    """
+    if not has_picture or is_default_picture_message(message):
+        return None
+    if not any(m.get("role") not in ("user", "system") for m in history or []):
+        return None
+    from backend.services.chat_prompt_blocks import ATTACHED_PICTURE_IN_CONVERSATION
+    return ATTACHED_PICTURE_IN_CONVERSATION
+
+
 def pasted_image_prompt(user_message: Optional[str]) -> str:
     """The guide-dog prompt for one attached picture.
 
@@ -2799,6 +2813,9 @@ class UnifiedChatEngine:
         interface_context = self._format_interface_context(options)
         if interface_context:
             context_parts.append(interface_context)
+        picture_note = attached_picture_note(message, history, bool(self._image_data))
+        if picture_note:
+            context_parts.append(picture_note)
         from backend.services.context_providers import (
             PAGE_PROVIDER_NAME,
             build_context_entries,

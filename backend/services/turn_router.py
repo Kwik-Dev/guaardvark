@@ -371,7 +371,8 @@ def legacy_route(message: str, options: Optional[Mapping[str, Any]], facts: Mapp
     has_image = facts["has_image"]
     if ((has_image or ab.VISION_PATTERNS.search(msg))
             and (has_image or facts["screen_active"] or facts["screen_viewer_open"])):
-        return _engine(msg, opts, facts, Route.CHAT, image=has_image, prompt_role="vision")
+        return _engine(msg, opts, facts, Route.CHAT, image=has_image,
+                       prompt_role=ab.vision_prompt_key(msg, has_image))
 
     if ab.AFFIRMATION_PATTERNS.fullmatch(stripped) and facts["pending_offer"]:
         return _engine(msg, opts, facts, Route.ACCEPTED_OFFER, image=False)

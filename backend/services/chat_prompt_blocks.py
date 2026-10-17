@@ -58,6 +58,18 @@ CHAT_KB_CONTEXT_HEADER = (
     "from your own knowledge as usual and do not mention them or the knowledge base."
 )
 
+# Sent with a picture attached mid-conversation. Without it a small vision
+# model describes the picture and stops, even when it is a render of the prompt
+# it just wrote and the user is saying it came out wrong.
+ATTACHED_PICTURE_IN_CONVERSATION = (
+    "The user attached the picture with this message as part of the conversation above. "
+    "Read it against what was discussed. If it shows the result of something from earlier "
+    "(a render of a prompt you wrote, a screenshot of an error, a draft or a design), compare "
+    "it with what was wanted, say what differs and the likely reason, and give the fix, such "
+    "as a revised prompt. Describe the picture only if the user asks for a description or "
+    "nothing earlier relates to it."
+)
+
 
 def build_chat_tools_prompt_tail(tool_list: str, voice_suffix: str = "") -> str:
     """Build the tool-instructions tail when tool_list is non-empty."""
