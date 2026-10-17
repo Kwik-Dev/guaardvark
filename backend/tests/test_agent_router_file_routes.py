@@ -46,3 +46,31 @@ def test_the_file_generation_result_names_the_extension():
     message = "create a file called notes.md"
     out = router._handle_file_generation(router.route(message), message, {})
     assert out["suggested_filename"] == "notes.md"
+
+
+# The chat page opens its file card for a codegen, generate_file or CSV route.
+# A language or "code" named as the topic of a piece of writing is plain chat.
+@pytest.mark.parametrize("message", [
+    "write a poem about javascript",
+    "write a blog post about clean code",
+    "write a tutorial on python decorators",
+    "write a short story regarding a java developer",
+    "generate a poem about code",
+])
+def test_a_language_named_as_the_topic_is_chat(message):
+    decision = AgentRouter().route(message)
+    assert decision.tool_name != "codegen"
+    assert decision.route_type.value == "chat_only"
+
+
+@pytest.mark.parametrize("message", [
+    "write python code to sort a list",
+    "write a python script that renames my photos about cats",
+    "write a function in javascript that debounces input",
+    "write some javascript to validate an email",
+    "write code for a todo app",
+    "generate code for a REST client",
+    "create a function that adds two numbers",
+])
+def test_a_request_for_code_still_routes_to_codegen(message):
+    assert AgentRouter().route(message).tool_name == "codegen"

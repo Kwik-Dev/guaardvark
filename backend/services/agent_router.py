@@ -100,6 +100,19 @@ def _near(verbs: str, objects: str) -> str:
     return rf"\b(?:{verbs})\b{_GAP}\b(?:{objects})\b"
 
 
+# Words after which the rest of a request is its topic, not the kind of thing
+# asked for: "a poem about javascript", "a blog post about clean code", "a
+# tutorial on python decorators" ask for prose.
+_TOPIC_WORDS = r"about|on|regarding|concerning|explaining|describing"
+_GAP_BEFORE_TOPIC = rf"(?:(?!\b(?:{_TOPIC_WORDS})\b)(?![.!?](?:\s|$))[^\n]){{0,60}}?"
+
+
+def _near_object(verbs: str, objects: str) -> str:
+    """Like _near, with the object named before any topic word: "write a
+    python script about cats" matches python, "write a poem about python" does not."""
+    return rf"\b(?:{verbs})\b{_GAP_BEFORE_TOPIC}\b(?:{objects})\b"
+
+
 # A person saying the turn needs no tools or files: "do not generate anything",
 # "no tool calling", "without tools", "don't create a file".
 _DECLINES_TOOLS_RE = re.compile(
@@ -224,9 +237,9 @@ class AgentRouter:
             IntentPattern(
                 name="code_generation",
                 patterns=[
-                    _near("generate", "code"),
-                    _near("write", "python|javascript|java|code"),
-                    _near("create", "function|class|module"),
+                    _near_object("generate", "code"),
+                    _near_object("write", "python|javascript|java|code"),
+                    _near_object("create", "function|class|module"),
                     r"/codegen\b",
                     _near("modify", "file|code"),
                     # "improve/refactor/optimize/rewrite this file" — must be
