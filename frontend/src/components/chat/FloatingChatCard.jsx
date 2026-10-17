@@ -30,6 +30,7 @@ import { useVoice } from "../../contexts/VoiceContext";
 import { useVoiceSession, useVoiceSessionState } from "../../contexts/VoiceSessionContext";
 import extractSpeakableText from "../../utils/extractSpeakableText";
 import useSlashCommands from "../../hooks/useSlashCommands";
+import { directToolOptions } from "../../utils/slashCommandRegistry";
 import SlashCommandPopup from "./SlashCommandPopup";
 import FileDropOverlay from "./FileDropOverlay";
 import useFileDropZone from "../../hooks/useFileDropZone";
@@ -80,6 +81,39 @@ const fitToViewport = (position, size, collapsed) => {
   const nextSize = w === size.w && h === size.h ? size : { w, h };
   const nextPosition = x === position.x && y === position.y ? position : { x, y };
   return { position: nextPosition, size: nextSize };
+};
+
+/**
+ * The reply kept when a turn ends without chat:complete: what had streamed,
+ * pictures included. This card renders only the body, reasoning and pictures,
+ * so agent-trail steps go into the text. Returns null when nothing had arrived.
+ */
+const partialReplyMessage = (partial, status) => {
+  const ended = status === "aborted" ? "stopped" : "failed";
+  const steps = partial.agentThinkingSteps || [];
+  const stepText = steps
+    .map((s) => `step ${s.iteration}: ${s.label}${s.reasoning ? ` — ${s.reasoning}` : ""}`)
+    .join("\n");
+  const body = (partial.content || "").trim();
+  const images = partial.images || [];
+  const hasAnything =
+    body || stepText || images.length > 0 || (partial.toolCalls?.length || 0) > 0 || partial.thinking;
+  if (!hasAnything) return null;
+  const composed = [
+    body,
+    stepText ? `--- agent trail (${ended}) ---\n${stepText}` : "",
+  ].filter(Boolean).join("\n\n");
+  return {
+    id: `asst_unified_${Date.now()}_partial`,
+    role: "assistant",
+    content: composed || (images.length > 0 ? "" : `(${ended} before any output)`),
+    toolCalls: partial.toolCalls || [],
+    thinking: partial.thinking || "",
+    generatedImages: images,
+    truncated: false,
+    timestamp: new Date().toISOString(),
+    status,
+  };
 };
 
 const FloatingChatCard = () => {
@@ -154,21 +188,6 @@ const FloatingChatCard = () => {
       setUnifiedChatService(null);
     };
   }, [sessionId, socketRef?.current]);
-
-  // chat:error on the composer. Raw socket so it does not overwrite
-  // StreamingMessage's UnifiedChatService.onError listener.
-  useEffect(() => {
-    const socket = socketRef?.current;
-    if (!socket || !sessionId) return;
-    const handleChatError = (data) => {
-      if (!data || (data.session_id && data.session_id !== sessionId)) return;
-      setError(chatErrorMessage(data));
-    };
-    socket.on("chat:error", handleChatError);
-    return () => {
-      socket.off("chat:error", handleChatError);
-    };
-  }, [sessionId, socketRef, setError]);
 
   // Hydrate session mode from backend on sessionId change so `/agent` state
   // survives reloads / re-mounts. Without this, the floating card's
@@ -398,9 +417,12 @@ const FloatingChatCard = () => {
         // can render it — keeping the saved message text exactly what was typed.
         // A document notice only acknowledges the upload: no search is possible
         // on that turn, so the engine's "no search ran" nudge and note stay off.
+        // A slash command (/imagine, /removebg, ...) names its tool; the
+        // engine runs it directly instead of leaving the choice to the model.
         await unifiedChatService.sendMessage(sessionId, content, {
           use_rag: true,
           page_context: pageContext,
+          ...directToolOptions(sendOptions),
           ...(isNotice ? { skip_nudges: true } : {}),
         }, imageBase64, isVoice);
       } catch (err) {
@@ -527,13 +549,15 @@ const FloatingChatCard = () => {
     }
     finishVoiceReply();
 
-    if (result.content || result.thinking) {
+    const generatedImages = result.generatedImages || [];
+    if (result.content || result.thinking || generatedImages.length > 0) {
       addMessage({
         id: `asst_unified_${Date.now()}`,
         role: "assistant",
         content: result.content || "",
         toolCalls: result.toolCalls || [],
         thinking: result.thinking || "",
+        generatedImages,
         truncated: result.truncated === true,
         synthesized: result.synthesized === true,
         timestamp: new Date().toISOString(),
@@ -549,35 +573,10 @@ const FloatingChatCard = () => {
   }, [addMessage, setIsSending, sessionId, socketRef, ttsEnabled, speak, finishVoiceReply]);
 
   const handleStop = useCallback(() => {
-    // Salvage whatever streamed so far. Floating card renders only
-    // msg.content, so we flatten any thinking-trail steps into the body
-    // text — otherwise the trail vanishes when the bubble unmounts.
+    // Salvage whatever streamed so far, or it vanishes when the bubble unmounts.
     if (streamingMessageRef.current) {
-      const partial = streamingMessageRef.current.getPartialState() || {};
-      const steps = partial.agentThinkingSteps || [];
-      const stepText = steps.length
-        ? steps
-            .map((s) => `step ${s.iteration}: ${s.label}${s.reasoning ? ` — ${s.reasoning}` : ""}`)
-            .join("\n")
-        : "";
-      const body = (partial.content || "").trim();
-      const hasAnything = body || stepText || (partial.toolCalls?.length || 0) > 0 || partial.thinking;
-      if (hasAnything) {
-        const composed = [
-          body,
-          stepText ? `--- agent trail (stopped) ---\n${stepText}` : "",
-        ].filter(Boolean).join("\n\n");
-        addMessage({
-          id: `asst_unified_${Date.now()}_partial`,
-          role: "assistant",
-          content: composed || "(stopped before any output)",
-          toolCalls: partial.toolCalls || [],
-          thinking: partial.thinking || "",
-          truncated: false,
-          timestamp: new Date().toISOString(),
-          status: "aborted",
-        });
-      }
+      const kept = partialReplyMessage(streamingMessageRef.current.getPartialState() || {}, "aborted");
+      if (kept) addMessage(kept);
     }
 
     // Abort the chat stream AND hard-kill the agent task — the socket
@@ -593,6 +592,41 @@ const FloatingChatCard = () => {
     setIsSending(false);
     finishVoiceReply();
   }, [unifiedChatService, sessionId, setIsSending, addMessage, finishVoiceReply]);
+
+  // The engine sends no chat:complete after a chat:error, so the error closes
+  // the turn in flight: what had streamed is kept, the error joins the thread,
+  // and the button goes back from Stop to Send.
+  const handleTurnError = useCallback((errorText) => {
+    if (!useFloatingChatStore.getState().isSending) return;
+    const kept = partialReplyMessage(streamingMessageRef.current?.getPartialState() || {}, "error");
+    if (kept) addMessage(kept);
+    addMessage({
+      id: `err_${Date.now()}`,
+      role: "system",
+      content: `Error: ${errorText}`,
+      timestamp: new Date().toISOString(),
+    });
+    setIsStreamingMessage(false);
+    setIsSending(false);
+    finishVoiceReply();
+  }, [addMessage, setIsSending, finishVoiceReply]);
+
+  // chat:error on the composer. Raw socket so it does not overwrite
+  // StreamingMessage's UnifiedChatService.onError listener.
+  useEffect(() => {
+    const socket = socketRef?.current;
+    if (!socket || !sessionId) return;
+    const handleChatError = (data) => {
+      if (!data || (data.session_id && data.session_id !== sessionId)) return;
+      const errorText = chatErrorMessage(data);
+      setError(errorText);
+      handleTurnError(errorText);
+    };
+    socket.on("chat:error", handleChatError);
+    return () => {
+      socket.off("chat:error", handleChatError);
+    };
+  }, [sessionId, socketRef, setError, handleTurnError]);
 
   const handleKeyDown = (e) => {
     // Slash command popup navigation intercepts first
@@ -650,7 +684,9 @@ const FloatingChatCard = () => {
       await handleChimeIn();
       return;
     }
-    if (slashCmds.isCommand) {
+    // Checked on the text too: isCommand only follows typing, and a command
+    // recalled from history (Up arrow) must run the same way.
+    if (slashCmds.isCommand || inputText.trim().startsWith("/")) {
       const result = await slashCmds.executeCommand(inputText);
       if (result?.handled) {
         setInputText("");

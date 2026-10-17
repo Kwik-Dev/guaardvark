@@ -13,6 +13,8 @@ import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import CheckIcon from "@mui/icons-material/Check";
 import MicIcon from "@mui/icons-material/Mic";
 import ThinkingCard from "./ThinkingCard";
+import GeneratedMedia from "./GeneratedMedia";
+import ImageLightbox from "../images/ImageLightbox";
 import { agentNoteCaption } from "./agentNoteCaptions";
 import copyText from "../../utils/copyText";
 
@@ -20,11 +22,14 @@ import copyText from "../../utils/copyText";
  * FloatingChatMessage - Renders an individual message item inside FloatingChatCard.
  * Supports copying prompts (user messages) and responses (assistant/system messages)
  * to clipboard with feedback tooltip and check icon matching ChatPage's MessageItem.
+ * A reply's generated pictures and videos render as in MessageItem, and a picture
+ * opens in the same lightbox.
  */
 const FloatingChatMessage = ({ message, msg, formatTime }) => {
   const m = message || msg || {};
   const theme = useTheme();
   const [copied, setCopied] = useState(false);
+  const [lightbox, setLightbox] = useState(null); // { images: [{url, name}], index }
   const timerRef = useRef(null);
 
   useEffect(() => {
@@ -63,6 +68,17 @@ const FloatingChatMessage = ({ message, msg, formatTime }) => {
     },
     [m.content]
   );
+
+  const handleLightboxDownload = useCallback(() => {
+    const img = lightbox?.images[lightbox.index];
+    if (!img) return;
+    const link = document.createElement("a");
+    link.href = img.url;
+    link.download = img.name || "image";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }, [lightbox]);
 
   const formattedTime = formatTime
     ? formatTime(m.timestamp)
@@ -207,6 +223,14 @@ const FloatingChatMessage = ({ message, msg, formatTime }) => {
           py: 0.75,
         }}
       >
+        {isAssistant && (
+          <GeneratedMedia
+            items={m.generatedImages}
+            onOpenPicture={(images, index) => setLightbox({ images, index })}
+            maxWidth="100%"
+            maxHeight={300}
+          />
+        )}
         {isAssistant &&
           typeof m.thinking === "string" &&
           m.thinking.trim() && (
@@ -287,9 +311,28 @@ const FloatingChatMessage = ({ message, msg, formatTime }) => {
           {formattedTime}
         </Typography>
       )}
+      {lightbox && (
+        <ImageLightbox
+          imageUrl={lightbox.images[lightbox.index]?.url}
+          imageName={lightbox.images[lightbox.index]?.name}
+          onClose={() => setLightbox(null)}
+          onPrev={() => setLightbox((prev) => ({ ...prev, index: Math.max(0, prev.index - 1) }))}
+          onNext={() => setLightbox((prev) => ({ ...prev, index: Math.min(prev.images.length - 1, prev.index + 1) }))}
+          onDownload={handleLightboxDownload}
+          hasPrev={lightbox.index > 0}
+          hasNext={lightbox.index < lightbox.images.length - 1}
+        />
+      )}
     </ListItem>
   );
 };
+
+const mediaItemShape = PropTypes.shape({
+  url: PropTypes.string,
+  alt: PropTypes.string,
+  caption: PropTypes.string,
+  type: PropTypes.string,
+});
 
 FloatingChatMessage.propTypes = {
   message: PropTypes.shape({
@@ -298,6 +341,7 @@ FloatingChatMessage.propTypes = {
     content: PropTypes.oneOfType([PropTypes.string, PropTypes.object]),
     thinking: PropTypes.string,
     truncated: PropTypes.bool,
+    generatedImages: PropTypes.arrayOf(mediaItemShape),
     timestamp: PropTypes.oneOfType([PropTypes.string, PropTypes.number]),
   }),
   msg: PropTypes.shape({
@@ -306,6 +350,7 @@ FloatingChatMessage.propTypes = {
     content: PropTypes.oneOfType([PropTypes.string, PropTypes.object]),
     thinking: PropTypes.string,
     truncated: PropTypes.bool,
+    generatedImages: PropTypes.arrayOf(mediaItemShape),
     timestamp: PropTypes.oneOfType([PropTypes.string, PropTypes.number]),
   }),
   formatTime: PropTypes.func,
