@@ -1467,6 +1467,7 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
                            project_id: int = None) -> Optional[Dict]:
         """Check if message is a media command and execute directly, bypassing LLM."""
         import re
+        from backend.services.unified_chat_engine import MEDIA_STATUS_REQUEST_RE
         msg = message.strip()
         msg_lower = msg.lower()
 
@@ -1491,10 +1492,8 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
             action = m.group(1).lower()
             tool_name = "media_control"
             params = {"action": "next" if action in ("next", "skip") else "previous"}
-        # What's playing
-        elif re.match(r"^(?:what'?s|what\s+is)\s+(?:this\s+)?(?:playing|this\s+song)", msg, re.IGNORECASE):
-            tool_name = "media_status"
-        elif re.match(r"^(?:current|now)\s+(?:playing|song|track)", msg, re.IGNORECASE):
+        # What's playing (the whole message, about the user's own player)
+        elif MEDIA_STATUS_REQUEST_RE.match(msg):
             tool_name = "media_status"
         # Volume with number
         elif re.match(r"^(?:set\s+)?volume\s+(?:to\s+)?(\d+)", msg, re.IGNORECASE):

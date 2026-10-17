@@ -461,6 +461,15 @@ WEB_TOOLS = ["analyze_website", "fetch_url"]
 # carries no offer to search.
 _WEB_LOOKUP_TOOLS = frozenset({"web_search", *WEB_TOOLS})
 MEDIA_TOOLS = ["media_play", "media_control", "media_volume", "media_status"]
+# A question about the user's own player, as the whole message: "what's
+# playing?", "what's this song called", "now playing". "What's playing at the
+# cinema tonight?" and "current track record of the company" are questions for
+# the chat model. Shared with enhanced chat's media shortcut.
+MEDIA_STATUS_REQUEST_RE = re.compile(
+    r"(?i)^(?:(?:what['\u2019]?s|what\s+is)\s+(?:this\s+)?(?:playing|this\s+song(?:\s+called)?)"
+    r"|(?:current|now)\s+(?:playing|song|track))"
+    r"(?:\s+(?:now|right\s+now))?[\s?!.]*$"
+)
 IMAGE_TOOLS = ["generate_image", "generate_animation", "generate_video"]
 # Tools that consume an attached (or last-edited) photo. Pinned whenever a
 # picture is on the turn so a small model can pick inpaint/identity/bg-remove
@@ -3775,10 +3784,7 @@ class UnifiedChatEngine:
         (re.compile(r"(?i)^(?:please\s+)?(next|skip|previous|prev)(?:\s+(?:song|track))?\.?$"),
          "media_control", lambda m: {"action": "next" if m.group(1).lower() in ("next", "skip") else "previous"}),
         # What's playing
-        (re.compile(r"(?i)^(?:what'?s|what\s+is)\s+(?:this\s+)?(?:playing|this\s+song)"),
-         "media_status", lambda m: {}),
-        (re.compile(r"(?i)^(?:current|now)\s+(?:playing|song|track)"),
-         "media_status", lambda m: {}),
+        (MEDIA_STATUS_REQUEST_RE, "media_status", lambda m: {}),
         # Volume
         (re.compile(r"(?i)^(?:set\s+)?volume\s+(?:to\s+)?(\d+)"), "media_volume",
          lambda m: {"level": m.group(1)}),
