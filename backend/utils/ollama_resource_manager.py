@@ -536,6 +536,99 @@ def same_model(a: str, b: str, tags: Optional[list] = None) -> Optional[bool]:
     return bool(digests_a & digests_b)
 
 
+# /api/ps is read at most this often; a decision asks several questions per turn.
+RESIDENT_TTL_S = 2.0
+# A model Ollama drops within this many seconds counts as not resident: a
+# question sent to it now could arrive after it is gone and load it again.
+RESIDENT_EXPIRY_MARGIN_S = 5.0
+_RESIDENT_TIMEOUT_S = 1.0
+_resident_cache: Dict[str, object] = {"at": 0.0, "models": []}
+_resident_lock = threading.Lock()
+_FRACTION = re.compile(r"(\.\d{6})\d+")
+
+
+def resident_models(ttl_s: float = RESIDENT_TTL_S) -> list:
+    """Ollama's /api/ps "models" entries, read at most once per ``ttl_s``.
+
+    [] when Ollama cannot be reached; a failed read is cached like a good one,
+    so a stopped Ollama costs one connection attempt per ``ttl_s``.
+    """
+    now = time.monotonic()
+    with _resident_lock:
+        if now - float(_resident_cache["at"]) < ttl_s:
+            return list(_resident_cache["models"])
+    models: list = []
+    try:
+        resp = requests.get(f"{get_ollama_base_url()}/api/ps", timeout=_RESIDENT_TIMEOUT_S)
+        if resp.ok:
+            models = list(resp.json().get("models") or [])
+    except Exception as e:  # noqa: BLE001
+        logger.debug("Could not read Ollama's loaded models: %s", e)
+    with _resident_lock:
+        _resident_cache.update(at=time.monotonic(), models=models)
+    return list(models)
+
+
+def _expires_in_s(entry: dict) -> Optional[float]:
+    """Seconds until Ollama drops ``entry``, or None when it does not say."""
+    from datetime import datetime, timezone
+
+    raw = str(entry.get("expires_at") or "").strip()
+    if not raw:
+        return None
+    try:
+        # Ollama writes nanoseconds; older Pythons parse at most microseconds.
+        when = datetime.fromisoformat(_FRACTION.sub(r"\1", raw.replace("Z", "+00:00")))
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return (when - datetime.now(timezone.utc)).total_seconds()
+
+
+def resident_entry(model_name: str, tags: Optional[list] = None) -> Optional[dict]:
+    """The /api/ps entry for ``model_name`` when it is loaded and staying loaded, else None.
+
+    Loaded means: on the GPU (``size_vram`` > 0) and not dropped within
+    RESIDENT_EXPIRY_MARGIN_S. Ollama 0.40 can list a loaded alias under a name
+    nobody asked for (``sha256-<digest>:latest`` for a ``llamacpp:<digest>``
+    model), so an entry matches when its name is the same name, or when
+    ``model_name`` resolves to exactly one manifest digest and the entry is
+    that build. A name listed under two builds (gemma4:e2b on 0.40) matches
+    only by name: a request by that name may load the other build. Another
+    size or tag of the same family never matches (gemma4:e2b is not
+    gemma4:12b). ``tags`` is an /api/tags list the caller already has.
+    """
+    name = _full_model_name(model_name)
+    if not name:
+        return None
+    running = resident_models()
+    match = None
+    for entry in running:
+        names = {_full_model_name(str(entry.get(k) or "")) for k in ("name", "model")}
+        if name in names:
+            match = entry
+            break
+    if match is None and running:
+        digests = model_digests(name, tags)
+        if len(digests) == 1:
+            for entry in running:
+                if _short_digest(entry.get("digest")) in digests:
+                    match = entry
+                    break
+    if match is None:
+        return None
+    try:
+        if int(match.get("size_vram") or 0) <= 0:
+            return None
+    except (TypeError, ValueError):
+        return None
+    remaining = _expires_in_s(match)
+    if remaining is not None and remaining <= RESIDENT_EXPIRY_MARGIN_S:
+        return None
+    return dict(match)
+
+
 def model_supports_tools(model_name: str) -> bool:
     """Check if a model supports native function calling via Ollama's capabilities API
     (or the model's declared row; see model_capabilities)."""
@@ -941,6 +1034,8 @@ def build_ollama(model_name: str, **kwargs):
 
 
 def clear_cache():
-    """Clear the model info cache and the unreachable-Ollama backoff."""
+    """Clear the model info cache, the unreachable-Ollama backoff and the /api/ps cache."""
     _model_info_cache.clear()
     _unreachable_at.clear()
+    with _resident_lock:
+        _resident_cache.update(at=0.0, models=[])
