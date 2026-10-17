@@ -23,7 +23,9 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Callable, Literal, Optional
+
+from backend.services.gpu_resource_policy import RenderStopped
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +97,18 @@ class StillResult:
         }
 
 
+def _stopped_still(prompt: str, enhance_mode: str, **sampling) -> StillResult:
+    """The result for a still the caller stopped before it finished."""
+    return StillResult(
+        success=False,
+        error="Stopped before the image finished; nothing was saved.",
+        prompt_used=prompt,
+        enhance_mode=enhance_mode,
+        metadata={"stopped": True},
+        **sampling,
+    )
+
+
 def run_stills_pipeline(
     prompts: list[str],
     *,
@@ -128,8 +142,14 @@ def run_stills_pipeline(
     hold_gpu: bool = True,
     replace_legacy_sd_markers: bool = True,
     allow_model_download: bool = False,
+    should_stop: Callable[[], bool] | None = None,
 ) -> list[StillResult]:
-    """Generate one or more stills with shared policy. Never raises for per-prompt failures."""
+    """Generate one or more stills with shared policy. Never raises for per-prompt failures.
+
+    ``should_stop`` is asked before each still and while it renders; once it
+    answers True the render in flight ends, the stills not yet started are
+    skipped, and each of those results has ``metadata["stopped"]`` set.
+    """
     from backend.services.image_prompt_sanitize import sanitize_image_prompt
     from backend.services.stills_defaults import resolve_stills_defaults
     from backend.services.stills_policy import (
@@ -237,6 +257,9 @@ def run_stills_pipeline(
 
     results: list[StillResult] = []
     for prompt_text, prompt_mode, prompt_auto_enhance in plan:
+        if should_stop is not None and should_stop():
+            results.append(_stopped_still(prompt_text, prompt_mode, width=w, height=h, steps=st, guidance=g))
+            continue
         results.append(
             _generate_one(
                 prompt=prompt_text,
@@ -267,6 +290,7 @@ def run_stills_pipeline(
                 remove_background=remove_background,
                 hold_gpu=hold_gpu,
                 allow_model_download=allow_model_download,
+                should_stop=should_stop,
             )
         )
     for result in results:
@@ -308,6 +332,7 @@ def _generate_one(
     remove_background: bool,
     hold_gpu: bool,
     allow_model_download: bool = False,
+    should_stop: Callable[[], bool] | None = None,
 ) -> StillResult:
     from backend.services.offline_image_generator import (
         ImageGenerationRequest,
@@ -326,7 +351,7 @@ def _generate_one(
             width=width, height=height, steps=steps, guidance=guidance,
             steps_explicit=steps_explicit,
             seed=seed, enhance_mode=enhance_mode, output=output, output_dir=output_dir,
-            hold_gpu=hold_gpu,
+            hold_gpu=hold_gpu, should_stop=should_stop,
         )
     if mid in ("comfyui", "comfy"):
         # run_stills_pipeline resolves the engine once and hands it down so the
@@ -350,13 +375,14 @@ def _generate_one(
                 prompt=prompt, negative=negative, model=f"comfyui ({engine})",
                 width=width, height=height, steps=steps, guidance=guidance,
                 seed=seed, enhance_mode=enhance_mode, output=output, output_dir=output_dir,
+                should_stop=should_stop,
             )
         return _generate_comfy_flux(
             prompt=prompt, negative=negative, model=f"comfyui ({engine})",
             width=width, height=height, steps=steps, steps_explicit=steps_explicit,
             guidance=guidance,
             seed=seed, enhance_mode=enhance_mode, output=output, output_dir=output_dir,
-            comfy_model=comfy_model,
+            comfy_model=comfy_model, should_stop=should_stop,
         )
 
     try:
@@ -403,6 +429,7 @@ def _generate_one(
         loras=loras,
         lora_scale=lora_scale,
         allow_model_download=allow_model_download,
+        should_stop=should_stop,
     )
 
     try:
@@ -491,6 +518,8 @@ def _generate_one(
         error=gen_result.error if not gen_result.success else None,
         metadata={"source": source},
     )
+    if (getattr(gen_result, "metadata", None) or {}).get("stopped"):
+        base.metadata["stopped"] = True
 
     if not gen_result.success or not gen_result.image_path:
         return base
@@ -537,6 +566,7 @@ def _generate_comfy_flux(
     output_dir: Path | str | None,
     comfy_model: str | None = None,
     hold_gpu: bool = False,
+    should_stop: Callable[[], bool] | None = None,
 ) -> StillResult:
     # The caller's model tag chooses the graph (upstream #218): "flux" + "dev" is
     # the FLUX-dev graph, plain "flux" the schnell GGUF branch, "qwen-image-21"
@@ -578,6 +608,7 @@ def _generate_comfy_flux(
             steps_explicit=steps_explicit,
             cfg=guidance,
             admit_vram_mb=_comfy_admission_mb(model_tag) if hold_gpu else None,
+            should_stop=should_stop,
         )
         url = None
         if output == "chat_copy" and path:
@@ -606,6 +637,8 @@ def _generate_comfy_flux(
             guidance=guidance,
             enhance_mode=enhance_mode,
         )
+    except RenderStopped:
+        return _stopped_still(prompt, enhance_mode, width=width, height=height, steps=steps, guidance=guidance)
     except Exception as e:
         return StillResult(
             success=False,
@@ -702,6 +735,7 @@ def _generate_comfy_zimage(
     enhance_mode: str,
     output: str,
     output_dir: Path | str | None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> StillResult:
     try:
         from backend.services.comfyui_image_generator import ComfyUIImageGenerator
@@ -726,6 +760,7 @@ def _generate_comfy_zimage(
             model="zimage",
             steps=steps,
             cfg=cfg,
+            should_stop=should_stop,
         )
         url = None
         if output == "chat_copy" and path:
@@ -754,6 +789,8 @@ def _generate_comfy_zimage(
             guidance=guidance,
             enhance_mode=enhance_mode,
         )
+    except RenderStopped:
+        return _stopped_still(prompt, enhance_mode, width=width, height=height, steps=steps, guidance=guidance)
     except Exception as e:
         return StillResult(
             success=False,

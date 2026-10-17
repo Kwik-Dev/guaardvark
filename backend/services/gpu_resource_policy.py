@@ -930,6 +930,21 @@ class GpuWaitStopped(Exception):
     """The person stopped the request while it waited for the GPU."""
 
 
+class RenderStopped(Exception):
+    """The person stopped the request while it rendered.
+
+    Raised by a renderer that was handed a ``should_stop`` callable once that
+    callable answers True. Not a RuntimeError, so the offline generator's OOM
+    recovery ladder never treats a stop as a failure to retry.
+    """
+
+
+def raise_if_stopped(should_stop, where: str) -> None:
+    """Raise ``RenderStopped`` when ``should_stop`` is given and says stop."""
+    if should_stop is not None and should_stop():
+        raise RenderStopped(f"stopped {where}")
+
+
 @contextlib.contextmanager
 def gpu_session_when_free(
     kind,

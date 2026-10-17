@@ -3416,7 +3416,9 @@ class UnifiedChatEngine:
                 # stream sub-progress back (notably agent_task_execute, which
                 # otherwise blocks 30+ seconds with zero feedback while the
                 # see-think-act loop runs).
-                from backend.services.agent_control_service import set_chat_emit_fn
+                from backend.services.agent_control_service import (
+                    get_chat_stop_check, set_chat_emit_fn, set_chat_stop_check,
+                )
                 set_chat_emit_fn(emit_fn)
                 logger.debug(
                     f"[EMIT-HANDOFF][LEGACY_ENGINE] set_chat_emit_fn inside _exec_one for tool={t_name} "
@@ -3436,6 +3438,10 @@ class UnifiedChatEngine:
                 app_ctx = (self.app.app_context()
                            if getattr(self, "app", None) is not None and not has_app_context()
                            else contextlib.nullcontext())
+                # The turn's Stop check is thread-local too, so a tool on a pool
+                # thread (a render, say) would not see Stop without this.
+                outer_stop_check = get_chat_stop_check()
+                set_chat_stop_check(lambda: is_aborted(session_id))
                 try:
                     exec_params = inject_chat_image_model(t_name, dict(t_params or {}), options)
                     with app_ctx, approval_mark:
@@ -3472,6 +3478,7 @@ class UnifiedChatEngine:
                     res = ToolResult(success=False, output=None, error=str(exc))
                 finally:
                     set_chat_emit_fn(None)
+                    set_chat_stop_check(outer_stop_check)
                     logger.debug(f"[EMIT-HANDOFF][LEGACY_ENGINE] cleared emit_fn after tool={t_name}")
                 return job_index, res, int((time.time() - t0) * 1000)
 

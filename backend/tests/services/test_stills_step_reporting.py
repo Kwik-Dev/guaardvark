@@ -188,7 +188,7 @@ def test_comfy_reports_submitted_steps(monkeypatch, tmp_path, model, steps, expe
     monkeypatch.setattr(gen, "_available", lambda: True)
     monkeypatch.setattr(gen, "_preflight_loras", lambda _: None)
     monkeypatch.setattr(gen, "_queue", lambda _: "mock_prompt")
-    monkeypatch.setattr(gen, "_wait", lambda _: {})
+    monkeypatch.setattr(gen, "_wait", lambda _, **kw: {})
     monkeypatch.setattr(gen, "_fetch_first_image", lambda outputs, path: path)
     gen.generate_image(
         prompt="a key", output_path=str(tmp_path / "key.png"), steps=steps, steps_explicit=explicit,
