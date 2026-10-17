@@ -31,9 +31,36 @@ mkdir -p "$GUAARDVARK_ROOT/data"
 echo "KILL_SWITCH_ACTIVATED=$(date -Iseconds)" > "$GUAARDVARK_ROOT/data/.codebase_lock"
 echo "  Lockfile created at data/.codebase_lock"
 
-# 3. Kill Celery workers
+# 3. Stop this checkout's Celery workers, the on-demand research worker included.
+# SIGTERM is Celery's warm shutdown, which waits for the running task; a worker
+# still up after WORKER_GRACE_S is killed.
 echo "[3/5] Stopping Celery workers..."
-pkill -f "celery.*worker.*guaardvark" 2>/dev/null && echo "  Celery workers stopped." || echo "  No Celery workers found."
+# shellcheck source=scripts/lib/celery_workers.sh
+. "$SCRIPT_DIR/scripts/lib/celery_workers.sh"
+WORKER_GRACE_S=5
+worker_pids=$(celery_worker_pids_of "$SCRIPT_DIR")
+if [ -n "$worker_pids" ]; then
+    for pid in $worker_pids; do
+        kill -TERM "$pid" 2>/dev/null || true
+    done
+    waited=0
+    while :; do
+        alive=""
+        for pid in $worker_pids; do
+            if kill -0 "$pid" 2>/dev/null; then alive="$alive $pid"; fi
+        done
+        if [ -z "$alive" ] || [ "$waited" -ge "$WORKER_GRACE_S" ]; then break; fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    for pid in $alive; do
+        kill -KILL "$pid" 2>/dev/null || true
+    done
+    echo "  Celery workers stopped (PIDs: $(echo $worker_pids))."
+    if [ -n "$alive" ]; then echo "  Killed after ${WORKER_GRACE_S}s:$alive"; fi
+else
+    echo "  No Celery workers found."
+fi
 
 # 4. Kill agent executor threads (via PID files)
 echo "[4/5] Stopping running agents..."
