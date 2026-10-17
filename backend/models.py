@@ -1741,6 +1741,40 @@ class InterconnectorPendingApproval(db.Model):
         }
 
 
+class InterconnectorNodeIdentity(db.Model):
+    """A machine's public key, as enrolled on the master (backend/utils/node_auth.py).
+
+    pending until the operator approves it; only an approved machine gets
+    certificates. revoked stops its certificates at once. The node row in
+    interconnector_nodes is created on the first enrolment after approval.
+    """
+    __tablename__ = "interconnector_node_identities"
+
+    node_id = db.Column(db.String(36), primary_key=True)
+    public_key = db.Column(db.String(64), nullable=False)  # raw Ed25519, base64url
+    status = db.Column(db.String(20), nullable=False, default="pending")  # pending/approved/revoked
+    node_name = db.Column(db.String(255), nullable=True)
+    hostname = db.Column(db.String(255), nullable=True)
+    host = db.Column(db.String(255), nullable=True)  # address the request came from
+    requested_at = db.Column(db.DateTime(), default=lambda: datetime.now())
+    decided_at = db.Column(db.DateTime(), nullable=True)
+    cert_expires_at = db.Column(db.DateTime(), nullable=True)
+
+    def to_dict(self):
+        from backend.utils.node_auth import fingerprint
+        return {
+            "node_id": self.node_id,
+            "fingerprint": fingerprint(self.public_key),
+            "status": self.status,
+            "node_name": self.node_name,
+            "hostname": self.hostname,
+            "host": self.host,
+            "requested_at": self.requested_at.isoformat() if self.requested_at else None,
+            "decided_at": self.decided_at.isoformat() if self.decided_at else None,
+            "cert_expires_at": self.cert_expires_at.isoformat() if self.cert_expires_at else None,
+        }
+
+
 # --- Uncle Claude Family Architecture Models ---
 class InterconnectorLearning(db.Model):
     __tablename__ = "interconnector_learnings"

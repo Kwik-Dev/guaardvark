@@ -6,7 +6,6 @@ Handles serialization and synchronization of entities between nodes.
 
 import json
 import logging
-import os
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
 import uuid
@@ -19,6 +18,10 @@ from backend.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+# apply_entity's strategy for a change a person chose on the approvals page:
+# the incoming version replaces the local row whichever was edited last.
+REMOTE_WINS = "remote_wins"
 
 
 class InterconnectorSyncService:
@@ -87,43 +90,52 @@ class InterconnectorSyncService:
         }
 
     def broadcast_directive(self, directive: str, reason: str):
-        """Broadcast an Uncle Claude directive to all connected nodes."""
+        """Broadcast an Uncle Claude directive to all connected nodes.
+
+        Only the fleet's master sends directives, signed with its own key:
+        every node takes one only with that signature (/receive-directive,
+        backend/utils/node_auth.py), so a client's would be refused.
+        """
         from backend.models import db, InterconnectorNode, InterconnectorBroadcast, InterconnectorBroadcastTarget
         import requests
 
-        local_node_id = os.environ.get("GUAARDVARK_NODE_ID", "local")
-        nodes = db.session.query(InterconnectorNode).filter(InterconnectorNode.status == "active").all()
+        from backend.utils import node_auth
+        from backend.utils.node_identity import local_node_id as _local_node_id
+
+        if not node_auth.is_master():
+            logger.info(f"Directive {directive} not broadcast: only the fleet's master sends directives")
+            return
+
+        local_node_id = _local_node_id()
+        # Skip self to prevent cascade loops
+        nodes = [
+            node for node in db.session.query(InterconnectorNode).filter(
+                InterconnectorNode.status == "active"
+            ).all()
+            if node.node_id != local_node_id
+        ]
         broadcast = InterconnectorBroadcast(
-            broadcast_type="uncle_directive",
-            payload=json.dumps({"directive": directive, "reason": reason}),
-            initiated_by=local_node_id,
+            id=str(uuid.uuid4()),
+            sync_type="directive",
+            entities=json.dumps([]),
+            file_paths=json.dumps([]),
+            require_approval=False,
+            priority="high",
+            status="in_progress",
+            total_clients=len(nodes),
+            pending_count=len(nodes),
         )
         db.session.add(broadcast)
         db.session.flush()
+        logger.warning(f"Broadcasting directive {directive} from master {local_node_id} to {len(nodes)} node(s): {reason}")
 
-        # Get API key for authenticated inter-node communication
-        config = {}
-        try:
-            from backend.models import Setting
-            setting = db.session.get(Setting, "interconnector_config")
-            if setting:
-                config = json.loads(setting.value) if isinstance(setting.value, str) else setting.value
-        except Exception:
-            pass
-        api_key = config.get("api_key", "")
-        headers = {"Content-Type": "application/json"}
-        if api_key:
-            headers["X-API-Key"] = api_key
-
+        delivered = 0
         for node in nodes:
-            # Skip self to prevent cascade loops
-            if node.node_id == local_node_id:
-                continue
-
             target = InterconnectorBroadcastTarget(
                 broadcast_id=broadcast.id,
-                target_node_id=node.node_id,
+                node_id=node.node_id,
                 status="pending",
+                started_at=datetime.now(),
             )
             db.session.add(target)
 
@@ -132,14 +144,25 @@ class InterconnectorSyncService:
                 resp = requests.post(
                     f"{api_url}/api/interconnector/receive-directive",
                     json={"directive": directive, "reason": reason},
-                    headers=headers,
                     timeout=10,
+                    auth=node_auth.request_auth(),
                 )
-                target.status = "delivered" if resp.ok else "failed"
+                target.status = "success" if resp.ok else "failed"
+                if resp.ok:
+                    delivered += 1
+                else:
+                    target.error_message = f"HTTP {resp.status_code}"
             except Exception as e:
                 target.status = "failed"
+                target.error_message = str(e)
                 logger.error(f"Failed to deliver directive to {node.node_id}: {e}")
+            target.completed_at = datetime.now()
 
+        broadcast.successful_count = delivered
+        broadcast.failed_count = len(nodes) - delivered
+        broadcast.pending_count = 0
+        broadcast.status = "completed" if broadcast.failed_count == 0 else "partial"
+        broadcast.completed_at = datetime.now()
         db.session.commit()
 
     def serialize_entity(self, entity_type: str, entity: Any) -> Optional[Dict]:
@@ -289,7 +312,8 @@ class InterconnectorSyncService:
         Args:
             entity_type: Type of entity (clients, projects, rules)
             entity_data: Serialized entity data
-            conflict_strategy: How to handle conflicts (last_write_wins, manual)
+            conflict_strategy: How to handle conflicts (last_write_wins, manual,
+                or REMOTE_WINS to take entity_data whichever is newer)
             node_id: ID of the node this entity came from (for conflict tracking)
             push_mode: When True, applies three-tier push safeguards:
                        new entity -> add, master newer -> skip, client newer -> queue for approval
@@ -578,7 +602,8 @@ class InterconnectorSyncService:
                     return result
             # Check for conflicts
             local_updated = existing_client.updated_at
-            if local_updated and remote_updated_dt and local_updated != remote_updated_dt:
+            if (conflict_strategy != REMOTE_WINS and local_updated and remote_updated_dt
+                    and local_updated != remote_updated_dt):
                 # Conflict detected
                 if conflict_strategy == "last_write_wins":
                     # Use the one with later updated_at
@@ -637,7 +662,8 @@ class InterconnectorSyncService:
                 if result is not None:
                     return result
             local_updated = existing_website.updated_at
-            if local_updated and remote_updated_dt and local_updated != remote_updated_dt:
+            if (conflict_strategy != REMOTE_WINS and local_updated and remote_updated_dt
+                    and local_updated != remote_updated_dt):
                 if conflict_strategy == "last_write_wins":
                     if remote_updated_dt > local_updated:
                         self._update_website(existing_website, data)
@@ -692,7 +718,8 @@ class InterconnectorSyncService:
                     return result
             # Check for conflicts
             local_updated = existing_project.updated_at
-            if local_updated and remote_updated_dt and local_updated != remote_updated_dt:
+            if (conflict_strategy != REMOTE_WINS and local_updated and remote_updated_dt
+                    and local_updated != remote_updated_dt):
                 # Conflict detected
                 if conflict_strategy == "last_write_wins":
                     if remote_updated_dt > local_updated:
@@ -752,7 +779,8 @@ class InterconnectorSyncService:
                 if result is not None:
                     return result
             local_updated = existing_rule.updated_at
-            if local_updated and remote_updated_dt and local_updated != remote_updated_dt:
+            if (conflict_strategy != REMOTE_WINS and local_updated and remote_updated_dt
+                    and local_updated != remote_updated_dt):
                 if conflict_strategy == "last_write_wins":
                     if remote_updated_dt > local_updated:
                         self._update_rule(existing_rule, data)
@@ -811,7 +839,8 @@ class InterconnectorSyncService:
                 if result is not None:
                     return result
             local_updated = existing_task.updated_at
-            if local_updated and remote_updated_dt and local_updated != remote_updated_dt:
+            if (conflict_strategy != REMOTE_WINS and local_updated and remote_updated_dt
+                    and local_updated != remote_updated_dt):
                 if conflict_strategy == "last_write_wins":
                     if remote_updated_dt > local_updated:
                         self._update_task(existing_task, data)
@@ -863,7 +892,8 @@ class InterconnectorSyncService:
                 if result is not None:
                     return result
             local_updated = existing_document.updated_at
-            if local_updated and remote_updated_dt and local_updated != remote_updated_dt:
+            if (conflict_strategy != REMOTE_WINS and local_updated and remote_updated_dt
+                    and local_updated != remote_updated_dt):
                 if conflict_strategy == "last_write_wins":
                     if remote_updated_dt > local_updated:
                         self._update_document(existing_document, data)

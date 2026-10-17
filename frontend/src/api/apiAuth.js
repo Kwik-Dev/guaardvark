@@ -27,6 +27,7 @@ export const AUTH_REFUSAL_CODES = [
   "local_only",
   "outside_local_network",
   "runs_code_key_required",
+  "fleet_key_required",
   "api_key_required",
 ];
 
@@ -111,6 +112,9 @@ export function describeAuthRefusal(code, rejected = false, machine = "the Guaar
   }
   if (code === "runs_code_key_required") {
     return `This runs a program on ${machine}, which works only on ${machine} itself or with its API key, even while Network access is on. Create an API key in Settings → Access on ${machine}, then enter it in Settings → Access on this device.`;
+  }
+  if (code === "fleet_key_required") {
+    return `This Interconnector action works only on ${machine} itself or with its API key, even while Network access is on. Create an API key in Settings → Access on ${machine}, then enter it in Settings → Access on this device.`;
   }
   if (code === "local_only") {
     return rejected

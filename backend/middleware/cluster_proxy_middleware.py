@@ -8,7 +8,6 @@ cluster never 5xx's a solo Guaardvark.
 from __future__ import annotations
 
 import logging
-import os
 
 from flask import current_app, request
 
@@ -40,7 +39,8 @@ def cluster_proxy_before_request():
             log.debug("[ROUTE] %s %s → local (no_table)", workload, request.path)
             return None
 
-        local_id = os.environ.get("CLUSTER_NODE_ID", "unknown")
+        from backend.utils.node_identity import local_node_id
+        local_id = local_node_id()
         model_hint = _extract_model_hint(request, workload)
 
         forwarder = HttpProxyForwarder()

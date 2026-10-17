@@ -30,6 +30,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from backend.utils.node_identity import local_node_id
+
 logger = logging.getLogger(__name__)
 
 # Test runs this service starts never reach a database. An address nothing
@@ -406,7 +408,7 @@ class SelfImprovementService:
             run_record = SelfImprovementRun(
                 trigger="scheduled",
                 status="running",
-                node_id=os.environ.get("GUAARDVARK_NODE_ID", "local"),
+                node_id=local_node_id(),
             )
             db.session.add(run_record)
             db.session.commit()
@@ -749,7 +751,7 @@ class SelfImprovementService:
             from backend.models import db, InterconnectorLearning
             for change in staged:
                 learning = InterconnectorLearning(
-                    source_node_id=os.environ.get("GUAARDVARK_NODE_ID", "local"),
+                    source_node_id=local_node_id(),
                     learning_type="bug_fix",
                     description=change.get("fix_description", ""),
                     code_diff=json.dumps(change),
@@ -795,7 +797,7 @@ class SelfImprovementService:
             run_record = SelfImprovementRun(
                 trigger="reactive",
                 status="running",
-                node_id=os.environ.get("GUAARDVARK_NODE_ID", "local"),
+                node_id=local_node_id(),
             )
             db.session.add(run_record)
             db.session.commit()
@@ -953,7 +955,7 @@ class SelfImprovementService:
             run_record = SelfImprovementRun(
                 trigger="directed",
                 status="running",
-                node_id=os.environ.get("GUAARDVARK_NODE_ID", "local"),
+                node_id=local_node_id(),
             )
             db.session.add(run_record)
             db.session.commit()

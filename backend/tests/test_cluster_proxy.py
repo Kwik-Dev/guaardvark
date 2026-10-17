@@ -12,6 +12,17 @@ from backend.utils.clock import utcnow
 
 # ---- app fixture ----------------------------------------------------
 
+# Stands in for this machine's request signer (backend/utils/node_auth.py), so
+# no test reads or makes a key in the home directory.
+_SIGNER = object()
+
+
+@pytest.fixture(autouse=True)
+def _signer(monkeypatch):
+    from backend.utils import node_auth
+    monkeypatch.setattr(node_auth, "request_auth", lambda: _SIGNER)
+
+
 @pytest.fixture
 def app():
     from flask import Flask
@@ -189,7 +200,7 @@ def test_forwarder_timeout_profiles_exist():
 
 def test_forwarder_strips_hop_by_hop_headers(app):
     from backend.services.cluster_proxy import HttpProxyForwarder, NodeTarget
-    target = NodeTarget("b", "192.168.1.20", 5002, "k-b")
+    target = NodeTarget("b", "192.168.1.20", 5002)
     req = MagicMock()
     req.method = "POST"
     req.path = "/api/chat/unified"
@@ -219,7 +230,7 @@ def test_forwarder_strips_hop_by_hop_headers(app):
 def test_forwarder_sets_loop_prevention_headers(app, monkeypatch):
     monkeypatch.setenv("CLUSTER_NODE_ID", "self-id")
     from backend.services.cluster_proxy import HttpProxyForwarder, NodeTarget
-    target = NodeTarget("b", "192.168.1.20", 5002, "k-b")
+    target = NodeTarget("b", "192.168.1.20", 5002)
     req = MagicMock()
     req.method = "POST"; req.path = "/api/chat/unified"; req.args = {}
     req.headers = {"X-Guaardvark-Hops": "0"}
@@ -235,12 +246,31 @@ def test_forwarder_sets_loop_prevention_headers(app, monkeypatch):
             assert sent["X-Guaardvark-Proxy"] == "1"
             assert sent["X-Guaardvark-Hops"] == "1"
             assert sent["X-Guaardvark-Source-Node"] == "self-id"
-            assert sent["X-Guaardvark-API-Key"] == "k-b"
+            # No node id as a key: the request is signed as this machine.
+            assert "X-Guaardvark-API-Key" not in sent
+            assert rreq.call_args.kwargs["auth"] is _SIGNER
+
+
+def test_forwarder_drops_another_senders_signature(app):
+    from backend.services.cluster_proxy import HttpProxyForwarder, NodeTarget
+    req = MagicMock()
+    req.method = "POST"; req.path = "/api/chat/unified"; req.args = {}
+    req.headers = {"X-GX-Node": "other", "X-GX-Sig": "sig", "X-GX-Cert": "cert"}
+    req.get_data.return_value = b"{}"
+
+    mock_resp = MagicMock(status_code=200, headers={})
+    mock_resp.iter_content = lambda chunk_size: iter([b""])
+
+    with app.app_context():
+        with patch("requests.request", return_value=mock_resp) as rreq:
+            HttpProxyForwarder().forward(NodeTarget("b", "h", 5002), "llm_chat", req)
+            sent = rreq.call_args.kwargs["headers"]
+    assert not any(name.lower().startswith("x-gx-") for name in sent)
 
 
 def test_forwarder_increments_hops_from_existing():
     from backend.services.cluster_proxy import HttpProxyForwarder, NodeTarget
-    target = NodeTarget("c", "h", 5002, "k")
+    target = NodeTarget("c", "h", 5002)
     req = MagicMock()
     req.method = "POST"; req.path = "/api/chat/unified"; req.args = {}
     req.headers = {"X-Guaardvark-Hops": "1"}  # already 1 hop in
@@ -257,7 +287,7 @@ def test_forwarder_increments_hops_from_existing():
 
 def test_forwarder_uses_correct_timeout_for_workload():
     from backend.services.cluster_proxy import HttpProxyForwarder, NodeTarget
-    target = NodeTarget("b", "h", 5002, "k")
+    target = NodeTarget("b", "h", 5002)
     req = MagicMock()
     req.method = "POST"; req.path = "/api/batch-video/generate/text"; req.args = {}
     req.headers = {}
@@ -274,7 +304,7 @@ def test_forwarder_uses_correct_timeout_for_workload():
 def test_forwarder_raises_on_connection_error(app):
     import requests as _requests
     from backend.services.cluster_proxy import HttpProxyForwarder, NodeTarget
-    target = NodeTarget("b", "h", 5002, "k")
+    target = NodeTarget("b", "h", 5002)
     req = MagicMock()
     req.method = "POST"; req.path = "/api/chat/unified"; req.args = {}
     req.headers = {}

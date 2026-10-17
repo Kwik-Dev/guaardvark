@@ -36,10 +36,10 @@ def create_self_improvement_tasks(celery_app: Celery):
                 if not scheduled_sends_allowed():
                     return {"skipped": True, "reason": "scheduled sends to Uncle Claude are off"}
 
-                import subprocess, os
+                import subprocess
+                # No machine id: this state is sent to a hosted model.
                 system_state = {
                     "timestamp": __import__("datetime").datetime.now().isoformat(),
-                    "node_id": os.environ.get("GUAARDVARK_NODE_ID", "local"),
                 }
                 try:
                     gpu = subprocess.run(
