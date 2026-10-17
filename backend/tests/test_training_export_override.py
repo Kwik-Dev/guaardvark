@@ -202,6 +202,7 @@ def test_a_held_run_exports_after_the_override(client, dispatched, tmp_path):
     export, register = workflow["signatures"]
     assert export.task == tt.export_gguf_task.name
     assert tuple(export.args) == ("held-job", str(model_dir), "q8_0")
+    assert export.kwargs == {"then_import": True}
     assert register.task == tt.import_ollama_task.name
     assert tuple(register.args) == ("held-job", str(model_dir), "mine")
     assert register.immutable
@@ -421,8 +422,56 @@ def test_export_merges_the_adapter_and_converts_it_to_gguf(client, tmp_path, mer
     assert result == {"merged_path": str(model_dir / "merged"), "gguf_path": str(gguf),
                       "quantization": "q8_0"}
     row = _row(pk)
-    assert row.status == "running" and row.pipeline_stage == "exporting"
+    # An export on its own (POST /jobs/<id>/export) finishes the job.
+    assert row.status == "completed" and row.pipeline_stage == "exporting"
+    assert row.progress == 100 and row.completed_at is not None
     assert row.gguf_path == str(gguf) and row.quantization_level == "q8_0"
+
+
+def test_the_first_step_of_export_to_ollama_leaves_the_job_running(client, tmp_path, merge, converter, progress):
+    pk, model_dir = _trained_job(tmp_path)
+
+    tt.export_gguf_task.run("trained", str(model_dir), None, then_import=True)
+
+    row = _row(pk)
+    assert row.status == "running" and row.pipeline_stage == "exporting"
+    assert row.gguf_path is not None
+    assert all(status != "complete" for _, _, status in progress)
+
+
+def _pipeline_job(pk):
+    """The job as full_training_pipeline_task holds it: running, with its own
+    start time and Celery task id."""
+    from datetime import datetime
+    job = db.session.get(TrainingJob, pk)
+    job.status, job.pipeline_stage = "running", "training"
+    job.started_at = datetime(2026, 1, 2, 3, 4, 5)
+    job.celery_task_id = "pipeline-task"
+    db.session.commit()
+
+
+def test_inside_the_pipeline_export_and_import_leave_the_job_to_it(
+        client, tmp_path, merge, converter, ollama_cli, progress):
+    from datetime import datetime
+
+    pk, model_dir = _trained_job(tmp_path)
+    _pipeline_job(pk)
+
+    tt.export_gguf_task.run("trained", str(model_dir), "q8_0", in_pipeline=True)
+    row = _row(pk)
+    assert row.status == "running" and row.pipeline_stage == "exporting"
+    assert row.gguf_path == str(model_dir / "test-out-q8_0.gguf")
+
+    tt.import_ollama_task.run("trained", str(model_dir), "my-model", in_pipeline=True)
+    row = _row(pk)
+    assert row.status == "running" and row.pipeline_stage == "importing"
+    assert row.ollama_model_name == "my-model"
+    assert row.started_at == datetime(2026, 1, 2, 3, 4, 5)
+    assert row.celery_task_id == "pipeline-task"
+    assert row.completed_at is None
+    # The steps report inside the pipeline's bar and never as complete.
+    assert all(status != "complete" for _, _, status in progress)
+    assert min(pct for pct, _, _ in progress) >= tt.PIPELINE_EXPORT_PROGRESS[0]
 
 
 def test_import_registers_the_gguf_with_the_declared_template(client, tmp_path, merge, ollama_cli):

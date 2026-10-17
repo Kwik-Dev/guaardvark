@@ -128,6 +128,7 @@ def finetune(
     print(f"Training examples: {len(dataset)}")
 
     from unsloth import UnslothVisionDataCollator
+    from finetune_model import progress_callbacks
 
     training_args = TrainingArguments(
         per_device_train_batch_size = batch_size,
@@ -155,6 +156,7 @@ def finetune(
         max_seq_length = max_seq_length,
         dataset_num_proc = 2,
         args = training_args,
+        callbacks = progress_callbacks(progress_callback, max_steps) or None,
     )
 
     import gc

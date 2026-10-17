@@ -1381,10 +1381,11 @@ def export_to_ollama(job_id):
 
             # Both steps take the training output folder (export reads lora/
             # in it and writes the .gguf beside it). The import signature is
-            # immutable so the chain does not prepend the export's result.
+            # immutable so the chain does not prepend the export's result;
+            # then_import keeps the job running between the two steps.
             model_dir = str(lora_path.parent)
             workflow = chain(
-                export_gguf_task.s(job.job_id, model_dir, quantization),
+                export_gguf_task.s(job.job_id, model_dir, quantization, then_import=True),
                 import_ollama_task.si(job.job_id, model_dir, model_name)
             )
             result = workflow.apply_async(queue="training")

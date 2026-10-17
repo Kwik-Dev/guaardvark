@@ -1050,9 +1050,10 @@ DECISIONS: dict = {
      'set': None,
      'hard_negatives': ('fluent_but_wrong', 'refusal', 'truncated', 'echo_instruction', 'injection'),
      'notes': 'Dataset text is third-party, so an answer can only remove a pair (a veto); unclear keeps it as '
-              'today. The original dataset is untouched. min_score then means the minimum kept share before the '
-              'job refuses to train. Batch only, with a model other than the one being trained. Labelled set not '
-              'written yet (planned: training_pair_keep.json).'},
+              'today. The original dataset is untouched. min_score stays the score threshold the precheck '
+              'applies; a minimum kept share below which the job refuses to train would be a setting of its own. '
+              'Batch only, with a model other than the one being trained. Labelled set not written yet (planned: '
+              'training_pair_keep.json).'},
     # ------------------------------------------------------------------ cli (draft, not measured)
     'repl_line': {'feature': 'cli',
      'layer': 'L1',
