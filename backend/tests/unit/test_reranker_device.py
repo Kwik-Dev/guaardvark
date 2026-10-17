@@ -97,8 +97,12 @@ def test_a_visible_gpu_with_room_still_takes_the_card(monkeypatch, card_with_roo
 
 
 def test_a_worker_loads_the_model_on_cpu_in_full_precision_and_reranks(monkeypatch, card_with_room):
-    """The worker path end to end, with the CrossEncoder stubbed: a CPU load, no
-    fp16, no VRAM reported, and a rerank that applies and names its device."""
+    """The worker path when the backend cannot score for it, end to end with the
+    CrossEncoder stubbed: a CPU load, no fp16, no VRAM reported, and a rerank
+    that applies and names its device."""
+    monkeypatch.setenv("CELERY_WORKER_MODE", "true")
+    monkeypatch.setattr(reranker, "_scores_from_backend",
+                        lambda query, texts: (None, {"reason": "the backend did not answer"}))
     loads = []
 
     class _FakeCrossEncoder:
@@ -128,5 +132,6 @@ def test_a_worker_loads_the_model_on_cpu_in_full_precision_and_reranks(monkeypat
     assert "model_kwargs" not in kwargs, "CPU stays fp32"
     assert reranker._model_device == "cpu" and reranker._model_vram_mb == 0
     assert info["applied"] is True and info["device"] == "cpu"
+    assert info["backend_unavailable"] == "the backend did not answer"
     assert out[0]["text"] == "a much longer passage"
     assert reranker._load_failed_reason is None

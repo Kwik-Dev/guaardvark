@@ -15,14 +15,23 @@ calls it -- both from its periodic registry (via `status()`) and directly when a
 render needs the card. Without that, a query that happened to run while the card
 was quiet would take ~1.1 GB of VRAM for the life of the process and starve every
 image batch behind it; that is exactly what F-RAG-10 was.
+
+A Celery worker cannot see the GPU, and on the CPU this model is slow (about 27 s
+for the 20 candidates of a default retrieval). A worker therefore sends its pairs
+to the backend (POST /api/meta/reranker/score), which scores them with the model
+chat uses, on the GPU, through the same code: the scores are chat's. The backend
+scores only on the GPU; when it cannot, or does not answer, the worker loads the
+model on its own CPU as before (see ``_scores_from_backend``).
 """
 
+import contextlib
 import gc
 import logging
+import math
 import os
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from backend.utils.backend_http import in_mcp_process
 
@@ -162,39 +171,46 @@ def _cuda_unusable_reason() -> Optional[str]:
         return f"CUDA check failed ({e.__class__.__name__})"
 
 
-def _pick_device() -> str:
-    """GPU only when this process can use one with comfortable headroom; otherwise CPU.
+def _why_not_cuda() -> Optional[str]:
+    """Why the model should not load on the GPU here now, or None when it may.
 
-    A Celery worker, where the GPU is hidden, therefore reranks on the CPU with
-    the same model chat uses. The floor is deliberately above the model's own
-    footprint: admitting it into the last free gigabyte would just move an OOM
-    onto whichever generation job starts next. This choice is made per load,
-    not once per process -- an unload releases it, and the next query
-    re-decides against the card as it is then.
+    GPU only when this process can use one with comfortable headroom. The floor
+    is deliberately above the model's own footprint: admitting it into the last
+    free gigabyte would just move an OOM onto whichever generation job starts
+    next. This is decided per load, not once per process -- an unload releases
+    the card, and the next query re-decides against the card as it is then.
     """
     # Memory held by the MCP process is invisible to the backend's GPU admission.
     if in_mcp_process():
-        return "cpu"
+        return "the MCP process keeps no GPU memory"
     unusable = _cuda_unusable_reason()
     if unusable:
-        logger.info("Reranker: no usable GPU in this process (%s) — loading on CPU", unusable)
-        return "cpu"
-    floor_mb = int(os.environ.get("GUAARDVARK_RERANK_MIN_VRAM_MB", "3000"))
+        return f"no usable GPU in this process ({unusable})"
     try:
+        floor_mb = int(os.environ.get("GUAARDVARK_RERANK_MIN_VRAM_MB", "3000"))
         from backend.services.gpu_resource_coordinator import has_gpu, get_available_vram
         if not has_gpu():
-            return "cpu"
+            return "no GPU"
         info = get_available_vram()
         if info.get("success") and info.get("available_mb", 0) >= floor_mb:
-            return "cuda"
-        logger.info(
-            "Reranker: %s MB free < %s MB floor — loading on CPU",
-            info.get("available_mb"), floor_mb,
-        )
-        return "cpu"
+            return None
+        return f"{info.get('available_mb')} MB free < {floor_mb} MB floor"
     except Exception as e:
-        logger.debug("Reranker device probe failed (%s); using CPU", e)
-        return "cpu"
+        return f"device probe failed ({e})"
+
+
+def _pick_device() -> str:
+    """"cuda" when ``_why_not_cuda`` allows it, otherwise "cpu", saying why.
+
+    A Celery worker, where the GPU is hidden, gets here only when the backend
+    could not score for it (``_scores_from_backend``), and then reranks on the
+    CPU with the same model chat uses.
+    """
+    why = _why_not_cuda()
+    if why is None:
+        return "cuda"
+    logger.info("Reranker: %s — loading on CPU", why)
+    return "cpu"
 
 
 def _measure_vram_mb(model) -> int:
@@ -223,39 +239,68 @@ def _get_model():
     failure to remember: the next query checks again, so an Install takes
     effect without a restart.
     """
-    global _model, _model_device, _load_failed_reason, _model_vram_mb
     if _model is not None or _load_failed_reason is not None:
         return _model
     if not is_installed():
         return None
     with _lock:
-        if _model is not None or _load_failed_reason is not None:
-            return _model
-        try:
-            from sentence_transformers import CrossEncoder
-            device = _pick_device()
-            name = model_name()
-            kwargs: Dict[str, Any] = {"device": device, "max_length": 512}
-            if device == "cuda":
-                # fp16 halves the card cost (2424 MB -> 1334 MB measured on
-                # bge-reranker-v2-m3) and reranking is a ranking decision, not an
-                # arithmetic one. CPU stays fp32: half precision there is slower,
-                # not faster, and costs no VRAM to avoid.
-                import torch
-                kwargs["model_kwargs"] = {"torch_dtype": torch.float16}
-            logger.info("Reranker: loading %s on %s", name, device)
-            _model = CrossEncoder(name, local_files_only=True, **kwargs)
-            _model_device = device
-            _model_vram_mb = _measure_vram_mb(_model) if device == "cuda" else 0
-            logger.info(
-                "Reranker: ready (%s on %s%s)", name, device,
-                f", ~{_model_vram_mb}MB VRAM" if _model_vram_mb else "",
-            )
-        except Exception as e:
-            _load_failed_reason = f"{e.__class__.__name__}: {str(e)[:160]}"
-            logger.warning("Reranker unavailable — %s", _load_failed_reason)
-            _model = None
+        if _model is None and _load_failed_reason is None:
+            _load_locked(_pick_device())
     return _model
+
+
+def _gpu_model() -> Tuple[Any, Optional[str]]:
+    """The model if it is on the GPU, loading it there when the card has room.
+
+    Never loads it on the CPU: the caller (the backend scoring for a worker)
+    then tells the worker to score on its own CPU, rather than leaving a CPU
+    copy here that chat would keep using after the card frees up. Returns
+    (model, None), or (None, why not).
+    """
+    if _model is None and _load_failed_reason is None and not is_installed():
+        return None, not_installed_reason()
+    with _lock:
+        if _model is None and _load_failed_reason is None:
+            why = _why_not_cuda()
+            if why is not None:
+                return None, why
+            _load_locked("cuda")
+        if _model is None:
+            return None, _load_failed_reason or "model unavailable"
+        if _model_device != "cuda":
+            return None, f"the reranker is loaded on the {_model_device}, not the GPU"
+        return _model, None
+
+
+def _load_locked(device: str) -> None:
+    """Load the model onto ``device``. The caller holds ``_lock``.
+
+    A failure is remembered in ``_load_failed_reason`` instead of raised.
+    """
+    global _model, _model_device, _load_failed_reason, _model_vram_mb
+    try:
+        from sentence_transformers import CrossEncoder
+        name = model_name()
+        kwargs: Dict[str, Any] = {"device": device, "max_length": 512}
+        if device == "cuda":
+            # fp16 halves the card cost (2424 MB -> 1334 MB measured on
+            # bge-reranker-v2-m3) and reranking is a ranking decision, not an
+            # arithmetic one. CPU stays fp32: half precision there is slower,
+            # not faster, and costs no VRAM to avoid.
+            import torch
+            kwargs["model_kwargs"] = {"torch_dtype": torch.float16}
+        logger.info("Reranker: loading %s on %s", name, device)
+        _model = CrossEncoder(name, local_files_only=True, **kwargs)
+        _model_device = device
+        _model_vram_mb = _measure_vram_mb(_model) if device == "cuda" else 0
+        logger.info(
+            "Reranker: ready (%s on %s%s)", name, device,
+            f", ~{_model_vram_mb}MB VRAM" if _model_vram_mb else "",
+        )
+    except Exception as e:
+        _load_failed_reason = f"{e.__class__.__name__}: {str(e)[:160]}"
+        logger.warning("Reranker unavailable — %s", _load_failed_reason)
+        _model = None
 
 
 def status() -> Dict[str, Any]:
@@ -390,15 +435,167 @@ def unload() -> Dict[str, Any]:
     return {"unloaded": True, "freed_mb": freed, "reason": None}
 
 
+# Characters of each passage the model reads; the tokenizer cuts the pair at
+# 512 tokens anyway, this only bounds the work of getting there.
+PASSAGE_CHARS = 4000
+
+
+@contextlib.contextmanager
+def _pinned():
+    """Pin the model across predict() so an eviction racing the call is refused
+    rather than reporting VRAM it did not free."""
+    global _inflight
+    with _lock:
+        _inflight += 1
+    try:
+        yield
+    finally:
+        with _lock:
+            _inflight = max(0, _inflight - 1)
+
+
+def _predict(model, query: str, texts: List[str]) -> List[float]:
+    """One score per text, in order. Chat and the backend's score route both
+    score through here, so the same inputs give the same scores."""
+    pairs = [(query, t[:PASSAGE_CHARS]) for t in texts]
+    with _pinned():
+        scores = model.predict(pairs, show_progress_bar=False)
+    return [float(s) for s in scores]
+
+
+# --- Scoring for a worker on the backend's GPU ----------------------------------
+
+SCORE_PATH = "/api/meta/reranker/score"
+# A retrieval reranks at most 50 candidates (indexing_service caps the pool).
+MAX_REMOTE_PASSAGES = 200
+MAX_REMOTE_QUERY_CHARS = 100_000
+# Measured on a 16 GB desktop card with 4,000-character passages: with the
+# model resident the backend scores 20 candidates in 0.10 s and 50 in 0.24 s;
+# loading it first takes 1.3 s, or 4.6 s in a process that has not used CUDA
+# yet. A worker's CPU (two torch threads) takes 27 s for 20 and 67 s for 50.
+# 20 s is four times the slowest backend answer and still below the CPU's time
+# for a default pool, so a backend busy past it is left for the CPU.
+REMOTE_CONNECT_TIMEOUT_S = 2.0
+REMOTE_READ_TIMEOUT_S = 20.0
+# After the backend could not score, this process scores on its own CPU for
+# this long before asking again, so a stuck or GPU-less backend costs one
+# wait per minute, not one per retrieval.
+REMOTE_RETRY_S = 60.0
+
+_remote: Dict[str, Any] = {"retry_at": 0.0, "reason": None, "noted": set(), "working": False}
+_clock: Callable[[], float] = time.monotonic
+
+
+def score_on_gpu(query: str, passages: List[str], model: Optional[str] = None) -> Dict[str, Any]:
+    """Score ``passages`` against ``query`` here, on the GPU only.
+
+    What POST /api/meta/reranker/score answers for a worker. Returns
+    {"applied": True, "scores": [...], "model", "device"} with one score per
+    passage in order, or {"applied": False, "reason": ...} when this process
+    cannot score on the GPU, or reranks with a model other than ``model``; the
+    worker then scores on its own CPU. Never raises.
+    """
+    info: Dict[str, Any] = {"applied": False, "reason": None, "model": model_name(), "device": None}
+    if not is_enabled():
+        info["reason"] = "disabled by GUAARDVARK_RERANK_CROSS_ENCODER"
+        return info
+    if model and model != model_name():
+        info["reason"] = f"the backend reranks with {model_name()}, not {model}"
+        return info
+    if not passages:
+        info.update({"applied": True, "scores": [], "scored": 0})
+        return info
+    m, why = _gpu_model()
+    if m is None:
+        info["reason"] = why
+        return info
+    try:
+        scores = _predict(m, query, passages)
+    except Exception as e:
+        info["reason"] = f"rerank failed: {e.__class__.__name__}: {str(e)[:120]}"
+        logger.warning("Reranker: %s", info["reason"])
+        return info
+    info.update({"applied": True, "scores": scores, "device": "cuda", "scored": len(scores)})
+    return info
+
+
+def _worker_without_gpu() -> Optional[str]:
+    """Why this process sends its scoring to the backend, or None to score here.
+
+    Only a Celery worker that cannot use the GPU: the backend never asks itself
+    (on a box without a usable GPU it hides CUDA too), and a worker that can see
+    the card loads the model there as the backend would.
+    """
+    if os.environ.get("CELERY_WORKER_MODE", "").strip().lower() != "true":
+        return None
+    return _cuda_unusable_reason()
+
+
+def _note_remote_once(key: str, level: int, message: str, *args) -> None:
+    if key in _remote["noted"]:
+        logger.debug(message, *args)
+        return
+    _remote["noted"].add(key)
+    logger.log(level, message, *args)
+
+
+def _scores_from_backend(query: str, texts: List[str]) -> Tuple[Optional[List[float]], Dict[str, Any]]:
+    """Scores from the backend's GPU reranker, or (None, {"reason": why not}).
+
+    Goes only to this checkout's backend on this machine, with its API key.
+    """
+    now = _clock()
+    if now < _remote["retry_at"]:
+        return None, {"reason": _remote["reason"]}
+    if len(texts) > MAX_REMOTE_PASSAGES or len(query) > MAX_REMOTE_QUERY_CHARS:
+        return None, {"reason": "too large to send to the backend"}
+
+    from backend.utils.backend_http import BackendError, request_json
+
+    try:
+        reply = request_json(
+            "POST", SCORE_PATH,
+            payload={"query": query, "passages": texts, "model": model_name()},
+            connect_timeout=REMOTE_CONNECT_TIMEOUT_S,
+            read_timeout=REMOTE_READ_TIMEOUT_S,
+            own_backend=True,
+        )
+        data = reply.data if isinstance(reply.data, dict) else {}
+        scores = data.get("scores") if data.get("applied") else None
+        if not (isinstance(scores, list) and len(scores) == len(texts)
+                and all(isinstance(s, (int, float)) and math.isfinite(s) for s in scores)):
+            # A refusal is the expected answer from a backend without a usable
+            # card (a Mac, a CPU-only box) or with a full one.
+            key, level = "refused", logging.INFO
+            why = data.get("reason") or "it answered without one score per passage"
+            reason = f"the backend could not score on its GPU ({why})"
+            scores = None
+    except BackendError as e:
+        key, level = e.kind, logging.WARNING
+        reason = f"the backend did not answer ({e.kind}: {str(e)[:160]})"
+        scores = None
+
+    if scores is None:
+        _remote.update({"retry_at": now + REMOTE_RETRY_S, "reason": reason, "working": False})
+        _note_remote_once(key, level, "Reranker: %s; reranking on this worker's CPU, asking again "
+                          "in %.0f s", reason, REMOTE_RETRY_S)
+        return None, {"reason": reason}
+
+    if not _remote["working"]:
+        _remote["working"] = True
+        logger.info("Reranker: scoring on the backend's %s (%s)", data.get("device"), data.get("model"))
+    _remote.update({"retry_at": 0.0, "reason": None})
+    return [float(s) for s in scores], data
+
+
 def rerank(query: str, results: List[Dict[str, Any]],
            top_n: Optional[int] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Reorder `results` by cross-encoder relevance.
 
     Returns (results, info). `results` is returned untouched whenever reranking
-    did not run, and `info` always says why.
+    did not run, and `info` always says why. In a worker without the GPU the
+    backend scores (info["via"] == "backend") when it can.
     """
-    global _inflight
-
     info: Dict[str, Any] = {"applied": False, "reason": None, "model": None, "device": None}
 
     if not is_enabled():
@@ -408,35 +605,35 @@ def rerank(query: str, results: List[Dict[str, Any]],
         info["reason"] = "fewer than 2 candidates"
         return results, info
 
-    model = _get_model()
-    if model is None:
-        info["reason"] = _load_failed_reason or (
-            "model unavailable" if is_installed() else not_installed_reason())
-        return results, info
+    texts = [(r.get("text") or "")[:PASSAGE_CHARS] for r in results]
+    scores: Optional[List[float]] = None
 
-    # Pin across predict() so an eviction racing this call is refused rather than
-    # reporting VRAM it did not free.
-    with _lock:
-        _inflight += 1
-    try:
-        pairs = [(query, (r.get("text") or "")[:4000]) for r in results]
-        scores = model.predict(pairs, show_progress_bar=False)
-        for r, s in zip(results, scores):
-            r["rerank_score"] = float(s)
-        ordered = sorted(results, key=lambda r: r.get("rerank_score", 0.0), reverse=True)
-        if top_n:
-            ordered = ordered[:top_n]
-        info.update({
-            "applied": True,
-            "model": model_name(),
-            "device": _model_device,
-            "scored": len(pairs),
-        })
-        return ordered, info
-    except Exception as e:
-        info["reason"] = f"rerank failed: {e.__class__.__name__}: {str(e)[:120]}"
-        logger.warning("Reranker: %s", info["reason"])
-        return results, info
-    finally:
-        with _lock:
-            _inflight = max(0, _inflight - 1)
+    if _worker_without_gpu():
+        scores, remote = _scores_from_backend(query, texts)
+        if scores is not None:
+            info.update({"model": remote.get("model") or model_name(),
+                         "device": remote.get("device"), "via": "backend"})
+        else:
+            info["backend_unavailable"] = remote.get("reason")
+
+    if scores is None:
+        model = _get_model()
+        if model is None:
+            info["reason"] = _load_failed_reason or (
+                "model unavailable" if is_installed() else not_installed_reason())
+            return results, info
+        try:
+            scores = _predict(model, query, texts)
+        except Exception as e:
+            info["reason"] = f"rerank failed: {e.__class__.__name__}: {str(e)[:120]}"
+            logger.warning("Reranker: %s", info["reason"])
+            return results, info
+        info.update({"model": model_name(), "device": _model_device})
+
+    for r, s in zip(results, scores):
+        r["rerank_score"] = s
+    ordered = sorted(results, key=lambda r: r.get("rerank_score", 0.0), reverse=True)
+    if top_n:
+        ordered = ordered[:top_n]
+    info.update({"applied": True, "scored": len(texts)})
+    return ordered, info
