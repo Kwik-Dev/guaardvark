@@ -137,6 +137,23 @@ def is_public_address(address: str) -> bool:
     )
 
 
+def is_local_host(host: str | None) -> bool:
+    """True when ``host`` names this machine or a private network without a
+    lookup: ``localhost``, a ``*.localhost`` name, or an IP literal that is not
+    globally routable. Any other name counts as outside, since resolving it
+    already asks a DNS server."""
+    h = (host or "").lower().rstrip(".").strip("[]")
+    if not h:
+        return False
+    if h == "localhost" or h.endswith(".localhost"):
+        return True
+    try:
+        ipaddress.ip_address(h.split("%")[0])
+    except ValueError:
+        return False
+    return not is_public_address(h)
+
+
 @functools.lru_cache(maxsize=None)
 def _no_netrc_session_class():
     import requests
