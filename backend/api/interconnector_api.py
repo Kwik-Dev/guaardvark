@@ -525,8 +525,26 @@ def update_config():
 
 @interconnector_bp.route("/config/generate-key", methods=["POST"])
 def generate_api_key():
-    """Generate a new API key for master mode."""
+    """Generate a new fleet key for master mode.
+
+    Only the person at the master gets the key, once, in this reply; the
+    master keeps its hash. The auth guard already lets through this machine
+    or a holder of the install API key; a caller on another machine is
+    refused here even with that key, so the plain fleet key never crosses
+    the network.
+    """
+    from backend.utils.auth_guard import LOCAL_ONLY_CODE, request_is_from_this_machine
+
     try:
+        if not request_is_from_this_machine():
+            logger.warning("[SYNC] Refused fleet key generation from another machine")
+            return error_response(
+                "A new fleet key can be made only on the master machine itself, "
+                "in Settings → Interconnector, where it is shown once.",
+                403,
+                error_code=LOCAL_ONLY_CODE,
+            )
+
         config = _get_config()
 
         if config.get("node_mode") != "master":
@@ -544,13 +562,16 @@ def generate_api_key():
 
         logger.info("New interconnector API key generated")
 
-        return success_response(
+        response, status = success_response(
             {
                 "api_key": api_key,
                 "api_key_hash": api_key_hash,
             },
             "API key generated successfully",
         )
+        # Shown once: no browser or proxy keeps a copy of this reply.
+        response.headers["Cache-Control"] = "no-store"
+        return response, status
 
     except Exception as e:
         logger.error(f"Error generating API key: {e}")
