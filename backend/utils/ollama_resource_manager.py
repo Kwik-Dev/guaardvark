@@ -517,6 +517,30 @@ def model_digests(model_name: str, tags: Optional[list] = None) -> frozenset:
     return frozenset(found)
 
 
+def model_families(model_name: str, tags: Optional[list] = None) -> frozenset:
+    """The model families Ollama reports for ``model_name`` (``details.family``).
+
+    A set, because one pull listed under two manifests can report two families
+    (embeddinggemma's appear as gemma3 and gemma-embedding). Manifests are
+    matched by name and by the digests :func:`model_digests` finds. Empty when
+    Ollama cannot be reached or the name is not installed.
+    """
+    name = _full_model_name(model_name)
+    if not name:
+        return frozenset()
+    if tags is None:
+        tags = _ollama_tags()
+    digests = model_digests(name, tags)
+    found = set()
+    for entry in tags:
+        names = {str(entry.get("name") or "").lower(), str(entry.get("model") or "").lower()}
+        if name in names or _short_digest(entry.get("digest")) in digests:
+            family = str((entry.get("details") or {}).get("family") or "").strip().lower()
+            if family:
+                found.add(family)
+    return frozenset(found)
+
+
 def same_model(a: str, b: str, tags: Optional[list] = None) -> Optional[bool]:
     """Whether two Ollama model names are the same build.
 

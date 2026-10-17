@@ -58,3 +58,55 @@ def test_the_identity_methods_use_the_same_bound():
     from backend.services.identity_method_data import IDENTITY_CONFIDENCE, accuracy_lower_bound
 
     assert accuracy_lower_bound(96, 100) == E.lcb(96, 100, q=1.0 - IDENTITY_CONFIDENCE)
+
+
+# ---- what counts as an independent check (decision_data.INDEPENDENCE) ----------------------
+
+E2B_LLAMACPP = "2cf98652fdc6" + "a" * 52
+TAGS = [
+    {"name": "gemma4:e2b", "digest": E2B_LLAMACPP, "details": {"family": "gemma4"}},
+    {"name": "gemma4:e2b", "digest": "da406dc37ca0" + "b" * 52, "details": {"family": "gemma4"}},
+    {"name": f"llamacpp:{E2B_LLAMACPP}", "digest": E2B_LLAMACPP, "details": {"family": "gemma4"}},
+    {"name": "gemma4:12b", "digest": "4eb23ef187e2" + "c" * 52, "details": {"family": "gemma4"}},
+    {"name": "qwen3:14b", "digest": "bdbd181c33f2" + "1" * 52, "details": {"family": "qwen3"}},
+]
+
+
+@pytest.mark.parametrize("judge, author, counts", [
+    ("gemma4:e2b", f"llamacpp:{E2B_LLAMACPP}", False),   # the same build under another name
+    ("gemma4:e2b", "gemma4:e2b", False),
+    ("gemma4:12b", "gemma4:e2b", False),                 # same family, another build
+    ("qwen3:14b", "gemma4:e2b", True),                   # another digest and another family
+    ("qwen3:14b", "not-installed:1b", None),             # cannot be told
+])
+def test_a_model_check_counts_only_from_an_unrelated_build(judge, author, counts):
+    assert E.check_counts_as_independent("model", judge=judge, authors=[author], tags=TAGS) is counts
+
+
+def test_a_model_check_must_differ_from_every_author():
+    assert E.check_counts_as_independent(
+        "model", judge="qwen3:14b", authors=["gemma4:e2b", "qwen3:14b"], tags=TAGS,
+    ) is False
+
+
+@pytest.mark.parametrize("kind", ["deterministic_rule", "embedding_similarity", "no_such_kind"])
+def test_rules_and_similarity_may_only_veto(kind):
+    assert E.check_counts_as_independent(kind, judge="qwen3:14b", authors=["gemma4:e2b"], tags=TAGS) is False
+
+
+def test_a_person_counts():
+    assert E.check_counts_as_independent("person") is True
+
+
+def test_an_unknown_build_does_not_count_when_a_yes_or_no_is_needed():
+    from backend.services.decision_data import INDEPENDENCE
+
+    assert INDEPENDENCE["unknown_counts"] is False
+
+
+def test_a_draft_checked_only_by_its_own_model_is_not_labelled_passed():
+    from backend.services.social_outreach import gates
+
+    ext = {"checked": True, "passed": True, "independent": False}
+    assert gates.independent_check_label(ext) == "not_independent"
+    assert gates.independent_ok(ext) == (True, "not_independent")

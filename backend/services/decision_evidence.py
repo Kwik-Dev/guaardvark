@@ -1,4 +1,4 @@
-"""How much a measured result proves.
+"""How much a measured result proves, and which checks count as independent.
 
 A decision may run on a model only when the model has earned it on the
 decision's labelled set. The strict rule: the lower confidence bound of its
@@ -6,15 +6,16 @@ accuracy, not the plain score, must reach the decision's floor. A perfect
 short run proves less than it looks: 35 of 35 right is 1.0 observed and 0.920
 at the bound, which does not clear a 0.95 floor.
 
-The constants live in ``decision_data.EVIDENCE``. ``lcb`` is also the bound the
-Cast identity methods are judged by (``identity_method_data``).
+The constants live in ``decision_data.EVIDENCE`` and ``INDEPENDENCE``. ``lcb``
+is also the bound the Cast identity methods are judged by
+(``identity_method_data``).
 """
 from __future__ import annotations
 
 import math
-from typing import Optional
+from typing import Iterable, Optional
 
-from backend.services.decision_data import EVIDENCE
+from backend.services.decision_data import EVIDENCE, INDEPENDENCE
 
 # needed_to_qualify gives up past this many extra items: a floor that far away
 # is not reachable by growing the set.
@@ -93,3 +94,60 @@ def needed_to_qualify(correct: int, n: int, floor: float, q: Optional[float] = N
         else:
             high = mid
     return high
+
+
+def _model_differs(judge: Optional[str], authors: Iterable[Optional[str]], tags: Optional[list]) -> Optional[bool]:
+    """True when ``judge`` differs from every author in everything
+    INDEPENDENCE["model_must_differ_in"] names, False when it shares one with
+    any author, None when that cannot be told."""
+    from backend.utils.ollama_resource_manager import _ollama_tags, model_families, same_model
+
+    authors = [a for a in authors if a]
+    if not judge:
+        return None
+    if not authors:
+        return True
+    if tags is None:
+        tags = _ollama_tags()
+    must_differ = INDEPENDENCE["model_must_differ_in"]
+    verdict: Optional[bool] = True
+    for author in authors:
+        if "digest" in must_differ:
+            same = same_model(judge, author, tags)
+            if same:
+                return False
+            if same is None:
+                verdict = None
+        if "family" in must_differ:
+            judge_families, author_families = model_families(judge, tags), model_families(author, tags)
+            if judge_families & author_families:
+                return False
+            if not judge_families or not author_families:
+                verdict = None
+    return verdict
+
+
+def check_counts_as_independent(
+    kind: str,
+    *,
+    judge: Optional[str] = None,
+    authors: Iterable[Optional[str]] = (),
+    tags: Optional[list] = None,
+) -> Optional[bool]:
+    """Whether a check of ``kind`` counts as the independent check of what
+    ``authors`` produced (decision_data.INDEPENDENCE).
+
+    ``kind`` is one of INDEPENDENCE["check_kinds"]; an unknown kind never
+    counts. For a model check, ``judge`` is the model that checked and
+    ``authors`` the models that wrote what it checked: True when it differs
+    from all of them in digest and family, False when it shares either with
+    one, None when that cannot be told. A caller that needs a yes or no reads
+    None as INDEPENDENCE["unknown_counts"]. ``tags`` is an /api/tags list the
+    caller already has.
+    """
+    rule = INDEPENDENCE["check_kinds"].get(kind)
+    if rule == "counts":
+        return True
+    if rule != "counts_if_unrelated":
+        return False
+    return _model_differs(judge, authors, tags)

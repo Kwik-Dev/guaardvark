@@ -281,11 +281,14 @@ def test_an_unknown_rubric_kind_is_refused():
 # ---- whether the grade is independent of the drafter -------------------------------------
 
 DRAFTER_ALIAS = "llamacpp:" + "2cf98652fdc6" + "a" * 52
+GEMMA4 = {"family": "gemma4"}
 TAGS = [
-    {"name": "gemma4:e2b", "digest": "2cf98652fdc6" + "a" * 52},
-    {"name": "gemma4:e2b", "digest": "da406dc37ca0" + "b" * 52},
-    {"name": DRAFTER_ALIAS, "digest": "2cf98652fdc6" + "a" * 52},
-    {"name": "qwen3:14b", "digest": "bdbd181c33f2" + "1" * 52},
+    {"name": "gemma4:e2b", "digest": "2cf98652fdc6" + "a" * 52, "details": GEMMA4},
+    {"name": "gemma4:e2b", "digest": "da406dc37ca0" + "b" * 52, "details": GEMMA4},
+    {"name": DRAFTER_ALIAS, "digest": "2cf98652fdc6" + "a" * 52, "details": GEMMA4},
+    {"name": "gemma4:12b", "digest": "4eb23ef187e2" + "c" * 52, "details": GEMMA4},
+    {"name": "qwen3:14b", "digest": "bdbd181c33f2" + "1" * 52, "details": {"family": "qwen3"}},
+    {"name": "nofamily:1b", "digest": "0123456789ab" + "2" * 52},
 ]
 PASSING = '{"engages": 1, "on_topic": 1, "appropriate_tone": 1, "reason": "fits"}'
 
@@ -293,7 +296,9 @@ PASSING = '{"engages": 1, "on_topic": 1, "appropriate_tone": 1, "reason": "fits"
 @pytest.mark.parametrize("drafter, independent", [
     (DRAFTER_ALIAS, False),        # another name for the grader's own build
     ("gemma4:e2b", False),
+    ("gemma4:12b", False),         # another build of the grader's family
     ("qwen3:14b", True),
+    ("nofamily:1b", None),         # its family is not reported, so cannot be told
     ("not-installed:1b", None),    # cannot be told
     (None, None),
 ])

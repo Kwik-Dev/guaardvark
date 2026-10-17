@@ -7,8 +7,9 @@ wrote, so a second model (external_grader) checks it blind. Its answer is
 recorded with the draft for the person who reviews it; a draft that failed
 the check is marked so they can see why.
 
-Only a different model build counts as an independent check. A grader that
-resolves to the drafter's own build (same Ollama manifest digest) still
+Only a build of another model family counts as an independent check
+(decision_data.INDEPENDENCE). A grader that resolves to the drafter's own
+build (same Ollama manifest digest) or to another build of its family still
 reports its answer, but a pass from it is labelled not_independent, never
 passed.
 
@@ -30,7 +31,8 @@ def independent_check_label(ext: dict) -> str:
     passed only when its ``passed`` is True: every question its rubric asked
     was answered yes. Its 0-1 grade is for display and does not decide. A pass
     from the drafter's own model (``independent`` False) is not_independent; a
-    no from it is still failed.
+    no from it is still failed. ``independent`` is set by the grader
+    (external_grader._independence); this module only reads it.
     """
     ext = ext or {}
     if not ext.get("checked"):

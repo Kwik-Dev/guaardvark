@@ -68,6 +68,30 @@ EVIDENCE = {
     # and adds nothing to correct or n. Only new labelled items add up.
     "fleet_label_weight": 0.0,
 }
+
+# What counts as an independent check of something a model produced: a draft
+# it wrote, a fix it proposed, a pair it generated. Read through
+# decision_evidence.check_counts_as_independent.
+INDEPENDENCE = {
+    # Each kind of check, and whether it can stand as the independent one.
+    # A rule or an embedding score may still veto; it never counts as the check.
+    "check_kinds": {
+        "person": "counts",
+        "model": "counts_if_unrelated",
+        "deterministic_rule": "veto_only",
+        "embedding_similarity": "veto_only",
+    },
+    # A model's check counts only when its build differs from the author's in
+    # both of these. The same build agrees with itself with or without a fresh
+    # context, and builds of one family share their training and its blind
+    # spots (gemma4:12b checking gemma4:e2b is not independent). A model on
+    # another approved machine is judged the same way: the same build
+    # elsewhere is still the same build.
+    "model_must_differ_in": ("digest", "family"),
+    # Whether a model check counts when the builds cannot be told apart
+    # (Ollama unreachable, a model not installed here).
+    "unknown_counts": False,
+}
 # Decision-model probabilities are informative; chat-model self-reported
 # confidence is not (it reports 1.0 on its misses), so no threshold applies to it.
 DECISION_MODEL_THRESHOLD = {"nimble": 0.95, "tev1": 0.8}
