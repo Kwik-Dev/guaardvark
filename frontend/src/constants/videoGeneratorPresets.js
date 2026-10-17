@@ -35,6 +35,12 @@ export const COGVIDEOX_DURATION_PRESETS = {
   long: { label: "Long", description: "~6 seconds", duration_frames: 49, fps: 8 },
 };
 
+/** CogVideoX 1.5 I2V renders its card's 5 s length at 16fps; the card's 10 s
+ *  (161 frames) is not offered until it has been measured on a 16 GB card. */
+export const COGVIDEOX15_DURATION_PRESETS = {
+  short: { label: "5 s", description: "5 seconds", duration_frames: 81, fps: 16 },
+};
+
 /** Wan 2.2 14B (T2V / I2V) is 16fps-native. */
 export const WAN_DURATION_PRESETS = {
   short: { label: "Short", description: "~2 seconds", duration_frames: 33, fps: 16 },
@@ -221,12 +227,18 @@ export const MODEL_OPTIONS = {
     dimensionAlignment: 16,
   },
   "cogvideox-5b-i2v": {
-    label: "CogVideoX 5B I2V",
-    description: "Image-to-video, 6s (~16GB VRAM)",
+    label: "CogVideoX 1.5 5B I2V",
+    description: "Image-to-video, 5 s at 1360x768 (~16GB VRAM)",
     type: "cogvideox",
-    nativeFps: 8,
-    maxFrames: 49,
-    resolution: [720, 480],
+    // CogVideoX 1.5's card: short side 768, long side up to 1360, 16fps,
+    // 5 s. The registry entry carries the same numbers.
+    nativeFps: 16,
+    maxFrames: 81,
+    resolution: [1360, 768],
+    canvas: { shortSide: 768, maxLongSide: 1360 },
+    maxPixelArea: 1360 * 768,
+    aspectRatios: ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2"],
+    durationPresets: COGVIDEOX15_DURATION_PRESETS,
     defaultSteps: 50,
     minSteps: 50,
     supportsT2V: false,
@@ -431,6 +443,7 @@ export const withDurationTiers = (presets, registryMeta) => {
 /** Duration presets for a model. The preset fps must match the model's native
  *  rate — muxing 24fps-native frames at 16fps plays every clip in slow motion. */
 export const durationPresetsFor = (model, registryMeta) => {
+  if (MODEL_OPTIONS[model]?.durationPresets) return MODEL_OPTIONS[model].durationPresets;
   if (isMinimaxModel(model, registryMeta)) return withDurationTiers(MINIMAX_DURATION_PRESETS, registryMeta);
   if (isHunyuanModel(model, registryMeta)) return HUNYUAN_DURATION_PRESETS;
   if (isLtxModel(model, registryMeta)) return LTX_DURATION_PRESETS;
@@ -458,6 +471,16 @@ export const aspectRatiosFor = (model, registryMeta) => {
 export const resolveAspectRatio = (model, aspectRatio, registryMeta) => {
   const allowed = aspectRatiosFor(model, registryMeta);
   return allowed[aspectRatio] ? aspectRatio : Object.keys(allowed)[0];
+};
+
+/** The size on a model's declared canvas: the short side fixed, the long side
+ *  following the aspect up to its cap, snapped to the model's grid. */
+export const canvasDimensions = (canvas, ratio, align = 16) => {
+  const { shortSide, maxLongSide } = canvas;
+  const wide = ratio >= 1 ? ratio : 1 / ratio;
+  let longSide = Math.max(shortSide, Math.round(Math.min(shortSide * wide, maxLongSide) / align) * align);
+  if (longSide > maxLongSide) longSide = Math.floor(maxLongSide / align) * align;
+  return ratio >= 1 ? { width: longSide, height: shortSide } : { width: shortSide, height: longSide };
 };
 
 export const snapDimensions = (width, height, model, registryMeta) => {

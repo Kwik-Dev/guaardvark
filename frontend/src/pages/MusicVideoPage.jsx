@@ -872,8 +872,8 @@ const MusicVideoPage = () => {
       description: "Cinematic motion, ~5s clips",
     },
     "cogvideox-5b-i2v": {
-      label: "CogVideoX 5B I2V",
-      description: "Solid alternative I2V (~6s)",
+      label: "CogVideoX 1.5 5B I2V",
+      description: "5 s clips at 1360x768, 16fps",
     },
     "hunyuan-i2v": {
       label: "HunyuanVideo 13B I2V (GGUF Q5)",

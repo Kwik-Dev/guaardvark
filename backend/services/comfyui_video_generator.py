@@ -2366,6 +2366,7 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                         f"(companions auto-pull). Generation never downloads on its own."
                     ))
                 files = self._cogvideox_i2v_files(model)
+                from backend.services.video_model_registry import VIDEO_MODEL_REGISTRY as _reg
                 workflow = self._create_cogvideox_i2v_workflow(
                     image_filename=uploaded_image,
                     prompt=request.prompt,
@@ -2381,6 +2382,7 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                     seed=seed,
                     fps=request.fps,
                     interpolation_multiplier=interpolation,
+                    sequential_cpu_offload=bool((_reg.get(model) or {}).get("sequential_cpu_offload")),
                 )
                 # Add optional TeaCache / FETA nodes for CogVideoX I2V
                 meta = request.metadata or {}
