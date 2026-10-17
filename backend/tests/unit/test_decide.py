@@ -440,3 +440,8 @@ def test_an_author_that_cannot_be_resolved_counts_as_the_judge(network, modes, m
     modes["needs_live_data"] = "on"
     result = ncp.decide("needs_live_data", LIVE, fallback=False, exclude_models=["somewhere-else:7b"])
     assert result.reason == "author_is_judge"
+
+
+def test_one_author_named_as_a_string_is_one_author(network, modes, model, qualified):
+    modes["needs_live_data"] = "on"
+    assert ncp.decide("needs_live_data", LIVE, fallback=False, exclude_models=MODEL).reason == "author_is_judge"

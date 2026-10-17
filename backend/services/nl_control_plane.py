@@ -545,6 +545,8 @@ def decide(
         if mode == "off":
             return DecisionResult(decision, fallback, "fallback", "off", latency_ms=_ms(started))
 
+        if isinstance(exclude_models, str):
+            exclude_models = (exclude_models,)
         authors = None if exclude_models is None else tuple(sorted({str(m) for m in exclude_models if m}))
         sha, chars = _state_digest(state)
         memo = _memo_for(ctx)
