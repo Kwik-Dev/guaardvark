@@ -17,19 +17,28 @@
 _have_brew() { command -v brew >/dev/null 2>&1; }
 _brew() {
     _have_brew || { vader_error "Homebrew is required on macOS — install from https://brew.sh, then re-run."; return 1; }
-    brew "$@"
+    # No Homebrew usage analytics from the runs these scripts make.
+    HOMEBREW_NO_ANALYTICS=1 brew "$@"
 }
 
 platform_install_system_deps() {
     # Presence check ONLY — never run bare `brew` (no args), which prints usage to
     # stderr and exits 1, making this function bail before installing anything.
     _have_brew || { vader_error "Homebrew is required on macOS — install from https://brew.sh, then re-run."; return 1; }
-    vader_info "Installing system deps via Homebrew (postgresql@16, redis, ffmpeg, node, cmake, zstd)..."
-    local log="${SETUP_LOG:-${SCRIPT_DIR:-.}/logs/setup.log}"
-    if declare -F _vader_run >/dev/null 2>&1; then
-        _vader_run "$log" -- _brew install postgresql@16 redis ffmpeg node cmake zstd || return 1
-    else
-        _brew install postgresql@16 redis ffmpeg node cmake zstd || return 1
+    # Install only what is missing. `brew install` on formulae already present
+    # still updates Homebrew from GitHub and upgrades them, on every start.
+    local missing=() formula
+    for formula in postgresql@16 redis ffmpeg node cmake zstd; do
+        brew list --versions "$formula" >/dev/null 2>&1 || missing+=("$formula")
+    done
+    if [ "${#missing[@]}" -gt 0 ]; then
+        vader_info "Installing system deps via Homebrew (${missing[*]})..."
+        local log="${SETUP_LOG:-${SCRIPT_DIR:-.}/logs/setup.log}"
+        if declare -F _vader_run >/dev/null 2>&1; then
+            _vader_run "$log" -- _brew install "${missing[@]}" || return 1
+        else
+            _brew install "${missing[@]}" || return 1
+        fi
     fi
     # Postgres/Redis run under launchd via brew services (the macOS analog of systemd).
     _brew services start postgresql@16 2>/dev/null || vader_warn "Could not auto-start postgresql@16 — run: brew services start postgresql@16"

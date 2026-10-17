@@ -16,6 +16,8 @@ TORCH_CHANNEL="$("$BACKEND_PY" -m backend.services.hardware_policy torch_channel
 
 log() { echo "  [video_editor/setup_venv] $*"; }
 
+# 0: healthy. 1: no venv, or torch does not import. 2: torch imports but the
+# CUDA probe failed, which a busy or full card causes at start.
 verify_venv() {
     local venv="$1"
     [ -x "$venv/bin/python" ] || return 1
@@ -23,18 +25,30 @@ verify_venv() {
 import sys
 try:
     import torch
-    if torch.cuda.is_available():
-        torch.zeros(1).cuda()
-    print("video_editor torch OK", torch.__version__)
 except Exception as e:
     print(f"VERIFY_FAIL: {e!r}", file=sys.stderr)
     sys.exit(1)
+try:
+    if torch.cuda.is_available():
+        torch.zeros(1).cuda()
+except Exception as e:
+    print(f"CUDA_PROBE_FAIL: {e!r}", file=sys.stderr)
+    sys.exit(2)
+print("video_editor torch OK", torch.__version__)
 PYEOF
 }
 
 venv="$PLUGIN_DIR/venv"
-if verify_venv "$venv"; then
+verify_venv "$venv"
+status=$?
+if [ "$status" -eq 0 ]; then
     log "venv healthy — skipping"
+    exit 0
+fi
+if [ "$status" -eq 2 ]; then
+    # Rebuilding cannot fix a busy card; it would only delete a working venv
+    # and download it all again.
+    log "torch imports but the CUDA probe failed (card busy or full?) — keeping the venv"
     exit 0
 fi
 

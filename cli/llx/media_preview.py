@@ -97,14 +97,32 @@ def preview_image(source: str | Path | bytes, console=None) -> str:
     return "path"
 
 
+def _origin(url: str) -> tuple[str, str, int | None]:
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    default = {"http": 80, "https": 443}.get(parts.scheme)
+    return parts.scheme, (parts.hostname or "").lower(), parts.port or default
+
+
 def fetch_media(url: str, server: str = "", timeout: float = 60.0) -> bytes | None:
-    """Bytes of a file the server made, from a full URL or a server-relative one."""
+    """Bytes of a file the server made, from a full URL or a server-relative one.
+
+    Only the server's own files are fetched: a reply naming another host gets
+    None (the caller prints the link), so neither a request nor the API key
+    goes there."""
     import httpx
 
     from llx.config import get_api_key, get_server_url
 
+    base = (server or get_server_url()).rstrip("/")
     if not url.startswith(("http://", "https://")):
-        url = (server or get_server_url()).rstrip("/") + "/" + url.lstrip("/")
+        url = base + "/" + url.lstrip("/")
+    try:
+        if _origin(url) != _origin(base):
+            return None
+    except ValueError:
+        return None
     api_key = get_api_key(url)
     headers = {"X-API-Key": api_key} if api_key else {}
     try:

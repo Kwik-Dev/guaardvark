@@ -98,6 +98,12 @@ services:
       # The name other containers on this network call the backend by
       # (http://backend:5000).
       VITE_ALLOWED_HOSTS: backend
+      # The quiet-library settings start.sh exports: no library telemetry, no
+      # pip version checks.
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      DO_NOT_TRACK: "1"
+      UNSLOTH_DISABLE_STATISTICS: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
       # Optional — set your Anthropic key for Uncle Claude:
       # ANTHROPIC_API_KEY: sk-ant-...
     ports:
