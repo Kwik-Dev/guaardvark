@@ -100,6 +100,15 @@ def _near(verbs: str, objects: str) -> str:
     return rf"\b(?:{verbs})\b{_GAP}\b(?:{objects})\b"
 
 
+# "make" asks for a file only as the request itself, opening the message or a
+# sentence: "make me a csv of 10 cities", "can you make a python file that ...".
+# "make sure the csv has headers" and "how do I make a csv in excel?" are not.
+_MAKE_A = (
+    r"(?:^|[.!?]\s+)(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)?"
+    r"make\s+(?:me\s+|us\s+)?an?\s+(?:[\w-]+\s+){0,3}?"
+)
+
+
 # Words after which the rest of a request is its topic, not the kind of thing
 # asked for: "a poem about javascript", "a blog post about clean code", "a
 # tutorial on python decorators" ask for prose.
@@ -214,6 +223,7 @@ class AgentRouter:
                 patterns=[
                     _near("create", "csv"),
                     _near("generate", "csv"),
+                    _MAKE_A + r"csv\b",
                     r"/createcsv\b",
                 ],
                 route_type=RouteType.TOOL_DIRECT,
@@ -226,6 +236,7 @@ class AgentRouter:
                 patterns=[
                     _near("create", "files?"),
                     _near("generate", "files?"),
+                    _MAKE_A + r"file\b",
                     r"\bwrite\b" + _GAP + r"\bto\s+(\w+\.\w+)",
                     r"/createfile\b",
                 ],

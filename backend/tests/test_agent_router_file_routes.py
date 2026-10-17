@@ -74,3 +74,22 @@ def test_a_language_named_as_the_topic_is_chat(message):
 ])
 def test_a_request_for_code_still_routes_to_codegen(message):
     assert AgentRouter().route(message).tool_name == "codegen"
+
+
+@pytest.mark.parametrize("message, tool", [
+    ("make me a csv of 10 cities", "generate_csv"),
+    ("can you make a quick csv of my expenses", "generate_csv"),
+    ("make a python file that prints hello", "generate_file"),
+    ("Thanks. Make me a file called notes.md", "generate_file"),
+])
+def test_make_a_csv_or_file_opens_the_card(message, tool):
+    assert AgentRouter().route(message).tool_name == tool
+
+
+@pytest.mark.parametrize("message", [
+    "make sure the csv has headers",
+    "how do I make a csv in excel?",
+    "make a profile picture for me",
+])
+def test_make_without_a_file_request_does_not(message):
+    assert AgentRouter().route(message).tool_name not in ("generate_csv", "generate_file")
