@@ -305,7 +305,8 @@ jobs:
 
       # CPU-only suites that must stay green: security guards, the GPU
       # resource layer (gate, lease, orchestrator, admission), video/image
-      # admission and unload paths, registries, plugin state, progress.
+      # admission and unload paths, registries, plugin state, progress, and
+      # the declared decision questions with their labelled sets.
       - name: Run smoke suites
         run: |
           source backend/venv/bin/activate
@@ -439,4 +440,6 @@ jobs:
             backend/tests/unit/test_web_search_routing.py \
             backend/tests/test_mcp_output_scope.py \
             backend/tests/test_outputs_download_protection.py \
-            backend/tests/test_api_outputs_record_refusal.py
+            backend/tests/test_api_outputs_record_refusal.py \
+            backend/tests/unit/test_decision_sets.py \
+            backend/tests/unit/test_decision_data.py
