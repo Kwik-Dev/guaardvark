@@ -1,5 +1,6 @@
 """Every Interconnector route is accounted for: an operator route, a node
 route that checks the signing machine itself, or a read left open on purpose.
+Operator routes stay with this machine and the key while Network access is on.
 
 Drives the real blueprint as a master behind the auth guard on an in-memory
 database. Operator routes must refuse another host before their view runs
@@ -20,6 +21,7 @@ from backend.utils import auth_guard, node_identity
 
 PREFIX = "/api/interconnector"
 REMOTE = {"REMOTE_ADDR": "192.0.2.40"}
+LAN_DEVICE = {"REMOTE_ADDR": "192.168.1.20"}
 LOCAL = {"REMOTE_ADDR": "127.0.0.1"}
 
 # This machine, or the install API key (backend/utils/auth_guard.py).
@@ -75,6 +77,7 @@ def master(tmp_path, monkeypatch):
     monkeypatch.setenv(node_identity.NODE_ID_ENV, "master-node")
     monkeypatch.setattr(auth_guard, "_local_ips_cache", {"127.0.0.1", "::1", "localhost"})
     monkeypatch.delenv(auth_guard.API_KEY_ENV, raising=False)
+    monkeypatch.delenv(auth_guard.NETWORK_ACCESS_ENV, raising=False)
     app = Flask(__name__)
     app.config.update({"TESTING": True, "SQLALCHEMY_DATABASE_URI": "sqlite:///:memory:"})
     db.init_app(app)
@@ -119,6 +122,14 @@ def test_operator_routes_ask_another_host_for_the_install_key(master, monkeypatc
     monkeypatch.setenv(auth_guard.API_KEY_ENV, "install-key")
     response = master.test_client().open(_concrete(rule), method=method, json={}, environ_base=REMOTE)
     assert response.status_code == 401
+
+
+@pytest.mark.parametrize("method,rule", sorted(OPERATOR))
+def test_operator_routes_stay_closed_to_a_lan_device_under_network_access(master, monkeypatch, method, rule):
+    monkeypatch.setenv(auth_guard.NETWORK_ACCESS_ENV, "1")
+    response = master.test_client().open(_concrete(rule), method=method, json={}, environ_base=LAN_DEVICE)
+    assert response.status_code == 403, response.get_data(as_text=True)
+    assert response.get_json()["code"] == auth_guard.FLEET_CODE
 
 
 @pytest.mark.parametrize("method,rule", sorted(NODE - {("POST", "/sync/files/push")}))

@@ -57,7 +57,7 @@ export function describeStatus(status) {
     return {
       tone: "ok",
       label: "network access",
-      text: `Network access is on, so this device can run protected actions on ${machineOf(status)} without the key, and can use chat with the tools it asks approval for. The Code Editor's Run, running tools directly and MCP server changes still need the key.`,
+      text: `Network access is on, so this device can run protected actions on ${machineOf(status)} without the key, and can use chat with the tools it asks approval for. The Code Editor's Run, running tools directly, MCP server changes and the Interconnector's settings and fleet controls still need the key.`,
       ok: true,
     };
   }
@@ -303,7 +303,7 @@ export default function ApiKeySection() {
     >
       <Cluster
         label="Network"
-        help="Network access on: every device on this machine's local network can run protected actions too, with no key, and can use chat, including the tools chat asks approval for, since the device that asks is the device that approves. The Code Editor's Run, running tools directly and MCP server changes always need this machine or the key. Devices outside the local network still need the key. For a machine on a network you trust."
+        help="Network access on: every device on this machine's local network can run protected actions too, with no key, and can use chat, including the tools chat asks approval for, since the device that asks is the device that approves. The Code Editor's Run, running tools directly, MCP server changes and the Interconnector's settings and fleet controls always need this machine or the key. Devices outside the local network still need the key. For a machine on a network you trust."
         note={status ? (status.network_access ? "open to the local network" : "this machine and the key") : undefined}
       >
         <Line>
@@ -314,7 +314,7 @@ export default function ApiKeySection() {
             disabled={!status?.can_manage_network_access || busy === "network"}
             tooltip={
               status?.can_manage_network_access
-                ? "On: any device on the local network can do everything but the Code Editor's Run, running tools directly and MCP server changes. Off: protected actions need this machine or the API key."
+                ? "On: any device on the local network can do everything but the Code Editor's Run, running tools directly, MCP server changes and the Interconnector's settings and fleet controls. Off: protected actions need this machine or the API key."
                 : status?.network_access_note ||
                   `Change it on ${machineOf(status)} itself, or from a browser signed in with the key.`
             }

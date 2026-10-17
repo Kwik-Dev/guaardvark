@@ -763,8 +763,8 @@ def test_network_access_off_keeps_the_local_only_refusal_for_code_routes(app, mo
 
 # ---- Interconnector operator routes ---------------------------------------
 
-# Every path below starts with one of the Interconnector entries in
-# PROTECTED_PREFIXES, with the method the route answers.
+# Every path below is an Interconnector operator route (auth_guard FLEET_*),
+# with the method the route answers.
 INTERCONNECTOR_OPERATOR_ROUTES = (
     ("GET", "/api/interconnector/config"),
     ("POST", "/api/interconnector/config"),
@@ -830,6 +830,7 @@ def interconnector_app(monkeypatch):
     # This machine is loopback only, whatever the test box's own address is.
     monkeypatch.setattr(auth_guard, "_local_ips_cache", {"127.0.0.1", "::1", "localhost"})
     monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    monkeypatch.delenv("GUAARDVARK_NETWORK_ACCESS", raising=False)
     test_app = Flask(__name__)
     test_app.before_request(auth_guard.check_endpoint_auth)
     routes = INTERCONNECTOR_OPERATOR_ROUTES + INTERCONNECTOR_NODE_ROUTES
@@ -842,9 +843,28 @@ def _call(client, method, path, environ, headers=None):
     return client.open(path, method=method, environ_base=environ, headers=headers or {})
 
 
-def test_every_interconnector_operator_prefix_is_protected():
+def test_every_interconnector_operator_prefix_is_a_fleet_route():
     for prefix in INTERCONNECTOR_OPERATOR_PREFIXES:
-        assert prefix in auth_guard.PROTECTED_PREFIXES, prefix
+        assert prefix in auth_guard.FLEET_PREFIXES, prefix
+
+
+@pytest.mark.parametrize("method,path,fleet", [
+    ("GET", "/api/interconnector/nodes", True),
+    ("GET", "/api/interconnector/nodes/", True),
+    ("DELETE", "/api/interconnector/nodes/n-1", True),
+    ("POST", "/api/interconnector/nodes/n-1/test", True),
+    ("POST", "/api/interconnector/sync/preferences", True),
+    ("GET", "/api/interconnector/sync/preferences", False),
+    ("POST", "/api/interconnector/nodes/register", False),
+    ("POST", "/api/interconnector/nodes/n-1/heartbeat", False),
+    ("GET", "/api/interconnector/nodes/local-identity", False),
+    ("GET", "/api/interconnector/status", False),
+    ("GET", "/api/interconnector/updates/manifest", False),
+    ("POST", "/api/interconnector/receive-directive", False),
+])
+def test_which_requests_control_the_fleet(method, path, fleet):
+    with Flask(__name__).test_request_context(path, method=method):
+        assert auth_guard.request_controls_fleet() is fleet
 
 
 @pytest.mark.parametrize("method,path", INTERCONNECTOR_OPERATOR_ROUTES)
@@ -880,3 +900,60 @@ def test_interconnector_operator_route_takes_the_install_key_from_any_host(inter
 @pytest.mark.parametrize("method,path", INTERCONNECTOR_NODE_ROUTES)
 def test_interconnector_node_routes_are_left_to_the_route(interconnector_app, method, path):
     assert _call(interconnector_app.test_client(), method, path, OTHER_MACHINE).status_code == 200
+
+
+# Network access opens protected routes to the local network, but the
+# Interconnector's operator routes stay with this machine and the key.
+
+@pytest.mark.parametrize("method,path", INTERCONNECTOR_OPERATOR_ROUTES)
+def test_network_access_does_not_open_a_fleet_route_to_a_lan_device(interconnector_app, monkeypatch, method, path):
+    monkeypatch.setenv("GUAARDVARK_NETWORK_ACCESS", "1")
+    client = interconnector_app.test_client()
+
+    direct = _call(client, method, path, {"REMOTE_ADDR": LAN_DEVICE})
+    proxied = _call(client, method, path, THIS_MACHINE, headers={"X-Forwarded-For": LAN_DEVICE})
+
+    for response in (direct, proxied):
+        assert response.status_code == 403
+        assert response.get_json()["code"] == auth_guard.FLEET_CODE
+        assert response.get_json()["error"] == auth_guard.FLEET_MESSAGE.format(machine=auth_guard.machine_name())
+
+
+@pytest.mark.parametrize("method,path", INTERCONNECTOR_OPERATOR_ROUTES)
+def test_a_fleet_route_answers_this_machine_while_network_access_is_on(interconnector_app, monkeypatch, method, path):
+    monkeypatch.setenv("GUAARDVARK_NETWORK_ACCESS", "1")
+    assert _call(interconnector_app.test_client(), method, path, THIS_MACHINE).status_code == 200
+
+
+@pytest.mark.parametrize("method,path", INTERCONNECTOR_OPERATOR_ROUTES)
+def test_a_fleet_route_takes_the_key_from_a_lan_device_while_network_access_is_on(interconnector_app, monkeypatch, method, path):
+    monkeypatch.setenv("GUAARDVARK_NETWORK_ACCESS", "1")
+    monkeypatch.setenv("GUAARDVARK_API_KEY", "install-key")
+    client = interconnector_app.test_client()
+    lan = {"REMOTE_ADDR": LAN_DEVICE}
+
+    without_key = _call(client, method, path, lan)
+    assert without_key.status_code == 401
+    assert without_key.get_json()["code"] == auth_guard.API_KEY_CODE
+    assert _call(client, method, path, lan, headers={"X-API-Key": "install-key"}).status_code == 200
+
+
+def test_a_fleet_route_takes_a_signed_in_browser_on_the_lan(interconnector_app, monkeypatch):
+    monkeypatch.setenv("GUAARDVARK_NETWORK_ACCESS", "1")
+    monkeypatch.setenv("GUAARDVARK_API_KEY", "install-key")
+    monkeypatch.setattr(auth_guard, "request_has_valid_session", lambda: True)
+    response = _call(interconnector_app.test_client(), "GET", "/api/interconnector/config", {"REMOTE_ADDR": LAN_DEVICE})
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize("method,path", INTERCONNECTOR_NODE_ROUTES)
+def test_network_access_leaves_the_node_routes_to_the_route(interconnector_app, monkeypatch, method, path):
+    monkeypatch.setenv("GUAARDVARK_NETWORK_ACCESS", "1")
+    assert _call(interconnector_app.test_client(), method, path, {"REMOTE_ADDR": LAN_DEVICE}).status_code == 200
+
+
+def test_network_access_still_opens_other_protected_routes_beside_the_fleet(app, monkeypatch):
+    monkeypatch.setenv("GUAARDVARK_NETWORK_ACCESS", "1")
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    response = app.test_client().post("/api/files/write", json={}, environ_base={"REMOTE_ADDR": LAN_DEVICE})
+    assert response.status_code == 200
