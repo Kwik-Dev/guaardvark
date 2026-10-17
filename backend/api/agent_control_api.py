@@ -6,6 +6,7 @@ Provides start/stop/kill/status/capture endpoints for the agent control system.
 Blueprint auto-discovered by blueprint_discovery.py.
 """
 
+import contextlib
 import logging
 import threading
 from flask import Blueprint, jsonify, request
@@ -548,46 +549,55 @@ def learn_input():
         if not action:
             return jsonify({"success": False, "error": "Missing 'action' field"}), 400
 
+        if action == "type" and not data.get("text", ""):
+            return jsonify({"success": False, "error": "Missing 'text' for type action"}), 400
+        if action == "hotkey" and not data.get("keys", ""):
+            return jsonify({"success": False, "error": "Missing 'keys' for hotkey action"}), 400
+        if action not in ("click", "type", "hotkey", "scroll"):
+            return jsonify({"success": False, "error": f"Unknown action: {action}"}), 400
+
+        recorder = None
+        try:
+            from backend.services.agent_control_service import get_agent_control_service
+            service = get_agent_control_service()
+            if service.is_learning and service._demo_recorder:
+                recorder = service._demo_recorder
+        except Exception as e:
+            logger.warning(f"DemoRecorder lookup failed (non-fatal): {e}")
+
+        if action == "scroll":
+            x, y = int(data.get("x", 640)), int(data.get("y", 360))
+        else:
+            x, y = int(data.get("x", 0)), int(data.get("y", 0))
+        amount = int(data.get("amount", -3))
+
         from backend.services.local_screen_backend import LocalScreenBackend
         screen = LocalScreenBackend()
 
-        if action == "click":
-            x = int(data.get("x", 0))
-            y = int(data.get("y", 0))
-            button = data.get("button", "left")
-            result = screen.click(x, y, button=button)
-        elif action == "type":
-            text = data.get("text", "")
-            if not text:
-                return jsonify({"success": False, "error": "Missing 'text' for type action"}), 400
-            result = screen.type_text(text)
-        elif action == "hotkey":
-            keys = data.get("keys", "")
-            if not keys:
-                return jsonify({"success": False, "error": "Missing 'keys' for hotkey action"}), 400
-            key_list = keys.split("+")
-            result = screen.hotkey(*key_list)
-        elif action == "scroll":
-            x = int(data.get("x", 640))
-            y = int(data.get("y", 360))
-            amount = int(data.get("amount", -3))
-            result = screen.scroll(x, y, amount=amount)
-        else:
-            return jsonify({"success": False, "error": f"Unknown action: {action}"}), 400
+        # This request records the action itself below, so the recorder's
+        # display listener must not record the injected copy as well.
+        with (recorder.injected_input() if recorder else contextlib.nullcontext()):
+            if action == "click":
+                button = data.get("button", "left")
+                result = screen.click(x, y, button=button)
+            elif action == "type":
+                result = screen.type_text(data.get("text", ""))
+            elif action == "hotkey":
+                result = screen.hotkey(*data.get("keys", "").split("+"))
+            else:
+                result = screen.scroll(x, y, amount=amount)
 
         # Feed the event to DemoRecorder if recording is active
-        if result.get("success"):
+        if result.get("success") and recorder:
             try:
-                from backend.services.agent_control_service import get_agent_control_service
-                service = get_agent_control_service()
-                if service.is_learning and service._demo_recorder:
-                    service._demo_recorder.record_event(
-                        action=action,
-                        x=int(data.get("x", 0)),
-                        y=int(data.get("y", 0)),
-                        text=data.get("text", ""),
-                        keys=data.get("keys", ""),
-                    )
+                recorder.record_event(
+                    action=action,
+                    x=x,
+                    y=y,
+                    text=data.get("text", ""),
+                    keys=data.get("keys", ""),
+                    amount=amount if action == "scroll" else None,
+                )
             except Exception as e:
                 logger.warning(f"DemoRecorder event capture failed (non-fatal): {e}")
 

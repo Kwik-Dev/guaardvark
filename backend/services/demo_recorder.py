@@ -2,19 +2,34 @@
 """
 DemoRecorder — Captures human demonstrations on the virtual display.
 
-Listens for input events via `xinput test-xi2` on display :99,
-captures screenshot pairs (before/after) around events, and uses
-VisionAnalyzer to generate target descriptions for each action.
+Two input paths feed it:
+
+* ``record_event()`` — the /learn/input API, which injects the action with
+  xdotool and already knows exactly what was done.
+* An ``xinput test-xi2 --root`` listener on the display, which sees input
+  arriving any other way (a person on the VNC viewer, a script driving
+  xdotool). Each event is decoded from its full output block: one step per
+  physical press (the master and slave copies and the Raw* events are
+  dropped), keycodes translated through the display's keymap, chords
+  recorded as hotkeys. Input injected by /learn/input is hidden from the
+  listener so it is recorded once.
+
+Each step carries before/after screenshots and VisionAnalyzer descriptions
+of the target and of the screen before the step (its precondition).
 
 Used by AgentControlService during LEARNING mode.
 """
 
 import logging
 import os
+import queue
+import re
 import subprocess
 import threading
 import time
 import uuid
+from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -31,6 +46,134 @@ RAPID_RECLICK_THRESHOLD = 0.5        # seconds — clicks faster than this flag 
 SCREEN_SETTLE_TIMEOUT = 3.0          # seconds — max wait for screen to stop changing
 SCREEN_SETTLE_INTERVAL = 0.3         # seconds — polling interval during settle detection
 SCREEN_CHANGE_THRESHOLD = 0.005      # normalized pixel diff — below this means "settled"
+INJECTION_ECHO_GRACE = 0.3           # seconds — listener events this soon after a /learn/input
+                                     # injection are that injection's echo
+STOP_DRAIN_TIMEOUT = 60.0            # seconds — stop() waits this long for queued listener events
+
+# X modifier mask bits as printed in xinput's "modifiers: ... effective: 0x.." field.
+_MOD_SHIFT, _MOD_LOCK, _MOD_CONTROL, _MOD_ALT, _MOD_NUMLOCK, _MOD_SUPER = 0x1, 0x2, 0x4, 0x8, 0x10, 0x40
+
+_MODIFIER_KEYSYMS = {
+    "Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R",
+    "Meta_L", "Meta_R", "Super_L", "Super_R", "Hyper_L", "Hyper_R",
+    "Caps_Lock", "Shift_Lock", "Num_Lock", "Mode_switch",
+    "ISO_Level3_Shift", "ISO_Level5_Shift", "ISO_Group_Shift",
+}
+
+# Keysym names of the printable ASCII characters that are not their own name.
+_KEYSYM_CHARS = {
+    "space": " ", "exclam": "!", "quotedbl": '"', "numbersign": "#",
+    "dollar": "$", "percent": "%", "ampersand": "&", "apostrophe": "'",
+    "parenleft": "(", "parenright": ")", "asterisk": "*", "plus": "+",
+    "comma": ",", "minus": "-", "period": ".", "slash": "/", "colon": ":",
+    "semicolon": ";", "less": "<", "equal": "=", "greater": ">",
+    "question": "?", "at": "@", "bracketleft": "[", "backslash": "\\",
+    "bracketright": "]", "asciicircum": "^", "underscore": "_", "grave": "`",
+    "braceleft": "{", "bar": "|", "braceright": "}", "asciitilde": "~",
+    "KP_Decimal": ".", "KP_Add": "+", "KP_Subtract": "-",
+    "KP_Multiply": "*", "KP_Divide": "/", "KP_Space": " ",
+}
+
+
+def _us_fallback_keymap() -> Dict[int, List[str]]:
+    """US evdev keycodes, used only when ``xmodmap -pke`` cannot be read."""
+    keymap: Dict[int, List[str]] = {}
+    rows = (
+        (10, "1234567890-=", "!@#$%^&*()_+"),
+        (24, "qwertyuiop[]", "QWERTYUIOP{}"),
+        (38, "asdfghjkl;'`", 'ASDFGHJKL:"~'),
+        (51, "\\zxcvbnm,./", "|ZXCVBNM<>?"),
+    )
+    by_char = {v: k for k, v in _KEYSYM_CHARS.items() if not k.startswith("KP_")}
+    for first, plain, shifted in rows:
+        for i, (lo, hi) in enumerate(zip(plain, shifted)):
+            keymap[first + i] = [by_char.get(lo, lo), by_char.get(hi, hi)]
+    named = {
+        9: "Escape", 22: "BackSpace", 23: "Tab", 36: "Return", 37: "Control_L",
+        50: "Shift_L", 62: "Shift_R", 64: "Alt_L", 65: "space", 66: "Caps_Lock",
+        105: "Control_R", 108: "Alt_R", 110: "Home", 111: "Up", 112: "Prior",
+        113: "Left", 114: "Right", 115: "End", 116: "Down", 117: "Next",
+        118: "Insert", 119: "Delete", 133: "Super_L", 134: "Super_R",
+        95: "F11", 96: "F12",
+    }
+    named.update({67 + i: f"F{i + 1}" for i in range(10)})
+    for code, sym in named.items():
+        keymap[code] = [sym]
+    return keymap
+
+
+def _keysym_to_char(sym: str) -> Optional[str]:
+    """The character a keysym types, or None for keys that type nothing (Return, F5, ...)."""
+    if len(sym) == 1:
+        return sym
+    if sym in _KEYSYM_CHARS:
+        return _KEYSYM_CHARS[sym]
+    if sym.startswith("KP_") and len(sym) == 4 and sym[3].isdigit():
+        return sym[3]
+    if re.fullmatch(r"U[0-9A-Fa-f]{4,6}", sym):
+        return chr(int(sym[1:], 16))
+    return None
+
+
+_EVENT_HEADER = re.compile(r"^EVENT type \d+ \((\w+)\)")
+
+
+class XinputBlockParser:
+    """Groups ``xinput test-xi2`` output into one dict per event.
+
+    Each event prints a header line followed by indented fields::
+
+        EVENT type 2 (KeyPress)
+            device: 3 (5)
+            time: 35003144
+            detail: 46
+            root: 100.00/200.00
+            modifiers: locked 0 latched 0 base 0x4 effective: 0x4
+            windows: root 0x3a7 event 0x3a7 child 0x0
+
+    ``windows:`` ends a device event; anything else (Raw*, DeviceChanged)
+    ends at the next header.
+    """
+
+    def __init__(self):
+        self._block: Optional[Dict[str, Any]] = None
+
+    def feed(self, line: str) -> Optional[Dict[str, Any]]:
+        """Consume one line; return the event it completes, if any."""
+        stripped = line.strip()
+        header = _EVENT_HEADER.match(stripped)
+        if header:
+            done, self._block = self._block, {"name": header.group(1)}
+            return done
+        if self._block is None or ":" not in stripped:
+            return None
+        name, _, value = stripped.partition(":")
+        value = value.strip()
+        block = self._block
+        try:
+            if name == "device":
+                # "device: 2 (4)": the delivering device, then the physical source.
+                ids = value.replace("(", " ").replace(")", " ").split()
+                block["device"], block["source"] = int(ids[0]), int(ids[1])
+            elif name == "time":
+                block["time"] = int(value)
+            elif name == "detail":
+                block["detail"] = int(value)
+            elif name == "root":
+                x, _, y = value.partition("/")
+                block["root"] = (int(float(x)), int(float(y)))
+            elif name == "modifiers":
+                block["mods"] = int(value.rsplit("effective:", 1)[1].strip(), 0)
+            elif name == "windows":
+                self._block = None
+                return block
+        except (ValueError, IndexError):
+            logger.debug(f"[DEMO] Unparsed xinput field: {stripped!r}")
+        return None
+
+    def flush(self) -> Optional[Dict[str, Any]]:
+        done, self._block = self._block, None
+        return done
 
 
 @dataclass
@@ -81,8 +224,21 @@ class DemoRecorder:
         self._demo_id: Optional[str] = None
         self._xinput_proc: Optional[subprocess.Popen] = None
         self._listener_thread: Optional[threading.Thread] = None
+        self._worker_thread: Optional[threading.Thread] = None
+        self._events: "queue.Queue[Optional[InputEvent]]" = queue.Queue()
         self._pending_keystrokes: List[InputEvent] = []
+        self._pending_scroll: List[InputEvent] = []
         self._lock = threading.Lock()
+        self._shot_seq = 0
+        self._last_event_timestamp = 0.0
+
+        # /learn/input injections in flight, and when their echo stops arriving.
+        self._injecting = 0
+        self._suppress_until = 0.0
+        # (event name, detail, server time) of recent presses: X reports each
+        # press once per slave device and again per master device.
+        self._seen_presses: deque = deque(maxlen=64)
+        self._keymap: Dict[int, List[str]] = {}
 
         # Capture initial screenshot so first event has a "before"
         self._last_screenshot: Optional[Image.Image] = None
@@ -105,10 +261,21 @@ class DemoRecorder:
         self._steps = []
         self._recording = True
         self._pending_keystrokes = []
+        self._pending_scroll = []
+        self._events = queue.Queue()
         self._capture_initial_screenshot()
 
+        # The worker turns listener events into steps; the listener only reads
+        # xinput so each event is timestamped when it happens, not when the
+        # previous step's settle wait and vision calls finish.
+        self._worker_thread = threading.Thread(
+            target=self._event_worker,
+            daemon=True,
+            name=f"demo-steps-{self._demo_id[:8]}",
+        )
+        self._worker_thread.start()
+
         # Start xinput listener thread (optional — may fail on some X servers)
-        # The primary recording path is via record_event() called from /learn/input
         try:
             self._listener_thread = threading.Thread(
                 target=self._xinput_listener,
@@ -122,16 +289,8 @@ class DemoRecorder:
             logger.info(f"[DEMO] Recording started: {self._demo_id} (API-only mode)")
 
     def stop(self):
-        """Stop recording and clean up."""
+        """Stop recording, finish any queued listener events, and clean up."""
         self._recording = False
-
-        # Flush any pending keystrokes
-        if self._pending_keystrokes:
-            step = self._collapse_keystrokes(self._pending_keystrokes)
-            if step:
-                with self._lock:
-                    self._steps.append(step)
-            self._pending_keystrokes = []
 
         # Kill xinput process
         if self._xinput_proc:
@@ -142,10 +301,38 @@ class DemoRecorder:
                 pass
             self._xinput_proc = None
 
+        worker = self._worker_thread
+        if worker is not None and worker.is_alive():
+            self._events.put(None)
+            worker.join(timeout=STOP_DRAIN_TIMEOUT)
+            if worker.is_alive():
+                logger.warning("[DEMO] Listener events still processing at stop; later steps are dropped")
+        else:
+            self._flush_pending()
+        self._worker_thread = None
+
         logger.info(f"[DEMO] Recording stopped: {self._demo_id}, {len(self._steps)} steps captured")
 
+    @contextmanager
+    def injected_input(self):
+        """Hide input this process injects from the xinput listener.
+
+        /learn/input injects each action with xdotool and records it through
+        record_event(); the listener would otherwise see the same action on
+        the display and record it a second time.
+        """
+        with self._lock:
+            self._injecting += 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._injecting -= 1
+                self._suppress_until = time.time() + INJECTION_ECHO_GRACE
+
     def record_event(self, action: str, x: int = 0, y: int = 0,
-                     text: str = "", keys: str = "", button: int = 1) -> Optional[Dict[str, Any]]:
+                     text: str = "", keys: str = "", button: int = 1,
+                     amount: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """
         Record an externally-supplied input event (from /learn/input API).
 
@@ -162,6 +349,7 @@ class DemoRecorder:
             button=button,
             key=text if action == "type" else keys,
             timestamp=time.time(),
+            scroll_amount=amount,
         )
 
         if action == "type" and text:
@@ -174,10 +362,7 @@ class DemoRecorder:
         else:
             step = self._process_event(evt)
 
-        if step:
-            with self._lock:
-                self._steps.append(step)
-        return step
+        return self._append_step(step)
 
     def get_steps(self) -> List[Dict[str, Any]]:
         """Return all recorded steps in order."""
@@ -185,6 +370,35 @@ class DemoRecorder:
             return list(self._steps)
 
     # ---- Event Processing ----
+
+    def _append_step(self, step: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Add a finished step, numbering it by its place in the list."""
+        if step:
+            with self._lock:
+                step["step_index"] = len(self._steps)
+                self._steps.append(step)
+        return step
+
+    def _next_shot_name(self, suffix: str) -> str:
+        with self._lock:
+            self._shot_seq += 1
+            return f"step_{self._shot_seq:04d}_{suffix}"
+
+    def _describe_precondition(self, image: Optional[Image.Image]) -> str:
+        """What the screen showed before a step; replay checks it before acting."""
+        if image is None:
+            return ""
+        try:
+            result = self.analyzer.analyze(
+                image,
+                prompt="Describe what is currently visible on screen in one sentence. "
+                       "Focus on the main content area and any notable UI state.",
+            )
+            if result.success and result.description:
+                return result.description
+        except Exception as e:
+            logger.warning(f"[DEMO] VisionAnalyzer precondition failed: {e}")
+        return ""
 
     def _process_event(self, evt: InputEvent) -> Optional[Dict[str, Any]]:
         """
@@ -194,8 +408,8 @@ class DemoRecorder:
         2. Save before screenshot as JPEG
         3. Wait for screen to settle (_wait_for_settle)
         4. Save after screenshot
-        5. For click/scroll: run VisionAnalyzer for target_description
-        6. Run VisionAnalyzer for precondition
+        5. For click/scroll: describe the target on the before screenshot
+        6. Describe the before screenshot as the precondition
         7. Detect rapid re-clicks (flag previous step as potential mistake)
         8. Return step dict
 
@@ -208,10 +422,11 @@ class DemoRecorder:
         step_index = len(self._steps)
 
         # --- Screenshot before ---
+        before_img = self._last_screenshot
         screenshot_before_path = None
-        if self._last_screenshot is not None:
+        if before_img is not None:
             screenshot_before_path = self._save_screenshot(
-                self._last_screenshot, f"step_{step_index:04d}_before"
+                before_img, self._next_shot_name("before")
             )
 
         # --- Build base step ---
@@ -247,7 +462,7 @@ class DemoRecorder:
         after_img = self._wait_for_settle()
         if after_img is not None:
             screenshot_after_path = self._save_screenshot(
-                after_img, f"step_{step_index:04d}_after"
+                after_img, self._next_shot_name("after")
             )
             step["screenshot_after"] = screenshot_after_path
             self._last_screenshot = after_img
@@ -256,7 +471,7 @@ class DemoRecorder:
             try:
                 img, _ = self.screen.capture()
                 screenshot_after_path = self._save_screenshot(
-                    img, f"step_{step_index:04d}_after"
+                    img, self._next_shot_name("after")
                 )
                 step["screenshot_after"] = screenshot_after_path
                 self._last_screenshot = img
@@ -264,11 +479,13 @@ class DemoRecorder:
                 pass
 
         # --- VisionAnalyzer for click/scroll targets ---
-        if evt.event_type in ("click", "scroll") and self._last_screenshot is not None:
+        # The element is described as it looked when it was clicked; replay
+        # looks for it on the screen before acting.
+        target_img = before_img if before_img is not None else self._last_screenshot
+        if evt.event_type in ("click", "scroll") and target_img is not None:
             try:
-                # Describe what was clicked
                 target_result = self.analyzer.analyze(
-                    self._last_screenshot if screenshot_before_path else self._last_screenshot,
+                    target_img,
                     prompt=f"Describe the UI element at pixel coordinates ({evt.x}, {evt.y}) in one sentence. "
                            f"Include its type (button, link, field, etc.), label text, and visual appearance.",
                 )
@@ -279,27 +496,13 @@ class DemoRecorder:
                 logger.warning(f"[DEMO] VisionAnalyzer target failed: {e}")
 
         # --- VisionAnalyzer for precondition ---
-        if self._last_screenshot is not None and screenshot_before_path:
-            try:
-                before_img = self._last_screenshot  # Use before screenshot for precondition
-                precond_result = self.analyzer.analyze(
-                    before_img,
-                    prompt="Describe what is currently visible on screen in one sentence. "
-                           "Focus on the main content area and any notable UI state.",
-                )
-                if precond_result.success and precond_result.description:
-                    step["precondition"] = precond_result.description
-            except Exception as e:
-                logger.warning(f"[DEMO] VisionAnalyzer precondition failed: {e}")
+        step["precondition"] = self._describe_precondition(before_img)
 
         # --- Rapid re-click detection ---
         if evt.event_type == "click" and len(self._steps) > 0:
             prev = self._steps[-1]
             if prev["action_type"] == "click":
-                # Check if the previous click was within the rapid threshold
-                # We use step_index timing: if the gap is small, flag previous as mistake
-                prev_timestamp = getattr(self, "_last_event_timestamp", 0)
-                if evt.timestamp - prev_timestamp < RAPID_RECLICK_THRESHOLD:
+                if evt.timestamp - self._last_event_timestamp < RAPID_RECLICK_THRESHOLD:
                     self._steps[-1]["is_potential_mistake"] = True
 
         self._last_event_timestamp = evt.timestamp
@@ -314,19 +517,23 @@ class DemoRecorder:
             events: List of key InputEvents to collapse
 
         Returns:
-            Step dict with action_type='type' and combined text
+            Step dict with action_type='type' and combined text, or None
+            when the events type nothing.
         """
         if not events:
             return None
 
         text = "".join(e.key or "" for e in events)
+        if not text:
+            return None
         step_index = len(self._steps)
 
         # Screenshot from before the first keystroke
+        before_img = self._last_screenshot
         screenshot_before_path = None
-        if self._last_screenshot is not None:
+        if before_img is not None:
             screenshot_before_path = self._save_screenshot(
-                self._last_screenshot, f"step_{step_index:04d}_before"
+                before_img, self._next_shot_name("before")
             )
 
         # Capture after screenshot
@@ -334,7 +541,7 @@ class DemoRecorder:
         try:
             img, _ = self.screen.capture()
             screenshot_after_path = self._save_screenshot(
-                img, f"step_{step_index:04d}_after"
+                img, self._next_shot_name("after")
             )
             self._last_screenshot = img
         except Exception:
@@ -350,7 +557,7 @@ class DemoRecorder:
             "text": text,
             "keys": None,
             "intent": None,
-            "precondition": "",
+            "precondition": self._describe_precondition(before_img),
             "variability": False,
             "wait_condition": None,
             "is_potential_mistake": False,
@@ -430,14 +637,34 @@ class DemoRecorder:
 
     # ---- xinput Listener ----
 
+    def _load_keymap(self) -> Dict[int, List[str]]:
+        """Keycode -> keysym names for the display, from ``xmodmap -pke``."""
+        env = {**os.environ, "DISPLAY": self.display}
+        keymap: Dict[int, List[str]] = {}
+        try:
+            out = subprocess.run(
+                ["xmodmap", "-pke"], env=env, capture_output=True, text=True, timeout=5,
+            ).stdout
+            for line in out.splitlines():
+                # "keycode  46 = l L l L"
+                left, _, right = line.partition("=")
+                parts = left.split()
+                if len(parts) == 2 and parts[0] == "keycode" and right.strip():
+                    keymap[int(parts[1])] = right.split()
+        except Exception as e:
+            logger.warning(f"[DEMO] xmodmap unavailable ({e}); using the US keymap")
+        return keymap or _us_fallback_keymap()
+
     def _xinput_listener(self):
         """
-        Background thread that monitors input events via xinput test-xi2.
+        Background thread that reads input events via xinput test-xi2.
 
-        Parses button press/release and key press events from xinput output
-        and feeds them into _process_event / keystroke collapse logic.
+        Decodes each event block and queues button and key presses for the
+        worker thread; does nothing slow, so each event's timestamp is when
+        it reached the display.
         """
         env = {**os.environ, "DISPLAY": self.display}
+        self._keymap = self._load_keymap()
 
         try:
             self._xinput_proc = subprocess.Popen(
@@ -456,113 +683,146 @@ class DemoRecorder:
             return
 
         logger.info(f"[DEMO] xinput listener started on {self.display}")
+        parser = XinputBlockParser()
 
         try:
             for line in self._xinput_proc.stdout:
                 if not self._recording:
                     break
-
-                line = line.strip()
-                if not line:
+                block = parser.feed(line)
+                if block is None:
                     continue
-
-                evt = self._parse_xinput_line(line)
-                if evt is None:
+                arrived = time.time()
+                if self._injecting or arrived <= self._suppress_until:
                     continue
-
-                # Handle keystroke collapse
-                if evt.event_type == "key":
-                    now = time.time()
-                    if (self._pending_keystrokes and
-                            now - self._pending_keystrokes[-1].timestamp > KEYSTROKE_COLLAPSE_WINDOW):
-                        # Flush previous keystrokes
-                        step = self._collapse_keystrokes(self._pending_keystrokes)
-                        if step:
-                            with self._lock:
-                                self._steps.append(step)
-                        self._pending_keystrokes = []
-
-                    self._pending_keystrokes.append(evt)
-                    continue
-
-                # Non-key event — flush pending keystrokes first
-                if self._pending_keystrokes:
-                    step = self._collapse_keystrokes(self._pending_keystrokes)
-                    if step:
-                        with self._lock:
-                            self._steps.append(step)
-                    self._pending_keystrokes = []
-
-                # Process the non-key event
-                step = self._process_event(evt)
-                if step:
-                    with self._lock:
-                        self._steps.append(step)
-
+                evt = self._event_from_block(block, arrived)
+                if evt is not None:
+                    self._events.put(evt)
         except Exception as e:
             if self._recording:
                 logger.error(f"[DEMO] xinput listener error: {e}")
         finally:
             logger.info("[DEMO] xinput listener stopped")
 
-    def _parse_xinput_line(self, line: str) -> Optional[InputEvent]:
+    def _event_from_block(self, block: Dict[str, Any], timestamp: float) -> Optional[InputEvent]:
+        """Turn one decoded xinput event into an InputEvent, or None to skip it.
+
+        Only ButtonPress and KeyPress count (releases, motion and the Raw*
+        copies do not), and each press once.
         """
-        Parse a single line from xinput test-xi2 output.
-
-        xinput test-xi2 --root output looks like:
-            EVENT type 4 (ButtonPress)
-                detail: 1
-                root: 640.00/400.00
-            EVENT type 5 (ButtonRelease)
-                detail: 1
-                root: 640.00/400.00
-            EVENT type 2 (KeyPress)
-                detail: 38
-            EVENT type 3 (KeyRelease)
-                detail: 38
-
-        We only care about ButtonPress and KeyPress events.
-        """
-        try:
-            if "ButtonPress" in line:
-                return self._parse_button_event(line, "click")
-            elif "KeyPress" in line:
-                return self._parse_key_event(line)
-        except Exception as e:
-            logger.debug(f"[DEMO] Failed to parse xinput line: {line!r} — {e}")
-        return None
-
-    def _parse_button_event(self, line: str, event_type: str = "click") -> Optional[InputEvent]:
-        """Parse a button press event from xinput output."""
-        # This is a simplified parser — the actual coordinates come on subsequent lines.
-        # For the background listener, we'll use cursor position from xdotool.
-        try:
-            cursor_pos = self.screen.cursor_position() if hasattr(self.screen, "cursor_position") else (0, 0)
-            return InputEvent(
-                event_type=event_type,
-                x=cursor_pos[0],
-                y=cursor_pos[1],
-                button=1,
-                timestamp=time.time(),
-            )
-        except Exception:
-            return InputEvent(
-                event_type=event_type,
-                x=0, y=0,
-                button=1,
-                timestamp=time.time(),
-            )
-
-    def _parse_key_event(self, line: str) -> Optional[InputEvent]:
-        """Parse a key press event from xinput output."""
-        # Key detail (keycode) needs mapping to a key name.
-        # For now, use xdotool to get the current key name.
-        # In practice, we'd use a keycode-to-keysym table.
-        try:
-            return InputEvent(
-                event_type="key",
-                key="",  # Will be enriched by keycode mapping
-                timestamp=time.time(),
-            )
-        except Exception:
+        name = block.get("name")
+        if name not in ("ButtonPress", "KeyPress") or "detail" not in block:
             return None
+        press_id = (name, block["detail"], block.get("time"))
+        if block.get("time") is not None:
+            if press_id in self._seen_presses:
+                return None
+            self._seen_presses.append(press_id)
+        elif block.get("device") == block.get("source"):
+            return None  # no server time to pair copies by: keep the master's copy
+
+        x, y = block.get("root", (None, None))
+        detail = block["detail"]
+        if name == "ButtonPress":
+            if detail in (1, 2, 3):
+                return InputEvent(event_type="click", x=x, y=y, button=detail, timestamp=timestamp)
+            if detail in (4, 5):
+                # Wheel up / down, in LocalScreenBackend.scroll's sign convention.
+                return InputEvent(event_type="scroll", x=x, y=y,
+                                  scroll_amount=1 if detail == 4 else -1, timestamp=timestamp)
+            return None  # horizontal wheel, back/forward: replay has no action for them
+        return self._key_event(detail, block.get("mods", 0), timestamp)
+
+    def _key_event(self, keycode: int, mods: int, timestamp: float) -> Optional[InputEvent]:
+        """A typed character ('key'), a named key or chord ('hotkey'), or None for a bare modifier."""
+        syms = [s for s in self._keymap.get(keycode, []) if s != "NoSymbol"]
+        if not syms:
+            logger.debug(f"[DEMO] Keycode {keycode} has no keysym; skipped")
+            return None
+        base = syms[0]
+        if base in _MODIFIER_KEYSYMS:
+            return None
+        shifted = bool(mods & _MOD_SHIFT)
+
+        chord = [name for bit, name in ((_MOD_CONTROL, "ctrl"), (_MOD_ALT, "alt"), (_MOD_SUPER, "super"))
+                 if mods & bit]
+        if chord:
+            if shifted:
+                chord.append("shift")
+            return InputEvent(event_type="hotkey", key="+".join(chord + [base]), timestamp=timestamp)
+
+        sym = base
+        if base.startswith("KP_") and mods & _MOD_NUMLOCK and len(syms) > 1:
+            sym = syms[1]
+        elif shifted and len(syms) > 1:
+            sym = syms[1]
+        if mods & _MOD_LOCK and len(sym) == 1 and sym.isalpha():
+            sym = sym.swapcase()
+
+        char = _keysym_to_char(sym)
+        if char is not None:
+            return InputEvent(event_type="key", key=char, timestamp=timestamp)
+        return InputEvent(event_type="hotkey", key=("shift+" if shifted else "") + base,
+                          timestamp=timestamp)
+
+    def _event_worker(self):
+        """Turn queued listener events into steps, in order."""
+        while True:
+            try:
+                evt = self._events.get(timeout=KEYSTROKE_COLLAPSE_WINDOW)
+            except queue.Empty:
+                self._flush_pending()   # a pause ends the text being typed
+                continue
+            if evt is None:
+                break
+            try:
+                self._handle_listener_event(evt)
+            except Exception as e:
+                logger.warning(f"[DEMO] Failed to record {evt.event_type} event: {e}")
+        self._flush_pending()
+
+    def _handle_listener_event(self, evt: InputEvent):
+        if evt.event_type == "key":
+            self._flush_scroll()
+            if (self._pending_keystrokes and
+                    evt.timestamp - self._pending_keystrokes[-1].timestamp > KEYSTROKE_COLLAPSE_WINDOW):
+                self._flush_keystrokes()
+            self._pending_keystrokes.append(evt)
+            return
+
+        if evt.event_type == "hotkey" and evt.key == "BackSpace" and self._pending_keystrokes:
+            # A correction inside the text being typed: record what was meant.
+            self._pending_keystrokes.pop()
+            return
+
+        if evt.event_type == "scroll":
+            self._flush_keystrokes()
+            pending = self._pending_scroll
+            if pending and (
+                (pending[-1].scroll_amount > 0) != (evt.scroll_amount > 0)
+                or evt.timestamp - pending[-1].timestamp > KEYSTROKE_COLLAPSE_WINDOW
+            ):
+                self._flush_scroll()
+            self._pending_scroll.append(evt)
+            return
+
+        self._flush_pending()
+        self._append_step(self._process_event(evt))
+
+    def _flush_keystrokes(self):
+        if self._pending_keystrokes:
+            events, self._pending_keystrokes = self._pending_keystrokes, []
+            self._append_step(self._collapse_keystrokes(events))
+
+    def _flush_scroll(self):
+        if self._pending_scroll:
+            events, self._pending_scroll = self._pending_scroll, []
+            first = events[0]
+            self._append_step(self._process_event(InputEvent(
+                event_type="scroll", x=first.x, y=first.y, timestamp=first.timestamp,
+                scroll_amount=sum(e.scroll_amount or 0 for e in events),
+            )))
+
+    def _flush_pending(self):
+        self._flush_keystrokes()
+        self._flush_scroll()
