@@ -398,8 +398,9 @@ def optional_features_render(comfy, monkeypatch, model_id: str, **fields):
     from backend.services import video_model_registry
 
     real = video_model_registry.is_model_installed
+    restore_plan = video_model_registry.install_plan("codeformer")
     monkeypatch.setattr(video_model_registry, "is_model_installed",
-                        lambda mid: True if mid == "codeformer" else real(mid))
+                        lambda mid: True if mid in restore_plan else real(mid))
     metadata = {"upscale": True, **fields.pop("metadata", {})}
     return comfy.render(model=model_id, interpolation_multiplier=2, face_restore=True,
                         generate_frames_only=True, metadata=metadata, **fields)

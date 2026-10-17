@@ -647,9 +647,33 @@ VIDEO_MODEL_REGISTRY = {
                 "dst": "codeformer.pth",
             }
         ],
+        "requires": ["facerestore-facedetection"],
         "size_gb": 0.35,
         "vram_mb": 0,
         "type": "facerestore",
+    },
+    # facerestore_cf finds faces with these before CodeFormer restores them, and
+    # downloads them on first use when they are missing from models/facedetection.
+    # Same files from the same release URLs the node itself would fetch (the
+    # face detection model the video workflow names, retinaface_resnet50).
+    "facerestore-facedetection": {
+        "name": "Face detector and parser (CodeFormer)",
+        "description": "RetinaFace ResNet50 detector and ParseNet parser the CodeFormer face "
+                       "restore node finds faces with. Lands in models/facedetection.",
+        "local_subdir": "facedetection",
+        "direct_urls": [
+            {
+                "url": "https://github.com/xinntao/facexlib/releases/download/v0.1.0/detection_Resnet50_Final.pth",
+                "dst": "detection_Resnet50_Final.pth",
+            },
+            {
+                "url": "https://github.com/sczhou/CodeFormer/releases/download/v0.1.0/parsing_parsenet.pth",
+                "dst": "parsing_parsenet.pth",
+            },
+        ],
+        "size_gb": 0.19,
+        "vram_mb": 0,
+        "type": "encoder",
     },
     "realesrgan-x2": {
         "name": "Real-ESRGAN 2x Upscaler",
