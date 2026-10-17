@@ -167,3 +167,41 @@ def test_a_reply_in_the_asked_shape_is_checked():
     assert result["checked"] is True
     assert result["passed"] is True
     assert result["grade"] == pytest.approx(1.0)
+
+
+# ---- the thread-fit judge's grade --------------------------------------------------------
+
+def _fit(reply):
+    with patch.object(external_grader, "_resolve_grader_model", return_value="gemma4:e2b"), \
+            patch.object(external_grader.requests, "post", _answer(json.dumps(reply))):
+        return external_grader.score_thread_relevance("title", "body", [], "rag")
+
+
+@pytest.mark.parametrize("grade", ["high", [0.9], {"value": 0.9}, True, "nan", float("inf")])
+def test_a_grade_that_is_not_a_number_is_no_verdict(grade):
+    """The judge's reply came back but its grade is not a number: handled like
+    a failed call (skipped, no verdict), never raised and never a pass."""
+    from backend.services.social_outreach.recon import judged_unfit
+
+    result = _fit({"grade": grade, "verdict": "good_fit", "reason": "r"})
+
+    assert result["skipped"] is True
+    assert result["grade"] == 0.0
+    assert result["reason"] == "relevance_reply_unparsed"
+    assert judged_unfit(result) is False
+
+
+@pytest.mark.parametrize("grade, expected", [(0.8, 0.8), ("0.8", 0.8), (1.7, 1.0), (-1, 0.0), (None, 0.0)])
+def test_a_numeric_grade_is_read_and_clamped(grade, expected):
+    result = _fit({"grade": grade, "verdict": "good_fit", "reason": "r"})
+
+    assert result["skipped"] is False
+    assert result["grade"] == pytest.approx(expected)
+
+
+def test_a_verdict_or_reason_that_is_not_text_does_not_raise():
+    result = _fit({"grade": 0.2, "verdict": 0, "reason": {"why": "rant"}})
+
+    assert result["skipped"] is False
+    assert result["verdict"] == ""
+    assert "rant" in result["reason"]

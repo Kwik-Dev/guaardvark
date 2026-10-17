@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from typing import Optional
 
@@ -78,6 +79,23 @@ def _rubric_bit(value) -> Optional[int]:
 
 def _is_concise(draft_text: str) -> int:
     return int(len((draft_text or "").split()) <= CONCISE_MAX_WORDS)
+
+
+def _relevance_grade(value) -> Optional[float]:
+    """The thread-fit grade as a number in [0, 1], or None when it is not a
+    number. A missing grade is 0.0 (do not comment). True/False, NaN and
+    infinity are not grades (NaN would come out of the clamp as 1.0)."""
+    if value is None or value == "":
+        return 0.0
+    if isinstance(value, bool):
+        return None
+    try:
+        grade = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(grade):
+        return None
+    return max(0.0, min(1.0, grade))
 
 
 def _list_loaded_models() -> list[str]:
@@ -215,10 +233,11 @@ def score_thread_relevance(
     that pure regex matching can't see.
 
     Same skip-on-infra-failure semantics as grade_draft_externally — if the
-    model isn't loaded or the call fails, we return skipped=True. That is not
-    a reject: recon queues the candidate on its keyword match and the
-    scheduled Reddit loop drafts it, both marked unchecked for the person who
-    reviews the draft.
+    model isn't loaded, the call fails or the reply's grade is not a number
+    (reason "relevance_reply_unparsed"), we return skipped=True. That is
+    neither a reject nor a pass: recon queues the candidate on its keyword
+    match and the scheduled Reddit loop drafts it, both marked unchecked for
+    the person who reviews the draft.
     """
     model = _resolve_grader_model()
     if model is None:
@@ -261,11 +280,14 @@ def score_thread_relevance(
         logger.warning("relevance scorer call failed: %s", e)
         return {"grade": 0.0, "skipped": True, "model": model, "reason": f"relevance_call_failed: {e}"}
 
-    grade = float(data.get("grade") or 0.0)
+    grade = _relevance_grade(data.get("grade"))
+    if grade is None:
+        logger.warning("relevance scorer reply unparsed: %.300r", data)
+        return {"grade": 0.0, "skipped": True, "model": model, "reason": "relevance_reply_unparsed"}
     return {
-        "grade": max(0.0, min(1.0, grade)),
-        "verdict": (data.get("verdict") or "")[:40],
-        "reason": (data.get("reason") or "")[:300],
+        "grade": grade,
+        "verdict": str(data.get("verdict") or "")[:40],
+        "reason": str(data.get("reason") or "")[:300],
         "skipped": False,
         "model": model,
     }
