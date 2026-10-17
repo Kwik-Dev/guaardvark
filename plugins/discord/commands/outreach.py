@@ -4,6 +4,12 @@ respond to (Ollama / ComfyUI / local-AI / RAG / self-hosted topics) and drafts a
 reply via the backend's /api/social-outreach/draft-comment endpoint. The backend
 queues the draft for a person's review; it never approves one itself.
 
+A keyword match alone does not get a draft. The message goes to the backend's
+thread-fit judge first (/api/social-outreach/thread-fit, the judge recon and
+the Reddit loop ask): "my voice is gone, no stream tonight" matches "voice"
+but is not a question we can answer. A message the judge rules out is skipped;
+when the judge cannot run, the draft is made and marked relevance unchecked.
+
 Replies are sent only by poll_approved_drafts, for approved drafts, after the
 cadence check, the claim and the /submit step (where a reject still stops it).
 Drafting never sends.
@@ -65,6 +71,12 @@ def _looks_relevant(text: str) -> bool:
     if not text or len(text) < 20:
         return False
     return bool(_RELEVANCE_RX.search(text))
+
+
+def _matched_keyword(text: str) -> str:
+    """The first keyword _RELEVANCE_RX found, lowercased; "" when none."""
+    match = _RELEVANCE_RX.search(text or "")
+    return match.group(0).lower() if match else ""
 
 
 class OutreachCog(commands.Cog):
@@ -381,25 +393,65 @@ class OutreachCog(commands.Cog):
             if replies_this_pass >= self.max_per_pass:
                 continue
 
-            # Found a candidate. Draft via backend.
-            await self._handle_candidate(msg, supervised=supervised)
-            replies_this_pass += 1
+            # Found a candidate. A message the thread-fit judge rules out is
+            # not drafted and does not use up this pass's reply.
+            if await self._handle_candidate(msg, supervised=supervised):
+                replies_this_pass += 1
 
         self._last_seen_ts[channel_id] = newest_ts
 
-    async def _handle_candidate(self, msg: discord.Message, supervised: bool):
-        thread_context = msg.content
-        # Pull a couple recent messages for context (ignore bots).
+    async def _earlier_messages(self, msg: discord.Message) -> list[str]:
+        """Up to five messages before ``msg`` from people (bots left out),
+        oldest first, as "name: text"."""
+        earlier = []
         try:
-            ctx_msgs = []
             async for prev in msg.channel.history(limit=5, before=msg):
                 if prev.author.bot:
                     continue
-                ctx_msgs.append(f"{prev.author.display_name}: {prev.content}")
-            if ctx_msgs:
-                thread_context = "\n".join(reversed(ctx_msgs)) + f"\n\n>>> {msg.author.display_name}: {msg.content}"
+                earlier.append(f"{prev.author.display_name}: {prev.content}")
         except Exception:
-            pass
+            return []
+        return list(reversed(earlier))
+
+    async def _thread_fit(self, msg: discord.Message, earlier: list[str]) -> dict:
+        """The backend's thread-fit judge on ``msg``. A call that fails counts
+        as a judge that could not run: skipped and not unfit."""
+        channel_name = str(getattr(msg.channel, "name", "") or "")
+        try:
+            return await self.api._post(
+                "/social-outreach/thread-fit",
+                json={
+                    "text": msg.content,
+                    "title": f"Discord message in #{channel_name}" if channel_name else "Discord message",
+                    "context": earlier,
+                    "feature_hint": _matched_keyword(msg.content),
+                },
+            )
+        except Exception as e:
+            logger.warning("outreach: thread-fit check failed for msg %s, drafting it marked unchecked: %s",
+                           msg.id, e)
+            return {"skipped": True, "unfit": False, "reason": f"thread_fit_call_failed: {e}"}
+
+    async def _handle_candidate(self, msg: discord.Message, supervised: bool) -> bool:
+        """Ask the thread-fit judge about ``msg``, then draft a reply through
+        /draft-comment unless the judge ruled it out.
+
+        True when the message went to /draft-comment, False when the judge
+        said it is not worth a reply.
+        """
+        earlier = await self._earlier_messages(msg)
+        fit = await self._thread_fit(msg, earlier)
+        if fit.get("unfit"):
+            logger.info(
+                "outreach: msg %s skipped by the thread-fit judge (grade=%.2f, verdict=%s, reason=%s)",
+                msg.id, float(fit.get("grade") or 0.0), fit.get("verdict") or "-",
+                str(fit.get("reason") or "")[:80],
+            )
+            return False
+
+        thread_context = msg.content
+        if earlier:
+            thread_context = "\n".join(earlier) + f"\n\n>>> {msg.author.display_name}: {msg.content}"
 
         target_url = f"https://discord.com/channels/{msg.guild.id if msg.guild else '@me'}/{msg.channel.id}/{msg.id}"
 
@@ -412,14 +464,15 @@ class OutreachCog(commands.Cog):
                     "target_url": target_url,
                     "target_thread_id": str(msg.id),
                     "mode": "comment",
+                    "relevance_unchecked": bool(fit.get("skipped")),
                 },
             )
         except APIError as e:
             logger.warning("outreach: draft-comment failed: %s", e)
-            return
+            return True
         except Exception as e:
             logger.warning("outreach: draft-comment error: %s", e)
-            return
+            return True
 
         draft = (result.get("draft") or "").strip()
         grade = float(result.get("grade") or 0.0)
@@ -434,6 +487,7 @@ class OutreachCog(commands.Cog):
         # A would_post draft is stored as approved; poll_approved_drafts sends it.
         if would_post and draft and not supervised:
             logger.info("outreach: draft %s approved, poll_approved_drafts will send it", audit_id)
+        return True
 
 
 async def setup(bot: commands.Bot):

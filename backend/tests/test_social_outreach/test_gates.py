@@ -58,6 +58,26 @@ def test_label(ext, label):
     assert gates.independent_check_label(ext) == label
 
 
+SAME_MODEL_PASS = {**PASSED, "independent": False, "model": "gemma4:e2b", "drafter_model": "gemma4:e2b"}
+SAME_MODEL_FAIL = {**FAILED, "independent": False, "model": "gemma4:e2b", "drafter_model": "gemma4:e2b"}
+
+
+def test_a_pass_from_the_drafters_own_model_is_not_independent(app):
+    assert gates.independent_check_label(SAME_MODEL_PASS) == "not_independent"
+    assert gates.independent_ok(SAME_MODEL_PASS) == (True, "not_independent")
+    assert gates.independent_ok(SAME_MODEL_PASS, relevance_unchecked=True) == (True, "not_independent")
+
+
+def test_a_no_from_the_drafters_own_model_is_still_failed(app):
+    assert gates.independent_check_label(SAME_MODEL_FAIL) == "failed"
+    assert gates.independent_ok(SAME_MODEL_FAIL) == (False, "failed")
+
+
+@pytest.mark.parametrize("independent", [True, None])
+def test_a_different_or_unknown_model_passes(app, independent):
+    assert gates.independent_check_label({**PASSED, "independent": independent}) == "passed"
+
+
 def test_an_unjudged_thread_is_noted(app):
     assert gates.independent_ok(PASSED, relevance_unchecked=True) == (True, "relevance_unchecked")
 

@@ -255,6 +255,12 @@ def find_relevant_feature(text: str) -> str | None:
     return profile.find_relevant_feature(text)
 
 
+def drafter_model() -> str:
+    """The model outreach drafts are written with: the default chat model."""
+    from backend.config import get_default_llm
+    return get_default_llm()
+
+
 def _ollama_json_chat(system: str, user: str, model: Optional[str] = None) -> Dict[str, Any]:
     """One-shot Ollama call that returns parsed JSON. Best-effort.
 
@@ -262,8 +268,7 @@ def _ollama_json_chat(system: str, user: str, model: Optional[str] = None) -> Di
     around the parse because models occasionally truncate or wrap.
     """
     if model is None:
-        from backend.config import get_default_llm
-        model = get_default_llm()
+        model = drafter_model()
 
     from backend.utils.ollama_resource_manager import think_payload
     try:

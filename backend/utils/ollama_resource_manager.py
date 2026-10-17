@@ -135,17 +135,38 @@ def is_text_chat_model(model_name: str) -> bool:
     """Check if a model is suitable as a default text chat LLM.
 
     The name rule leaves out vision-only and embedding models; when Ollama can
-    describe the model, one it lists as embedding is left out too, whatever its
-    name (bge-m3 has no "embed" in it).
+    describe the model, one it lists as embedding or decision is left out too,
+    whatever its name (bge-m3 has no "embed" in it; nimble and tev1 answer
+    with a label, not a reply). When it cannot, DECISION_NAME_PATTERNS stands
+    in for the decision capability.
     """
     if not model_name:
         return False
     lower = model_name.lower()
     if any(re.search(p, lower) for p in NON_TEXT_MODEL_PATTERNS):
         return False
+    from backend.services.model_capabilities import capabilities_for, decides_by_name
+    rec = capabilities_for(model_name, with_vision=False)
+    if rec.exists and rec.capabilities:
+        return not (rec.embedding or rec.decision)
+    return not (rec.exists and rec.embedding) and not decides_by_name(model_name)
+
+
+def known_not_to_chat(model_name: str) -> bool:
+    """True when Ollama describes the model and it cannot answer a chat
+    request: no "completion", or an embedding or decision model.
+
+    For a model a person chose. is_text_chat_model is the rule for picking a
+    default and its name rule also leaves out vision-named models (qwen3-vl,
+    llava) that chat fine. A model Ollama cannot describe is not known either way.
+    """
+    if not model_name:
+        return False
     from backend.services.model_capabilities import capabilities_for
     rec = capabilities_for(model_name, with_vision=False)
-    return not (rec.exists and rec.embedding)
+    if not (rec.exists and rec.capabilities):
+        return False
+    return not rec.completion or rec.embedding or rec.decision
 
 
 def _gpu_memory_mb() -> Optional[tuple]:
@@ -436,6 +457,83 @@ def get_model_info(model_name: str) -> Optional[dict]:
 def model_info_available(model_name: str) -> bool:
     """Whether Ollama can currently describe ``model_name`` (cached once it can)."""
     return get_model_info(model_name) is not None
+
+
+# Ollama's manifest digests are compared on this many leading hex characters,
+# the length `ollama list` prints.
+DIGEST_PREFIX_LEN = 12
+_LLAMACPP_ALIAS = re.compile(r"^llamacpp:([0-9a-f]{12,64})$")
+_HEX_DIGEST = re.compile(r"^[0-9a-f]{12,64}$")
+
+
+def _short_digest(value) -> str:
+    digest = str(value or "").strip().lower()
+    if digest.startswith("sha256:"):
+        digest = digest[len("sha256:"):]
+    return digest[:DIGEST_PREFIX_LEN] if _HEX_DIGEST.match(digest) else ""
+
+
+def _full_model_name(model_name: str) -> str:
+    name = (model_name or "").strip().lower()
+    return name if not name or ":" in name else f"{name}:latest"
+
+
+def _ollama_tags() -> list:
+    """Ollama's /api/tags "models" entries; [] when it cannot be read."""
+    try:
+        resp = requests.get(f"{get_ollama_base_url()}/api/tags", timeout=5)
+        if resp.ok:
+            return list(resp.json().get("models") or [])
+    except Exception as e:  # noqa: BLE001
+        logger.debug("Could not list Ollama models: %s", e)
+    return []
+
+
+def model_digests(model_name: str, tags: Optional[list] = None) -> frozenset:
+    """Short manifest digests Ollama lists under ``model_name``.
+
+    One name is not one build, and one build is not one name: Ollama 0.40
+    lists a pulled tag under two manifests (a ggml and a llamacpp build of the
+    same pull, so gemma4:e2b appears twice in /api/tags) and adds a
+    ``llamacpp:<digest>`` alias for the llamacpp one. The digests say which
+    build a name is. A name without a tag is read as ``:latest``. ``tags`` is
+    an /api/tags "models" list the caller already has; empty when Ollama
+    cannot be reached and the name carries no digest of its own.
+    """
+    name = _full_model_name(model_name)
+    if not name:
+        return frozenset()
+    if tags is None:
+        tags = _ollama_tags()
+    found = {
+        _short_digest(entry.get("digest"))
+        for entry in tags
+        if name in (str(entry.get("name") or "").lower(), str(entry.get("model") or "").lower())
+    }
+    alias = _LLAMACPP_ALIAS.match(name)
+    if alias:
+        found.add(alias.group(1)[:DIGEST_PREFIX_LEN])
+    found.discard("")
+    return frozenset(found)
+
+
+def same_model(a: str, b: str, tags: Optional[list] = None) -> Optional[bool]:
+    """Whether two Ollama model names are the same build.
+
+    True when they are the same name or share a manifest digest, False when
+    both resolve to digests and share none, None when either cannot be
+    resolved (not installed, Ollama unreachable)."""
+    name_a, name_b = _full_model_name(a), _full_model_name(b)
+    if not name_a or not name_b:
+        return None
+    if name_a == name_b:
+        return True
+    if tags is None:
+        tags = _ollama_tags()
+    digests_a, digests_b = model_digests(name_a, tags), model_digests(name_b, tags)
+    if not digests_a or not digests_b:
+        return None
+    return bool(digests_a & digests_b)
 
 
 def model_supports_tools(model_name: str) -> bool:

@@ -1,13 +1,14 @@
 """The outreach cog sends a reply only from poll_approved_drafts.
 
-_handle_candidate drafts through /draft-comment and stops there, even when the
-backend says the draft may post on its own. The approved draft goes out on the
-next poll, after the cadence check, the claim and /submit. Discord and the
-backend are stand-ins: FakeBackend keeps one status per draft and answers the
-routes the cog calls.
+_handle_candidate asks the thread-fit judge, drafts through /draft-comment and
+stops there, even when the backend says the draft may post on its own. The
+approved draft goes out on the next poll, after the cadence check, the claim
+and /submit. Discord and the backend are stand-ins: FakeBackend keeps one
+status per draft and answers the routes the cog calls.
 """
 import logging
 import time
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -21,6 +22,11 @@ DRAFT = "A 12GB card runs the 8B models fine."
 CHANNEL_ID = 555
 MSG_ID = 999
 
+GOOD_FIT = {"grade": 0.9, "verdict": "good_fit", "reason": "a setup question", "skipped": False, "unfit": False}
+UNFIT = {"grade": 0.1, "verdict": "skip", "reason": "personal news, not a question", "skipped": False,
+         "unfit": True}
+JUDGE_DOWN = {"grade": 0.0, "skipped": True, "reason": "no_grader_model_loaded", "unfit": False}
+
 
 class FakeBackend:
     """The /social-outreach routes the cog uses, with the backend's transitions
@@ -30,8 +36,11 @@ class FakeBackend:
         self.would_post = would_post
         self.rows = {}
         self.calls = []
+        self.bodies = {}
         self.recorded_at = []
         self.record_fails = False
+        # The thread-fit judge's answer for a /thread-fit body; a good fit by default.
+        self.fit = lambda body: dict(GOOD_FIT)
 
     async def _get(self, path):
         if path == "/social-outreach/status":
@@ -46,6 +55,9 @@ class FakeBackend:
 
     async def _post(self, path, json=None):
         self.calls.append(path)
+        self.bodies.setdefault(path, []).append(json)
+        if path == "/social-outreach/thread-fit":
+            return self.fit(json)
         if path == "/social-outreach/draft-comment":
             audit_id = len(self.rows) + 1
             self.rows[audit_id] = {
@@ -112,7 +124,7 @@ async def test_a_would_post_draft_is_not_sent_by_the_candidate_pass(cog):
     await cog._handle_candidate(msg, supervised=False)
 
     msg.reply.assert_not_called()
-    assert cog.api.calls == ["/social-outreach/draft-comment"]
+    assert cog.api.calls == ["/social-outreach/thread-fit", "/social-outreach/draft-comment"]
     assert cog.api.rows[1]["status"] == "approved"
 
 
@@ -252,3 +264,96 @@ async def test_an_unrecorded_reply_is_dropped_after_a_day(cog):
 
     assert cog._unrecorded == []
     assert "/social-outreach/record-post" not in cog.api.calls
+
+
+# ---- the thread-fit judge decides before a keyword match is drafted ----------------------
+
+@pytest.mark.asyncio
+async def test_a_keyword_match_the_judge_rules_out_is_not_drafted(cog):
+    """'voice' matches the keyword filter; the judge says it is not a question
+    we can answer, so no draft is made."""
+    cog.api.fit = lambda body: dict(UNFIT)
+    msg = _message()
+    msg.content = "my voice is gone today, no stream tonight sorry all"
+
+    drafted = await cog._handle_candidate(msg, supervised=True)
+
+    assert drafted is False
+    assert cog.api.calls == ["/social-outreach/thread-fit"]
+    assert cog.api.rows == {}
+    body = cog.api.bodies["/social-outreach/thread-fit"][0]
+    assert body["text"] == msg.content
+    assert body["feature_hint"] == "voice"
+
+
+@pytest.mark.asyncio
+async def test_the_judge_sees_the_earlier_messages_oldest_first(cog):
+    msg = _message()
+    earlier = [MagicMock(content=text, author=MagicMock(bot=bot, display_name=name))
+               for text, name, bot in (("second", "b", False), ("a bot line", "bot", True), ("first", "a", False))]
+    msg.channel.history = MagicMock(side_effect=lambda **kwargs: _aiter(earlier))
+
+    await cog._handle_candidate(msg, supervised=True)
+
+    assert cog.api.bodies["/social-outreach/thread-fit"][0]["context"] == ["a: first", "b: second"]
+    thread_context = cog.api.bodies["/social-outreach/draft-comment"][0]["thread_context"]
+    assert thread_context.startswith("a: first\nb: second")
+
+
+@pytest.mark.asyncio
+async def test_a_good_fit_is_drafted_as_judged(cog):
+    msg = _message()
+
+    assert await cog._handle_candidate(msg, supervised=True) is True
+
+    assert cog.api.bodies["/social-outreach/draft-comment"][0]["relevance_unchecked"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_judge_that_could_not_run_drafts_marked_unchecked(cog):
+    cog.api.fit = lambda body: dict(JUDGE_DOWN)
+    msg = _message()
+
+    assert await cog._handle_candidate(msg, supervised=True) is True
+
+    assert cog.api.bodies["/social-outreach/draft-comment"][0]["relevance_unchecked"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_failed_thread_fit_call_drafts_marked_unchecked(cog):
+    def refused(body):
+        raise APIError("backend restarting", status_code=502)
+
+    cog.api.fit = refused
+    msg = _message()
+
+    assert await cog._handle_candidate(msg, supervised=True) is True
+
+    assert cog.api.bodies["/social-outreach/draft-comment"][0]["relevance_unchecked"] is True
+
+
+def _channel_message(msg_id, text, minute):
+    msg = _message()
+    msg.id = msg_id
+    msg.content = text
+    msg.created_at = datetime(2026, 10, 16, 12, minute, tzinfo=timezone.utc)
+    return msg
+
+
+@pytest.mark.asyncio
+async def test_a_ruled_out_match_does_not_use_up_the_pass(cog):
+    """max_replies_per_pass is 1: the off-topic match before the question does
+    not take the pass's one draft."""
+    off_topic = _channel_message(1, "my voice is gone today, no stream tonight sorry all", 0)
+    question = _channel_message(2, "Which GPU do I need to run ollama with a local llm?", 1)
+    channel = MagicMock()
+    channel.history = MagicMock(side_effect=lambda **kwargs: _aiter([question, off_topic]))
+    cog.bot.get_channel = MagicMock(return_value=channel)
+    cog.bot.user.id = 1234
+    cog.api.fit = lambda body: dict(UNFIT if "voice" in body["text"] else GOOD_FIT)
+
+    await cog._process_channel(CHANNEL_ID, supervised=True)
+
+    assert cog.api.calls == ["/social-outreach/thread-fit", "/social-outreach/thread-fit",
+                             "/social-outreach/draft-comment"]
+    assert [b["target_thread_id"] for b in cog.api.bodies["/social-outreach/draft-comment"]] == ["2"]

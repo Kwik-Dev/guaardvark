@@ -269,6 +269,15 @@ NON_TEXT_NAME_PATTERNS = [
     r'embed', r'retrieval', r'minilm',
 ]
 
+# Decision-only models answer a closed question with a label and cannot write
+# a chat reply. Ollama reports their capability list as "decision" alone (no
+# "completion"): nimble:9b-q4_K_M, tev1:4b and tev1:0.8b on Ollama 0.40.1. That
+# list decides whenever Ollama can describe the model; these name rules are
+# only for when it cannot.
+DECISION_NAME_PATTERNS = [
+    r'(^|/)nimble\b', r'(^|/)tev1\b',
+]
+
 # Tag pairs a model may write around reasoning in its answer text, matched
 # case-insensitively by backend/utils/inline_reasoning.py; what they enclose
 # goes to the Thinking card instead of the answer. The set is Open WebUI's
@@ -297,7 +306,7 @@ INLINE_REASONING_TAGS = (
 # it has its own authority order in model_capability_resolver (EXTERNAL_MODEL_ROWS).
 MODEL_CAPABILITY_ROWS: dict = {}
 OVERRIDABLE_FIELDS = (
-    "tools", "thinking", "completion", "embedding", "native_context", "embedding_dim",
+    "tools", "thinking", "completion", "embedding", "decision", "native_context", "embedding_dim",
     "reasoning_tags",
 )
 

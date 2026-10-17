@@ -19,6 +19,7 @@ PASSED = {"grade": 0.75, "passed": True, "checked": True, "skipped": False, "mod
 FAILED = {"grade": 0.75, "passed": False, "checked": True, "skipped": False, "model": "g", "reason": "generic"}
 UNCHECKED = {"grade": 0.0, "checked": False, "skipped": True, "model": None,
              "reason": "no_grader_model_loaded"}
+SAME_MODEL = {**PASSED, "model": "gemma4:e2b", "drafter_model": "gemma4:e2b", "independent": False}
 
 THREAD = "TITLE: Running local models\n\nOP BODY:\nWhich GPU do I need?"
 
@@ -99,6 +100,7 @@ def test_a_feature_hint_in_the_body_is_the_persons_requested_feature(route, monk
     (PASSED, "passed", "passed", None),
     (UNCHECKED, "unavailable", "unchecked", None),
     (FAILED, "failed", "failed", "failed"),
+    (SAME_MODEL, "not_independent", "not_independent", None),
 ])
 def test_every_draft_waits_for_a_person_and_reports_the_check(route, ext, label, reason, hold):
     route.state["ext"] = ext
@@ -167,3 +169,15 @@ def test_a_draft_for_x_or_linkedin_is_refused_before_drafting(route, platform):
     assert resp.get_json()["error"] == platforms.refusal_for(platform)
     assert route.state["drafted"] == 0
     assert SocialOutreachLog.query.count() == 0
+
+
+def test_the_record_says_which_models_graded_and_drafted(route):
+    route.state["ext"] = SAME_MODEL
+
+    route()
+
+    extra = route.audit_extra()
+    assert extra["independent_check"] == "not_independent"
+    assert extra["external_model"] == "gemma4:e2b"
+    assert extra["drafter_model"] == "gemma4:e2b"
+    assert extra["external_independent"] is False

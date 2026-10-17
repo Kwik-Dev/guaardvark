@@ -85,6 +85,18 @@ def _build_thread_context(payload: dict) -> str:
     )
 
 
+def _build_reply_context(payload: dict) -> str:
+    """What the grader reads for a reply on the account's own video: the video
+    title, our earlier comment and the viewer's reply to it."""
+    title = payload.get("title") or "(not recorded)"
+    author = payload.get("incoming_author") or "a viewer"
+    return (
+        f"VIDEO TITLE: {title}\n\n"
+        f"OUR EARLIER COMMENT:\n{payload.get('parent_text', '')}\n\n"
+        f"THEIR REPLY ({author}):\n{payload.get('incoming_text', '')}"
+    )
+
+
 class ContentAgent:
     """Stateless drafting agent. Each call processes one candidate row.
 
@@ -190,15 +202,16 @@ class ContentAgent:
             audit.mark_rejected(audit_id, f"grade_too_low:{grade:.2f}")
             return {"status": "rejected", "grade": grade, "reason": "grade_too_low"}
 
-        # Reply path skips the external grader entirely — its rubric was
-        # tuned for outreach comments ("would a stranger flag this as
-        # promotional?"), which scores replies-to-fans as low even when
-        # the reply is good. We keep the self-grade threshold (MIN_REPLY_GRADE).
-        # A share has no thread for the rubric at all.
-        if row.action == "reply":
-            ext = {"checked": False, "skipped": True, "reason": "skip_for_reply_action"}
-        elif row.action == "share":
+        # A share has no thread for the rubric at all. A reply on the
+        # account's own video answers one viewer, so it is asked only whether
+        # it answers them and whether the tone fits (the "reply" rubric), not
+        # whether it engages a thread.
+        if row.action == "share":
             ext = {"checked": False, "skipped": True, "reason": "share_not_graded"}
+        elif row.action == "reply":
+            ext = external_grader.grade_draft_externally(
+                draft_text, _build_reply_context(payload), kind="reply",
+            )
         else:
             # Second-opinion grade — different model family, rubric-based,
             # blind to the self-grade. Drafter is biased toward its own
@@ -207,7 +220,8 @@ class ContentAgent:
             # draft is not rejected; the person reviewing it sees that.
             ext = external_grader.grade_draft_externally(draft_text, thread_context)
         if gates.independent_check_label(ext) == "failed":
-            missed = ",".join(q for q in external_grader.RUBRIC_QUESTIONS if not ext.get(q))
+            asked = ext.get("questions") or external_grader.RUBRIC_QUESTIONS
+            missed = ",".join(q for q in asked if not ext.get(q))
             reason = f"external_check_failed:{missed or 'not_passed'} ({ext.get('reason', '')[:120]})"
             audit.mark_rejected(audit_id, reason)
             return {
@@ -297,6 +311,9 @@ class ContentAgent:
                 "external_checked": bool(ext.get("checked")),
                 "external_skipped": ext.get("skipped", False),
                 "external_reason": ext.get("reason", ""),
+                "external_model": ext.get("model"),
+                "drafter_model": ext.get("drafter_model"),
+                "external_independent": ext.get("independent"),
                 "relevance_unchecked": relevance_unchecked,
                 "independent_reason": independent_reason,
                 "promoted_status": promote_status,

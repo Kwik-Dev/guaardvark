@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from backend.services.model_capability_data import (
+    DECISION_NAME_PATTERNS,
     INLINE_REASONING_TAGS,
     MODEL_CAPABILITY_ROWS,
     OVERRIDABLE_FIELDS,
@@ -59,6 +60,7 @@ class ModelRecord:
     size_mb: float
     architecture: str
     evidence: Dict[str, str] = field(default_factory=dict)
+    decision: bool = False        # Ollama lists "decision": a label-only model, no chat reply
 
     @property
     def sends_think_flag(self) -> bool:
@@ -73,6 +75,13 @@ def thinks_by_name(tag: Optional[str]) -> bool:
         and any(re.search(p, lower) for p in THINKING_NAME_PATTERNS)
         and not any(re.search(p, lower) for p in THINKING_NAME_EXCLUDE_PATTERNS)
     )
+
+
+def decides_by_name(tag: Optional[str]) -> bool:
+    """DECISION_NAME_PATTERNS matches the tag: the rule for when Ollama cannot
+    describe the model."""
+    lower = (tag or "").lower()
+    return bool(lower) and any(re.search(p, lower) for p in DECISION_NAME_PATTERNS)
 
 
 def _tag_pairs(value: Any) -> Tuple[Tuple[str, str], ...]:
@@ -149,6 +158,7 @@ def record_from_info(tag: str, info: Optional[dict], *, with_vision: bool = True
         "tools": "tools" in caps,
         "thinking": "thinking" in caps,
         "embedding": "embedding" in caps,
+        "decision": "decision" in caps,
         "native_context": int((info or {}).get("native_context") or 0),
         "embedding_dim": int((info or {}).get("embedding_length") or 0),
     }
@@ -189,4 +199,5 @@ def record_from_info(tag: str, info: Optional[dict], *, with_vision: bool = True
         size_mb=float((info or {}).get("size_mb") or 0.0),
         architecture=(info or {}).get("architecture") or "unknown",
         evidence=evidence,
+        decision=bool(values["decision"]),
     )

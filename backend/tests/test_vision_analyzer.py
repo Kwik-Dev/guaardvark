@@ -144,7 +144,10 @@ class TestVisionAnalyzer(unittest.TestCase):
                 {"name": "llama3:8b"},
             ]
         }
-        mock_get.return_value = mock_response
+        nothing_loaded = MagicMock(status_code=200)
+        nothing_loaded.json.return_value = {"models": []}
+        mock_get.side_effect = lambda url, timeout=None: (
+            nothing_loaded if url.endswith("/api/ps") else mock_response)
 
         analyzer = VisionAnalyzer()
         model = analyzer._get_decision_model()
@@ -168,13 +171,20 @@ class TestVisionAnalyzer(unittest.TestCase):
                 {"name": "qwen3:14b"},
             ]
         }
-        mock_get.return_value = mock_response
+        nothing_loaded = MagicMock(status_code=200)
+        nothing_loaded.json.return_value = {"models": []}
+        mock_get.side_effect = lambda url, timeout=None: (
+            nothing_loaded if url.endswith("/api/ps") else mock_response)
+        none = dict(vision=False, tools=False, decision=False)
         caps = {
-            "nimble:9b-q4_K_M": dict(exists=True, completion=False, embedding=False),
-            "nomic-embed-text:latest": dict(exists=True, completion=False, embedding=True),
-            "qwen3:14b": dict(exists=True, completion=True, embedding=False),
+            "nimble:9b-q4_K_M": dict(none, exists=True, capabilities=("decision",), completion=False,
+                                     embedding=False, decision=True),
+            "nomic-embed-text:latest": dict(none, exists=True, capabilities=("embedding",), completion=False,
+                                            embedding=True),
+            "qwen3:14b": dict(none, exists=True, capabilities=("completion", "tools"), completion=True,
+                              embedding=False, tools=True),
         }
-        mock_caps.side_effect = lambda name, with_vision=False: MagicMock(**caps[name])
+        mock_caps.side_effect = lambda name, with_vision=True: MagicMock(**caps[name])
 
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("GUAARDVARK_DECISION_MODEL", None)
@@ -218,8 +228,10 @@ class TestLegacyDecisionModel(unittest.TestCase):
         self._caps = {}
         self._described = True
         self._saved = None
+        self._loaded = []
+        self._digests = {}
         patches = [
-            patch("backend.utils.vision_analyzer.requests.get", side_effect=self._fake_tags),
+            patch("backend.utils.vision_analyzer.requests.get", side_effect=self._fake_get),
             patch("backend.services.model_capabilities.capabilities_for", side_effect=self._fake_caps),
             patch("backend.config._read_saved_model_name", side_effect=lambda: self._saved),
             patch.dict(os.environ, {}, clear=False),
@@ -229,23 +241,33 @@ class TestLegacyDecisionModel(unittest.TestCase):
             self.addCleanup(p.stop)
         os.environ.pop("GUAARDVARK_DECISION_MODEL", None)
 
-    def _fake_tags(self, url, timeout=None):
+    def _fake_get(self, url, timeout=None):
+        """/api/ps lists the loaded models, /api/tags the installed ones."""
         response = MagicMock()
         response.status_code = 200
-        response.json.return_value = {"models": [{"name": n} for n in self._tags]}
+        names = self._loaded if url.endswith("/api/ps") else self._tags
+        response.json.return_value = {"models": [{"name": n, "digest": self._digests.get(n, "")}
+                                                 for n in names]}
         return response
 
-    def _fake_caps(self, name, with_vision=False):
-        caps = tuple(self._caps.get(name, ())) if self._described else ()
-        return MagicMock(exists=self._described and name in self._caps, capabilities=caps,
-                         completion="completion" in caps, embedding="embedding" in caps)
+    def _fake_caps(self, name, with_vision=True):
+        """The capability record; vision is the resolver's answer, a name guess
+        when Ollama cannot describe the model."""
+        from backend.services.model_capability_data import name_looks_vision
+        described = self._described and name in self._caps
+        caps = tuple(self._caps.get(name, ())) if described else ()
+        return MagicMock(exists=described, capabilities=caps,
+                         completion="completion" in caps, embedding="embedding" in caps,
+                         decision="decision" in caps, tools="tools" in caps,
+                         vision=("vision" in caps) if described else name_looks_vision(name))
 
-    def _pick(self, table, order=None, saved=None, described=True):
+    def _pick(self, table, order=None, saved=None, described=True, loaded=()):
         from backend.utils.vision_analyzer import VisionAnalyzer
         self._caps = dict(table)
         self._tags = list(order if order is not None else table)
         self._saved = saved
         self._described = described
+        self._loaded = list(loaded)
         return VisionAnalyzer(default_model="moondream:latest")._pick_decision_model()
 
     def test_stock_clone_picks_the_chat_model_not_the_embedding_model(self):
@@ -300,6 +322,66 @@ class TestLegacyDecisionModel(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.error, why)
         mock_post.assert_not_called()
+
+    # ---- by capability, preferring the loaded chat model ----
+
+    _BOX = {
+        # listed in this order by /api/tags: a vision chat model before the text-only ones
+        "qwen3.8:latest": ("completion", "vision", "tools", "thinking"),
+        "nimble:9b-q4_K_M": ("decision",),
+        "gemma4:e2b": _GEMMA4,
+        "qwen3-14b-16k:latest": ("completion", "tools", "thinking"),
+        "qwen3:14b": ("completion", "tools", "thinking"),
+        "nomic-embed-text:latest": ("embedding",),
+    }
+
+    def test_the_loaded_chat_model_is_picked_when_it_can_reply(self):
+        model, why = self._pick(self._BOX, saved="gemma4:e2b", loaded=["gemma4:e2b"])
+        self.assertEqual(model, "gemma4:e2b")
+        self.assertIn("already loaded", why)
+
+    def test_with_nothing_loaded_a_text_only_model_is_picked_not_a_vision_one(self):
+        model, why = self._pick(self._BOX, saved="gemma4:e2b")
+        self.assertEqual(model, "qwen3-14b-16k:latest", why)
+
+    def test_a_loaded_text_only_model_beats_loading_another(self):
+        model, why = self._pick(self._BOX, saved="gemma4:e2b", loaded=["qwen3:14b"])
+        self.assertEqual(model, "qwen3:14b")
+        self.assertEqual(why, "a text-only model already loaded")
+
+    def test_the_loaded_chat_model_comes_before_another_loaded_model(self):
+        model, _ = self._pick(self._BOX, saved="gemma4:e2b", loaded=["qwen3:14b", "gemma4:e2b"])
+        self.assertEqual(model, "gemma4:e2b")
+
+    def test_a_loaded_vision_model_that_is_not_the_chat_model_is_not_preferred(self):
+        model, _ = self._pick(self._BOX, saved="gemma4:e2b", loaded=["qwen3.8:latest"])
+        self.assertEqual(model, "qwen3-14b-16k:latest")
+
+    def test_the_chat_model_loaded_under_another_name_for_its_build(self):
+        alias = "llamacpp:" + "2cf98652fdc6" + "a" * 52
+        table = {**self._BOX, alias: _GEMMA4}
+        self._digests = {"gemma4:e2b": "2cf98652fdc6" + "a" * 52, alias: "2cf98652fdc6" + "a" * 52}
+        model, why = self._pick(table, saved=alias, loaded=["gemma4:e2b"])
+        self.assertEqual(model, "gemma4:e2b")
+        self.assertIn("already loaded", why)
+
+    def test_a_loaded_chat_model_that_cannot_reply_is_passed_over(self):
+        model, _ = self._pick(self._BOX, saved="nimble:9b-q4_K_M", loaded=["nimble:9b-q4_K_M"])
+        self.assertEqual(model, "qwen3-14b-16k:latest")
+
+    def test_a_vision_model_outside_the_old_name_list_never_beats_a_text_only_one(self):
+        table = {"pixtral-next:12b": ("completion", "vision", "tools"), "qwen3:14b": ("completion", "tools")}
+        for order in (list(table), list(reversed(table))):
+            with self.subTest(order=order):
+                self.assertEqual(self._pick(table, order=order)[0], "qwen3:14b")
+
+    def test_a_vision_named_model_that_does_not_see_is_text_only(self):
+        """A gemma4-named build without a vision tower is a text model."""
+        table = {"moondream:latest": ("completion", "vision"),
+                 "someone/gemma4-26b-text-only:latest": ("completion", "tools", "thinking")}
+        model, why = self._pick(table)
+        self.assertEqual(model, "someone/gemma4-26b-text-only:latest")
+        self.assertEqual(why, "first installed text-only model")
 
     def test_ollama_unreachable_gives_none_with_a_reason(self):
         import requests

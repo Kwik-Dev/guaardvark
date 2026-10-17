@@ -167,10 +167,45 @@ def unload_all_except(keep_model: str = None) -> int:
     return unloaded_count
 
 
+# Embedding-model names, for a model Ollama cannot describe.
+_EMBEDDING_NAME_PATTERNS = ("embed", "nomic-embed", "all-minilm", "bge", "gte", "e5-", "mxbai-embed")
+
+
+def _ollama_model_kind(name: str) -> str:
+    """"chat", "embedding" or "decision" for an installed Ollama model.
+
+    Ollama's capability list decides when it can describe the model, whatever
+    the name: a llamacpp:<digest> alias of an embedding model is still an
+    embedding model, and a decision model (capability "decision", e.g. nimble,
+    tev1) answers with a label, not a chat reply. The name rules answer only
+    when Ollama cannot describe it.
+    """
+    from backend.services.model_capabilities import capabilities_for, decides_by_name
+    try:
+        rec = capabilities_for(name, with_vision=False)
+    except Exception:  # noqa: BLE001 - fall back to the name rules
+        rec = None
+    if rec is not None and rec.exists and rec.capabilities:
+        if rec.embedding:
+            return "embedding"
+        return "decision" if rec.decision else "chat"
+    lower = (name or "").lower()
+    if any(pattern in lower for pattern in _EMBEDDING_NAME_PATTERNS):
+        return "embedding"
+    return "decision" if decides_by_name(name) else "chat"
+
+
+def get_available_decision_models() -> list:
+    """Installed decision-only models, as of the last chat-model listing
+    (get_available_ollama_models keeps them out of that list)."""
+    return list(_model_list_cache.get("decision_models") or [])
+
+
 def get_available_ollama_models(use_cache: bool = True, force_refresh: bool = False):
     """
-    Fetches available models from the Ollama API, filtering out embedding-only models.
-    Uses caching to reduce API calls.
+    Fetches the chat models from the Ollama API: embedding and decision-only
+    models are left out (_ollama_model_kind). The decision models found are
+    kept for get_available_decision_models. Uses caching to reduce API calls.
 
     Args:
         use_cache: Whether to use cached results (default True)
@@ -199,22 +234,25 @@ def get_available_ollama_models(use_cache: bool = True, force_refresh: bool = Fa
             )
             return {"error": "Invalid format received from Ollama API."}
 
-        # Filter out embedding-only models (cannot be used for chat)
-        embedding_patterns = ["embed", "nomic-embed", "all-minilm", "bge", "gte", "e5-", "mxbai-embed"]
+        # Embedding and decision-only models cannot be used for chat.
         chat_models = []
+        decision_models = []
         filtered_count = 0
 
         for model_item in models:
-            model_name = model_item.get("name", "").lower()
-            # Skip if model name contains any embedding pattern
-            is_embedding = any(pattern in model_name for pattern in embedding_patterns)
-            if not is_embedding:
+            kind = _ollama_model_kind(model_item.get("name", ""))
+            if kind == "chat":
                 chat_models.append(model_item)
+            elif kind == "decision":
+                decision_models.append(model_item)
             else:
                 filtered_count += 1
                 logger.debug(f"Filtered out embedding model: {model_item.get('name')}")
 
-        logger.info(f"Found {len(chat_models)} chat models from Ollama API (filtered {filtered_count} embedding models).")
+        logger.info(
+            f"Found {len(chat_models)} chat models from Ollama API (filtered {filtered_count} "
+            f"embedding models, {len(decision_models)} decision models)."
+        )
 
         # Add a simple id for frontend key prop if missing
         for i, model_item in enumerate(chat_models):
@@ -223,9 +261,12 @@ def get_available_ollama_models(use_cache: bool = True, force_refresh: bool = Fa
             if "name" not in model_item:
                 model_item["name"] = "unknown:latest"
             model_item["full_name"] = model_item["name"]
+        for model_item in decision_models:
+            model_item["full_name"] = model_item.get("name", "")
 
         # Update cache
         _model_list_cache["models"] = chat_models
+        _model_list_cache["decision_models"] = decision_models
         _model_list_cache["timestamp"] = time.time()
 
         return chat_models
@@ -246,6 +287,9 @@ def get_available_ollama_models(use_cache: bool = True, force_refresh: bool = Fa
 def list_models():
     """API endpoint to list available models from Ollama.
 
+    ``models`` are the chat models; ``decision_models`` are the installed
+    decision-only models (capability "decision"), which cannot chat.
+
     When Ollama is offline (plugin disabled / not running), returns a 200 with
     an empty model list and `ollama_offline: true` rather than a 502, so pages
     that load this on mount don't spam the console with 502 errors. Real
@@ -255,10 +299,14 @@ def list_models():
     models_data = get_available_ollama_models(use_cache=True, force_refresh=force_refresh)
     if isinstance(models_data, dict) and models_data.get("error"):
         if models_data.get("offline"):
-            return success_response({"models": [], "ollama_offline": True}, "Ollama offline")
+            return success_response({"models": [], "decision_models": [], "ollama_offline": True},
+                                    "Ollama offline")
         return error_response(models_data["error"], 502, "OLLAMA_ERROR")
     logger.info(f"Returning {len(models_data)} available models from Ollama.")
-    return success_response({"models": models_data}, "Models retrieved")
+    return success_response(
+        {"models": models_data, "decision_models": get_available_decision_models()},
+        "Models retrieved",
+    )
 
 
 @model_bp.route("/loaded", methods=["GET"])
