@@ -2147,6 +2147,8 @@ const ChatPage = () => {
                 ? {
                   ...m,
                   content: result.content,
+                  // The browser never searches by itself; the reply offers it.
+                  web_search_offer: result.webSearchOffer || null,
                   claudeFix: {
                     responseReceived: true,
                     enhanced: result.enhanced,
