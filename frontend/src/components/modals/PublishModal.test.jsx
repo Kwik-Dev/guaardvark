@@ -52,6 +52,11 @@ const SPECS = [
       supports_tags: true,
       visibilities: ['private', 'unlisted', 'public'],
       default_visibility: 'private',
+      public_opt_in: {
+        visibilities: ['unlisted', 'public'],
+        label: 'Allow public uploads',
+        refusal: 'Public and unlisted uploads are off for this YouTube account.',
+      },
     },
   },
   {
@@ -275,6 +280,39 @@ describe('PublishModal', () => {
             connection_ids: [5, 2, 1],
             visibilities: { 5: 'unlisted', 2: 'private', 1: 'public' },
           }),
+        ),
+      );
+    });
+
+    it('offers public and unlisted on YouTube only once its switch is on, and says why', async () => {
+      open();
+
+      fireEvent.click(await screen.findByText('YouTube'));
+      const select = await screen.findByRole('combobox', { name: /^Visibility/ });
+      expect(select).toHaveTextContent('private');
+      expect(screen.getByText('Public and unlisted uploads are off for this YouTube account.')).toBeInTheDocument();
+      fireEvent.mouseDown(select);
+      const listbox = within(await screen.findByRole('listbox'));
+      expect(listbox.getByRole('option', { name: 'public' })).toHaveAttribute('aria-disabled', 'true');
+      expect(listbox.getByRole('option', { name: 'unlisted' })).toHaveAttribute('aria-disabled', 'true');
+      expect(listbox.getByRole('option', { name: 'private' })).not.toHaveAttribute('aria-disabled');
+    });
+
+    it('lets a YouTube account with the switch on pick public', async () => {
+      connectionsService.fetchConnections.mockResolvedValue([
+        { ...CONNECTIONS[1], public_opt_in: { on: true, source: 'connection' } },
+      ]);
+      open();
+
+      fireEvent.click(await screen.findByText('YouTube'));
+      fireEvent.mouseDown(await screen.findByRole('combobox', { name: /^Visibility/ }));
+      fireEvent.click(within(await screen.findByRole('listbox')).getByRole('option', { name: 'public' }));
+      expect(screen.queryByText(/uploads are off/)).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: /^publish$/i }));
+      await waitFor(() =>
+        expect(connectionsService.queuePublish).toHaveBeenCalledWith(
+          expect.objectContaining({ connection_ids: [2], visibilities: { 2: 'public' } }),
         ),
       );
     });

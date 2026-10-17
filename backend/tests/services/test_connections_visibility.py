@@ -236,3 +236,265 @@ def test_the_contract_flags_a_default_that_is_not_offered(monkeypatch):
     module = types.SimpleNamespace(SPEC=spec, test=lambda ctx: None, publish=lambda *a: None)
     monkeypatch.setitem(registry._cache, "fake", module)
     assert registry.contract_problems("fake") == ["default_visibility must be one of visibilities."]
+
+
+# --- YouTube's public opt-in -------------------------------------------------------
+YOUTUBE_OPT_IN = registry.spec_for("youtube").capabilities.public_opt_in
+
+
+def _video(tmp_path, name="clip.mp4"):
+    from backend.models import Document, db
+
+    path = tmp_path / name
+    path.write_bytes(b"\0" * 100)
+    doc = Document(filename=name, path=str(path), type=path.suffix)
+    db.session.add(doc)
+    db.session.commit()
+    return doc
+
+
+def _setting(key, value):
+    from backend.models import Setting, db
+
+    db.session.add(Setting(key=key, value=value))
+    db.session.commit()
+
+
+def test_youtube_holds_back_unlisted_and_public_behind_its_switch():
+    assert YOUTUBE_OPT_IN.visibilities == ("unlisted", "public")
+    assert YOUTUBE_OPT_IN.legacy_setting == "youtube_allow_public_publish"
+    assert "Connections page" in YOUTUBE_OPT_IN.refusal
+    assert "approval" in YOUTUBE_OPT_IN.explanation
+    assert [url for _title, url in YOUTUBE_OPT_IN.sources] == [
+        "https://support.google.com/youtube/answer/14328491",
+        "https://developers.google.com/youtube/terms/developer-policies",
+        "https://developers.google.com/youtube/v3/docs/videos",
+    ]
+    others = [p for p in registry.PROVIDER_MODULES if registry.spec_for(p).capabilities.public_opt_in]
+    assert others == ["youtube"]
+    serialised = registry.spec_for("youtube").to_dict()["capabilities"]["public_opt_in"]
+    assert serialised["label"] == "Allow public uploads" and serialised["sources"][0]["title"]
+
+
+@pytest.mark.parametrize("config, legacy, expected", [
+    ({}, None, {"on": False, "source": "default"}),
+    ({"allow_public": True}, None, {"on": True, "source": "connection"}),
+    ({}, "true", {"on": True, "source": "setting"}),
+    ({"allow_public": False}, "true", {"on": False, "source": "connection"}),
+    ({"allow_public": "true"}, None, {"on": False, "source": "default"}),
+    ("not json", None, {"on": False, "source": "default"}),
+])
+def test_the_switch_wins_and_the_old_setting_fills_in(db_app, config, legacy, expected):
+    from backend.services.connections import gates
+
+    if legacy is not None:
+        _setting("youtube_allow_public_publish", legacy)
+    stored = config if isinstance(config, str) else json.dumps(config)
+
+    assert gates.public_opt_in_state("youtube", stored) == expected
+    assert gates.public_opt_in_state("bluesky", stored) is None
+
+
+def test_the_connection_reports_its_state(db_app):
+    youtube = _connection("youtube")
+    bluesky = _connection("bluesky")
+
+    assert youtube.to_dict()["public_opt_in"] == {"on": False, "source": "default"}
+    assert bluesky.to_dict()["public_opt_in"] is None
+
+
+def test_public_is_refused_at_queue_time_while_off_and_private_still_goes(db_app, platform, tmp_path):
+    from backend.models import PublishRecord
+
+    youtube = _connection("youtube")
+    clip = _video(tmp_path)
+    when = datetime.now() + LATER
+
+    for visibility in ("public", "unlisted"):
+        pre = publish_service.preflight([youtube.id], [clip.id], body="b", visibility=visibility)
+        assert pre["per_connection"][str(youtube.id)]["violations"] == [YOUTUBE_OPT_IN.refusal]
+        with pytest.raises(ValueError, match="YouTube: Public and unlisted uploads are off"):
+            publish_service.queue_publish(connection_ids=[youtube.id], document_ids=[clip.id],
+                                          body="b", visibility=visibility)
+    # A scheduled public release is refused the same way, before any record.
+    pre = publish_service.preflight([youtube.id], [clip.id], body="b", visibility="public", scheduled_at=when)
+    assert pre["per_connection"][str(youtube.id)]["violations"] == [YOUTUBE_OPT_IN.refusal]
+    with pytest.raises(ValueError, match="Public and unlisted uploads are off"):
+        publish_service.queue_publish(connection_ids=[youtube.id], document_ids=[clip.id], body="b",
+                                      visibility="public", scheduled_at=when)
+    assert PublishRecord.query.count() == 0
+
+    # Private, scheduled: Guaardvark's timer uploads it privately at its time.
+    pre = publish_service.preflight([youtube.id], [clip.id], body="b", scheduled_at=when)
+    entry = pre["per_connection"][str(youtube.id)]
+    assert entry["violations"] == [] and entry["visibility"] == "private"
+    assert entry["schedule"]["mode"] == "timer"
+
+
+def test_switched_on_a_scheduled_public_upload_is_handed_to_youtube(db_app, platform, tmp_path):
+    youtube = _connection("youtube", {"allow_public": True})
+    clip = _video(tmp_path)
+    when = datetime.now() + LATER
+
+    record, = _records(publish_service.queue_publish(
+        connection_ids=[youtube.id], document_ids=[clip.id], body="b",
+        visibilities={str(youtube.id): "public"}, scheduled_at=when,
+    ))
+    assert record.visibility == "public"
+    _send(record)
+
+    kind, provider, request = platform.calls[-1]
+    assert (kind, provider, request.visibility) == ("schedule", "youtube", "public")
+    assert record.status == "scheduled" and record.scheduled_natively
+
+
+def test_switching_off_holds_what_was_queued_public(db_app, platform, tmp_path, monkeypatch):
+    from backend.models import Task, db
+    from backend.services.connections import scheduler
+
+    _no_secrets(monkeypatch)
+    youtube = _connection("youtube", {"allow_public": True})
+    clip = _video(tmp_path)
+    now_post, = _records(publish_service.queue_publish(
+        connection_ids=[youtube.id], document_ids=[clip.id], body="b", visibility="public",
+    ))
+    timer_post, = _records(publish_service.queue_publish(
+        connection_ids=[youtube.id], document_ids=[clip.id], body="b", visibility="unlisted",
+        scheduled_at=datetime.now() + LATER,
+    ))
+    publish_service.approve(timer_post)
+    assert timer_post.status == "scheduled"
+    service.update_connection(youtube, {"allow_public": False})
+
+    # Approval: refused, and the record keeps waiting without the stamp.
+    with pytest.raises(RuntimeError, match="Public and unlisted uploads are off"):
+        publish_service.approve(now_post)
+    assert now_post.status == "awaiting_approval" and now_post.approved_at is None
+
+    # The timer: sent back to Approvals with the reason.
+    timer_post.scheduled_at = datetime.now() - timedelta(minutes=2)
+    out = scheduler.release_due(datetime.now())
+    assert out["held"] == [timer_post.id]
+    assert timer_post.status == "awaiting_approval" and timer_post.error_message == YOUTUBE_OPT_IN.refusal
+
+    # A job already queued: failed by the runner, nothing sent.
+    now_post.status = "queued"
+    task = Task(name="Publish to YouTube", status="queued", task_handler="connections",
+                workflow_config=json.dumps({"publish_record_id": now_post.id}))
+    db.session.add(task)
+    db.session.commit()
+    out = publish_runner.run({"workflow_config": task.workflow_config}, lambda *a: None)
+    assert out == {"error": YOUTUBE_OPT_IN.refusal} and now_post.status == "failed"
+    assert platform.calls == []
+
+
+def test_an_edit_to_public_is_refused_while_off(db_app, platform, tmp_path):
+    youtube = _connection("youtube")
+    record, = _records(publish_service.queue_publish(
+        connection_ids=[youtube.id], document_ids=[_video(tmp_path).id], body="b",
+    ))
+
+    report = publish_service.edit_preflight(record, publish_service.edit_changes({"visibility": "public"}))
+    assert next(iter(report["per_connection"].values()))["violations"] == [YOUTUBE_OPT_IN.refusal]
+    with pytest.raises(ValueError, match="Public and unlisted uploads are off"):
+        publish_service.edit(record, publish_service.edit_changes({"visibility": "public"}))
+    assert record.visibility == "private"
+
+
+def test_the_youtube_provider_refuses_before_reaching_youtube(db_app, monkeypatch):
+    import requests
+
+    from backend.services.connections.providers import youtube
+
+    def no_network(*args, **kwargs):
+        raise AssertionError("YouTube was reached")
+
+    monkeypatch.setattr(requests, "post", no_network)
+    monkeypatch.setattr(requests, "put", no_network)
+    ctx = base.ConnCtx(connection={}, config={}, secrets={})
+    request = base.PublishRequest(record_id=1, connection_id=1, visibility="public",
+                                  publish_at=datetime.now() + LATER)
+
+    assert youtube.publish(ctx, request, lambda *a: None).message == YOUTUBE_OPT_IN.refusal
+    private = base.PublishRequest(record_id=1, connection_id=1, visibility="private",
+                                  publish_at=datetime.now() + LATER)
+    assert youtube.schedule(ctx, private, lambda *a: None).message == YOUTUBE_OPT_IN.refusal
+
+
+# --- the switch on the connection ---------------------------------------------------
+def _no_secrets(monkeypatch):
+    monkeypatch.setattr(service.credential_store, "apply_secret_updates",
+                        lambda *a, **k: {"updated": [], "skipped_empty": False})
+
+
+def test_the_switch_is_stored_on_the_connection(db_app, monkeypatch):
+    _no_secrets(monkeypatch)
+    youtube = _connection("youtube", {"channel_id": "c"})
+
+    service.update_connection(youtube, {"allow_public": True})
+    assert json.loads(youtube.config) == {"channel_id": "c", "allow_public": True}
+    assert youtube.to_dict()["public_opt_in"] == {"on": True, "source": "connection"}
+
+    service.update_connection(youtube, {"allow_public": False})
+    assert youtube.to_dict()["public_opt_in"] == {"on": False, "source": "connection"}
+
+
+@pytest.mark.parametrize("value", ["true", 1, None])
+def test_the_switch_takes_only_a_boolean(db_app, monkeypatch, value):
+    _no_secrets(monkeypatch)
+    youtube = _connection("youtube")
+
+    with pytest.raises(ValueError, match="true or false"):
+        service.update_connection(youtube, {"allow_public": value})
+
+
+def test_a_provider_without_the_opt_in_refuses_the_switch(db_app, monkeypatch):
+    _no_secrets(monkeypatch)
+    bluesky = _connection("bluesky")
+
+    with pytest.raises(ValueError, match="nothing to allow"):
+        service.update_connection(bluesky, {"allow_public": True})
+    assert "allow_public" not in (bluesky.config or "")
+
+
+def test_a_config_field_cannot_smuggle_the_switch_in(db_app, monkeypatch):
+    _no_secrets(monkeypatch)
+    youtube = _connection("youtube")
+
+    service.update_connection(youtube, {"config": {"allow_public": True}})
+
+    assert youtube.to_dict()["public_opt_in"]["on"] is False
+
+
+def test_the_route_switches_it(db_app, monkeypatch):
+    from backend.api.connections_api import connections_bp
+
+    _no_secrets(monkeypatch)
+    db_app.register_blueprint(connections_bp)
+    client = db_app.test_client()
+    youtube = _connection("youtube")
+
+    saved = client.put(f"/api/connections/{youtube.id}", json={"allow_public": True})
+    assert saved.status_code == 200 and saved.get_json()["public_opt_in"]["on"] is True
+    listed = client.get("/api/connections?family=social").get_json()["connections"]
+    assert listed[0]["public_opt_in"] == {"on": True, "source": "connection"}
+
+
+def test_the_contract_keeps_the_default_out_of_the_opt_in(monkeypatch):
+    from backend.services.connections.base import Capabilities, ProviderSpec, PublicOptIn, RateLimit
+
+    spec = ProviderSpec(
+        provider="fake", family="social", label="Fake", auth_kinds=("api_token",),
+        capabilities=Capabilities(
+            visibilities=("private", "public"), default_visibility="public",
+            rate_limits=(RateLimit(posts=1, window_seconds=60, platform_limit="x", source="https://x"),),
+            public_opt_in=PublicOptIn(visibilities=("public", "secret"), label="", explanation="", refusal=""),
+        ),
+    )
+    module = types.SimpleNamespace(SPEC=spec, test=lambda ctx: None, publish=lambda *a: None)
+    monkeypatch.setitem(registry._cache, "fake", module)
+    assert registry.contract_problems("fake") == [
+        "public_opt_in must not hold back default_visibility.",
+        "public_opt_in names a visibility the provider does not offer.",
+        "public_opt_in needs a label, an explanation and a refusal.",
+    ]

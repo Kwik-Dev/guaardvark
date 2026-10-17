@@ -34,6 +34,11 @@ It declares, in ``SPEC = ProviderSpec(...)``:
                        all; a scheduled post to it is refused with this text.
   ``deletable`` and ``delete_window_seconds``  whether Delete on platform
                        is offered, and for how long after posting.
+  ``public_opt_in``    visibilities a connection posts with only once its
+                       person turns them on, with a switch on its card on the
+                       Connections page. Until then a post with one of them is
+                       refused, with the declared reason, wherever a publish
+                       is checked (``gates.visibility_refusal``).
 
 - ``post_fields`` (``PostField``): inputs a post to this platform needs beyond
   title, body and link, such as the subreddit a Reddit post goes to. The
@@ -227,6 +232,38 @@ class NativeScheduling:
 
 
 @dataclass(frozen=True)
+class PublicOptIn:
+    """Visibilities a connection posts with only once its person turns them on.
+
+    Off by default, and stored per connection (``Connection.config``, key
+    ``gates.ALLOW_PUBLIC_KEY``). While off, a post with one of
+    ``visibilities`` is refused with ``refusal``, which also says where the
+    switch is; the composer shows those choices unavailable with the same
+    text. ``explanation`` is shown beside the switch: what turning it on
+    allows and what stays the same, citing ``sources`` ((title, url) pairs).
+    ``legacy_setting`` names an install-wide setting that decided this before
+    the switch existed; it is still read for a connection with no choice stored.
+    """
+
+    visibilities: Tuple[str, ...]
+    label: str
+    explanation: str
+    refusal: str
+    sources: Tuple[Tuple[str, str], ...] = ()
+    legacy_setting: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "visibilities": list(self.visibilities),
+            "label": self.label,
+            "explanation": self.explanation,
+            "refusal": self.refusal,
+            "sources": [{"title": title, "url": url} for title, url in self.sources],
+            "legacy_setting": self.legacy_setting,
+        }
+
+
+@dataclass(frozen=True)
 class Capabilities:
     """What a platform accepts. Drives client-side validation and the UI."""
 
@@ -262,6 +299,7 @@ class Capabilities:
     deletable: bool = False
     # How long after posting the platform still allows a delete; None = no limit.
     delete_window_seconds: Optional[int] = None
+    public_opt_in: Optional[PublicOptIn] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -293,6 +331,7 @@ class Capabilities:
             "schedule_refusal": self.schedule_refusal,
             "deletable": self.deletable,
             "delete_window_seconds": self.delete_window_seconds,
+            "public_opt_in": self.public_opt_in.to_dict() if self.public_opt_in else None,
         }
 
 

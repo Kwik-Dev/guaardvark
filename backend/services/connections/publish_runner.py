@@ -99,6 +99,9 @@ def run(task: Dict[str, Any], update_progress: Callable[[int, str], None]) -> Di
         return _fail(record, verdict.reason)
 
     problems = publish_service.bot_label_problems(caps, connection)
+    problems += publish_service.visibility_problems(
+        connection, publish_service.visibility_for(caps, record.visibility)
+    )
     if problems:
         return _fail(record, problems[0])
 

@@ -12,7 +12,8 @@ Each tick does at most two things:
    limit or the shared cadence turns away waits for a later tick. A post
    whose time came while public posting was stopped or publishing was off,
    or that is more than ``LATE_HOLD_SECONDS`` late, goes back to Approvals
-   for a person's click instead of going out late.
+   for a person's click instead of going out late. So does a post whose
+   visibility its connection no longer allows (``Capabilities.public_opt_in``).
 
 With nothing scheduled the beat gate (``celery_beat_gates``) holds the task
 back, so a fresh install never runs it.
@@ -161,8 +162,14 @@ def release_due(now: datetime) -> Dict[str, Any]:
             publish_service.hold(record, NOT_APPROVED_MESSAGE)
             out["held"].append(record.id)
             continue
-        # Disabled, or failing its last Test, since it was scheduled.
+        # Disabled, failing its last Test, or its public opt-in switched off,
+        # since it was scheduled.
         problems = publish_service.connection_problems(connection)
+        if not problems:
+            caps = registry.spec_for(connection.provider).capabilities
+            problems = publish_service.visibility_problems(
+                connection, publish_service.visibility_for(caps, record.visibility)
+            )
         if problems:
             publish_service.hold(record, problems[0])
             out["held"].append(record.id)

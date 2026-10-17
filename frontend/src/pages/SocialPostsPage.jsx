@@ -361,6 +361,7 @@ const SocialPostsPage = () => {
         open={Boolean(editing)}
         record={editing}
         spec={editing ? specs[editing.platform] || null : null}
+        connection={editing ? connections.find((c) => c.id === editing.connection_id) || null : null}
         accountLabel={editing ? accountName(editing) : ""}
         onClose={() => setEditing(null)}
         onSaved={async () => {

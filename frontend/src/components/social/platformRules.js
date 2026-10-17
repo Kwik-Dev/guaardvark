@@ -111,11 +111,26 @@ export const sharedVisibilities = (specs) => {
 export const defaultVisibility = (spec) => spec?.capabilities?.default_visibility || "";
 
 /**
- * The visibilities a post to this connection can take.
+ * Whether this connection may use the visibilities its provider holds back
+ * (capabilities.public_opt_in), as the backend reports it on the connection.
+ * A state that is missing counts as off, like on the backend.
+ */
+export const publicOptInOn = (connection) => connection?.public_opt_in?.on === true;
+
+/**
+ * The visibilities a post to this connection can take. One its provider holds
+ * back until the connection's switch is on is offered disabled, with the
+ * provider's reason, which also says where the switch is.
  * @returns {Array<{ value: string, disabled: boolean, reason: string }>}
  */
-export const visibilityChoices = (spec) =>
-  (spec?.capabilities?.visibilities || []).map((value) => ({ value, disabled: false, reason: "" }));
+export const visibilityChoices = (spec, connection) => {
+  const optIn = spec?.capabilities?.public_opt_in;
+  const held = optIn && !publicOptInOn(connection) ? optIn.visibilities || [] : [];
+  return (spec?.capabilities?.visibilities || []).map((value) => {
+    const off = held.includes(value);
+    return { value, disabled: off, reason: off ? optIn.refusal || "" : "" };
+  });
+};
 
 const joinWords = (words) =>
   words.length < 2 ? words.join("") : `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}`;

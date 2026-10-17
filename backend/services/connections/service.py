@@ -160,6 +160,7 @@ def update_connection(connection, payload: MutableMapping[str, Any]):
 
     _apply_config(connection, payload, spec)
     _apply_post_without_approval(connection, payload, spec)
+    _apply_allow_public(connection, payload, spec)
     _apply_secrets(connection, payload, spec)
     db.session.commit()
     return connection
@@ -185,6 +186,24 @@ def _apply_post_without_approval(connection, payload: MutableMapping[str, Any], 
         )
     merged = _json_loads(connection.config, {})
     merged[gates.POST_WITHOUT_APPROVAL_KEY] = value
+    connection.config = json.dumps(merged)
+
+
+def _apply_allow_public(connection, payload: MutableMapping[str, Any], spec) -> None:
+    """Store a person's choice on the provider's public opt-in
+    (``Capabilities.public_opt_in``). A provider that declares none refuses
+    it, and nothing is stored."""
+    from backend.services.connections import gates
+
+    if gates.ALLOW_PUBLIC_KEY not in payload:
+        return
+    value = payload.get(gates.ALLOW_PUBLIC_KEY)
+    if not isinstance(value, bool):
+        raise ValueError(f"{gates.ALLOW_PUBLIC_KEY} must be true or false.")
+    if spec.capabilities.public_opt_in is None:
+        raise ValueError(f"{spec.label} holds no visibility back, so there is nothing to allow.")
+    merged = _json_loads(connection.config, {})
+    merged[gates.ALLOW_PUBLIC_KEY] = value
     connection.config = json.dumps(merged)
 
 

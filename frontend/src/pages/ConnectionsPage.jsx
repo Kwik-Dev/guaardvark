@@ -11,6 +11,7 @@ import {
   Container,
   Divider,
   Grid,
+  Link,
   Menu,
   MenuItem,
   Snackbar,
@@ -139,6 +140,24 @@ const ConnectionsPage = () => {
     }
   }, []);
 
+  // Only a provider that declares capabilities.public_opt_in (YouTube) offers
+  // this; the backend refuses it for any other.
+  const handleAllowPublic = useCallback(async (connection, optIn, value) => {
+    try {
+      const saved = await updateConnection(connection.id, { allow_public: value });
+      setConnections((prev) => prev.map((c) => (c.id === connection.id ? saved : c)));
+      setFeedback({
+        open: true,
+        message: value
+          ? `${optIn.label}: on for this account. Every upload still waits for your approval.`
+          : `${optIn.label}: off for this account.`,
+        severity: "success",
+      });
+    } catch (e) {
+      setFeedback({ open: true, message: e.message, severity: "error" });
+    }
+  }, []);
+
   // Only a provider whose spec says posts_to_owned_channel (a Discord webhook)
   // offers this; the backend refuses it for any other.
   const handlePostWithoutApproval = useCallback(async (connection, value) => {
@@ -200,7 +219,8 @@ const ConnectionsPage = () => {
               <Typography variant="body2" color="text.secondary">
                 Every publish waits for your approval on the Approvals page. A Discord
                 webhook, which posts into a channel you manage, can be set to post without
-                it on its own card.
+                it on its own card. A YouTube account uploads as private until its card
+                allows public uploads.
               </Typography>
             </Stack>
           </CardContent>
@@ -246,6 +266,7 @@ const ConnectionsPage = () => {
         <Grid container spacing={2}>
           {connections.map((conn) => {
             const spec = specByProvider[conn.provider];
+            const optIn = spec?.capabilities?.public_opt_in;
             return (
               <Grid item xs={12} sm={6} md={4} key={conn.id}>
                 <Card variant="outlined" sx={{ height: "100%" }}>
@@ -295,6 +316,36 @@ const ConnectionsPage = () => {
                           <Typography variant="body2">Post without approval</Typography>
                         </Tooltip>
                       </Stack>
+                    )}
+                    {optIn && (
+                      <Box sx={{ mt: 1 }}>
+                        <Stack direction="row" alignItems="center" spacing={1}>
+                          <Switch
+                            size="small"
+                            checked={conn.public_opt_in?.on === true}
+                            onChange={(e) => handleAllowPublic(conn, optIn, e.target.checked)}
+                            inputProps={{ "aria-label": optIn.label }}
+                          />
+                          <Typography variant="body2">{optIn.label}</Typography>
+                        </Stack>
+                        <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+                          {optIn.explanation}{" "}
+                          {(optIn.sources || []).map((source, index) => (
+                            <React.Fragment key={source.url}>
+                              {index > 0 && " · "}
+                              <Link href={source.url} target="_blank" rel="noopener noreferrer">
+                                {source.title}
+                              </Link>
+                            </React.Fragment>
+                          ))}
+                        </Typography>
+                        {conn.public_opt_in?.source === "setting" && (
+                          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>
+                            On through the install-wide setting {optIn.legacy_setting}. Switching it
+                            here keeps a choice for this account instead.
+                          </Typography>
+                        )}
+                      </Box>
                     )}
                   </CardContent>
                   <CardActions>

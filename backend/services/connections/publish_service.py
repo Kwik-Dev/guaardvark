@@ -119,6 +119,7 @@ def preflight(
             problems = media_util.validate_against(
                 caps, items, body=final_body, title=title, visibility=target_visibility
             )
+            problems += visibility_problems(connection, target_visibility)
             problems += post_field_problems(spec, options_for(spec, post_options))
             problems += schedule_problems(caps, scheduled_at)
             problems += bot_label_problems(caps, connection)
@@ -214,6 +215,14 @@ def post_field_problems(spec, options: Dict[str, str]) -> List[str]:
     for post_field in spec.post_fields:
         problems += post_field.problems(options.get(post_field.name, ""))
     return problems
+
+
+def visibility_problems(connection, visibility: str) -> List[str]:
+    """A visibility this connection's person has not turned on
+    (``Capabilities.public_opt_in``). ``visibility`` is the one the post is
+    sent with (``visibility_for``)."""
+    refusal = gates.visibility_refusal(connection.provider, connection.config, visibility)
+    return [refusal] if refusal else []
 
 
 def schedule_problems(caps, scheduled_at: Optional[datetime]) -> List[str]:
@@ -347,6 +356,7 @@ def queue_publish(
         problems += media_util.validate_against(
             caps, items, body=final_body, title=title, visibility=target_visibility
         )
+        problems += visibility_problems(connection, target_visibility)
         options = options_for(spec, post_options)
         problems += post_field_problems(spec, options)
         problems += schedule_problems(caps, scheduled_at)
@@ -408,14 +418,18 @@ def queue_publish(
 def _release(record, connection, spec, now: Optional[datetime] = None) -> Dict[str, Any]:
     """Send an approved record on: now, to the platform's own schedule, or to the timer.
 
-    Raises RuntimeError before committing anything when the post, now or at
+    Raises RuntimeError before committing anything when its visibility is one
+    the connection's person has not turned on, or when the post, now or at
     the time the platform would publish it, is over its account's rate limit.
-    A timer post is checked when it comes due instead.
+    A timer post is checked for the limit when it comes due instead.
     """
     from backend.models import db
 
     now = now or datetime.now()
     caps = spec.capabilities
+    refused = visibility_problems(connection, visibility_for(caps, record.visibility))
+    if refused:
+        raise RuntimeError(refused[0])
     when = record.scheduled_at if record.scheduled_at and record.scheduled_at > now else None
     mode = scheduling.plan(caps, when, record.visibility, now) if when else None
 
@@ -513,7 +527,8 @@ def approve(record, revision: Optional[int] = None) -> Dict[str, Any]:
     and one landing after finds the record no longer waiting.
 
     Raises PublishChanged when the record was edited since that revision,
-    RuntimeError while public posting is stopped, or when a post that would go
+    RuntimeError while public posting is stopped, for a visibility the
+    connection's person has since turned off, or when a post that would go
     out now is over its account's rate limit; the record stays put.
     """
     from backend.models import Connection, PublishRecord, db
@@ -672,6 +687,7 @@ def _check_edit(record, changes: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[s
     problems = media_util.validate_against(
         caps, items, body=body, title=wanted["title"], visibility=visibility
     )
+    problems += visibility_problems(connection, visibility)
     problems += post_field_problems(spec, options)
     problems += schedule_problems(caps, scheduled_at)
     problems += bot_label_problems(caps, connection)

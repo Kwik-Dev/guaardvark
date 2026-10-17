@@ -118,7 +118,7 @@ const PublishModal = ({ open, onClose, documents = NO_DOCUMENTS, onFeedback }) =
           key: String(conn.id),
           label: conn.display_name || conn.handle || spec.label || conn.provider,
           value: visibilities[conn.id] ?? defaultVisibility(spec),
-          choices: visibilityChoices(spec),
+          choices: visibilityChoices(spec, conn),
         };
       }),
     [selectedConnections, specs, visibilities],

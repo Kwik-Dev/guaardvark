@@ -526,6 +526,7 @@ const ApprovalsPage = () => {
       <EditPublishDialog
         open={!!editing}
         record={editing}
+        connection={editing ? connections.find((c) => c.id === editing.connection_id) || null : null}
         accountLabel={editing ? connectionName(editing) : ""}
         onClose={() => setEditing(null)}
         onSaved={async () => {

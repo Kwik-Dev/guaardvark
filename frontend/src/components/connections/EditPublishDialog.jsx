@@ -26,11 +26,21 @@ import { draftedBy, editChanges, editableValues, withDisclosureLine } from "./pu
  * @param {boolean}  open
  * @param {object}   record      the publish record (GET /publishes/<id>)
  * @param {object}   [spec]      its provider spec; fetched when not given
+ * @param {object}   [connection] its connection (GET /connections), for the
+ *                               visibilities it has turned on
  * @param {string}   [accountLabel]
  * @param {function} onClose
  * @param {function} onSaved     called with the saved record and the changed fields
  */
-const EditPublishDialog = ({ open, record: givenRecord, spec: givenSpec = null, accountLabel = "", onClose, onSaved }) => {
+const EditPublishDialog = ({
+  open,
+  record: givenRecord,
+  spec: givenSpec = null,
+  connection = null,
+  accountLabel = "",
+  onClose,
+  onSaved,
+}) => {
   // Parents clear the record as they close the dialog; the closing fade
   // keeps showing the last one.
   const lastRecord = useRef(givenRecord);
@@ -114,7 +124,7 @@ const EditPublishDialog = ({ open, record: givenRecord, spec: givenSpec = null, 
             key: String(record?.connection_id ?? ""),
             label: accountLabel || platformLabel,
             value: values.visibility || defaultVisibility(spec),
-            choices: visibilityChoices(spec),
+            choices: visibilityChoices(spec, connection),
           },
         ]
       : [];

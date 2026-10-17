@@ -57,8 +57,9 @@ export const scheduledIsoOf = (scheduleOn, scheduledAt) => {
  *                              postOptions, scheduleOn, scheduledAt }
  * @param {function} onChange   called with the fields that changed
  * @param {object[]} [visibilityTargets] one per target: { key, label, value,
- *                              choices: [{ value, disabled, reason }], note };
- *                              value is what the target is sent with
+ *                              choices: [{ value, disabled, reason }] }; value
+ *                              is what the target is sent with, and a disabled
+ *                              choice's reason shows under its select
  * @param {function} [onVisibilityChange] called with (key, value)
  * @param {object}   [preflight] a preflight result; its per_connection entries
  *                              give the AI label rules and who sends a timed post
@@ -178,7 +179,7 @@ const PostFields = ({
           value={target.value}
           onChange={(e) => onVisibilityChange?.(target.key, e.target.value)}
           size="small"
-          helperText={target.note || undefined}
+          helperText={target.choices.find((choice) => choice.disabled)?.reason || undefined}
         >
           {target.choices.map((choice) => (
             <MenuItem key={choice.value} value={choice.value} disabled={choice.disabled}>

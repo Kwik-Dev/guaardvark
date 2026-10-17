@@ -76,7 +76,8 @@ def test_rate_limits_name_their_source(provider):
 def test_new_capabilities_serialise(provider):
     caps = registry.spec_for(provider).to_dict()["capabilities"]
     for key in ("rate_limits", "ai_disclosure", "bot_label", "native_scheduling", "deletable",
-                "delete_window_seconds", "requires_title", "max_title_chars", "schedule_refusal"):
+                "delete_window_seconds", "requires_title", "max_title_chars", "schedule_refusal",
+                "public_opt_in"):
         assert key in caps
 
 

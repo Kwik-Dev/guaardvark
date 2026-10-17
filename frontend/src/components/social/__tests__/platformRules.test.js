@@ -8,6 +8,7 @@ import {
   describeWindow,
   fixedVisibilityNote,
   mergePostFields,
+  publicOptInOn,
   sharedVisibilities,
   statusLabel,
   strictestLimit,
@@ -146,5 +147,33 @@ describe("visibility per target", () => {
         { label: "Discord", value: "public" },
       ]),
     ).toBe("Public on Bluesky, Telegram and Discord: the only visibility they offer.");
+  });
+});
+
+describe("visibilities held back until a connection's switch is on", () => {
+  const youtube = {
+    capabilities: {
+      visibilities: ["private", "unlisted", "public"],
+      default_visibility: "private",
+      public_opt_in: { visibilities: ["unlisted", "public"], refusal: "Turn it on first." },
+    },
+  };
+
+  it("disables them, with the reason, while the switch is off or unknown", () => {
+    for (const connection of [undefined, {}, { public_opt_in: { on: false, source: "default" } }]) {
+      expect(publicOptInOn(connection)).toBe(false);
+      expect(visibilityChoices(youtube, connection)).toEqual([
+        { value: "private", disabled: false, reason: "" },
+        { value: "unlisted", disabled: true, reason: "Turn it on first." },
+        { value: "public", disabled: true, reason: "Turn it on first." },
+      ]);
+    }
+  });
+
+  it("offers them once the switch is on, however it was set", () => {
+    for (const source of ["connection", "setting"]) {
+      const connection = { public_opt_in: { on: true, source } };
+      expect(visibilityChoices(youtube, connection).every((c) => !c.disabled)).toBe(true);
+    }
   });
 });
