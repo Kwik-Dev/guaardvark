@@ -27,8 +27,8 @@ from backend.services.agent_tools import (
 )
 from backend.utils.text_cut import cut_on_whitespace
 from backend.utils.request_phrases import (
-    HOW_TO_QUESTION_RE, VIDEO_SOFTWARE_PATTERN, asks_for_writing, declines_media,
-    normalise_message, whole_message_pattern,
+    HOW_TO_QUESTION_RE, VIDEO_SOFTWARE_PATTERN, asks_for_rewrite, asks_for_writing,
+    declines_media, normalise_message, whole_message_pattern,
 )
 from backend.utils.inline_reasoning import (
     InlineReasoningStream, REASONING, RETRACT, VISIBLE, split_inline_reasoning,
@@ -882,6 +882,85 @@ def _withholds_media_tools(message: str) -> bool:
     return not (_has_explicit_image_gen_intent(lower, draw_anywhere=True) or _RENDER_IT_RE.search(lower))
 
 
+# Small models sometimes answer with a media tool call written out as text,
+# 'generate_image(prompt: "...")', which the tool-call parser does not run. The
+# prompt inside is the reply.
+_MEDIA_CALL_AS_TEXT_RE = re.compile(
+    r"^\s*`*\s*(?:" + "|".join(sorted(_MEDIA_CREATE_TOOLS)) + r")\s*\(\s*(?:style_)?prompt\s*[:=]\s*"
+    r"[\"'“](.+)[\"'”]\s*(?:,[^()]*)?\)\s*`*\s*$",
+    re.DOTALL,
+)
+
+
+def _media_call_as_text(reply: str) -> Optional[str]:
+    """The prompt of a reply that is only a media tool call written as text, else None."""
+    m = _MEDIA_CALL_AS_TEXT_RE.match(reply or "")
+    return m.group(1).strip() if m else None
+
+
+# "generate that image", "make a picture from the prompt above": what to draw is
+# already in the conversation, so the words of the request are not the prompt.
+_EARLIER_PICTURE_RE = re.compile(
+    r"\b(?:that|this|those|these|the\s+(?:same|last|previous|above))\s+"
+    r"(?:image|picture|photo|pic|one|prompt|version|description|scene)s?\b"
+    r"|\b(?:from|of|using|with|for|based\s+on)\s+(?:that|this|those|these|the|your)\s+"
+    r"(?:(?:last|previous|above|new|revised|rewritten|same)\s+)?"
+    r"(?:prompt|description|text|version|reply)s?\b"
+    r"|\b(?:prompt|description|text|version)\s+above\b"
+    r"|\b(?:of|from)\s+(?:that|this|it)(?=\s*(?:please|now|again|for\s+me)?\s*[.!?]*\s*$)",
+    re.IGNORECASE,
+)
+# Words that add nothing to such a reference: no subject, style or change.
+_REFERENCE_ONLY_WORDS = frozenset("""
+    generate render create make draw produce paint do run try give show use using with from
+    based on of for me us the a an that this it its those these them one ones image images
+    picture pictures photo photos pic pics prompt prompts version description scene text reply
+    above last previous latest same new revised rewritten again now please pls ok okay yes yeah
+    yep sure great perfect cool nice good alright awesome thanks thank you can could would will
+    go ahead and then just let's lets let see i i'd like want to so how looks look more time
+    once also
+""".split())
+
+
+def earlier_picture_reference(message: str) -> Optional[str]:
+    """How a picture request points back at the conversation.
+
+    "only": the request is nothing but the reference ("generate that image
+    please"), so the prompt is the one already written. "changed": it points back
+    and asks for more ("that image, but with a stormy sky"), which the chat model
+    folds into the earlier prompt. None: the request names its own subject.
+    """
+    if not message or not _EARLIER_PICTURE_RE.search(message):
+        return None
+    words = re.findall(r"[a-z0-9']+", message.lower().replace("’", "'"))
+    return "only" if all(w in _REFERENCE_ONLY_WORDS for w in words) else "changed"
+
+
+# Replies that are not a prompt: a failed or stopped render, the placeholder for a
+# reply stopped before it began, and the summary of older turns.
+_NOT_A_PROMPT_REPLY_PREFIXES = (
+    "Sorry, that didn't work", "Stopped by the user", "(stopped before any output)",
+    "Earlier conversation summary:",
+)
+_RENDER_DONE_REPLIES = ("Here's the generated image.", "Here's the generated video.")
+
+
+def _prompt_in_reply(reply: str) -> Optional[str]:
+    """The image prompt a chat reply holds: a tool call written as text, else its
+    longest fenced block, else the reply without an introducing line ending in a
+    colon. None when it is too short to be a prompt."""
+    from backend.services.image_prompt_sanitize import sanitize_image_prompt
+    text = _media_call_as_text(reply)
+    if text is None:
+        blocks = re.findall(r"```[^\n]*\n(.*?)```", reply, re.DOTALL)
+        text = max(blocks, key=len) if blocks else reply
+        lines = text.strip().splitlines()
+        if len(lines) > 1 and lines[0].rstrip().endswith(":"):
+            text = "\n".join(lines[1:])
+    text = sanitize_image_prompt(text.replace("**", ""))
+    return text if len(text.split()) >= 4 else None
+
+
 def user_wants_image_edit(message: str, has_recent_image: bool,
                           has_stale_image: bool = False) -> bool:
     """True when the message asks to change a picture the session already has.
@@ -1580,6 +1659,9 @@ def _remember_session_image(session_id: str, path: str) -> None:
 
 # Pending image prompt after GPU-busy or failed generate_image — enables "try again" retry.
 _SESSION_PENDING_IMAGE_PROMPT: Dict[str, str] = {}
+# Prompt of the session's last finished picture, for "generate that image again"
+# while that picture is in focus.
+_SESSION_LAST_IMAGE_PROMPT: Dict[str, str] = {}
 # Pending edit (instruction + source image path) after GPU-busy edit_image failure.
 _SESSION_PENDING_IMAGE_EDIT: Dict[str, Dict[str, str]] = {}
 
@@ -2817,8 +2899,8 @@ class UnifiedChatEngine:
         if picture_note:
             context_parts.append(picture_note)
         if withheld_tools:
-            from backend.services.chat_prompt_blocks import WRITE_THE_TEXT_NOTE
-            context_parts.append(WRITE_THE_TEXT_NOTE)
+            from backend.services.chat_prompt_blocks import REWRITE_THE_TEXT_NOTE, WRITE_THE_TEXT_NOTE
+            context_parts.append(REWRITE_THE_TEXT_NOTE if asks_for_rewrite(message) else WRITE_THE_TEXT_NOTE)
         from backend.services.context_providers import (
             PAGE_PROVIDER_NAME,
             build_context_entries,
@@ -3070,6 +3152,11 @@ class UnifiedChatEngine:
                 logger.info(f"[UNIFIED_ENGINE] iter={iteration} TOOL_CALLS: {tool_names}")
             else:
                 final_text = parsed.final_answer or llm_response.strip()
+                written_call = _media_call_as_text(final_text)
+                if written_call:
+                    # Shown and saved as the prompt it holds; it never runs.
+                    final_text = written_call
+                    emit_fn("chat:token", {"content": final_text, "reset": True, "session_id": session_id})
                 # A tool-list echo is non-empty, so the reasoning-only retry in
                 # _call_llm_streaming never sees it; repeat the turn once here,
                 # thinking off, the same way. Per-request engine, so _think is
@@ -3353,10 +3440,12 @@ class UnifiedChatEngine:
                             "session_id": session_id,
                         })
                     if t_name == "generate_image":
+                        prompt_val = (t_params or {}).get("prompt") or (res.metadata or {}).get("prompt")
                         if res.success:
                             _SESSION_PENDING_IMAGE_PROMPT.pop(session_id, None)
+                            if prompt_val:
+                                _SESSION_LAST_IMAGE_PROMPT[session_id] = prompt_val
                         elif not res.success:
-                            prompt_val = (t_params or {}).get("prompt") or (res.metadata or {}).get("prompt")
                             if prompt_val:
                                 _SESSION_PENDING_IMAGE_PROMPT[session_id] = prompt_val
                     # Emit video event if tool result contains a video URL
@@ -4263,6 +4352,8 @@ class UnifiedChatEngine:
             prompt_val = params.get("prompt") or (result.metadata or {}).get("prompt")
             if result.success:
                 _SESSION_PENDING_IMAGE_PROMPT.pop(session_id, None)
+                if prompt_val:
+                    _SESSION_LAST_IMAGE_PROMPT[session_id] = prompt_val
             elif prompt_val and result.error and (
                 "gpu is busy" in (result.error or "").lower()
                 or "try again" in (result.error or "").lower()
@@ -4295,6 +4386,8 @@ class UnifiedChatEngine:
                 params.get("query") or user_message, result.output, emit_fn, session_id)
         elif result.success:
             response = str(result.output)
+        elif (result.metadata or {}).get("stopped"):
+            response = result.error
         else:
             response = f"Sorry, that didn't work: {result.error}"
 
@@ -4677,6 +4770,19 @@ class UnifiedChatEngine:
         prompt = sanitize_image_prompt(message)
         if not prompt:
             return None
+        reference = None if getattr(self, "_image_data", None) else earlier_picture_reference(message)
+        if reference == "changed":
+            # The chat model has the conversation and the image tools, and folds
+            # the change into the earlier prompt.
+            return None
+        if reference == "only":
+            prompt = self._earlier_image_prompt(session_id, options)
+            if not prompt:
+                return self._pipeline_usage_notice(
+                    session_id, emit_fn, request_id, message,
+                    "I don't see a prompt earlier in this chat to render. Paste it, or "
+                    "describe the picture you want.",
+                )
         logger.info("Image-gen direct (natural lang): generate_image(prompt=%r)", prompt[:80])
         # Delegate everything (user save, tool_call emit, model injection via /imagemodel,
         # gpu lease, execute, chat:image, complete, assistant save) to the shared runner.
@@ -4711,6 +4817,26 @@ class UnifiedChatEngine:
         return self._run_direct_tool_execution(
             "generate_video", params, session_id, emit_fn, request_id, message, options
         )
+
+    def _earlier_image_prompt(self, session_id: str,
+                              options: Optional[Dict[str, Any]] = None) -> Optional[str]:
+        """The prompt "generate that image" points at: the picture made last turn,
+        else the chat's latest written reply. None when there is neither."""
+        if session_id in _SESSION_IMAGE_FOCUS and _SESSION_LAST_IMAGE_PROMPT.get(session_id):
+            return _SESSION_LAST_IMAGE_PROMPT[session_id]
+        history = (options or {}).get("history")
+        if not isinstance(history, list):
+            history = self._load_history(session_id, limit=6)
+        for turn in reversed(history):
+            if not isinstance(turn, dict) or turn.get("role") != "assistant":
+                continue
+            reply = (turn.get("content") or "").strip()
+            if not reply or reply.startswith(_NOT_A_PROMPT_REPLY_PREFIXES):
+                continue
+            if reply in _RENDER_DONE_REPLIES:
+                return None
+            return _prompt_in_reply(reply)
+        return None
 
     def _video_first_frame(self, message: str, session_id: str) -> Optional[str]:
         """The picture a video request animates, when it points back at one
