@@ -669,3 +669,19 @@ class TestDeclinedOrWrittenMediaIsNotRendered:
         from backend.services.agent_brain import is_pure_image_request
         assert is_pure_image_request("draw a cat") is True
         assert is_pure_image_request("don't draw a picture, describe a cat") is False
+
+
+class TestImageExampleFollowsTheOffer:
+    """The prompt's generate_image example made the model call a tool it was
+    not offered, for a request to write a prompt for an image model."""
+
+    def test_no_image_example_without_the_tool(self):
+        from backend.services.chat_prompt_blocks import build_chat_tools_prompt_tail
+        tail = build_chat_tools_prompt_tail("- web_search(query:string) - Search the web")
+        assert "<tool>generate_image</tool>" not in tail
+        assert "<tool>web_search</tool>" in tail
+
+    def test_image_example_with_the_tool(self):
+        from backend.services.chat_prompt_blocks import build_chat_tools_prompt_tail
+        tail = build_chat_tools_prompt_tail("- generate_image(prompt:string) - Generate an image")
+        assert "<tool>generate_image</tool>" in tail

@@ -2816,6 +2816,9 @@ class UnifiedChatEngine:
         picture_note = attached_picture_note(message, history, bool(self._image_data))
         if picture_note:
             context_parts.append(picture_note)
+        if withheld_tools:
+            from backend.services.chat_prompt_blocks import WRITE_THE_TEXT_NOTE
+            context_parts.append(WRITE_THE_TEXT_NOTE)
         from backend.services.context_providers import (
             PAGE_PROVIDER_NAME,
             build_context_entries,
@@ -3189,8 +3192,9 @@ class UnifiedChatEngine:
                     # The model can name a tool it was not offered; the prompt's
                     # own generate_image example invites it.
                     allowed, block_reason = False, (
-                        "The user asked for text, not a generated image or video. "
-                        "Write the answer as text."
+                        f"{tool_name} is not available for this request: the user asked for "
+                        "written text. Write the full text they asked for in your reply now, "
+                        "without calling a tool."
                     )
                 else:
                     allowed, block_reason = guard.check_call(tool_name, params)
