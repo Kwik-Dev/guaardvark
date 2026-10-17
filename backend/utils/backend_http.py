@@ -76,19 +76,25 @@ def backend_base_url() -> str:
     url = (os.environ.get("GUAARDVARK_URL") or "").strip()
     if url:
         return url.rstrip("/")
+    return own_backend_url()
+
+
+def own_backend_url() -> str:
+    """This checkout's backend on this machine, whatever ``GUAARDVARK_URL`` says."""
     return f"http://127.0.0.1:{backend_port()}"
 
 
-def backend_api_key() -> str:
+def backend_api_key(own_backend: bool = False) -> str:
     """The API key to send, or "".
 
-    For this checkout's own backend (no ``GUAARDVARK_URL``), the key in its
-    ``.env`` comes first and is read on every call: that is the key the backend
-    runs with, and Settings → Access rewrites it, so a key created or replaced
-    there works here without restarting the MCP client. Otherwise, and when
-    ``.env`` has none, ``GUAARDVARK_API_KEY`` from this process's environment.
+    For this checkout's own backend (no ``GUAARDVARK_URL``, or ``own_backend``),
+    the key in its ``.env`` comes first and is read on every call: that is the
+    key the backend runs with, and Settings → Access rewrites it, so a key
+    created or replaced there works here without restarting the MCP client.
+    Otherwise, and when ``.env`` has none, ``GUAARDVARK_API_KEY`` from this
+    process's environment.
     """
-    if not (os.environ.get("GUAARDVARK_URL") or "").strip():
+    if own_backend or not (os.environ.get("GUAARDVARK_URL") or "").strip():
         saved = _checkout_env_value("GUAARDVARK_API_KEY")
         if saved:
             return saved
@@ -162,13 +168,19 @@ def request_json(
     connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
     read_timeout: float = DEFAULT_READ_TIMEOUT,
     headers: Optional[Mapping[str, str]] = None,
+    own_backend: bool = False,
 ) -> BackendResponse:
-    """One call to the backend REST API. Raises ``BackendError`` on failure."""
+    """One call to the backend REST API. Raises ``BackendError`` on failure.
+
+    ``own_backend`` sends it to this checkout's backend on this machine
+    (``own_backend_url``) even where ``GUAARDVARK_URL`` names another one: for a
+    worker handing the backend work that carries local content.
+    """
     import requests
 
-    base = backend_base_url()
+    base = own_backend_url() if own_backend else backend_base_url()
     send_headers = dict(headers or {})
-    api_key = backend_api_key()
+    api_key = backend_api_key(own_backend)
     if api_key:
         send_headers[API_KEY_HEADER] = api_key
 

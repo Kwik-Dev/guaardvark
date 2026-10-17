@@ -792,3 +792,39 @@ def reranker_install():
     """Download the reranker's weights (Settings > Knowledge > Install). Searches never do."""
     from backend.utils import reranker
     return jsonify(reranker.start_install()), 202
+
+
+@index_mgmt_bp.route("/reranker/score", methods=["POST"])
+def reranker_score():
+    """Score passages against a query with chat's reranker, on the GPU only.
+
+    Called by Celery workers, which cannot see the GPU (reranker.rerank).
+    Body: {"query": str, "passages": [str, ...], "model": str (optional)}.
+    Answers 200 with {"applied": true, "scores": [one per passage, in order],
+    "model", "device"}, or {"applied": false, "reason"} when the reranker here
+    is off, is another model, or cannot run on the GPU now; the worker then
+    scores on its own CPU. It reads only the text it is sent and stores
+    nothing. Like every POST under /api/meta it answers this machine, the API
+    key, and the local network while Network access is on
+    (backend/utils/auth_guard.py).
+
+    It does not wait for a chat turn (job_arbiter): a pass takes well under a
+    second on the model chat itself holds, and background callers such as a
+    research run already pause between units of work while chat runs.
+    """
+    from backend.utils import reranker
+
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "expected a JSON object"}), 400
+    query, passages, model = body.get("query"), body.get("passages"), body.get("model")
+    if not isinstance(query, str) or len(query) > reranker.MAX_REMOTE_QUERY_CHARS:
+        return jsonify({"error": f"query must be a string of at most "
+                                 f"{reranker.MAX_REMOTE_QUERY_CHARS} characters"}), 400
+    if (not isinstance(passages, list) or len(passages) > reranker.MAX_REMOTE_PASSAGES
+            or not all(isinstance(p, str) for p in passages)):
+        return jsonify({"error": f"passages must be a list of at most "
+                                 f"{reranker.MAX_REMOTE_PASSAGES} strings"}), 400
+    if model is not None and not isinstance(model, str):
+        return jsonify({"error": "model must be a string"}), 400
+    return jsonify(reranker.score_on_gpu(query, passages, model=model)), 200
