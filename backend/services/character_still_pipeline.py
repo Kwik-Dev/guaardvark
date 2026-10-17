@@ -20,8 +20,9 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Iterable, Literal, Optional, Sequence
+from typing import Any, Callable, Iterable, Literal, Optional, Sequence
 
+from backend.services.gpu_resource_policy import RenderStopped
 from backend.services.stills_pipeline import StillResult
 
 log = logging.getLogger(__name__)
@@ -139,6 +140,7 @@ def render_character_still(
     keep_pipeline: bool = True,
     hold_gpu: bool = False,
     image_model: str | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> StillResult:
     """Render one identity-locked still. Never raises — returns StillResult.
 
@@ -149,6 +151,9 @@ def render_character_still(
     Members holding LoRAs for several bases render with the one for that model,
     and the render is refused when a member has none; see
     ``cast_lora_selection``.
+
+    ``should_stop`` ends the render once it answers True; the result then has
+    ``metadata["stopped"]`` set.
     """
     from backend.services.cast_lock import apply_lock, resolve_lora_strength
     from backend.services.image_prompt_sanitize import sanitize_image_prompt
@@ -353,9 +358,12 @@ def render_character_still(
                 loras=list(paths) if paths else None,
                 lora_scale=strength,
                 keep_pipeline_loaded=keep_pipeline,
+                should_stop=should_stop,
             ))
             st = (getattr(result, "metadata", None) or {}).get("steps", st)
             meta["steps"] = st
+            if (getattr(result, "metadata", None) or {}).get("stopped"):
+                meta["stopped"] = True
             if not result.success or not result.image_path:
                 return StillResult(
                     success=False,
@@ -412,6 +420,7 @@ def render_character_still(
             steps_explicit=steps_explicit,
             model=model_tag,
             negative_prompt=negative_prompt or None,
+            should_stop=should_stop,
             **extra,
         )
         st = getattr(gen, "last_steps", st)
@@ -441,6 +450,15 @@ def render_character_still(
             steps=st,
             guidance=g,
             enhance_mode=enhance or "none",
+            generation_time=time.time() - t0,
+            metadata=meta,
+        )
+    except RenderStopped:
+        meta["stopped"] = True
+        return StillResult(
+            success=False,
+            error="Stopped before the image finished; nothing was saved.",
+            prompt_used=final_prompt,
             generation_time=time.time() - t0,
             metadata=meta,
         )

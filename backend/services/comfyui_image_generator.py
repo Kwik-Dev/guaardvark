@@ -840,9 +840,15 @@ class ComfyUIImageGenerator:
         resp.raise_for_status()
         return resp.json().get("prompt_id")
 
-    def _wait(self, prompt_id: str, timeout: int = 300) -> Optional[dict]:
+    def _wait(self, prompt_id: str, timeout: int = 300, should_stop=None) -> Optional[dict]:
+        """Poll for the prompt's outputs; None on timeout. When ``should_stop``
+        answers True the prompt is cancelled and RenderStopped is raised."""
         start = time.time()
         while time.time() - start < timeout:
+            if should_stop is not None and should_stop():
+                self._cancel(prompt_id)
+                from backend.services.gpu_resource_policy import RenderStopped
+                raise RenderStopped(f"while ComfyUI rendered prompt {prompt_id}")
             try:
                 resp = requests.get(f"{self.comfy_url}/history/{prompt_id}", timeout=5)
                 resp.raise_for_status()
@@ -853,6 +859,21 @@ class ComfyUIImageGenerator:
                 logger.warning("ComfyUI history poll error: %s", e)
             time.sleep(2)
         return None
+
+    def _cancel(self, prompt_id: str) -> None:
+        """Drop one prompt from ComfyUI, pending or running, and nothing else.
+
+        ComfyUI is shared with the Studio and batch runs, so neither the bare
+        ``/interrupt`` nor ``/queue {"clear": true}`` is used. The queue delete
+        goes first: ``/interrupt`` with a prompt_id acts only on a running
+        prompt, so in the other order a prompt that started between the two
+        calls would render to the end.
+        """
+        for route, body in (("queue", {"delete": [prompt_id]}), ("interrupt", {"prompt_id": prompt_id})):
+            try:
+                requests.post(f"{self.comfy_url}/{route}", json=body, timeout=5)
+            except requests.exceptions.RequestException as e:
+                logger.warning("ComfyUI /%s for stopped prompt %s failed: %s", route, prompt_id, e)
 
     def _fetch_first_image(self, outputs: dict, output_path: str) -> Optional[str]:
         for node_output in outputs.values():
@@ -1188,17 +1209,19 @@ class ComfyUIImageGenerator:
         return gpu_session(JobKind.VIDEO_RENDER, op_id, on_busy="raise", **session_kwargs)
 
     def _run_edit_graph(self, workflow: dict, output_path: str, *, job: str, vram_mb: int, timeout: int,
-                        gpu_wait: dict | None = None) -> str:
+                        gpu_wait: dict | None = None, should_stop=None) -> str:
         import uuid as _uuid
+        from backend.services.gpu_resource_policy import raise_if_stopped
         with self._edit_gpu_session(
             f"{job}_{_uuid.uuid4().hex[:8]}", gpu_wait,
             evict_ollama=True, free_comfyui=True,
             vram_estimate_mb=vram_mb, require_fit=True, cross_process=True,
         ):
+            raise_if_stopped(should_stop, "before ComfyUI was given the graph")
             prompt_id = self._queue(workflow)
             if not prompt_id:
                 raise RuntimeError("ComfyUI did not accept the image workflow")
-            outputs = self._wait(prompt_id, timeout=timeout)
+            outputs = self._wait(prompt_id, timeout=timeout, should_stop=should_stop)
             if outputs is None:
                 raise RuntimeError(f"ComfyUI image job timed out (prompt {prompt_id})")
             result = self._fetch_first_image(outputs, output_path)
@@ -1395,12 +1418,16 @@ class ComfyUIImageGenerator:
         steps_explicit: bool = False,
         model: str | None = None,  # e.g. keyframe_model from MV settings ("flux-schnell", "sdxl"...)
         admit_vram_mb: int | None = None,
+        should_stop=None,
     ) -> str:
         """Render one still on the ComfyUI graph ``model`` names.
 
         ``admit_vram_mb`` claims the GPU for the render the way a chat edit does
         (refuse when busy, require the estimate to fit); callers that already
         hold a session (the batch runner) leave it None.
+
+        ``should_stop`` is polled while the prompt waits and renders; True
+        cancels this prompt only and raises RenderStopped.
         """
         self._require_up(
             f"ComfyUI not reachable at {self.comfy_url} — cannot generate storyboard image"
@@ -1444,13 +1471,16 @@ class ComfyUIImageGenerator:
         if admit_vram_mb:
             result = self._run_edit_graph(
                 workflow, output_path, job="stills_comfy", vram_mb=int(admit_vram_mb), timeout=300,
+                should_stop=should_stop,
             )
         else:
+            from backend.services.gpu_resource_policy import raise_if_stopped
+            raise_if_stopped(should_stop, "before ComfyUI was given the graph")
             prompt_id = self._queue(workflow)
             if not prompt_id:
                 raise RuntimeError("ComfyUI did not accept the image workflow")
 
-            outputs = self._wait(prompt_id)
+            outputs = self._wait(prompt_id, should_stop=should_stop)
             if outputs is None:
                 raise RuntimeError(f"ComfyUI image generation timed out (prompt {prompt_id})")
 

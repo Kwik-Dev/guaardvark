@@ -227,7 +227,7 @@ def test_admission_wraps_the_render_like_an_edit(monkeypatch, tmp_path):
     monkeypatch.setattr(gen, "_require_up", lambda msg: None)
     seen = {}
 
-    def fake_run(workflow, output_path, *, job, vram_mb, timeout, gpu_wait=None):
+    def fake_run(workflow, output_path, *, job, vram_mb, timeout, gpu_wait=None, should_stop=None):
         seen.update(job=job, vram_mb=vram_mb, workflow=workflow)
         return output_path
 

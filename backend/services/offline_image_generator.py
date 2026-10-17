@@ -5,7 +5,7 @@ import os
 import re
 import uuid
 import time
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple, Callable
 from pathlib import Path
 from dataclasses import dataclass
 from datetime import datetime
@@ -196,6 +196,10 @@ class ImageGenerationRequest:
     # product sets it: the Studio, chat, agents, MCP and edits all refuse a
     # missing model with where to install it, and Install fetches it.
     allow_model_download: bool = False
+    # Asked before the model loads, after it loads and on every denoise step;
+    # True ends the render without decoding or saving, and the result carries
+    # metadata {"stopped": True}. Chat passes its turn's Stop check here.
+    should_stop: Optional[Callable[[], bool]] = None
 
 @dataclass
 class ImageGenerationResult:
@@ -1236,6 +1240,26 @@ class OfflineImageGenerator:
                     "to protect the machine — close other applications or reduce "
                     "resolution."
                 )
+            return callback_kwargs
+
+        return _cb
+
+    def _denoise_callback(self, should_stop: Optional[Callable[[], bool]] = None):
+        """Per-step denoise callback: the RAM watchdog, plus the caller's stop
+        check when one is given. None when there is neither.
+
+        A stop raises RenderStopped for the same reason the watchdog raises:
+        pipeline._interrupt would still run the VAE decode and hand back an image.
+        """
+        watchdog = self._ram_watchdog_callback()
+        if should_stop is None:
+            return watchdog
+        from backend.services.gpu_resource_policy import raise_if_stopped
+
+        def _cb(pipe, step, timestep, callback_kwargs):
+            raise_if_stopped(should_stop, f"at denoise step {step}")
+            if watchdog is not None:
+                return watchdog(pipe, step, timestep, callback_kwargs)
             return callback_kwargs
 
         return _cb
@@ -2652,7 +2676,7 @@ Negative Prompt: {negative_prompt}""",
             # Central gpu_session for *all* direct calls (chat tool, batch, API, edits via img2img).
             # Provides GPU lease + evict + GlobalLoadGate RAM/swap admission using our real estimates.
             # Reentrant-safe; chat tool may outer-wrap.
-            from backend.services.gpu_resource_policy import gpu_session
+            from backend.services.gpu_resource_policy import RenderStopped, gpu_session, raise_if_stopped
             from backend.services.job_operation_gate import GpuBusyError
             from backend.services.job_types import JobKind
             import uuid as _uuid_local
@@ -2800,6 +2824,10 @@ Negative Prompt: {negative_prompt}""",
 
                 # (Resolution clamp moved ABOVE the estimates — 2026-08-04.)
 
+                # A stop while the GPU was being claimed ends here, before any
+                # eviction or load.
+                raise_if_stopped(request.should_stop, "before the model loaded")
+
                 # Make room BEFORE loading — family-aware estimate + Ollama eviction
                 # when the card is too full. Runs after ALL model rerouting so the
                 # estimate matches the model we actually load.
@@ -2815,6 +2843,9 @@ Negative Prompt: {negative_prompt}""",
                         f"Model {request.model} ({model_id}) failed to load: {result.error}"
                     )
                     return result
+
+                # A load takes seconds to tens of seconds; a stop during it ends here.
+                raise_if_stopped(request.should_stop, "after the model loaded")
 
                 # Pin sd:pipeline for the duration of this forward so idle eviction
                 # cannot null scheduler mid-denoise (300s default timeout).
@@ -2997,7 +3028,8 @@ Negative Prompt: {negative_prompt}""",
 
                 # Mid-denoise RAM floor (2026-08-04): admission can't guard a
                 # minutes-long forward; the watchdog aborts per-step on breach.
-                _watchdog = self._ram_watchdog_callback()
+                # The same callback ends the forward when the caller stops.
+                _watchdog = self._denoise_callback(request.should_stop)
                 _watchdog_kwargs = (
                     {"callback_on_step_end": _watchdog} if _watchdog else {}
                 )
@@ -3392,6 +3424,14 @@ Negative Prompt: {negative_prompt}""",
                 except Exception:
                     pass
 
+            except RenderStopped as stopped:
+                # The finally below unloads the pipeline and releases the GPU
+                # session; detach first so the forward's frames do not pin it.
+                logger.info("Image generation %s", stopped)
+                _detach_exception(stopped)
+                result.error = "Stopped before the image finished; nothing was saved."
+                result.metadata = {"stopped": True}
+                result.generation_time = time.time() - start_time
             except Exception as e:
                 logger.error(f"Image generation failed: {type(e).__name__}: {e}", exc_info=True)
                 if is_fatal_cuda_error(e):

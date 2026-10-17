@@ -366,6 +366,9 @@ class ImageGeneratorTool(BaseTool):
                 via_http=remote, wait=wait_for_result and remote,
             )
 
+        # Inside a chat turn, Stop ends this render: only the one this call
+        # starts, never a Studio or batch job sharing the GPU or ComfyUI.
+        should_stop = _chat_stop_check()
         try:
             if sid_list:
                 from backend.services.character_still_pipeline import render_character_still
@@ -388,6 +391,7 @@ class ImageGeneratorTool(BaseTool):
                     style=style,
                     keep_pipeline=False,
                     image_model=model,
+                    should_stop=should_stop,
                 )
                 results = [still]
                 cast_used = True
@@ -412,11 +416,14 @@ class ImageGeneratorTool(BaseTool):
                     restore_faces=bool(kwargs.get("restore_faces", False)),
                     hold_gpu=True,
                     replace_legacy_sd_markers=False,
+                    should_stop=should_stop,
                 )
                 cast_used = False
             still = results[0] if results else None
             if not still:
                 return ToolResult(success=False, error="No result from stills pipeline")
+            if not still.success and (still.metadata or {}).get("stopped"):
+                return ToolResult(success=False, error=_RENDER_STOPPED, metadata={"stopped": True})
 
             if still.success and still.image_path and (
                 still.image_url or os.path.exists(still.image_path)
@@ -2363,6 +2370,18 @@ def _job_gpu_wait() -> dict | None:
         return None
     return {"wait_s": _image_vram_wait_s(), "on_wait": _tool_jobs.note_gpu_wait,
             "should_stop": None, "still_busy": _JOB_GPU_STILL_BUSY}
+
+
+_RENDER_STOPPED = (
+    "Stopped by the user before the image finished. The render was cancelled and "
+    "nothing was saved."
+)
+
+
+def _chat_stop_check():
+    """The running chat turn's Stop check, or None outside a chat turn."""
+    from backend.services.agent_control_service import get_chat_stop_check
+    return get_chat_stop_check()
 
 
 def _chat_gpu_wait() -> dict | None:
