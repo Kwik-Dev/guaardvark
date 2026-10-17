@@ -183,6 +183,7 @@ def test_same_class_is_first_come_first_served(arbiter):
 
 def test_a_refused_try_keeps_its_place_and_its_waiting_time(arbiter):
     first = _open("video_batch", "VideoBatch_1")
+    arbiter.clock.advance(1)
     with pytest.raises(GpuBusyError):
         with job_arbiter.gpu_admission(JobKind.VIDEO_RENDER, "mv_1_0") as adm:
             assert adm.turn()[0] is False
@@ -197,6 +198,7 @@ def test_a_refused_try_keeps_its_place_and_its_waiting_time(arbiter):
 
 def test_a_single_shot_caller_that_is_refused_leaves_the_line(arbiter):
     _open("video_batch", "VideoBatch_1").turn()
+    arbiter.clock.advance(1)
     with pytest.raises(GpuQueuedError):
         with job_arbiter.gpu_admission(JobKind.VIDEO_RENDER, "prod_7", polls=False) as stage:
             ok, reason = stage.turn()
@@ -228,6 +230,7 @@ def test_a_job_that_fails_for_good_leaves_the_line(arbiter):
 def test_a_job_asleep_in_a_backoff_does_not_hold_the_line(arbiter):
     head = _open("video_batch", "VideoBatch_1")
     assert head.turn()[0] is True
+    arbiter.clock.advance(1)
     behind = _open("image_batch", "ImageBatch_1")
     assert behind.turn()[0] is False
     arbiter.clock.advance(data.HEAD_FRESH_S + 1)
@@ -239,8 +242,9 @@ def test_a_requeueing_caller_keeps_the_head_through_its_countdown(arbiter):
         with job_arbiter.gpu_admission(JobKind.VIDEO_RENDER, "mv_1_0", polls=False) as clip:
             assert clip.turn()[0] is True
             raise GpuBusyError("GPU is held by another process")
+    arbiter.clock.advance(1)
     other = _open("video_batch", "VideoBatch_1")
-    arbiter.clock.advance(12)  # music_video_tasks requeues with countdown=12
+    arbiter.clock.advance(11)  # music_video_tasks requeues with countdown=12
     assert other.turn()[0] is False
     arbiter.clock.advance(data.RETRY_FRESH_S)
     assert other.turn()[0] is True
