@@ -18,8 +18,9 @@ The file is capped at ``MAX_BYTES``; on reaching it the file moves to ``.1``
 disk. A turn row is 1.1-1.3 KB, so each file holds about 8,000 turns and the
 three together a 14-day shadow window at well over 1,000 turns a day.
 
-Off by default. Set ``GUAARDVARK_DECISION_TELEMETRY=true`` to write rows (a shadow
-run of the decision layer needs them).
+Off by default, with one exception: a question row for a decision in shadow
+mode is always written, since collecting those rows is what shadow is for. Set
+``GUAARDVARK_DECISION_TELEMETRY=true`` to write every row, turn rows included.
 """
 
 from __future__ import annotations
@@ -93,9 +94,10 @@ def _rotate(path: str) -> None:
     os.replace(path, f"{path}.1")
 
 
-def append_row(row: Dict[str, Any]) -> bool:
-    """Append one row; True when written. Never raises."""
-    if not telemetry_enabled():
+def append_row(row: Dict[str, Any], force: bool = False) -> bool:
+    """Append one row; True when written. Never raises. force writes it with the
+    switch off (a shadow question row)."""
+    if not (force or telemetry_enabled()):
         return False
     try:
         line = json.dumps(row, ensure_ascii=False, default=str) + "\n"
@@ -186,7 +188,7 @@ def write_question(
         }
         if debug:
             row["state"] = state
-        return append_row(row)
+        return append_row(row, force=(mode == "shadow"))
     except Exception as e:
         logger.debug("decision telemetry question row skipped: %s", e)
         return False
