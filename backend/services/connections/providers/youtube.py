@@ -329,7 +329,7 @@ def _watch_url(video_id) -> str | None:
 
 def publish(ctx: ConnCtx, req: PublishRequest, on_progress: ProgressFn) -> PublishResult:
     # Public requires both an explicit request and an operator opt-in.
-    visibility = req.visibility or "private"
+    visibility = req.visibility or SPEC.capabilities.default_visibility
     if visibility != "private" and not _public_publish_allowed():
         visibility = "private"
 

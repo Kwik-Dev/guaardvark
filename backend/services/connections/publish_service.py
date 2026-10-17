@@ -78,12 +78,16 @@ def preflight(
     body: str = "",
     title: Optional[str] = None,
     visibility: Optional[str] = None,
+    visibilities: Optional[Dict[str, Any]] = None,
     scheduled_at: Optional[datetime] = None,
     ai_disclosure: Optional[bool] = None,
     requested_by: str = "ui",
     post_options: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Validate without queueing, for live feedback in the compose modal."""
+    """Validate without queueing, for live feedback in the compose modal.
+
+    Each target's entry carries ``visibility``, the one it would be sent with.
+    """
     from backend.models import Connection
 
     stopped = gates.posting_stop_reason()
@@ -109,10 +113,11 @@ def preflight(
         if not problems:
             spec = registry.spec_for(connection.provider)
             caps = spec.capabilities
+            target_visibility = visibility_for(caps, chosen_visibility(cid, visibility, visibilities))
             disclosed, required = disclosure_for(caps, items, requested_by, ai_disclosure)
             final_body = compose_body(body, items, connection, caps, disclosed)
             problems = media_util.validate_against(
-                caps, items, body=final_body, title=title, visibility=visibility
+                caps, items, body=final_body, title=title, visibility=target_visibility
             )
             problems += post_field_problems(spec, options_for(spec, post_options))
             problems += schedule_problems(caps, scheduled_at)
@@ -124,13 +129,13 @@ def preflight(
                 if not verdict.allowed:
                     problems.append(verdict.reason)
             entry["body"] = final_body
+            entry["visibility"] = target_visibility
             entry["ai_disclosure"] = {
                 **caps.ai_disclosure.to_dict(),
                 "required": required,
                 "applied": disclosed,
             }
             if scheduled_at is not None:
-                target_visibility = visibility or caps.default_visibility
                 mode = scheduling.plan(caps, scheduled_at, target_visibility)
                 entry["schedule"] = {
                     "mode": mode,
@@ -148,6 +153,25 @@ def preflight(
         "per_connection": per_connection,
         "violations": general,
     }
+
+
+def chosen_visibility(connection_id, visibility: Optional[str], visibilities: Optional[Dict[str, Any]]):
+    """The visibility a person picked for one target: its own entry in
+    ``visibilities`` ({connection id: value}), else ``visibility``, which
+    applies to every target, else None."""
+    if isinstance(visibilities, dict):
+        own = visibilities.get(str(connection_id), visibilities.get(connection_id))
+        if own is not None and str(own).strip():
+            return own
+    return visibility
+
+
+def visibility_for(caps, chosen) -> str:
+    """What a target is sent with: the chosen visibility, or the platform's
+    declared default when none was chosen. Stored on the record as such, so
+    the record shows what went out."""
+    text = "" if chosen is None else str(chosen).strip()
+    return text or caps.default_visibility
 
 
 def disclosure_for(caps, items, requested_by: str, choice: Optional[bool]) -> Tuple[bool, bool]:
@@ -271,6 +295,7 @@ def queue_publish(
     link_url: Optional[str] = None,
     tags: Optional[List[str]] = None,
     visibility: Optional[str] = None,
+    visibilities: Optional[Dict[str, Any]] = None,
     requested_by: str = "ui",
     scheduled_at: Optional[datetime] = None,
     ai_disclosure: Optional[bool] = None,
@@ -279,7 +304,9 @@ def queue_publish(
     """Create one PublishRecord (+ Task) per connection and release or hold them.
 
     Every target is validated before any record is written, so a refusal for
-    one destination does not leave the others half-queued.
+    one destination does not leave the others half-queued. A target takes its
+    entry in ``visibilities`` ({connection id: value}), else ``visibility``,
+    else its platform's default (``visibility_for``).
 
     Raises:
         ValueError: nothing selected, a bad time, or the post violates a target's limits.
@@ -314,7 +341,7 @@ def queue_publish(
         problems = connection_problems(connection)
         spec = registry.spec_for(connection.provider)
         caps = spec.capabilities
-        target_visibility = visibility or caps.default_visibility
+        target_visibility = visibility_for(caps, chosen_visibility(cid, visibility, visibilities))
         disclosed, _required = disclosure_for(caps, items, requested_by, ai_disclosure)
         final_body = compose_body(body, items, connection, caps, disclosed)
         problems += media_util.validate_against(
@@ -640,7 +667,7 @@ def _check_edit(record, changes: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[s
     items = _record_media(record)
     disclosed, required = disclosure_for(caps, items, record.requested_by, wanted["ai_disclosure"])
     body = compose_body(wanted["body"], items, connection, caps, disclosed)
-    visibility = wanted["visibility"] or caps.default_visibility
+    visibility = visibility_for(caps, wanted["visibility"])
     options = options_for(spec, wanted["post_options"])
     problems = media_util.validate_against(
         caps, items, body=body, title=wanted["title"], visibility=visibility
@@ -650,6 +677,7 @@ def _check_edit(record, changes: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[s
     problems += bot_label_problems(caps, connection)
 
     entry["body"] = body
+    entry["visibility"] = visibility
     entry["ai_disclosure"] = {**caps.ai_disclosure.to_dict(), "required": required, "applied": disclosed}
     if scheduled_at is not None and scheduled_at > datetime.now():
         mode = scheduling.plan(caps, scheduled_at, visibility)

@@ -1,14 +1,17 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  defaultVisibility,
   deleteOnPlatform,
   describeDisclosure,
   describeScheduling,
   describeWindow,
+  fixedVisibilityNote,
   mergePostFields,
   sharedVisibilities,
   statusLabel,
   strictestLimit,
+  visibilityChoices,
 } from "../platformRules";
 
 const HOUR = 3600;
@@ -113,5 +116,35 @@ describe("strictestLimit and sharedVisibilities", () => {
   it("keeps the visibilities every declaring target accepts", () => {
     expect(sharedVisibilities(specs)).toEqual(["public", "unlisted"]);
     expect(sharedVisibilities([])).toEqual([]);
+  });
+});
+
+describe("visibility per target", () => {
+  const mastodon = {
+    capabilities: { visibilities: ["public", "unlisted", "private", "direct"], default_visibility: "unlisted" },
+  };
+
+  it("starts from the platform's declared default, not the first choice", () => {
+    expect(defaultVisibility(mastodon)).toBe("unlisted");
+    expect(defaultVisibility(undefined)).toBe("");
+  });
+
+  it("offers every declared visibility", () => {
+    expect(visibilityChoices(mastodon).map((c) => c.value)).toEqual(["public", "unlisted", "private", "direct"]);
+    expect(visibilityChoices(mastodon).every((c) => !c.disabled)).toBe(true);
+    expect(visibilityChoices({ capabilities: {} })).toEqual([]);
+  });
+
+  it("names the targets that have only one visibility", () => {
+    expect(fixedVisibilityNote([{ label: "Bluesky", value: "public" }])).toBe(
+      "Public on Bluesky: the only visibility it offers.",
+    );
+    expect(
+      fixedVisibilityNote([
+        { label: "Bluesky", value: "public" },
+        { label: "Telegram", value: "public" },
+        { label: "Discord", value: "public" },
+      ]),
+    ).toBe("Public on Bluesky, Telegram and Discord: the only visibility they offer.");
   });
 });

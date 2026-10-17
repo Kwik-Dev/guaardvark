@@ -253,6 +253,13 @@ def _post_options(payload):
     return value if isinstance(value, dict) else None
 
 
+def _visibilities(payload):
+    """Per-target visibilities ({connection id: value}); ``visibility``, when
+    given, applies to the targets left out."""
+    value = payload.get("visibilities")
+    return value if isinstance(value, dict) else None
+
+
 @connections_bp.route("/publish/preflight", methods=["POST"])
 def publish_preflight():
     from backend.services.connections import publish_service, scheduling
@@ -268,6 +275,7 @@ def publish_preflight():
         body=payload.get("body") or "",
         title=payload.get("title"),
         visibility=payload.get("visibility"),
+        visibilities=_visibilities(payload),
         scheduled_at=scheduled_at,
         ai_disclosure=_disclosure_choice(payload),
         post_options=_post_options(payload),
@@ -295,6 +303,7 @@ def publish_route():
             link_url=payload.get("link_url"),
             tags=payload.get("tags") or [],
             visibility=payload.get("visibility"),
+            visibilities=_visibilities(payload),
             requested_by=gates.normalize_source(payload.get("requested_by")),
             scheduled_at=scheduling.parse_when(payload.get("scheduled_at")),
             ai_disclosure=_disclosure_choice(payload),

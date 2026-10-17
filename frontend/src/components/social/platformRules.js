@@ -105,6 +105,41 @@ export const sharedVisibilities = (specs) => {
 };
 
 /**
+ * The visibility a post to this provider is sent with when the person picks
+ * none: its declared default. The composer shows it selected and sends it.
+ */
+export const defaultVisibility = (spec) => spec?.capabilities?.default_visibility || "";
+
+/**
+ * The visibilities a post to this connection can take.
+ * @returns {Array<{ value: string, disabled: boolean, reason: string }>}
+ */
+export const visibilityChoices = (spec) =>
+  (spec?.capabilities?.visibilities || []).map((value) => ({ value, disabled: false, reason: "" }));
+
+const joinWords = (words) =>
+  words.length < 2 ? words.join("") : `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}`;
+
+/**
+ * One line for the targets that offer a single visibility, which get no
+ * select, e.g. "Public on Bluesky and Discord: the only visibility they offer."
+ * @param {Array<{ label: string, value: string }>} targets
+ */
+export const fixedVisibilityNote = (targets) => {
+  const byValue = new Map();
+  for (const target of targets || []) {
+    byValue.set(target.value, [...(byValue.get(target.value) || []), target.label]);
+  }
+  return [...byValue.entries()]
+    .map(([value, labels]) => {
+      const named = value ? `${value[0].toUpperCase()}${value.slice(1)}` : value;
+      const offer = labels.length === 1 ? "it offers" : "they offer";
+      return `${named} on ${joinWords(labels)}: the only visibility ${offer}.`;
+    })
+    .join(" ");
+};
+
+/**
  * The per-post fields the selected targets declare, merged by name: one input
  * serves every target that asks for it, required when any of them requires it.
  * @returns {Array<object & { for: string[] }>}

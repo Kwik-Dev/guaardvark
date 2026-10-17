@@ -1,6 +1,6 @@
 import React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 const { hook, messages } = vi.hoisted(() => ({
   hook: { rows: [], next: null },
@@ -192,6 +192,41 @@ describe("ApprovalsPage: edit before approving", () => {
     const label = await screen.findByLabelText("Label as made with AI");
     await waitFor(() => expect(label).toBeDisabled());
     expect(label).toBeChecked();
+  });
+
+  it("shows the platform's default where no visibility is stored, and saves a picked one", async () => {
+    hook.rows = [{ ...RECORD, platform: "mastodon", visibility: "" }];
+    connectionsService.fetchProviders.mockResolvedValue([
+      {
+        ...SPEC,
+        provider: "mastodon",
+        label: "Mastodon",
+        capabilities: {
+          ...SPEC.capabilities,
+          visibilities: ["public", "unlisted", "private", "direct"],
+          default_visibility: "unlisted",
+        },
+      },
+    ]);
+    connectionsService.editPublish.mockResolvedValue({ publish: RECORD, changed: ["visibility"] });
+    await openCard();
+
+    fireEvent.click(screen.getByRole("button", { name: /^edit$/i }));
+    const select = await screen.findByRole("combobox", { name: /^Visibility/ });
+    expect(select).toHaveTextContent("unlisted");
+    expect(screen.getByRole("button", { name: /^save$/i })).toBeDisabled();
+
+    fireEvent.mouseDown(select);
+    fireEvent.click(within(await screen.findByRole("listbox")).getByRole("option", { name: "private" }));
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+
+    await waitFor(() =>
+      expect(connectionsService.editPublish).toHaveBeenCalledWith(7, {
+        visibility: "private",
+        revision: 0,
+        edited_by: "ui",
+      }),
+    );
   });
 
   it("leaves Save off until something changes", async () => {

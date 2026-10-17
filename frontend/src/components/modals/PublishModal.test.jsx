@@ -1,5 +1,5 @@
 import React from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import PublishModal from './PublishModal';
@@ -34,27 +34,45 @@ const CONNECTIONS = [
 const SPECS = [
   {
     provider: 'bluesky',
+    label: 'Bluesky',
     capabilities: {
       max_text_chars: 300,
       supports_title: false,
       supports_tags: false,
       visibilities: ['public'],
+      default_visibility: 'public',
     },
   },
   {
     provider: 'youtube',
+    label: 'YouTube',
     capabilities: {
       max_text_chars: 5000,
       supports_title: true,
       supports_tags: true,
       visibilities: ['private', 'unlisted', 'public'],
+      default_visibility: 'private',
     },
   },
   {
     provider: 'mastodon',
-    capabilities: { max_text_chars: 500, visibilities: ['public'] },
+    label: 'Mastodon',
+    capabilities: {
+      max_text_chars: 500,
+      visibilities: ['public', 'unlisted', 'private', 'direct'],
+      default_visibility: 'unlisted',
+    },
   },
 ];
+
+// Its platform's default visibility is not the first in its list.
+const MASTODON_CONNECTION = {
+  id: 5,
+  provider: 'mastodon',
+  display_name: 'Mastodon account',
+  enabled: true,
+  has_credentials: true,
+};
 
 const REDDIT_CONNECTION = {
   id: 4,
@@ -208,5 +226,76 @@ describe('PublishModal', () => {
       ),
     );
     expect(onClose).toHaveBeenCalled();
+  });
+
+  describe('visibility', () => {
+    beforeEach(() => {
+      connectionsService.fetchConnections.mockResolvedValue([...CONNECTIONS, MASTODON_CONNECTION]);
+    });
+
+    it("shows a destination's declared default and sends it", async () => {
+      open();
+
+      fireEvent.click(await screen.findByText('Mastodon account'));
+      expect(await screen.findByRole('combobox', { name: /^Visibility/ })).toHaveTextContent('unlisted');
+      await waitFor(() =>
+        expect(connectionsService.preflightPublish).toHaveBeenLastCalledWith(
+          expect.objectContaining({ connection_ids: [5], visibilities: { 5: 'unlisted' } }),
+        ),
+      );
+
+      fireEvent.click(screen.getByRole('button', { name: /^publish$/i }));
+      await waitFor(() =>
+        expect(connectionsService.queuePublish).toHaveBeenCalledWith(
+          expect.objectContaining({ connection_ids: [5], visibilities: { 5: 'unlisted' } }),
+        ),
+      );
+      expect(connectionsService.queuePublish.mock.calls[0][0]).not.toHaveProperty('visibility');
+    });
+
+    it('keeps each destination on its own visibility', async () => {
+      open();
+
+      fireEvent.click(await screen.findByText('Mastodon account'));
+      fireEvent.click(screen.getByText('YouTube'));
+      fireEvent.click(screen.getByText('Bluesky'));
+
+      expect(await screen.findByRole('combobox', { name: /Visibility on Mastodon account/ })).toHaveTextContent(
+        'unlisted',
+      );
+      expect(screen.getByRole('combobox', { name: /Visibility on YouTube/ })).toHaveTextContent('private');
+      // One visibility only: no select, a line saying so.
+      expect(screen.queryByRole('combobox', { name: /Visibility on Bluesky/ })).not.toBeInTheDocument();
+      expect(screen.getByText('Public on Bluesky: the only visibility it offers.')).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: /^publish$/i }));
+      await waitFor(() =>
+        expect(connectionsService.queuePublish).toHaveBeenCalledWith(
+          expect.objectContaining({
+            connection_ids: [5, 2, 1],
+            visibilities: { 5: 'unlisted', 2: 'private', 1: 'public' },
+          }),
+        ),
+      );
+    });
+
+    it('sends the visibility the person picks for that destination only', async () => {
+      open();
+
+      fireEvent.click(await screen.findByText('Mastodon account'));
+      fireEvent.click(screen.getByText('YouTube'));
+      fireEvent.mouseDown(await screen.findByRole('combobox', { name: /Visibility on Mastodon account/ }));
+      fireEvent.click(within(await screen.findByRole('listbox')).getByRole('option', { name: 'public' }));
+
+      await waitFor(() =>
+        expect(screen.getByRole('combobox', { name: /Visibility on Mastodon account/ })).toHaveTextContent('public'),
+      );
+      fireEvent.click(screen.getByRole('button', { name: /^publish$/i }));
+      await waitFor(() =>
+        expect(connectionsService.queuePublish).toHaveBeenCalledWith(
+          expect.objectContaining({ visibilities: { 5: 'public', 2: 'private' } }),
+        ),
+      );
+    });
   });
 });

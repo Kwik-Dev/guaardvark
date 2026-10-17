@@ -241,7 +241,7 @@ def _post_status(
     if req.link_url:
         body = f"{body}\n{req.link_url}".strip()
 
-    payload = {"status": body, "visibility": req.visibility or "unlisted"}
+    payload = {"status": body, "visibility": req.visibility or SPEC.capabilities.default_visibility}
     if media_ids:
         payload["media_ids[]"] = media_ids
     if scheduled_at:

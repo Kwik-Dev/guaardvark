@@ -104,6 +104,10 @@ def contract_problems(provider: str) -> List[str]:
             problems.append("every rate limit names the platform page it is kept below.")
     if spec.family == FAMILY_SOCIAL and not caps.rate_limits:
         problems.append("a social provider declares at least one rate limit.")
+    # A post with no visibility chosen is sent with the default, and the
+    # composer shows it selected, so it must be one of the choices.
+    if caps.visibilities and caps.default_visibility not in caps.visibilities:
+        problems.append("default_visibility must be one of visibilities.")
     return problems
 
 

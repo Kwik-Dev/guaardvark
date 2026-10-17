@@ -2,7 +2,8 @@
 // The inputs of one post, shared by the publish composer and the Approvals
 // edit: title, the platforms' per-post fields, text, link, tags, visibility,
 // the AI label and the time. Limits come from the targets' declared
-// capabilities; the strictest one governs.
+// capabilities; the strictest one governs. Visibility is per target, since
+// each platform has its own choices and default.
 import React, { useEffect, useState } from "react";
 import {
   Box,
@@ -15,7 +16,7 @@ import {
 } from "@mui/material";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 
-import { mergePostFields, sharedVisibilities, strictestLimit } from "./platformRules";
+import { fixedVisibilityNote, mergePostFields, strictestLimit } from "./platformRules";
 
 /** Debounce so preflight doesn't fire on every keystroke. */
 export const useDebounced = (value, delay = 400) => {
@@ -52,9 +53,13 @@ export const scheduledIsoOf = (scheduleOn, scheduledAt) => {
 
 /**
  * @param {object[]} specs      provider specs of the targets
- * @param {object}   values     { title, body, linkUrl, tags, visibility,
- *                              aiDisclosure, postOptions, scheduleOn, scheduledAt }
+ * @param {object}   values     { title, body, linkUrl, tags, aiDisclosure,
+ *                              postOptions, scheduleOn, scheduledAt }
  * @param {function} onChange   called with the fields that changed
+ * @param {object[]} [visibilityTargets] one per target: { key, label, value,
+ *                              choices: [{ value, disabled, reason }], note };
+ *                              value is what the target is sent with
+ * @param {function} [onVisibilityChange] called with (key, value)
  * @param {object}   [preflight] a preflight result; its per_connection entries
  *                              give the AI label rules and who sends a timed post
  * @param {string}   [bodyLabel]
@@ -68,6 +73,8 @@ const PostFields = ({
   specs,
   values,
   onChange,
+  visibilityTargets = [],
+  onVisibilityChange,
   preflight = null,
   bodyLabel = "Text",
   showLink = false,
@@ -83,9 +90,10 @@ const PostFields = ({
     .filter((s) => s.capabilities?.requires_title)
     .map((s) => s.label || s.provider);
   const postFields = mergePostFields(specs);
-  const visibilityOptions = sharedVisibilities(specs);
-  const { title, body, linkUrl, tags, visibility, aiDisclosure, postOptions, scheduleOn, scheduledAt } =
-    values;
+  // A target with one visibility has nothing to pick; it is named in a line instead.
+  const visibilitySelects = visibilityTargets.filter((t) => t.choices.length > 1);
+  const fixedVisibilities = visibilityTargets.filter((t) => t.choices.length === 1);
+  const { title, body, linkUrl, tags, aiDisclosure, postOptions, scheduleOn, scheduledAt } = values;
   const overLimit = charLimit !== null && body.length > charLimit;
 
   // Destinations whose terms require the AI label for this post: the switch
@@ -162,23 +170,30 @@ const PostFields = ({
         />
       )}
 
-      {visibilityOptions.length > 0 && (
+      {visibilitySelects.map((target) => (
         <TextField
+          key={target.key}
           select
-          label="Visibility"
-          value={visibility || visibilityOptions[0]}
-          onChange={(e) => onChange({ visibility: e.target.value })}
+          label={visibilityTargets.length > 1 ? `Visibility on ${target.label}` : "Visibility"}
+          value={target.value}
+          onChange={(e) => onVisibilityChange?.(target.key, e.target.value)}
           size="small"
+          helperText={target.note || undefined}
         >
-          {visibilityOptions.map((option) => (
-            <MenuItem key={option} value={option}>
-              {option}
-              {option !== "private" && (
+          {target.choices.map((choice) => (
+            <MenuItem key={choice.value} value={choice.value} disabled={choice.disabled}>
+              {choice.value}
+              {choice.value !== "private" && (
                 <WarningAmberIcon fontSize="small" color="warning" sx={{ ml: 1, verticalAlign: "middle" }} />
               )}
             </MenuItem>
           ))}
         </TextField>
+      ))}
+      {fixedVisibilities.length > 0 && (
+        <Typography variant="caption" color="text.secondary">
+          {fixedVisibilityNote(fixedVisibilities)}
+        </Typography>
       )}
 
       <Box>

@@ -19,7 +19,7 @@ import {
 import { editPublish, fetchProviders, preflightPublishEdit } from "../../api/connectionsService";
 import { ActionButton } from "../settings/ui";
 import PostFields, { useDebounced } from "../social/PostFields";
-import { describeRateLimit } from "../social/platformRules";
+import { defaultVisibility, describeRateLimit, visibilityChoices } from "../social/platformRules";
 import { draftedBy, editChanges, editableValues, withDisclosureLine } from "./publishEdit";
 
 /**
@@ -105,6 +105,19 @@ const EditPublishDialog = ({ open, record: givenRecord, spec: givenSpec = null, 
   // The preflight answered for the debounced edit, so compare with that text.
   const checkedBody = "body" in debouncedChanges ? debouncedChanges.body : initial?.body;
   const goesOutAs = entry?.body !== undefined && entry.body !== checkedBody ? entry.body : null;
+  // A record without a stored visibility goes out with the platform's
+  // default, so that is what the select shows.
+  const visibilityTargets =
+    spec && values
+      ? [
+          {
+            key: String(record?.connection_id ?? ""),
+            label: accountLabel || platformLabel,
+            value: values.visibility || defaultVisibility(spec),
+            choices: visibilityChoices(spec),
+          },
+        ]
+      : [];
 
   const handleChange = (patch) => {
     setValues((prev) => {
@@ -159,6 +172,8 @@ const EditPublishDialog = ({ open, record: givenRecord, spec: givenSpec = null, 
               specs={[spec]}
               values={values}
               onChange={handleChange}
+              visibilityTargets={visibilityTargets}
+              onVisibilityChange={(_key, value) => handleChange({ visibility: value })}
               preflight={preflight}
               bodyLabel={record?.media_refs?.length ? "Caption" : "Text"}
               showLink={Boolean(spec.capabilities?.supports_link || record?.link_url)}

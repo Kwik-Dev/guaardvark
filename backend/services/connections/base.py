@@ -249,6 +249,7 @@ class Capabilities:
     max_title_chars: Optional[int] = None
     supports_tags: bool = False
     visibilities: Tuple[str, ...] = ()
+    # Sent when a post names no visibility, and shown selected in the composer.
     default_visibility: str = "private"
     accepted_mime: Tuple[str, ...] = ()
     rate_limits: Tuple[RateLimit, ...] = ()
