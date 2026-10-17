@@ -265,7 +265,18 @@ REASONS = (
     "timeout",           # the model did not answer within timeout_s
     "parse_fail",        # the reply held no usable answer
     "error",             # the call failed, or something failed inside decide()
+    "third_party_unlock",  # the answer would unlock, and some of the state is third-party text
 )
+
+# With the decision on, these mean no model answer could be used. A layer
+# whose BACKEND_POLICY says when_unanswered "safe_side" (L4, the checks) then
+# returns the entry's safe side, never the fallback: a check that did not
+# answer is not verified. shadow, below_floor (on acting as shadow) and
+# third_party_unlock (the fallback stands) are not in it.
+NO_ANSWER_REASONS = frozenset({
+    "batch_only", "author_unknown", "bad_state", "too_long", "gpu_busy", "not_resident",
+    "author_is_judge", "timeout", "parse_fail", "error",
+})
 
 DEFAULT_RUN = "interactive"
 
@@ -276,8 +287,9 @@ class DecisionResult:
 
     ``answer`` is what the caller acts on. ``source`` says where it came
     from: ``"llm"`` (the model), ``"fallback"`` (the caller's own answer,
-    today's code). ``reason`` is one of REASONS. ``model`` and ``digest`` name
-    the build that was asked, when one was.
+    today's code) or ``"safe_side"`` (the entry's declared safe side: a check
+    that is on and got no usable answer). ``reason`` is one of REASONS.
+    ``model`` and ``digest`` name the build that was asked, when one was.
     """
 
     decision: str
@@ -491,12 +503,23 @@ def decide(
     The model then gets the measured prompt at temperature 0, with the
     context length it is loaded with and ``timeout_s`` as the limit.
 
+    What the answer may do is limited in data, whatever the model says. An
+    answer in the entry's ``unlocks`` is refused ("third_party_unlock", the
+    fallback stands) when any state field comes from a third party, so
+    retrieved pages, posts and documents can only lead to a veto. Text the
+    user typed may unlock, which is why callers filter candidates through the
+    user's own policy (web access, MCP policy, tool confirmation) before
+    asking. When an L4 check is on and no model answer can be used
+    (NO_ANSWER_REASONS), the result is its safe side, "not verified", never
+    the fallback. decide() only answers; it never runs a tool or writes.
+
     ``ctx`` is a dict for the request: ``request_id`` and ``model`` (the
     turn's chat model) when the caller knows them. Pass the same dict for the
     whole turn: decide() keeps its answers in it, so a question asked twice
     with the same state in one turn is asked once.
     """
     started = time.perf_counter()
+    entry, mode = None, None
     try:
         from backend.services.decision_data import DECISIONS
         from backend.services.decision_settings import get_decision_mode
@@ -536,7 +559,15 @@ def decide(
         return result
     except Exception as e:  # noqa: BLE001 - decide() never raises
         logger.error("decide(%s) failed: %s", decision, e, exc_info=True)
+        if mode == "on" and entry is not None and _fails_closed(entry):
+            return DecisionResult(decision, entry["safe_side"], "safe_side", "error", latency_ms=_ms(started))
         return DecisionResult(decision, fallback, "fallback", "error", latency_ms=_ms(started))
+
+
+def _fails_closed(entry: Mapping[str, Any]) -> bool:
+    from backend.services.decision_data import BACKEND_POLICY
+
+    return BACKEND_POLICY[entry["layer"]]["when_unanswered"] == "safe_side"
 
 
 def _decide_live(entry, decision, state, fallback, mode, timeout_s, ctx, run, authors, started):
@@ -549,7 +580,10 @@ def _decide_live(entry, decision, state, fallback, mode, timeout_s, ctx, run, au
     asked: Optional[_Asked] = None
 
     def refuse(reason, model=None, digest=None):
-        return DecisionResult(decision, fallback, "fallback", reason, model,
+        answer, source = fallback, "fallback"
+        if mode == "on" and reason in NO_ANSWER_REASONS and policy["when_unanswered"] == "safe_side":
+            answer, source = entry["safe_side"], "safe_side"
+        return DecisionResult(decision, answer, source, reason, model,
                               asked.confidence if asked else None, _ms(started), digest), asked
 
     if run not in RUN_KINDS:
@@ -587,4 +621,8 @@ def _decide_live(entry, decision, state, fallback, mode, timeout_s, ctx, run, au
                  int(num_ctx) if isinstance(num_ctx, int) and num_ctx > 0 else None)
     if asked.reason != "ok":
         return refuse(asked.reason, model, digest)
+    if asked.answer in entry["unlocks"] and any(src == "third_party" for src, _ in entry["state"].values()):
+        logger.info("decide(%s): answer %r would unlock on third-party text; the fallback stands",
+                    decision, asked.answer)
+        return refuse("third_party_unlock", model, digest)
     return DecisionResult(decision, asked.answer, "llm", "ok", model, asked.confidence, _ms(started), digest), asked

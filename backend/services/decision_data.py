@@ -28,6 +28,12 @@ Field reference
     precheck      the cheap trigger that decides whether to ask at all
     fallback      today's deterministic answer, used when off, unsure or failing
     safe_side     the answer to act on when nothing better is known
+    unlocks       the answers that move toward the side effect or past a check
+                  (start the job, send, post, write, mark done, skip the
+                  check): what an instruction planted in the text would ask
+                  for. Never the safe side. decide() refuses one of these
+                  when any state field comes from a third party, so such text
+                  can only lead to a veto
     side_effect   none | prompt | gpu_job | web_egress | public_post |
                   file_db_write | desktop | shell
     mode_default  off | shadow | on
@@ -193,6 +199,38 @@ GUARD_MODULES: dict = {
     "backend/services/mcp_policy.py": None,
 }
 
+# What a decision's answer may lead to when its side effect is a file or
+# database write. Each kind is a path a person can see and undo; no decision
+# deletes, overwrites or applies anything. The code that acts on the answer
+# keeps to its kind.
+#   offered_action     starts only the action the assistant itself offered,
+#                      behind the tool confirmation guard
+#   reversible_row     adds or marks rows a person can see and undo (memories
+#                      on the Memory page, lessons, provisional recipes; an
+#                      update marks the old row superseded); never deletes
+#   label_only         labels a record or adds a note to it; never applies,
+#                      deletes or changes what it labels
+#   metadata_only      sets metadata (how a file is split, a stored class);
+#                      never the content
+#   drop_from_derived  leaves an item out of a derived set before it is
+#                      stored; the source is untouched
+WRITE_LIMIT_KINDS = ("offered_action", "reversible_row", "label_only", "metadata_only", "drop_from_derived")
+WRITE_LIMITS: dict = {
+    "accepted_offer": "offered_action",
+    "chunk_strategy": "metadata_only",
+    "screen_meta_memory_request": "reversible_row",
+    "screen_element_seen": "reversible_row",
+    "screen_lesson_about_target": "reversible_row",
+    "memory_fact": "reversible_row",
+    "memory_relation": "reversible_row",
+    "training_pair_keep": "drop_from_derived",
+    "character_class": "metadata_only",
+    "eval_pair_valid": "drop_from_derived",
+    "judge_pairwise": "label_only",
+    "feedback_strong_praise": "reversible_row",
+    "fix_addresses_failure": "label_only",
+}
+
 DECISIONS: dict = {
     # ------------------------------------------------------------------ chat turn routing (L1)
     "accepted_offer": {
@@ -208,6 +246,7 @@ DECISIONS: dict = {
         "precheck": "pending_offer() found an offer in the last assistant reply and the reply is not a bare yes",
         "fallback": "AFFIRMATION_PATTERNS.fullmatch(reply)",
         "safe_side": False,
+        "unlocks": (True,),
         "side_effect": "file_db_write",
         "mode_default": "off", "floor": GATE_FLOOR,
         "set": "accepted_offer.json",
@@ -230,6 +269,7 @@ DECISIONS: dict = {
         "precheck": "_REALTIME_KEYWORD_RE or a wider time/price/score/news word list matches",
         "fallback": "UnifiedChatEngine._is_realtime_query(message)",
         "safe_side": False,
+        "unlocks": (True,),
         "side_effect": "prompt",
         "mode_default": "off", "floor": DEFAULT_FLOOR,
         "set": "needs_live_data.json",
@@ -258,6 +298,7 @@ DECISIONS: dict = {
         "precheck": "a broad image-intent regex fires or an image is attached",
         "fallback": "the rule-based image gate and user_wants_image_edit",
         "safe_side": "neither",
+        "unlocks": ("new_image", "edit_image"),
         "side_effect": "gpu_job",
         "mode_default": "off", "floor": DEFAULT_FLOOR,
         "set": "image_intent.json",
@@ -281,6 +322,7 @@ DECISIONS: dict = {
         "precheck": "the agent screen is active and the message is not social or an explicit screen command",
         "fallback": "screen_task unless NO_SCREEN_CONTEXT matches",
         "safe_side": "chat",
+        "unlocks": ("screen_task",),
         "side_effect": "desktop",
         "mode_default": "off", "floor": DEFAULT_FLOOR,
         "set": "screen_or_chat.json",
@@ -306,6 +348,7 @@ DECISIONS: dict = {
         "precheck": "more than one trigger family fires for the turn",
         "fallback": "the legacy route the current chain would take",
         "safe_side": "chat_answer",
+        "unlocks": ("image_generation", "screen_agent", "web_search", "search_documents"),
         "side_effect": "gpu_job",
         "mode_default": "off", "floor": DEFAULT_FLOOR,
         "set": "chat_route.json",
@@ -329,6 +372,7 @@ DECISIONS: dict = {
         "precheck": "retrieval returned passages above the reranker floor",
         "fallback": "keep the passages (no answerability check today)",
         "safe_side": False,
+        "unlocks": (True,),
         "side_effect": "prompt",
         "mode_default": "off", "floor": DEFAULT_FLOOR,
         "set": "context_answers.json",
@@ -349,6 +393,7 @@ DECISIONS: dict = {
         "precheck": "the agent reported done",
         "fallback": "the existing done-proof check",
         "safe_side": False,
+        "unlocks": (True,),
         "side_effect": "none",
         "mode_default": "off", "floor": DEFAULT_FLOOR,
         "set": "task_done.json",
@@ -377,6 +422,7 @@ DECISIONS: dict = {
         "precheck": "an outreach command arrived (HTTP /intent, chat tool, slash freeform, llx outreach)",
         "fallback": "the existing JSON classification through nl_control_plane.json_chat",
         "safe_side": "refuse",
+        "unlocks": ("approve", "scout_and_draft"),
         "side_effect": "public_post",
         "mode_default": "off", "floor": GATE_FLOOR,
         "set": "outreach_intent.json",
@@ -409,6 +455,7 @@ DECISIONS: dict = {
         "fallback": "the existing relevance judge (recon.judged_unfit: a grade below MIN_RELEVANCE_GRADE "
                     "or a 'skip' verdict)",
         "safe_side": "skip",
+        "unlocks": ("good_fit",),
         "side_effect": "public_post",
         "mode_default": "off", "floor": GATE_FLOOR,
         "set": "outreach_thread_fit.json",
@@ -439,6 +486,7 @@ DECISIONS: dict = {
                  'or /film-crew command',
      'fallback': 'music video, then film crew, then video, in _run_chat order',
      'safe_side': 'neither',
+     'unlocks': ('new_clip', 'music_video', 'film_crew'),
      'side_effect': 'gpu_job',
      'mode_default': 'off',
      'floor': 0.95,
@@ -467,6 +515,7 @@ DECISIONS: dict = {
                  "pause, resume, what's playing), which stays deterministic",
      'fallback': 'the matched media pattern',
      'safe_side': 'chat',
+     'unlocks': ('player_command',),
      'side_effect': 'desktop',
      'mode_default': 'off',
      'floor': 0.95,
@@ -490,6 +539,7 @@ DECISIONS: dict = {
      'precheck': '_LOOKUP_REQUEST_RE matches selection_text, no tool ran this turn, tools are not skipped',
      'fallback': 'True (the regex matched)',
      'safe_side': True,
+     'unlocks': (False,),
      'side_effect': 'prompt',
      'mode_default': 'off',
      'floor': 0.95,
@@ -513,6 +563,7 @@ DECISIONS: dict = {
      'precheck': 'a DELIBERATION_SIGNALS pattern matches',
      'fallback': 'AgentBrain._needs_deliberation(message)',
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'shell',
      'mode_default': 'off',
      'floor': 0.98,
@@ -538,6 +589,7 @@ DECISIONS: dict = {
      'precheck': 'a CODE_SEARCH_KEYWORDS substring matches and search_codebase is registered',
      'fallback': '_asks_about_code(message)',
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'prompt',
      'mode_default': 'off',
      'floor': 0.95,
@@ -560,6 +612,7 @@ DECISIONS: dict = {
      'precheck': 'get_vision_context() reports an active stream and the user attached no image',
      'fallback': 'True (attach the latest frame, as today)',
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'gpu_job',
      'mode_default': 'off',
      'floor': 0.95,
@@ -582,6 +635,7 @@ DECISIONS: dict = {
      'precheck': 'Tier 3 or a legacy agent loop finished with facts in FactsRegistry',
      'fallback': '_verify_answer (capitalised-entity regex, then a free-text VALID/CORRECTED reply)',
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'prompt',
      'mode_default': 'off',
      'floor': 0.95,
@@ -606,6 +660,7 @@ DECISIONS: dict = {
                  '_WORKSTATION_DIRECT command (those run with no question asked)',
      'fallback': 'match_workstation_direct(message)',
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'prompt',
      'mode_default': 'off',
      'floor': 0.95,
@@ -632,6 +687,7 @@ DECISIONS: dict = {
      'precheck': 'the rules fetch returned at least one rule and NO_PROMO_RULE_PATTERNS found no ban',
      'fallback': 'is_self_promo_banned(rules_text) is None, so allowed',
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'public_post',
      'mode_default': 'off',
      'floor': 0.98,
@@ -664,6 +720,7 @@ DECISIONS: dict = {
                  'generated',
      'fallback': 'allowed (nothing reads this rule today)',
      'safe_side': True,
+     'unlocks': (False,),
      'side_effect': 'public_post',
      'mode_default': 'off',
      'floor': 0.98,
@@ -692,6 +749,7 @@ DECISIONS: dict = {
      'fallback': "the single grader call's 'engages' answer; passed needs engages, on_topic and "
                  "appropriate_tone all yes",
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'public_post',
      'mode_default': 'off',
      'floor': 0.98,
@@ -721,6 +779,7 @@ DECISIONS: dict = {
      'fallback': "the single grader call's 'on_topic' answer; passed needs engages, on_topic and "
                  "appropriate_tone all yes",
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'public_post',
      'mode_default': 'off',
      'floor': 0.98,
@@ -745,6 +804,7 @@ DECISIONS: dict = {
      'fallback': "the single grader call's 'appropriate_tone' answer; passed needs engages, on_topic and "
                  "appropriate_tone all yes",
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'public_post',
      'mode_default': 'off',
      'floor': 0.98,
@@ -776,6 +836,7 @@ DECISIONS: dict = {
                  'scraper is a stub)',
      'fallback': "the drafter's own empty-draft decision inside the reply prompt",
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'public_post',
      'mode_default': 'off',
      'floor': 0.98,
@@ -802,6 +863,7 @@ DECISIONS: dict = {
      'fallback': 'the DOM needle check (first 60 characters; Reddit in comment-like elements, YouTube in the whole '
                  'body text)',
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'public_post',
      'mode_default': 'off',
      'floor': 0.98,
@@ -835,6 +897,7 @@ DECISIONS: dict = {
                  '(is_conversational, SOCIAL_TIER2_PATTERNS) are not asked',
      'fallback': 'False (skip, as the rule says today)',
      'safe_side': True,
+     'unlocks': (),
      'side_effect': 'prompt',
      'mode_default': 'off',
      'floor': 0.95,
@@ -862,6 +925,7 @@ DECISIONS: dict = {
      'fallback': '_detect_best_chunking_strategy content patterns, then '
                  'AdaptiveChunker._analyze_content_for_strategy',
      'safe_side': 'prose',
+     'unlocks': (),
      'side_effect': 'file_db_write',
      'mode_default': 'off',
      'floor': 0.95,
@@ -889,6 +953,7 @@ DECISIONS: dict = {
      'precheck': '_META_MEMORY_RE matches, _SCREEN_VERB_RE does not, and the task is under 140 characters',
      'fallback': "_try_meta_memory_task's regex decision",
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'file_db_write',
      'mode_default': 'off',
      'floor': 0.95,
@@ -919,6 +984,7 @@ DECISIONS: dict = {
      'precheck': '_dom_confirms_target returned True',
      'fallback': '_dom_confirms_target(target), positive-only word overlap',
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'none',
      'mode_default': 'off',
      'floor': 0.95,
@@ -943,6 +1009,7 @@ DECISIONS: dict = {
                  'contradiction)',
      'fallback': 'the word-overlap result: not seen, so the contradiction is logged',
      'safe_side': True,
+     'unlocks': (False,),
      'side_effect': 'file_db_write',
      'mode_default': 'off',
      'floor': 0.95,
@@ -967,6 +1034,7 @@ DECISIONS: dict = {
      'precheck': '_is_task_target kept the lesson (word-set subset match)',
      'fallback': '_is_task_target(element, targets)',
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'file_db_write',
      'mode_default': 'off',
      'floor': 0.95,
@@ -990,6 +1058,7 @@ DECISIONS: dict = {
      'precheck': 'the step carries a precondition and the eye described the screen',
      'fallback': "_parse_match_verdict on the text model's JSON reply (fails closed)",
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'desktop',
      'mode_default': 'off',
      'floor': 0.98,
@@ -1017,6 +1086,7 @@ DECISIONS: dict = {
      'precheck': 'a note arrived for the running task and _STOP_NOTE did not match',
      'fallback': '_STOP_NOTE.match(note)',
      'safe_side': False,
+     'unlocks': (),
      'side_effect': 'desktop',
      'mode_default': 'off',
      'floor': 0.95,
@@ -1044,6 +1114,7 @@ DECISIONS: dict = {
                  'typography, inscription, spelling)',
      'fallback': 'has_text_intent(_without_negated_text(prompt))',
      'safe_side': False,
+     'unlocks': (),
      'side_effect': 'prompt',
      'mode_default': 'off',
      'floor': 0.95,
@@ -1073,6 +1144,7 @@ DECISIONS: dict = {
                  "that' / 'from now on' prefixes stay deterministic",
      'fallback': '_extract_fact(message) is not None',
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'file_db_write',
      'mode_default': 'off',
      'floor': 0.95,
@@ -1099,6 +1171,7 @@ DECISIONS: dict = {
                  'is an embedding near-neighbour (at most 3 candidates)',
      'fallback': 'exact normalised-text match counts as same; everything else is unrelated',
      'safe_side': 'unrelated',
+     'unlocks': ('updates', 'contradicts'),
      'side_effect': 'file_db_write',
      'mode_default': 'off',
      'floor': 0.95,
@@ -1126,6 +1199,7 @@ DECISIONS: dict = {
      'precheck': 'a task crashed (SWARM_AGENT_FAILED or no status file) and retries remain',
      'fallback': 'retry up to max_retries=2 with no classification, then the diagnostic pass',
      'safe_side': 'unclear',
+     'unlocks': (),
      'side_effect': 'shell',
      'mode_default': 'off',
      'floor': 0.95,
@@ -1149,6 +1223,7 @@ DECISIONS: dict = {
      'precheck': 'the agent exited cleanly with no uncommitted diff, or the diagnostic pass moved HEAD',
      'fallback': 'DONE on a clean exit; any new commit counts as a diagnostic fix',
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'shell',
      'mode_default': 'off',
      'floor': 0.98,
@@ -1182,6 +1257,7 @@ DECISIONS: dict = {
      'fallback': 'keep (today the filter drops a pair only on its length checks or a score below min_score; '
                  'a pair with no score is kept)',
      'safe_side': 'unclear',
+     'unlocks': ('keep',),
      'side_effect': 'file_db_write',
      'mode_default': 'off',
      'floor': 0.95,
@@ -1214,6 +1290,7 @@ DECISIONS: dict = {
                  "command lines and '/' lines stay deterministic",
      'fallback': 'resolve_repl_line(line)',
      'safe_side': 'chat',
+     'unlocks': ('command',),
      'side_effect': 'shell',
      'mode_default': 'off',
      'floor': 0.98,
@@ -1247,6 +1324,7 @@ DECISIONS: dict = {
      'precheck': 'a production reached awaiting_approval and the vision model returned a frame description',
      'fallback': "_parse_verdict on the decider's one-line reply (REJECT wins, APPROVE, CONFIDENCE >= 70)",
      'safe_side': 'unclear',
+     'unlocks': ('usable',),
      'side_effect': 'gpu_job',
      'mode_default': 'off',
      'floor': 0.98,
@@ -1282,6 +1360,7 @@ DECISIONS: dict = {
      'precheck': 'no class_token is stored on the subject or passed in, and the regex blob is not empty',
      'fallback': 'resolve_class_token(subject)',
      'safe_side': 'unclear',
+     'unlocks': (),
      'side_effect': 'file_db_write',
      'mode_default': 'off',
      'floor': 0.95,
@@ -1312,6 +1391,7 @@ DECISIONS: dict = {
      'precheck': 'generate_eval_pair returned a non-empty question and expected_answer',
      'fallback': "keep the pair (today's only check is non-empty fields)",
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'file_db_write',
      'mode_default': 'off',
      'floor': 0.95,
@@ -1340,6 +1420,7 @@ DECISIONS: dict = {
      'precheck': 'an experiment scored the same pair with the baseline and the candidate config',
      'fallback': 'the 1-5 rubric composite from JUDGE_PROMPT',
      'safe_side': 'tie_or_unclear',
+     'unlocks': ('answer_a', 'answer_b'),
      'side_effect': 'file_db_write',
      'mode_default': 'off',
      'floor': 0.95,
@@ -1364,6 +1445,7 @@ DECISIONS: dict = {
                  "matches the why-text or the thumbed turn's user message",
      'fallback': '_detect_strong_positive(why_text, session_id)',
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'file_db_write',
      'mode_default': 'off',
      'floor': 0.98,
@@ -1388,6 +1470,7 @@ DECISIONS: dict = {
      'fallback': "a staged PendingFix under the run id counts as a change; the agent's answer alone does not "
                  '(heal and self-check record failed, a directed run no_change)',
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'file_db_write',
      'mode_default': 'off',
      'floor': 0.95,

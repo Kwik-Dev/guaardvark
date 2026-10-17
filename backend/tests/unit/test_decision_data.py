@@ -29,7 +29,7 @@ from backend.tests.fixtures.decision_sets import load_set
 
 FIELDS = {
     "feature", "layer", "type", "key", "kind", "instructions", "choices", "state", "anchor", "precheck",
-    "fallback", "safe_side", "side_effect", "mode_default", "floor", "set", "hard_negatives", "notes",
+    "fallback", "safe_side", "unlocks", "side_effect", "mode_default", "floor", "set", "hard_negatives", "notes",
 }
 SNAKE_CASE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$")
 GENERIC_KEYS = {
@@ -66,6 +66,18 @@ def test_kind_and_choices_agree(decision_id):
     else:
         assert entry["choices"] is None
         assert isinstance(entry["safe_side"], bool)
+
+
+@pytest.mark.parametrize("decision_id", DECISION_IDS)
+def test_unlocks_are_answers_and_never_the_safe_side(decision_id):
+    entry = DECISIONS[decision_id]
+    unlocks = entry["unlocks"]
+    assert isinstance(unlocks, tuple)
+    options = set(entry["choices"]) if entry["kind"] == "choice" else {True, False}
+    for answer in unlocks:
+        assert type(answer) is (str if entry["kind"] == "choice" else bool), (decision_id, answer)
+        assert answer in options, (decision_id, answer)
+    assert entry["safe_side"] not in unlocks
 
 
 @pytest.mark.parametrize("decision_id", DECISION_IDS)
