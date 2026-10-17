@@ -228,7 +228,10 @@ def unmet_requirements(versions: dict[str, str]) -> list[str]:
 
 
 def unavailable_reason() -> str | None:
-    """Why a training job cannot run for want of the libraries, or None."""
+    """Why a training job cannot run for want of the libraries, or None: one
+    is missing, or one declares a requirement this environment does not meet
+    (unmet_requirements), which a run would otherwise hit only once started,
+    on the GPU."""
     with _lock:
         busy = _run["state"] == "running"
     if busy:
@@ -240,12 +243,16 @@ def unavailable_reason() -> str | None:
             metadata.version(lib["id"])
         except metadata.PackageNotFoundError:
             missing.append(lib["id"])
-    if not missing:
+    if missing:
+        one = len(missing) == 1
+        names = missing[0] if one else ", ".join(missing[:-1]) + " and " + missing[-1]
+        return (f"Training needs {names}, which {'is' if one else 'are'} not installed. "
+                f"Install {'it' if one else 'them'} in Settings > Training libraries.")
+    unmet = unmet_requirements(installed_versions())
+    if not unmet:
         return None
-    one = len(missing) == 1
-    names = missing[0] if one else ", ".join(missing[:-1]) + " and " + missing[-1]
-    return (f"Training needs {names}, which {'is' if one else 'are'} not installed. "
-            f"Install {'it' if one else 'them'} in Settings > Training libraries.")
+    return ("The training libraries are installed, but incomplete: " + "; ".join(unmet) + ". "
+            "Open Settings > Training libraries and click Repair.")
 
 
 # ---- the hardware verdict ----------------------------------------------------------
@@ -384,11 +391,13 @@ def status(*, with_plan_token: bool = False) -> dict[str, Any]:
     changes = [{"name": name, "installed": versions[name], "needs": spec, "why": why}
                for name, (spec, why) in MAY_CHANGE.items()
                if name in versions and _would_move(name, versions[name])]
+    unmet = unmet_requirements(versions)
     result = {
         "libraries": libraries,
-        "ready": not missing,
+        # A job may start (unavailable_reason): all installed, every requirement met.
+        "ready": not missing and not unmet,
         "download_mb": round(sum(lib["download_mb"] for lib in missing), 1),
-        "unmet": unmet_requirements(versions),
+        "unmet": unmet,
         "changes": changes,
         "left_out": [{"name": name, "why": why} for name, why in LEFT_OUT.items()],
         "hardware": hardware_fit(),

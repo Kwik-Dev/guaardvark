@@ -43,6 +43,13 @@ def task_bodies_run_in_this_app(monkeypatch):
         monkeypatch.setattr(tt, name, getattr(tt, name).run)
 
 
+@pytest.fixture(autouse=True)
+def libraries_ready(monkeypatch):
+    """The training libraries count as installed and complete; the training
+    step is a stand-in, and the refusal has its own tests."""
+    monkeypatch.setattr("backend.services.training_libraries.unavailable_reason", lambda: None)
+
+
 @pytest.fixture
 def progress(monkeypatch):
     """Every progress message the task emits, as (percent, message, status)."""

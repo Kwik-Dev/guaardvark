@@ -7,8 +7,10 @@ converter it runs is not installed.
 Export itself folds the adapter into its base model in an offline subprocess,
 converts the merged folder to one GGUF file with the installed converter, and
 registers that file with `ollama create`, using the chat template the base
-model's entry declares. A run folder merged before Export went through GGUF
-still registers its merged folder with `ollama create --quantize`.
+model's entry declares. Once Ollama has registered the GGUF the merged folder
+is deleted; a failed step keeps it, and the next export merges again. A run
+folder merged before Export went through GGUF still registers its merged
+folder with `ollama create --quantize`, and keeps it.
 
 Seams: celery.chain and each task's apply_async, read by the routes at call
 time; training_base_models.export_verified and resolve_for_training,
@@ -441,6 +443,90 @@ def test_import_registers_the_gguf_with_the_declared_template(client, tmp_path, 
     assert row.status == "completed" and row.ollama_model_name == "my-model"
 
 
+# ---- the merged copy goes once Ollama has the model --------------------------------
+
+def _files(model_dir):
+    return {str(p.relative_to(model_dir)) for p in model_dir.rglob("*")}
+
+
+def test_a_registered_gguf_drops_the_merged_copy_and_nothing_else(client, tmp_path, merge, ollama_cli, progress):
+    pk, model_dir = _trained_job(tmp_path)
+    (model_dir / "lora" / "adapter_model.safetensors").write_bytes(b"A" * 10)
+    (model_dir / "checkpoints" / "checkpoint-10").mkdir(parents=True)
+    (model_dir / "heldout").mkdir()
+    (model_dir / "heldout" / "heldout.jsonl").write_text("{}\n")
+    tt.export_gguf_task.run("trained", str(model_dir), "q8_0")
+    (model_dir / "merged" / "model.safetensors").write_bytes(b"W" * 1000)
+    kept = {f for f in _files(model_dir) if not f.startswith("merged")}
+
+    tt.import_ollama_task.run("trained", str(model_dir), "my-model")
+
+    assert not (model_dir / "merged").exists()
+    assert _files(model_dir) == kept | {"Modelfile"}
+    assert "test-out-q8_0.gguf" in kept and "lora/adapter_model.safetensors" in kept
+    assert _row(pk).status == "completed"
+    assert progress[-1][1].startswith("Ollama import complete: my-model (removed the merged copy")
+
+
+def test_a_failed_import_keeps_the_merged_copy(client, tmp_path, merge, monkeypatch):
+    import subprocess
+
+    pk, model_dir = _trained_job(tmp_path)
+    tt.export_gguf_task.run("trained", str(model_dir), "q8_0")
+    monkeypatch.setattr(tt.subprocess, "run", lambda cmd, **kwargs: subprocess.CompletedProcess(
+        cmd, 1, stdout="", stderr="Error: could not reach the Ollama server"))
+
+    with pytest.raises(RuntimeError, match="ollama create failed"):
+        tt.import_ollama_task.run("trained", str(model_dir), "my-model")
+
+    assert (model_dir / "merged" / "config.json").is_file()
+    assert (model_dir / "test-out-q8_0.gguf").is_file()
+    assert _row(pk).status == "failed"
+
+
+def test_exporting_again_after_the_merged_copy_went_merges_again(client, tmp_path, merge, ollama_cli):
+    pk, model_dir = _trained_job(tmp_path)
+    tt.export_gguf_task.run("trained", str(model_dir), "q8_0")
+    tt.import_ollama_task.run("trained", str(model_dir), "my-model")
+    assert not (model_dir / "merged").exists()
+
+    tt.export_gguf_task.run("trained", str(model_dir), "f16")
+
+    assert len(merge.calls) == 2 and (model_dir / "merged" / "config.json").is_file()
+    assert sorted(p.name for p in model_dir.glob("*.gguf")) == ["test-out-f16.gguf"]
+
+    tt.import_ollama_task.run("trained", str(model_dir), "my-model")
+
+    assert not (model_dir / "merged").exists()
+    assert (model_dir / "Modelfile").read_text().startswith(f"FROM {model_dir / 'test-out-f16.gguf'}\n")
+    assert _row(pk).status == "completed" and _row(pk).quantization_level == "f16"
+
+
+def test_only_the_merged_folder_a_gguf_export_here_came_from_is_dropped(tmp_path):
+    model_dir = tmp_path / "run"
+    (model_dir / "merged").mkdir(parents=True)
+    (model_dir / "merged" / "config.json").write_text("{}")
+
+    assert tt._drop_merged(model_dir, tmp_path / "elsewhere" / "run-q8_0.gguf") == 0
+    assert tt._drop_merged(model_dir, model_dir / "run-q4_k_m.gguf") == 0
+    assert (model_dir / "merged" / "config.json").is_file()
+
+    assert tt._drop_merged(model_dir, model_dir / "run-q8_0.gguf") == 2
+    assert not (model_dir / "merged").exists()
+
+
+def test_a_merged_link_is_left_alone(tmp_path):
+    shared = tmp_path / "shared-merge"
+    shared.mkdir()
+    (shared / "config.json").write_text("{}")
+    model_dir = tmp_path / "run"
+    model_dir.mkdir()
+    (model_dir / "merged").symlink_to(shared)
+
+    assert tt._drop_merged(model_dir, model_dir / "run-q8_0.gguf") == 0
+    assert (model_dir / "merged").is_symlink() and (shared / "config.json").is_file()
+
+
 def test_a_level_the_converter_does_not_write_fails_before_the_merge(client, tmp_path, merge, converter):
     pk, model_dir = _trained_job(tmp_path)
 
@@ -461,6 +547,7 @@ def test_a_failed_conversion_fails_the_job_with_the_reason(client, tmp_path, mer
     row = _row(pk)
     assert row.status == "failed" and "Model X is not supported" in row.error_message
     assert row.gguf_path is None
+    assert (model_dir / "merged" / "config.json").is_file()
 
 
 def test_exporting_again_at_another_level_leaves_one_gguf(client, tmp_path, merge):
@@ -502,6 +589,7 @@ def test_a_folder_merged_before_registers_the_merged_model(client, tmp_path, oll
                            "--quantize", "q4_K_M"]
     assert (model_dir / "Modelfile").read_text().startswith(f"FROM {model_dir / 'merged'}\n")
     assert _row(pk).status == "completed"
+    assert (model_dir / "merged" / "config.json").is_file()
 
 
 def test_a_level_ollama_cannot_quantize_to_is_refused_with_the_choices(client, tmp_path, ollama_cli):
