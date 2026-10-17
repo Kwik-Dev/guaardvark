@@ -445,7 +445,7 @@ def test_clip_profile_reads_the_registry_for_declared_models(app):
     assert (h3["fps"], h3["min_frames"], h3["max_frames"], h3["audio_out"]) == (24, 72, 362, True)
     assert mvt._max_clip_s(s) == pytest.approx(362 / 24)
     cog = mvt._clip_profile(mvt._settings(_mk(svc, settings={"i2v_engine": "cogvideox"})))
-    assert (cog["model"], cog["fps"], cog["max_frames"]) == ("cogvideox-5b-i2v", 8, 49)
+    assert (cog["model"], cog["fps"], cog["max_frames"]) == ("cogvideox-5b-i2v", 16, 81)
 
 
 def test_generate_one_clip_on_a_native_audio_model_anchors_the_song_slice(app, monkeypatch, tmp_path):

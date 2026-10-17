@@ -37,6 +37,7 @@ from typing import Optional
 
 from backend.services.video_model_registry import (
     VIDEO_MODEL_REGISTRY,
+    declared_canvas,
     family_spec,
     model_capabilities,
 )
@@ -126,6 +127,18 @@ def clamp_aspect_ratio(model_id: str, width: int, height: int) -> tuple:
     return new_w, new_h
 
 
+def fit_declared_canvas(model_id: str, width: int, height: int) -> tuple:
+    """Put the size on the canvas the entry declares (``short_side``,
+    ``max_long_side``), up or down: below its short side the model is off the
+    sizes it was trained at, which is a broken render rather than a smaller one."""
+    canvas = declared_canvas(model_id, width, height)
+    if not canvas or canvas == (width, height):
+        return width, height
+    logger.warning("Fitted %s video dims %dx%d → %dx%d, the canvas the model declares",
+                   model_id, width, height, *canvas)
+    return canvas
+
+
 def pixel_area_cap(model_id: str, frames: int = 0, family: Optional[str] = None) -> Optional[int]:
     """The entry's max_pixel_area (else its family's), lowered by the
     duration tier a longer clip falls in (MiniMax H3: 480p beyond ~7 s on 16 GB)."""
@@ -199,8 +212,9 @@ def align_dimensions(model_id: str, width: int, height: int, family: Optional[st
 
 def resolve_canvas(model_id: str, width: int, height: int, frames: int = 0,
                    family: Optional[str] = None, *, strict: Optional[bool] = None) -> tuple:
-    """(width, height) the render uses: declared ratio, pixel budget, grid."""
+    """(width, height) the render uses: declared ratio, declared canvas, pixel budget, grid."""
     width, height = clamp_aspect_ratio(model_id, width, height)
+    width, height = fit_declared_canvas(model_id, width, height)
     width, height = clamp_pixel_area(model_id, width, height, frames, family)
     return align_dimensions(model_id, width, height, family, strict=strict)
 

@@ -310,14 +310,15 @@ class ComfyUIVideoWorkflowMixin:
         negative_prompt: str = "",
         model_file: str = "CogVideoX_1_5_5b_I2V_bf16.safetensors",
         vae_file: str = "cogvideox_vae_bf16.safetensors",
-        num_frames: int = 49,
+        num_frames: int = 81,
         num_inference_steps: int = 50,
         guidance_scale: float = 6.0,
-        width: int = 720,
-        height: int = 480,
+        width: int = 1360,
+        height: int = 768,
         seed: Optional[int] = None,
-        fps: int = 8,
+        fps: int = 16,
         interpolation_multiplier: int = 2,
+        sequential_cpu_offload: bool = False,
     ) -> dict:
         """CogVideoX 1.5 5B I2V from the registry's local files — never a hub id.
 
@@ -328,6 +329,8 @@ class ComfyUIVideoWorkflowMixin:
         starts, by which time the T5 encoder and the image VAE have been
         offloaded again. Loading it to main_device up front is what put 14.4GB
         on a 16GB card before T5 had even been encoded (OOM, 2026-08-28).
+        ``sequential_cpu_offload`` streams the transformer's layers from CPU
+        memory, for an entry that declares it does not fit the card otherwise.
         """
         if seed is None:
             seed = int(time.time() * 1000) % (2**31)
@@ -368,7 +371,7 @@ class ComfyUIVideoWorkflowMixin:
                     "base_precision": "bf16",
                     "quantization": "disabled",
                     "load_device": "offload_device",
-                    "enable_sequential_cpu_offload": False,
+                    "enable_sequential_cpu_offload": sequential_cpu_offload,
                     "attention_mode": "sdpa",
                 }
             },

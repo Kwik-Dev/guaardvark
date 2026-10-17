@@ -401,7 +401,7 @@ VIDEO_MODEL_REGISTRY = {
     },
     "cogvideox-5b-i2v": {
         "name": "CogVideoX 1.5 5B I2V (BF16)",
-        "description": "Image-to-video, 6s clips. Full precision, best quality. Needs ~16GB VRAM. "
+        "description": "Image-to-video, 5 s clips at 1360x768, 16 fps. Full precision. Needs ~16GB VRAM. "
                        "Pulls the CogVideoX VAE + T5 encoder.",
         "hf_repo": "Kijai/CogVideoX-comfy",
         # The wrapper's single-file loader (CogVideoXModelLoader) enumerates
@@ -433,8 +433,31 @@ VIDEO_MODEL_REGISTRY = {
         "live_preview": False,
         "type": "cogvideox",
         "dimension_alignment": 16,
-        "native_fps": 8,
-        "max_frames": 49,
+        # This is CogVideoX 1.5, not the 1.0 the text-to-video entry above runs.
+        # Its card (THUDM/CogVideoX1.5-5B-I2V) sets min(W, H) = 768 and
+        # 768 <= max(W, H) <= 1360, 16 fps, 5 or 10 s clips, 50 steps, cfg 6.
+        # At 1.0's 720x480 and 8 fps a test clip's face broke into speckle and
+        # melted within four seconds (2026-10-17).
+        "short_side": 768,
+        "max_long_side": 1360,
+        # 21:9 is left out: at a 768 short side its long side would exceed 1360.
+        "aspect_ratios": ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2"],
+        "max_pixel_area": 1360 * 768,
+        # BF16 weights take ~10.5 GB and guidance doubles the batch, so on a 16 GB
+        # card every size the card allows ran out of memory at the first step
+        # without offload (1360x768, 1024x768 and 768x768 at 81 frames; 1360x768 at
+        # 49; FP8 weights at 1360x768), measured 2026-10-17 on 16376 MB. With the
+        # wrapper's sequential CPU offload 1360x768x81 fits at a 14.3 GB peak,
+        # 50.4 s/step. Cards above 16 GB are unmeasured and offload too.
+        "sequential_cpu_offload": True,
+        "native_fps": 16,
+        # The card's lengths are 81 and 161 frames; only 81 (5 s) is offered until
+        # 161 has been measured on a 16 GB card.
+        "frame_rule": "80n+1",
+        "frame_snap": "down",
+        "min_frames": 81,
+        "frames_when_unset": 81,
+        "max_frames": 81,
         "min_steps": 50,
         "default_steps": 50,
     },
@@ -2310,6 +2333,8 @@ def model_capabilities(model_id: str) -> dict:
         "cfg": bool(entry.get("cfg", True)),
         "aspect_ratios": list(entry.get("aspect_ratios") or []),
         "dimension_alignment": entry.get("dimension_alignment"),
+        "short_side": entry.get("short_side"),
+        "max_long_side": entry.get("max_long_side"),
         "max_pixel_area": entry.get("max_pixel_area"),
         "native_fps": entry.get("native_fps"),
         "frame_rule": entry.get("frame_rule"),
@@ -2567,13 +2592,34 @@ def snap_frames(model_id: str, frames: int, *, up: bool = False) -> int:
     return offset + k * step
 
 
+def declared_canvas(model_id: str, width: int, height: int) -> Optional[tuple]:
+    """(width, height) on the canvas an entry fixes with ``short_side`` and
+    ``max_long_side``: the short side at its declared length, the long side
+    following the request's aspect up to the cap, orientation kept. None for
+    an entry that declares no short side."""
+    entry = VIDEO_MODEL_REGISTRY.get(model_id or "") or {}
+    short = int(entry.get("short_side") or 0)
+    if not short or width <= 0 or height <= 0:
+        return None
+    align = int(entry.get("dimension_alignment") or 16) or 16
+    cap = int(entry.get("max_long_side") or 0)
+    long_side = short * max(width, height) / min(width, height)
+    if cap:
+        long_side = min(long_side, cap)
+    long_side = max(short, int(round(long_side / align)) * align)
+    if cap and long_side > cap:
+        long_side = (cap // align) * align
+    return (long_side, short) if width >= height else (short, long_side)
+
+
 def clip_defaults_for(model_id: str, total_vram_mb=None) -> dict:
     """Native fps/frames/steps/canvas for a model when the caller omitted them."""
     caps = model_capabilities(model_id)
     tiers = tier_defaults_for(model_id, total_vram_mb)
+    entry = VIDEO_MODEL_REGISTRY.get(model_id or "") or {}
     fps = int(caps.get("native_fps") or 24)
     max_frames = int(caps.get("max_frames") or 121)
-    frames = int(tiers.get("frames") or min(49, max_frames))
+    frames = int(tiers.get("frames") or entry.get("frames_when_unset") or min(49, max_frames))
     frames = max(1, min(frames, max_frames))
     steps = int(tiers.get("steps") or caps.get("default_steps") or 20)
     floor = int(caps.get("min_steps") or 0)
@@ -2581,6 +2627,8 @@ def clip_defaults_for(model_id: str, total_vram_mb=None) -> dict:
         steps = max(steps, floor)
     width = tiers.get("width")
     height = tiers.get("height")
+    if (not width or not height) and declared_canvas(model_id, 16, 9):
+        width, height = declared_canvas(model_id, 16, 9)
     if not width or not height:
         area = int(caps.get("max_pixel_area") or 512 * 512)
         align = int(caps.get("dimension_alignment") or 16) or 16

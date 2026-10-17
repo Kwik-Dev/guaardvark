@@ -66,6 +66,7 @@ import {
   DEFAULT_I2V_MODEL,
   familyType,
   isCogVideoXModel,
+  canvasDimensions,
   isWanModel,
   isLtxModel,
   isMinimaxModel,
@@ -700,7 +701,14 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     // Resolve through the model: the snap effect settles a render later, and
     // a restored config can name a ratio this model never supported.
     const effectiveAspectRatio = resolveAspectRatio(model, aspectRatio);
-    // CogVideoX is trained on 720x480 (3:2). Aspect-ratio math at 16:9 lands
+    // A model with a declared canvas (CogVideoX 1.5 I2V) renders at its fixed
+    // short side whatever the Size chips say; the aspect sets the long side.
+    const canvas = MODEL_OPTIONS[model]?.canvas;
+    if (canvas) {
+      const ratioConfig = ASPECT_RATIO_PRESETS[effectiveAspectRatio] || ASPECT_RATIO_PRESETS["16:9"];
+      return canvasDimensions(canvas, ratioConfig.ratio, MODEL_OPTIONS[model].dimensionAlignment);
+    }
+    // CogVideoX 1.0 is trained on 720x480 (3:2). Aspect-ratio math at 16:9 lands
     // on 720x405 → snaps to 720x400, which is off-spec and produces distorted
     // output every time. Pin to the model's native frame and let the user
     // letterbox / crop in post if they need a different aspect.
@@ -765,6 +773,11 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     [encoderModels, model],
   );
 
+  // Low VRAM clamps frames, resolution and steps on CogVideoX and Wan only,
+  // and never shrinks a model below the canvas it declares.
+  const lowVramClamps = (m, meta) =>
+    lowVramMode && ((isCogVideoXModel(m, meta) && !MODEL_OPTIONS[m]?.canvas) || isWanModel(m, meta));
+
   // Compute final params from presets
   const computedParams = useMemo(() => {
     const quality = QUALITY_PRESETS[qualityPreset] || QUALITY_PRESETS.standard;
@@ -822,7 +835,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     // Low VRAM safe preset for CogVideoX on 16GB GPUs
     // Very aggressive settings based on successful test: 8 frames, 15 steps, 480x320.
     // (cogvideox-2b was retired; cogvideox-5b stays and is tamed via the clamps below.)
-    if (lowVramMode && isCogVideoXModel(model, modelMeta[model])) {
+    // A model with a declared canvas is never shrunk below it.
+    if (lowVramMode && isCogVideoXModel(model, modelMeta[model]) && !modelConfig.canvas) {
       // Aggressively clamp frames - tested working with 8 frames
       if (effectiveDurationFrames > 12) {
         effectiveDurationFrames = 12;
@@ -916,7 +930,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       num_inference_steps: effectiveSteps,
       guidance_scale: advancedParams.guidance_scale,
       generate_frames_only: advancedParams.generate_frames_only,
-      frames_per_batch: lowVramMode && (isCogVideoXModel(model, modelMeta[model]) || isWanModel(model, modelMeta[model])) ? 1 : advancedParams.frames_per_batch,
+      frames_per_batch: lowVramClamps(model, modelMeta[model]) ? 1 : advancedParams.frames_per_batch,
       combine_frames: advancedParams.combine_frames,
       face_restore: advancedParams.face_restore,
       lora_name: advancedParams.lora_name,
@@ -959,12 +973,11 @@ const VideoGeneratorPage = ({ embedded = false }) => {
 
   // Low VRAM clamps frames, resolution and steps on CogVideoX and Wan only
   // (computedParams above); on other models the switch leaves the steps alone.
-  const lowVramClampApplies =
-    lowVramMode && (isCogVideoXModel(model, modelMeta[model]) || isWanModel(model, modelMeta[model]));
+  const lowVramClampApplies = lowVramClamps(model, modelMeta[model]);
 
   const qualityChipOptions = useMemo(() => {
     if (isLtxModel(model, modelMeta[model])) return [];
-    if (lowVramMode && (isWanModel(model, modelMeta[model]) || isCogVideoXModel(model, modelMeta[model]))) return [];
+    if (lowVramClamps(model, modelMeta[model])) return [];
     const min = MODEL_OPTIONS[model]?.minSteps ?? modelCaps?.min_steps ?? 0;
     const seen = new Set();
     const out = [];
@@ -2355,7 +2368,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   }))}
                 />
               </Cluster>
-              {isCogVideoXModel(model, modelMeta[model]) ? (
+              {isCogVideoXModel(model, modelMeta[model]) && !MODEL_OPTIONS[model]?.canvas ? (
                 <Hint>CogVideoX is trained at {computedParams.width}×{computedParams.height}. Other aspects distort.</Hint>
               ) : (
                 <>
@@ -2376,7 +2389,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                       ariaLabel="Video size"
                       value={videoSize}
                       onChange={setVideoSize}
-                      disabled={isLtxModel(model, modelMeta[model]) || isMinimaxModel(model, modelMeta[model])}
+                      disabled={isLtxModel(model, modelMeta[model]) || isMinimaxModel(model, modelMeta[model]) || !!MODEL_OPTIONS[model]?.canvas}
                       options={Object.entries(VIDEO_SIZE_PRESETS).map(([key, preset]) => ({
                         value: key,
                         label: stripGlyph(preset.label),
