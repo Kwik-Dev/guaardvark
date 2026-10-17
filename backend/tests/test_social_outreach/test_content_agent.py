@@ -595,3 +595,18 @@ def test_a_judged_thread_with_a_passed_draft_still_waits(app):
         assert outcome["status"] == "drafted"
         assert outcome["independent_reason"] == "passed"
         assert extra["relevance_unchecked"] is False
+
+
+def test_a_pass_from_the_drafters_own_model_is_drafted_and_labelled(app):
+    """Nothing is blocked: the draft waits for a person, told the check was
+    the drafter's own model."""
+    same_model = {**EXT_PASS, "model": "gemma4:e2b", "drafter_model": "gemma4:e2b", "independent": False}
+    with app.app_context():
+        row = _make_candidate(platform="youtube")
+        outcome, extra, _ = _draft_with_gates(row.id, same_model)
+
+        assert outcome["status"] == "drafted"
+        assert outcome["independent_reason"] == "not_independent"
+        assert outcome["hold_reason"] is None
+        assert extra["external_independent"] is False
+        assert extra["drafter_model"] == "gemma4:e2b"

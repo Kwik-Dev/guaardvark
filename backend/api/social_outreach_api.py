@@ -440,10 +440,12 @@ def draft_comment():
 
     Every draft is queued as drafted for a person's approval; ``would_post``
     is always false and stays in the answer for the callers that read it.
-    gates.independent_check is passed, failed or unavailable: whether the
-    second-opinion grader ran on this draft and what it concluded, recorded
-    for the person who reviews it. A share is never graded (there is no thread
-    for the rubric). A draft for X or LinkedIn is refused (400).
+    gates.independent_check is passed, not_independent, failed or
+    unavailable: whether the second-opinion grader ran on this draft and what
+    it concluded (not_independent: it passed, but the grader is the drafter's
+    own model), recorded for the person who reviews it. A share is never
+    graded (there is no thread for the rubric). A draft for X or LinkedIn is
+    refused (400).
     """
     body = request.get_json(silent=True) or {}
     platform = body.get("platform", "unknown")
@@ -525,6 +527,9 @@ def draft_comment():
             "external_grade": ext.get("grade"),
             "external_passed": ext.get("passed"),
             "external_reason": ext.get("reason", ""),
+            "external_model": ext.get("model"),
+            "drafter_model": ext.get("drafter_model"),
+            "external_independent": ext.get("independent"),
             "relevance_unchecked": relevance_unchecked,
             "hold_reason": hold_reason,
         },

@@ -29,6 +29,13 @@ def _no_model_info():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _drafter_unknown():
+    """No drafter lookup reaches Ollama; tests that compare models set one."""
+    with patch.object(external_grader, "_drafter_model", return_value=None):
+        yield
+
+
 def test_a_returned_answer_is_checked_and_graded_in_code():
     """The model's own grade (0.75) and concise (0) are not read: a one-word
     draft is concise, so all four items hold and the grade is 1.0."""
@@ -269,3 +276,41 @@ def test_a_comment_still_reports_its_three_questions():
 def test_an_unknown_rubric_kind_is_refused():
     with pytest.raises(ValueError):
         external_grader.grade_draft_externally("draft", "thread", kind="share")
+
+
+# ---- whether the grade is independent of the drafter -------------------------------------
+
+DRAFTER_ALIAS = "llamacpp:" + "2cf98652fdc6" + "a" * 52
+TAGS = [
+    {"name": "gemma4:e2b", "digest": "2cf98652fdc6" + "a" * 52},
+    {"name": "gemma4:e2b", "digest": "da406dc37ca0" + "b" * 52},
+    {"name": DRAFTER_ALIAS, "digest": "2cf98652fdc6" + "a" * 52},
+    {"name": "qwen3:14b", "digest": "bdbd181c33f2" + "1" * 52},
+]
+PASSING = '{"engages": 1, "on_topic": 1, "appropriate_tone": 1, "reason": "fits"}'
+
+
+@pytest.mark.parametrize("drafter, independent", [
+    (DRAFTER_ALIAS, False),        # another name for the grader's own build
+    ("gemma4:e2b", False),
+    ("qwen3:14b", True),
+    ("not-installed:1b", None),    # cannot be told
+    (None, None),
+])
+def test_a_grade_from_the_drafters_own_build_is_not_independent(drafter, independent):
+    with patch.object(external_grader, "_drafter_model", return_value=drafter), \
+            patch("backend.utils.ollama_resource_manager._ollama_tags", return_value=TAGS):
+        result = _grade(PASSING)
+
+    assert result["checked"] is True
+    assert result["passed"] is True
+    assert result["drafter_model"] == drafter
+    assert result["independent"] is independent
+
+
+def test_an_unchecked_grade_does_not_look_up_the_drafter():
+    with patch.object(external_grader, "_drafter_model") as drafter:
+        result = _grade("not json at all")
+
+    assert result["checked"] is False
+    drafter.assert_not_called()
