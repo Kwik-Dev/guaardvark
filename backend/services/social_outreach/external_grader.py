@@ -6,8 +6,9 @@ its own confidence, not objective quality — it's biased toward what it
 believes is good. An independent grader, run on a different model family
 with a fixed rubric, catches drafts that the writer overrated. When the
 grader resolves to the drafter's own build (the same Ollama manifest digest,
-whatever the two names), its answer is still recorded but marked not
-independent (gates.independent_check_label).
+whatever the two names) or to another build of the drafter's family, its
+answer is still recorded but marked not independent
+(decision_data.INDEPENDENCE, gates.independent_check_label).
 
 This is intentionally NOT a generation model — it's a binary fitness check.
 A comment on a thread is asked three yes/no questions (engages, on_topic,
@@ -28,7 +29,8 @@ from typing import Optional
 
 import requests
 
-from backend.utils.ollama_resource_manager import same_model, think_payload
+from backend.services.decision_evidence import check_counts_as_independent
+from backend.utils.ollama_resource_manager import think_payload
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +41,8 @@ DEFAULT_GRADER_MODEL = "gemma4:e2b"
 """Override via env GUAARDVARK_OUTREACH_GRADER_MODEL if you want a different one.
 Falls back to gemma4:e2b if the configured model isn't loaded. gemma4:e2b is
 also the stock default chat model, which writes the drafts; a grade from the
-drafter's own build is marked not independent, so set the override to a
-model of another family for a check that counts."""
+drafter's own build or family is marked not independent, so set the override
+to a model of another family for a check that counts."""
 
 FALLBACK_GRADER_MODEL = "gemma4:e2b"
 
@@ -143,21 +145,24 @@ def _drafter_model() -> Optional[str]:
 
 
 def _independence(grader_model: str) -> dict:
-    """Whether ``grader_model`` is a different build from the drafter.
+    """Whether ``grader_model``'s grade counts as independent of the drafter.
 
-    ``independent`` is False when the two names resolve to the same Ollama
-    manifest digest, True when they resolve to different ones, None when
-    either cannot be resolved. The same build grading its own draft is not an
-    independent check, with or without a fresh context.
+    ``independent`` follows decision_data.INDEPENDENCE: False when the two
+    names resolve to the same Ollama build or to builds of one model family,
+    True when they differ in both, None when that cannot be told. The same
+    build grading its own draft is not an independent check, with or without
+    a fresh context.
     """
     drafter = _drafter_model()
-    same = same_model(grader_model, drafter) if drafter else None
-    if same:
+    independent = (
+        check_counts_as_independent("model", judge=grader_model, authors=[drafter]) if drafter else None
+    )
+    if independent is False:
         logger.info(
-            "external grader %s is the drafter's own model (%s): its grade is not independent",
+            "external grader %s is the drafter's own model or family (%s): its grade is not independent",
             grader_model, drafter,
         )
-    return {"drafter_model": drafter, "independent": None if same is None else not same}
+    return {"drafter_model": drafter, "independent": independent}
 
 
 def _resolve_grader_model() -> Optional[str]:
@@ -202,7 +207,7 @@ def grade_draft_externally(draft_text: str, thread_context: str, *, kind: str = 
             "model": str | None,
             "drafter_model": str | None,   # checked results: the model that wrote drafts
             "independent": bool | None,    # checked results: False when model is the drafter's
-                                           # own build, None when that could not be told
+                                           # own build or family, None when that could not be told
         }
 
     Only the asked answers are read; a "grade" or "concise" in the reply is

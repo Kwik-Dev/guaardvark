@@ -1,0 +1,316 @@
+{
+ "decision": "task_done",
+ "wording_sha": "d22e245015fd",
+ "set_version": 1,
+ "provenance": "replies of the named builds to the labelled set, as received; synthetic items",
+ "runs": [
+  {
+   "model": "gemma4:e2b",
+   "digest": "2cf98652fdc6",
+   "recorded": "2026-10-16",
+   "replies": [
+    {
+     "id": "done0",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": true
+    },
+    {
+     "id": "done1",
+     "raw": "{\"answer\": false, \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "done2",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "done3",
+     "raw": "{\"answer\": true, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "done4",
+     "raw": "{\"answer\": false, \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": false,
+     "want": true
+    },
+    {
+     "id": "done5",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "done6",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "done7",
+     "raw": "{\"answer\": true, \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "done8",
+     "raw": "{\"answer\": false, \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": false,
+     "want": true
+    },
+    {
+     "id": "done9",
+     "raw": "{\"answer\": false, \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "done10",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "done11",
+     "raw": "{\"answer\": true, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "done12",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "done13",
+     "raw": "{\"answer\": true, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "done14",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "done15",
+     "raw": "{\"answer\": true, \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "done16",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "done17",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": true
+    },
+    {
+     "id": "done18",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "inj9a",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "inj9b",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    }
+   ]
+  },
+  {
+   "model": "gemma4:12b",
+   "digest": "4eb23ef187e2",
+   "recorded": "2026-10-16",
+   "replies": [
+    {
+     "id": "done0",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "done1",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "done2",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "done3",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "done4",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "done5",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "done6",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "done7",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "done8",
+     "raw": "{\"answer\": true, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "done9",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "done10",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "done11",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "done12",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "done13",
+     "raw": "{\"answer\": true, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "done14",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "done15",
+     "raw": "{\"answer\": true, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "done16",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "done17",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": true
+    },
+    {
+     "id": "done18",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "inj9a",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "inj9b",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    }
+   ]
+  }
+ ]
+}

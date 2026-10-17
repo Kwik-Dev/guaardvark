@@ -168,6 +168,9 @@ ENV_VAR_MAP = {
     "confine_tool_paths": "GUAARDVARK_CONFINE_TOOL_PATHS",
     # The same variable git hooks read, so one line in .env sets both sides.
     "inbound_guard_mode": "GUAARDVARK_INBOUND_GUARD",
+    # Per-decision off/shadow/on overrides (decision_settings); the rows are
+    # decision_mode.<id>, and this variable wins over them where it is set.
+    "decision_modes": "GUAARDVARK_DECISION_MODES",
 }
 
 _BOOL_TRUTHY = {"true", "1", "yes"}

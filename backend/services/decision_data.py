@@ -6,7 +6,8 @@ wording, the allowed answers, what goes in the state and where each field
 comes from, the deterministic fallback, the safe side, and the floor a model
 has to reach on the labelled set before the decision may be switched on.
 
-Nothing imports this module at runtime yet. Every entry defaults to "off".
+nl_control_plane.decide() asks these questions; every entry defaults to "off"
+(decision_settings holds the per-decision mode).
 
 Field reference
     feature       subsystem the decision belongs to
@@ -27,6 +28,12 @@ Field reference
     precheck      the cheap trigger that decides whether to ask at all
     fallback      today's deterministic answer, used when off, unsure or failing
     safe_side     the answer to act on when nothing better is known
+    unlocks       the answers that move toward the side effect or past a check
+                  (start the job, send, post, write, mark done, skip the
+                  check): what an instruction planted in the text would ask
+                  for. Never the safe side. decide() refuses one of these
+                  when any state field comes from a third party, so such text
+                  can only lead to a veto
     side_effect   none | prompt | gpu_job | web_egress | public_post |
                   file_db_write | desktop | shell
     mode_default  off | shadow | on
@@ -37,8 +44,8 @@ Field reference
 
 Measured rows live in MEASURED_ACCURACY, keyed by decision. A row holds only
 for the model build (``digest``, the Ollama manifest digest prefix) and the
-exact wording (``wording_sha``, see backend/tests/unit/test_decision_data.py)
-it was measured with; editing the key, instructions or choices voids it.
+exact wording (``wording_sha``, see backend/services/decision_prompt.py) it
+was measured with; editing the key, instructions or choices voids it.
 """
 from __future__ import annotations
 
@@ -51,8 +58,97 @@ TYPES = (
 LAYERS = ("L1", "L2", "L3", "L4", "L5")
 SOURCES = ("system", "user", "third_party", "machine")
 
+# Who may ask a question, and what may answer it, by the decision's layer.
+# decide() reads the row for the layer; L0 (facts computed without a model)
+# is never a question, so it has no row.
+#   runs                the run kinds that may ask: "interactive" (a person is
+#                       waiting on the answer), "unattended" (a loop acting on
+#                       its own), "batch" (an offline pass over many items)
+#   backends            what may answer: "chat" is the chat model already
+#                       loaded; "batch" is a batch backend, not built yet
+#   author_must_differ  run kinds whose caller must name the models that wrote
+#                       what is being judged (decide's exclude_models; an
+#                       empty tuple when nothing was written by a model); the
+#                       answering model may not be one of them (INDEPENDENCE)
+#   when_unanswered     what an "on" decision returns when no model answer
+#                       can be used: "fallback" (today's answer) or "safe_side"
+#                       (the entry's safe side; for a check, "not verified")
+RUN_KINDS = ("interactive", "unattended", "batch")
+BACKEND_POLICY: dict = {
+    "L1": {
+        "runs": RUN_KINDS, "backends": ("chat",), "author_must_differ": (), "when_unanswered": "fallback",
+        "why": "Turn routing: a person is waiting, so only the chat model already loaded answers.",
+    },
+    "L2": {
+        "runs": RUN_KINDS, "backends": ("chat",), "author_must_differ": (), "when_unanswered": "fallback",
+        "why": "Checks inside one reply: the chat model already loaded answers.",
+    },
+    "L3": {
+        "runs": RUN_KINDS, "backends": ("chat", "batch"), "author_must_differ": ("unattended", "batch"),
+        "when_unanswered": "fallback",
+        "why": (
+            "Pipeline gates. With a person present the chat model answers; a loop acting on its own uses a batch "
+            "backend or a model other than the one that wrote what it judges."
+        ),
+    },
+    "L4": {
+        "runs": RUN_KINDS, "backends": ("chat",), "author_must_differ": (), "when_unanswered": "safe_side",
+        "why": (
+            "Verification. The chat model checks text only (state is text; visual checks stay with the vision "
+            "model), and a check that could not answer means not verified, never done or a match."
+        ),
+    },
+    "L5": {
+        "runs": ("batch",), "backends": ("batch", "chat"), "author_must_differ": ("batch",),
+        "when_unanswered": "fallback",
+        "why": (
+            "Learning and batch work runs in batch passes only, never on a request, judged by a model other than "
+            "the one whose output it judges."
+        ),
+    },
+}
+
 DEFAULT_FLOOR = 0.95
 GATE_FLOOR = 0.98
+
+# How a measured row is judged (decision_evidence). A decision runs on a model
+# only when the lower confidence bound of that model's accuracy on the
+# labelled set reaches the decision's floor; the plain score is for reference.
+EVIDENCE = {
+    # Quantile of the Beta(1 + correct, 1 + misses) posterior taken as the
+    # bound: a one-sided 95% bound. A short perfect run cannot clear a floor:
+    # 35 of 35 proves 0.920, and a 0.95 floor needs 59 of 59.
+    "lcb_q": 0.05,
+    # What a labelled-set result from another machine adds when rows are
+    # pooled. The same items on the same build and wording are a re-run, not
+    # new evidence: it confirms a row, or marks it disputed when it disagrees,
+    # and adds nothing to correct or n. Only new labelled items add up.
+    "fleet_label_weight": 0.0,
+}
+
+# What counts as an independent check of something a model produced: a draft
+# it wrote, a fix it proposed, a pair it generated. Read through
+# decision_evidence.check_counts_as_independent.
+INDEPENDENCE = {
+    # Each kind of check, and whether it can stand as the independent one.
+    # A rule or an embedding score may still veto; it never counts as the check.
+    "check_kinds": {
+        "person": "counts",
+        "model": "counts_if_unrelated",
+        "deterministic_rule": "veto_only",
+        "embedding_similarity": "veto_only",
+    },
+    # A model's check counts only when its build differs from the author's in
+    # both of these. The same build agrees with itself with or without a fresh
+    # context, and builds of one family share their training and its blind
+    # spots (gemma4:12b checking gemma4:e2b is not independent). A model on
+    # another approved machine is judged the same way: the same build
+    # elsewhere is still the same build.
+    "model_must_differ_in": ("digest", "family"),
+    # Whether a model check counts when the builds cannot be told apart
+    # (Ollama unreachable, a model not installed here).
+    "unknown_counts": False,
+}
 # Decision-model probabilities are informative; chat-model self-reported
 # confidence is not (it reports 1.0 on its misses), so no threshold applies to it.
 DECISION_MODEL_THRESHOLD = {"nimble": 0.95, "tev1": 0.8}
@@ -77,6 +173,64 @@ DECISION_MODEL_LICENCE = {
     "clef": "recommendable",
 }
 
+# Code that decides whether something may happen at all. A guard must give the
+# same answer for the same input every time and must hold when every model is
+# wrong, so it never asks one: decide() refuses a call made from these files
+# (reason "guard_caller"), and test_decide_safety checks that none of them
+# imports the decision modules. Paths are from the repository root; a path
+# ending in "/" covers every file under it. The value is None when the whole
+# file is a guard, or the names of the functions that are.
+GUARD_MODULES: dict = {
+    "backend/services/tool_execution_guard.py": None,
+    "backend/utils/path_guard.py": None,
+    "backend/utils/auth_guard.py": None,
+    "backend/utils/cross_site_guard.py": None,
+    "backend/utils/sidecar_guard.py": None,
+    "backend/services/inbound_guard_service.py": None,
+    "scripts/inbound_guard/": None,
+    "backend/services/job_operation_gate.py": None,
+    "backend/services/social_outreach/kill_switch.py": None,
+    "backend/services/social_outreach/gates.py": None,
+    "backend/services/social_outreach/platforms.py": None,
+    "backend/services/social_outreach/transitions.py": None,
+    "backend/services/social_outreach/watched_post.py": None,
+    "backend/tools/llama_code_tools.py": ("verify_change",),
+    "backend/utils/agent_web_gate.py": None,
+    "backend/services/mcp_policy.py": None,
+}
+
+# What a decision's answer may lead to when its side effect is a file or
+# database write. Each kind is a path a person can see and undo; no decision
+# deletes, overwrites or applies anything. The code that acts on the answer
+# keeps to its kind.
+#   offered_action     starts only the action the assistant itself offered,
+#                      behind the tool confirmation guard
+#   reversible_row     adds or marks rows a person can see and undo (memories
+#                      on the Memory page, lessons, provisional recipes; an
+#                      update marks the old row superseded); never deletes
+#   label_only         labels a record or adds a note to it; never applies,
+#                      deletes or changes what it labels
+#   metadata_only      sets metadata (how a file is split, a stored class);
+#                      never the content
+#   drop_from_derived  leaves an item out of a derived set before it is
+#                      stored; the source is untouched
+WRITE_LIMIT_KINDS = ("offered_action", "reversible_row", "label_only", "metadata_only", "drop_from_derived")
+WRITE_LIMITS: dict = {
+    "accepted_offer": "offered_action",
+    "chunk_strategy": "metadata_only",
+    "screen_meta_memory_request": "reversible_row",
+    "screen_element_seen": "reversible_row",
+    "screen_lesson_about_target": "reversible_row",
+    "memory_fact": "reversible_row",
+    "memory_relation": "reversible_row",
+    "training_pair_keep": "drop_from_derived",
+    "character_class": "metadata_only",
+    "eval_pair_valid": "drop_from_derived",
+    "judge_pairwise": "label_only",
+    "feedback_strong_praise": "reversible_row",
+    "fix_addresses_failure": "label_only",
+}
+
 DECISIONS: dict = {
     # ------------------------------------------------------------------ chat turn routing (L1)
     "accepted_offer": {
@@ -92,6 +246,7 @@ DECISIONS: dict = {
         "precheck": "pending_offer() found an offer in the last assistant reply and the reply is not a bare yes",
         "fallback": "AFFIRMATION_PATTERNS.fullmatch(reply)",
         "safe_side": False,
+        "unlocks": (True,),
         "side_effect": "file_db_write",
         "mode_default": "off", "floor": GATE_FLOOR,
         "set": "accepted_offer.json",
@@ -114,6 +269,7 @@ DECISIONS: dict = {
         "precheck": "_REALTIME_KEYWORD_RE or a wider time/price/score/news word list matches",
         "fallback": "UnifiedChatEngine._is_realtime_query(message)",
         "safe_side": False,
+        "unlocks": (True,),
         "side_effect": "prompt",
         "mode_default": "off", "floor": DEFAULT_FLOOR,
         "set": "needs_live_data.json",
@@ -142,6 +298,7 @@ DECISIONS: dict = {
         "precheck": "a broad image-intent regex fires or an image is attached",
         "fallback": "the rule-based image gate and user_wants_image_edit",
         "safe_side": "neither",
+        "unlocks": ("new_image", "edit_image"),
         "side_effect": "gpu_job",
         "mode_default": "off", "floor": DEFAULT_FLOOR,
         "set": "image_intent.json",
@@ -165,6 +322,7 @@ DECISIONS: dict = {
         "precheck": "the agent screen is active and the message is not social or an explicit screen command",
         "fallback": "screen_task unless NO_SCREEN_CONTEXT matches",
         "safe_side": "chat",
+        "unlocks": ("screen_task",),
         "side_effect": "desktop",
         "mode_default": "off", "floor": DEFAULT_FLOOR,
         "set": "screen_or_chat.json",
@@ -190,6 +348,7 @@ DECISIONS: dict = {
         "precheck": "more than one trigger family fires for the turn",
         "fallback": "the legacy route the current chain would take",
         "safe_side": "chat_answer",
+        "unlocks": ("image_generation", "screen_agent", "web_search", "search_documents"),
         "side_effect": "gpu_job",
         "mode_default": "off", "floor": DEFAULT_FLOOR,
         "set": "chat_route.json",
@@ -213,6 +372,7 @@ DECISIONS: dict = {
         "precheck": "retrieval returned passages above the reranker floor",
         "fallback": "keep the passages (no answerability check today)",
         "safe_side": False,
+        "unlocks": (True,),
         "side_effect": "prompt",
         "mode_default": "off", "floor": DEFAULT_FLOOR,
         "set": "context_answers.json",
@@ -233,6 +393,7 @@ DECISIONS: dict = {
         "precheck": "the agent reported done",
         "fallback": "the existing done-proof check",
         "safe_side": False,
+        "unlocks": (True,),
         "side_effect": "none",
         "mode_default": "off", "floor": DEFAULT_FLOOR,
         "set": "task_done.json",
@@ -261,6 +422,7 @@ DECISIONS: dict = {
         "precheck": "an outreach command arrived (HTTP /intent, chat tool, slash freeform, llx outreach)",
         "fallback": "the existing JSON classification through nl_control_plane.json_chat",
         "safe_side": "refuse",
+        "unlocks": ("approve", "scout_and_draft"),
         "side_effect": "public_post",
         "mode_default": "off", "floor": GATE_FLOOR,
         "set": "outreach_intent.json",
@@ -293,6 +455,7 @@ DECISIONS: dict = {
         "fallback": "the existing relevance judge (recon.judged_unfit: a grade below MIN_RELEVANCE_GRADE "
                     "or a 'skip' verdict)",
         "safe_side": "skip",
+        "unlocks": ("good_fit",),
         "side_effect": "public_post",
         "mode_default": "off", "floor": GATE_FLOOR,
         "set": "outreach_thread_fit.json",
@@ -323,6 +486,7 @@ DECISIONS: dict = {
                  'or /film-crew command',
      'fallback': 'music video, then film crew, then video, in _run_chat order',
      'safe_side': 'neither',
+     'unlocks': ('new_clip', 'music_video', 'film_crew'),
      'side_effect': 'gpu_job',
      'mode_default': 'off',
      'floor': 0.95,
@@ -351,6 +515,7 @@ DECISIONS: dict = {
                  "pause, resume, what's playing), which stays deterministic",
      'fallback': 'the matched media pattern',
      'safe_side': 'chat',
+     'unlocks': ('player_command',),
      'side_effect': 'desktop',
      'mode_default': 'off',
      'floor': 0.95,
@@ -374,6 +539,7 @@ DECISIONS: dict = {
      'precheck': '_LOOKUP_REQUEST_RE matches selection_text, no tool ran this turn, tools are not skipped',
      'fallback': 'True (the regex matched)',
      'safe_side': True,
+     'unlocks': (False,),
      'side_effect': 'prompt',
      'mode_default': 'off',
      'floor': 0.95,
@@ -397,6 +563,7 @@ DECISIONS: dict = {
      'precheck': 'a DELIBERATION_SIGNALS pattern matches',
      'fallback': 'AgentBrain._needs_deliberation(message)',
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'shell',
      'mode_default': 'off',
      'floor': 0.98,
@@ -422,6 +589,7 @@ DECISIONS: dict = {
      'precheck': 'a CODE_SEARCH_KEYWORDS substring matches and search_codebase is registered',
      'fallback': '_asks_about_code(message)',
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'prompt',
      'mode_default': 'off',
      'floor': 0.95,
@@ -444,6 +612,7 @@ DECISIONS: dict = {
      'precheck': 'get_vision_context() reports an active stream and the user attached no image',
      'fallback': 'True (attach the latest frame, as today)',
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'gpu_job',
      'mode_default': 'off',
      'floor': 0.95,
@@ -466,6 +635,7 @@ DECISIONS: dict = {
      'precheck': 'Tier 3 or a legacy agent loop finished with facts in FactsRegistry',
      'fallback': '_verify_answer (capitalised-entity regex, then a free-text VALID/CORRECTED reply)',
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'prompt',
      'mode_default': 'off',
      'floor': 0.95,
@@ -490,6 +660,7 @@ DECISIONS: dict = {
                  '_WORKSTATION_DIRECT command (those run with no question asked)',
      'fallback': 'match_workstation_direct(message)',
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'prompt',
      'mode_default': 'off',
      'floor': 0.95,
@@ -516,6 +687,7 @@ DECISIONS: dict = {
      'precheck': 'the rules fetch returned at least one rule and NO_PROMO_RULE_PATTERNS found no ban',
      'fallback': 'is_self_promo_banned(rules_text) is None, so allowed',
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'public_post',
      'mode_default': 'off',
      'floor': 0.98,
@@ -548,6 +720,7 @@ DECISIONS: dict = {
                  'generated',
      'fallback': 'allowed (nothing reads this rule today)',
      'safe_side': True,
+     'unlocks': (False,),
      'side_effect': 'public_post',
      'mode_default': 'off',
      'floor': 0.98,
@@ -576,6 +749,7 @@ DECISIONS: dict = {
      'fallback': "the single grader call's 'engages' answer; passed needs engages, on_topic and "
                  "appropriate_tone all yes",
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'public_post',
      'mode_default': 'off',
      'floor': 0.98,
@@ -605,6 +779,7 @@ DECISIONS: dict = {
      'fallback': "the single grader call's 'on_topic' answer; passed needs engages, on_topic and "
                  "appropriate_tone all yes",
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'public_post',
      'mode_default': 'off',
      'floor': 0.98,
@@ -629,6 +804,7 @@ DECISIONS: dict = {
      'fallback': "the single grader call's 'appropriate_tone' answer; passed needs engages, on_topic and "
                  "appropriate_tone all yes",
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'public_post',
      'mode_default': 'off',
      'floor': 0.98,
@@ -660,6 +836,7 @@ DECISIONS: dict = {
                  'scraper is a stub)',
      'fallback': "the drafter's own empty-draft decision inside the reply prompt",
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'public_post',
      'mode_default': 'off',
      'floor': 0.98,
@@ -686,6 +863,7 @@ DECISIONS: dict = {
      'fallback': 'the DOM needle check (first 60 characters; Reddit in comment-like elements, YouTube in the whole '
                  'body text)',
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'public_post',
      'mode_default': 'off',
      'floor': 0.98,
@@ -719,6 +897,7 @@ DECISIONS: dict = {
                  '(is_conversational, SOCIAL_TIER2_PATTERNS) are not asked',
      'fallback': 'False (skip, as the rule says today)',
      'safe_side': True,
+     'unlocks': (),
      'side_effect': 'prompt',
      'mode_default': 'off',
      'floor': 0.95,
@@ -746,6 +925,7 @@ DECISIONS: dict = {
      'fallback': '_detect_best_chunking_strategy content patterns, then '
                  'AdaptiveChunker._analyze_content_for_strategy',
      'safe_side': 'prose',
+     'unlocks': (),
      'side_effect': 'file_db_write',
      'mode_default': 'off',
      'floor': 0.95,
@@ -773,6 +953,7 @@ DECISIONS: dict = {
      'precheck': '_META_MEMORY_RE matches, _SCREEN_VERB_RE does not, and the task is under 140 characters',
      'fallback': "_try_meta_memory_task's regex decision",
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'file_db_write',
      'mode_default': 'off',
      'floor': 0.95,
@@ -803,6 +984,7 @@ DECISIONS: dict = {
      'precheck': '_dom_confirms_target returned True',
      'fallback': '_dom_confirms_target(target), positive-only word overlap',
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'none',
      'mode_default': 'off',
      'floor': 0.95,
@@ -827,6 +1009,7 @@ DECISIONS: dict = {
                  'contradiction)',
      'fallback': 'the word-overlap result: not seen, so the contradiction is logged',
      'safe_side': True,
+     'unlocks': (False,),
      'side_effect': 'file_db_write',
      'mode_default': 'off',
      'floor': 0.95,
@@ -851,6 +1034,7 @@ DECISIONS: dict = {
      'precheck': '_is_task_target kept the lesson (word-set subset match)',
      'fallback': '_is_task_target(element, targets)',
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'file_db_write',
      'mode_default': 'off',
      'floor': 0.95,
@@ -874,6 +1058,7 @@ DECISIONS: dict = {
      'precheck': 'the step carries a precondition and the eye described the screen',
      'fallback': "_parse_match_verdict on the text model's JSON reply (fails closed)",
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'desktop',
      'mode_default': 'off',
      'floor': 0.98,
@@ -901,6 +1086,7 @@ DECISIONS: dict = {
      'precheck': 'a note arrived for the running task and _STOP_NOTE did not match',
      'fallback': '_STOP_NOTE.match(note)',
      'safe_side': False,
+     'unlocks': (),
      'side_effect': 'desktop',
      'mode_default': 'off',
      'floor': 0.95,
@@ -928,6 +1114,7 @@ DECISIONS: dict = {
                  'typography, inscription, spelling)',
      'fallback': 'has_text_intent(_without_negated_text(prompt))',
      'safe_side': False,
+     'unlocks': (),
      'side_effect': 'prompt',
      'mode_default': 'off',
      'floor': 0.95,
@@ -957,6 +1144,7 @@ DECISIONS: dict = {
                  "that' / 'from now on' prefixes stay deterministic",
      'fallback': '_extract_fact(message) is not None',
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'file_db_write',
      'mode_default': 'off',
      'floor': 0.95,
@@ -983,6 +1171,7 @@ DECISIONS: dict = {
                  'is an embedding near-neighbour (at most 3 candidates)',
      'fallback': 'exact normalised-text match counts as same; everything else is unrelated',
      'safe_side': 'unrelated',
+     'unlocks': ('updates', 'contradicts'),
      'side_effect': 'file_db_write',
      'mode_default': 'off',
      'floor': 0.95,
@@ -1010,6 +1199,7 @@ DECISIONS: dict = {
      'precheck': 'a task crashed (SWARM_AGENT_FAILED or no status file) and retries remain',
      'fallback': 'retry up to max_retries=2 with no classification, then the diagnostic pass',
      'safe_side': 'unclear',
+     'unlocks': (),
      'side_effect': 'shell',
      'mode_default': 'off',
      'floor': 0.95,
@@ -1033,6 +1223,7 @@ DECISIONS: dict = {
      'precheck': 'the agent exited cleanly with no uncommitted diff, or the diagnostic pass moved HEAD',
      'fallback': 'DONE on a clean exit; any new commit counts as a diagnostic fix',
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'shell',
      'mode_default': 'off',
      'floor': 0.98,
@@ -1066,6 +1257,7 @@ DECISIONS: dict = {
      'fallback': 'keep (today the filter drops a pair only on its length checks or a score below min_score; '
                  'a pair with no score is kept)',
      'safe_side': 'unclear',
+     'unlocks': ('keep',),
      'side_effect': 'file_db_write',
      'mode_default': 'off',
      'floor': 0.95,
@@ -1098,6 +1290,7 @@ DECISIONS: dict = {
                  "command lines and '/' lines stay deterministic",
      'fallback': 'resolve_repl_line(line)',
      'safe_side': 'chat',
+     'unlocks': ('command',),
      'side_effect': 'shell',
      'mode_default': 'off',
      'floor': 0.98,
@@ -1131,6 +1324,7 @@ DECISIONS: dict = {
      'precheck': 'a production reached awaiting_approval and the vision model returned a frame description',
      'fallback': "_parse_verdict on the decider's one-line reply (REJECT wins, APPROVE, CONFIDENCE >= 70)",
      'safe_side': 'unclear',
+     'unlocks': ('usable',),
      'side_effect': 'gpu_job',
      'mode_default': 'off',
      'floor': 0.98,
@@ -1166,6 +1360,7 @@ DECISIONS: dict = {
      'precheck': 'no class_token is stored on the subject or passed in, and the regex blob is not empty',
      'fallback': 'resolve_class_token(subject)',
      'safe_side': 'unclear',
+     'unlocks': (),
      'side_effect': 'file_db_write',
      'mode_default': 'off',
      'floor': 0.95,
@@ -1196,6 +1391,7 @@ DECISIONS: dict = {
      'precheck': 'generate_eval_pair returned a non-empty question and expected_answer',
      'fallback': "keep the pair (today's only check is non-empty fields)",
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'file_db_write',
      'mode_default': 'off',
      'floor': 0.95,
@@ -1224,6 +1420,7 @@ DECISIONS: dict = {
      'precheck': 'an experiment scored the same pair with the baseline and the candidate config',
      'fallback': 'the 1-5 rubric composite from JUDGE_PROMPT',
      'safe_side': 'tie_or_unclear',
+     'unlocks': ('answer_a', 'answer_b'),
      'side_effect': 'file_db_write',
      'mode_default': 'off',
      'floor': 0.95,
@@ -1248,6 +1445,7 @@ DECISIONS: dict = {
                  "matches the why-text or the thumbed turn's user message",
      'fallback': '_detect_strong_positive(why_text, session_id)',
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'file_db_write',
      'mode_default': 'off',
      'floor': 0.98,
@@ -1272,6 +1470,7 @@ DECISIONS: dict = {
      'fallback': "a staged PendingFix under the run id counts as a change; the agent's answer alone does not "
                  '(heal and self-check record failed, a directed run no_change)',
      'safe_side': False,
+     'unlocks': (True,),
      'side_effect': 'file_db_write',
      'mode_default': 'off',
      'floor': 0.95,
@@ -1282,22 +1481,53 @@ DECISIONS: dict = {
               'disk. Labelled set not written yet (planned: fix_addresses_failure.json).'},
 }
 
-# Measured rows: decision -> list of rows. Filled from runs that used the
-# exact wording above; see the module docstring for when a row holds.
-# accepted_offer and outreach_intent were reworded after misses on their own
-# sets (thanks without a go-ahead; approve/reject without a draft number), so
-# their holdout items were seen while tuning; write fresh holdout items before
-# treating those two scores as unbiased.
+# Measured rows: decision -> list of rows, one per build. Produced by
+# scripts/eval_decisions.py --rows, which asks through the same function as
+# decide(); see the module docstring for when a row holds. injection_misses
+# counts the set's injection items answered wrong; a gate qualifies only with 0.
+# The gemma4:12b counts match the first measurement of these wordings
+# (2026-10-06) item for item. accepted_offer and outreach_intent were reworded
+# after misses on their own sets (thanks without a go-ahead; approve/reject
+# without a draft number), so their holdout items were seen while tuning;
+# write fresh holdout items before treating those two scores as unbiased.
+# 2cf98652fdc6 is the gemma4:e2b build Ollama 0.40 loads for that name.
 MEASURED_ACCURACY: dict = {
-    "accepted_offer": [{"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "a236e697ea4e", "set_version": 1, "correct": 27, "n": 27, "date": "2026-10-06"}],
-    "needs_live_data": [{"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "080f1727cb9a", "set_version": 1, "correct": 46, "n": 47, "date": "2026-10-06"}],
-    "image_intent": [{"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "67841514f6ac", "set_version": 1, "correct": 30, "n": 30, "date": "2026-10-06"}],
-    "screen_or_chat": [{"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "d89ca1e4e3f1", "set_version": 1, "correct": 32, "n": 32, "date": "2026-10-06"}],
-    "chat_route": [{"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "f9568f399086", "set_version": 1, "correct": 35, "n": 35, "date": "2026-10-06"}],
-    "context_answers": [{"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "dedb9e3021a1", "set_version": 1, "correct": 20, "n": 20, "date": "2026-10-06"}],
-    "task_done": [{"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "d22e245015fd", "set_version": 1, "correct": 20, "n": 21, "date": "2026-10-06"}],
-    "outreach_intent": [{"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "10e5f54965cc", "set_version": 1, "correct": 35, "n": 35, "date": "2026-10-06"}],
-    "outreach_thread_fit": [{"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "7accbd77b6ce", "set_version": 1, "correct": 30, "n": 30, "date": "2026-10-06"}],
+    "accepted_offer": [
+        {"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "a236e697ea4e", "set_version": 1, "correct": 27, "n": 27, "injection_misses": 0, "date": "2026-10-16"},
+        {"backend": "chat", "model": "gemma4:e2b", "digest": "2cf98652fdc6", "wording_sha": "a236e697ea4e", "set_version": 1, "correct": 26, "n": 27, "injection_misses": 1, "date": "2026-10-16"},
+    ],
+    "chat_route": [
+        {"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "f9568f399086", "set_version": 1, "correct": 35, "n": 35, "injection_misses": 0, "date": "2026-10-16"},
+        {"backend": "chat", "model": "gemma4:e2b", "digest": "2cf98652fdc6", "wording_sha": "f9568f399086", "set_version": 1, "correct": 32, "n": 35, "injection_misses": 2, "date": "2026-10-16"},
+    ],
+    "context_answers": [
+        {"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "dedb9e3021a1", "set_version": 1, "correct": 20, "n": 20, "injection_misses": 0, "date": "2026-10-16"},
+        {"backend": "chat", "model": "gemma4:e2b", "digest": "2cf98652fdc6", "wording_sha": "dedb9e3021a1", "set_version": 1, "correct": 20, "n": 20, "injection_misses": 0, "date": "2026-10-16"},
+    ],
+    "image_intent": [
+        {"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "67841514f6ac", "set_version": 1, "correct": 30, "n": 30, "injection_misses": 0, "date": "2026-10-16"},
+        {"backend": "chat", "model": "gemma4:e2b", "digest": "2cf98652fdc6", "wording_sha": "67841514f6ac", "set_version": 1, "correct": 25, "n": 30, "injection_misses": 0, "date": "2026-10-16"},
+    ],
+    "needs_live_data": [
+        {"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "080f1727cb9a", "set_version": 1, "correct": 46, "n": 47, "injection_misses": 1, "date": "2026-10-16"},
+        {"backend": "chat", "model": "gemma4:e2b", "digest": "2cf98652fdc6", "wording_sha": "080f1727cb9a", "set_version": 1, "correct": 25, "n": 47, "injection_misses": 2, "date": "2026-10-16"},
+    ],
+    "outreach_intent": [
+        {"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "10e5f54965cc", "set_version": 1, "correct": 35, "n": 35, "injection_misses": 0, "date": "2026-10-16"},
+        {"backend": "chat", "model": "gemma4:e2b", "digest": "2cf98652fdc6", "wording_sha": "10e5f54965cc", "set_version": 1, "correct": 26, "n": 35, "injection_misses": 1, "date": "2026-10-16"},
+    ],
+    "outreach_thread_fit": [
+        {"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "7accbd77b6ce", "set_version": 1, "correct": 30, "n": 30, "injection_misses": 0, "date": "2026-10-16"},
+        {"backend": "chat", "model": "gemma4:e2b", "digest": "2cf98652fdc6", "wording_sha": "7accbd77b6ce", "set_version": 1, "correct": 24, "n": 30, "injection_misses": 0, "date": "2026-10-16"},
+    ],
+    "screen_or_chat": [
+        {"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "d89ca1e4e3f1", "set_version": 1, "correct": 32, "n": 32, "injection_misses": 0, "date": "2026-10-16"},
+        {"backend": "chat", "model": "gemma4:e2b", "digest": "2cf98652fdc6", "wording_sha": "d89ca1e4e3f1", "set_version": 1, "correct": 31, "n": 32, "injection_misses": 0, "date": "2026-10-16"},
+    ],
+    "task_done": [
+        {"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "d22e245015fd", "set_version": 1, "correct": 20, "n": 21, "injection_misses": 0, "date": "2026-10-16"},
+        {"backend": "chat", "model": "gemma4:e2b", "digest": "2cf98652fdc6", "wording_sha": "d22e245015fd", "set_version": 1, "correct": 17, "n": 21, "injection_misses": 0, "date": "2026-10-16"},
+    ],
 }
 MEASURED_SOURCE = (
     "Hand-labelled synthetic sets in backend/tests/fixtures/decisions (labels written for the test, not "

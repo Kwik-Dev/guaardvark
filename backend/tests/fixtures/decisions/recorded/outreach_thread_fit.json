@@ -1,0 +1,442 @@
+{
+ "decision": "outreach_thread_fit",
+ "wording_sha": "7accbd77b6ce",
+ "set_version": 1,
+ "provenance": "replies of the named builds to the labelled set, as received; synthetic items",
+ "runs": [
+  {
+   "model": "gemma4:e2b",
+   "digest": "2cf98652fdc6",
+   "recorded": "2026-10-16",
+   "replies": [
+    {
+     "id": "fit01",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "good_fit"
+    },
+    {
+     "id": "fit02",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "good_fit"
+    },
+    {
+     "id": "fit03",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "good_fit"
+    },
+    {
+     "id": "fit04",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "good_fit"
+    },
+    {
+     "id": "fit05",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "good_fit"
+    },
+    {
+     "id": "fit06",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "good_fit"
+    },
+    {
+     "id": "fit07",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "good_fit"
+    },
+    {
+     "id": "fit08",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "good_fit"
+    },
+    {
+     "id": "fit09",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "good_fit"
+    },
+    {
+     "id": "fit10",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "good_fit"
+    },
+    {
+     "id": "fit11",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "good_fit"
+    },
+    {
+     "id": "fit12",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "good_fit"
+    },
+    {
+     "id": "fit13",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "good_fit"
+    },
+    {
+     "id": "fit14",
+     "raw": "{\"choice\": \"skip\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "skip",
+     "want": "skip"
+    },
+    {
+     "id": "fit15",
+     "raw": "{\"choice\": \"skip\", \"confidence\": 0.85}",
+     "reason": "ok",
+     "answer": "skip",
+     "want": "skip"
+    },
+    {
+     "id": "fit16",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "skip"
+    },
+    {
+     "id": "fit17",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "skip"
+    },
+    {
+     "id": "fit18",
+     "raw": "{\"choice\": \"skip\", \"confidence\": 0.9}",
+     "reason": "ok",
+     "answer": "skip",
+     "want": "skip"
+    },
+    {
+     "id": "fit19",
+     "raw": "{\"choice\": \"skip\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "skip",
+     "want": "skip"
+    },
+    {
+     "id": "fit20",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "skip"
+    },
+    {
+     "id": "fit21",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "skip"
+    },
+    {
+     "id": "fit22",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "skip"
+    },
+    {
+     "id": "fit23",
+     "raw": "{\"choice\": \"skip\", \"confidence\": 0.85}",
+     "reason": "ok",
+     "answer": "skip",
+     "want": "skip"
+    },
+    {
+     "id": "fit24",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "skip"
+    },
+    {
+     "id": "fit25",
+     "raw": "{\"choice\": \"skip\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "skip",
+     "want": "skip"
+    },
+    {
+     "id": "fit26",
+     "raw": "{\"choice\": \"skip\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "skip",
+     "want": "skip"
+    },
+    {
+     "id": "fit27",
+     "raw": "{\"choice\": \"skip\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "skip",
+     "want": "skip"
+    },
+    {
+     "id": "fit28",
+     "raw": "{\"choice\": \"skip\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "skip",
+     "want": "skip"
+    },
+    {
+     "id": "fit29",
+     "raw": "{\"choice\": \"skip\", \"confidence\": 0.9}",
+     "reason": "ok",
+     "answer": "skip",
+     "want": "skip"
+    },
+    {
+     "id": "fit30",
+     "raw": "{\"choice\": \"skip\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "skip",
+     "want": "skip"
+    }
+   ]
+  },
+  {
+   "model": "gemma4:12b",
+   "digest": "4eb23ef187e2",
+   "recorded": "2026-10-16",
+   "replies": [
+    {
+     "id": "fit01",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "good_fit"
+    },
+    {
+     "id": "fit02",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 1}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "good_fit"
+    },
+    {
+     "id": "fit03",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 1}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "good_fit"
+    },
+    {
+     "id": "fit04",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 1}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "good_fit"
+    },
+    {
+     "id": "fit05",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 0.9}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "good_fit"
+    },
+    {
+     "id": "fit06",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "good_fit"
+    },
+    {
+     "id": "fit07",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 0.9}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "good_fit"
+    },
+    {
+     "id": "fit08",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "good_fit"
+    },
+    {
+     "id": "fit09",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 1}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "good_fit"
+    },
+    {
+     "id": "fit10",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 0.9}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "good_fit"
+    },
+    {
+     "id": "fit11",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 1}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "good_fit"
+    },
+    {
+     "id": "fit12",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 0.9}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "good_fit"
+    },
+    {
+     "id": "fit13",
+     "raw": "{\"choice\": \"good_fit\", \"confidence\": 1}",
+     "reason": "ok",
+     "answer": "good_fit",
+     "want": "good_fit"
+    },
+    {
+     "id": "fit14",
+     "raw": "{\"choice\": \"skip\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "skip",
+     "want": "skip"
+    },
+    {
+     "id": "fit15",
+     "raw": "{\"choice\": \"skip\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "skip",
+     "want": "skip"
+    },
+    {
+     "id": "fit16",
+     "raw": "{\"choice\": \"skip\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "skip",
+     "want": "skip"
+    },
+    {
+     "id": "fit17",
+     "raw": "{\"choice\": \"skip\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "skip",
+     "want": "skip"
+    },
+    {
+     "id": "fit18",
+     "raw": "{\"choice\": \"skip\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "skip",
+     "want": "skip"
+    },
+    {
+     "id": "fit19",
+     "raw": "{\"choice\": \"skip\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "skip",
+     "want": "skip"
+    },
+    {
+     "id": "fit20",
+     "raw": "{\"choice\": \"skip\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "skip",
+     "want": "skip"
+    },
+    {
+     "id": "fit21",
+     "raw": "{\"choice\": \"skip\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "skip",
+     "want": "skip"
+    },
+    {
+     "id": "fit22",
+     "raw": "{\"choice\": \"skip\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "skip",
+     "want": "skip"
+    },
+    {
+     "id": "fit23",
+     "raw": "{\"choice\": \"skip\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "skip",
+     "want": "skip"
+    },
+    {
+     "id": "fit24",
+     "raw": "{\"choice\": \"skip\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "skip",
+     "want": "skip"
+    },
+    {
+     "id": "fit25",
+     "raw": "{\"choice\": \"skip\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "skip",
+     "want": "skip"
+    },
+    {
+     "id": "fit26",
+     "raw": "{\"choice\": \"skip\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "skip",
+     "want": "skip"
+    },
+    {
+     "id": "fit27",
+     "raw": "{\"choice\": \"skip\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "skip",
+     "want": "skip"
+    },
+    {
+     "id": "fit28",
+     "raw": "{\"choice\": \"skip\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "skip",
+     "want": "skip"
+    },
+    {
+     "id": "fit29",
+     "raw": "{\"choice\": \"skip\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "skip",
+     "want": "skip"
+    },
+    {
+     "id": "fit30",
+     "raw": "{\"choice\": \"skip\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "skip",
+     "want": "skip"
+    }
+   ]
+  }
+ ]
+}

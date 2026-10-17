@@ -12,6 +12,9 @@
   while Network access is on. A new fleet key is shown only on the master itself.
 - Approving held files or entity changes applies them as chosen, or leaves them pending and says
   why; a partial approval with nothing ticked applies nothing.
+- An outreach draft graded by another build of the drafter's model family (gemma4:12b grading
+  gemma4:e2b drafts) is marked not independent, as one graded by the drafter's own build already
+  was.
 
 ## 3.2.1 — Code Editor works offline and saves safely; Audio Studio fits on the card
 
