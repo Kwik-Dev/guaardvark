@@ -321,6 +321,21 @@ _REPLY_LACKS_CURRENT_INFO_RE = re.compile(
 )
 
 
+def asks_current_information(message: str, intent_type: Optional[IntentType] = None) -> bool:
+    """True when ``message`` is a current-information question by both signals
+    offer_web_search uses: a web-search classification and the realtime check
+    at WEB_SEARCH_OFFER_MIN_REALTIME, within WEB_SEARCH_OFFER_MAX_CHARS."""
+    text = (message or "").strip()
+    if not text or len(text) > WEB_SEARCH_OFFER_MAX_CHARS:
+        return False
+    if intent_type is None:
+        intent_type, _, _ = intent_classifier.classify_intent(text)
+    if not should_enable_web_search(intent_type, text):
+        return False
+    is_live, confidence = is_realtime_query(text)
+    return bool(is_live and confidence >= WEB_SEARCH_OFFER_MIN_REALTIME)
+
+
 def offer_web_search(message: str, intent_type: Optional[IntentType] = None,
                      reply: Optional[str] = None) -> Optional[Dict[str, str]]:
     """The offer a chat reply carries when ``message`` looks like it needs
@@ -342,12 +357,7 @@ def offer_web_search(message: str, intent_type: Optional[IntentType] = None,
     text = (message or "").strip()
     if not text or len(text) > WEB_SEARCH_OFFER_MAX_CHARS:
         return None
-    if intent_type is None:
-        intent_type, _, _ = intent_classifier.classify_intent(text)
-    asks_current = False
-    if should_enable_web_search(intent_type, text):
-        is_live, confidence = is_realtime_query(text)
-        asks_current = is_live and confidence >= WEB_SEARCH_OFFER_MIN_REALTIME
+    asks_current = asks_current_information(text, intent_type)
     if not asks_current and not (reply and _REPLY_LACKS_CURRENT_INFO_RE.search(reply)):
         return None
     try:
