@@ -848,6 +848,15 @@ class OfflineImageGenerator:
                 "Install the FLUX dev unet/clip/vae assets, then retry."
             )
         if getattr(self, "_install_needed", None) == model_id:
+            from backend.services.user_image_models import single_file_config_missing
+            if single_file_config_missing(self, model_id):
+                return (
+                    f"'{model_key}' is missing the base pipeline config its checkpoint "
+                    "loads with (a few MB of configs and tokenizer files). Click Install "
+                    "on it in Manage models on the Images page or Settings > Model "
+                    "libraries > Image; the checkpoint already on disk is kept. "
+                    "Generating never downloads a model on its own."
+                )
             return (
                 f"'{model_key}' is not installed ({model_id}). Install it from Manage models "
                 "on the Images page or Settings > Model libraries > Image, or pick an "
@@ -1847,10 +1856,28 @@ class OfflineImageGenerator:
             user_file = self._user_file_entry(model_id)
             if user_file and user_file.get("kind") == "single_file":
                 # A merged checkpoint (SD / SDXL): diffusers rebuilds the pipeline
-                # from the one file instead of a component tree.
+                # from the one file and the base config Install put beside it.
+                # Given a folder as config, from_single_file reads configs and
+                # tokenizers from it; without one it asks the hub.
+                from backend.services.user_image_models import (
+                    single_file_config_dir, single_file_config_present,
+                )
                 checkpoint = model_path / user_file["files"][0]["dst"]
+                if not single_file_config_present(self, model_id):
+                    self._install_needed = model_id
+                    logger.warning(
+                        "Base config for %s is not installed; not downloading it from a generate call",
+                        model_id,
+                    )
+                    return False
+                config_dir = single_file_config_dir(self, model_id)
                 logger.info(f"Loading single-file checkpoint {checkpoint.name} (family: {family})")
-                self._pipeline = pipeline_class.from_single_file(str(checkpoint), **load_kwargs)
+                self._pipeline = pipeline_class.from_single_file(
+                    str(checkpoint),
+                    config=str(config_dir),
+                    local_files_only=True,
+                    **load_kwargs,
+                )
             else:
                 self._pipeline = pipeline_class.from_pretrained(
                     model_path,

@@ -7,7 +7,10 @@ person can add three kinds of thing from a pasted Hugging Face URL:
                             new model of a shipped family: Z-Image, Krea 2, SDXL, SD
   generation / single_file  one .safetensors checkpoint, loaded with
                             from_single_file; SD and SDXL only, the families
-                            diffusers can rebuild from a merged checkpoint
+                            diffusers can rebuild from a merged checkpoint.
+                            Install also fetches the base pipeline's configs
+                            and tokenizer files beside it (base_config/), so
+                            loading never asks the hub for them
   lora                      an adapter file the offline pipeline stacks on a model
                             of its family (Z-Image today; SDXL and FLUX LoRAs run
                             on the ComfyUI path, which this catalog does not drive)
@@ -27,6 +30,7 @@ import logging
 import os
 import re
 import threading
+from collections.abc import Mapping
 from pathlib import Path
 
 from backend.services.user_model_families import (
@@ -475,6 +479,10 @@ def user_files_present(generator, sentinel: str) -> bool:
     uf = (getattr(generator, "user_files", {}) or {}).get(sentinel)
     if not uf:
         return False
+    return _entry_files_present(generator, uf)
+
+
+def _entry_files_present(generator, uf: dict) -> bool:
     base = _user_dest_dir(generator, uf)
     for spec in uf.get("files") or []:
         p = base / spec["dst"]
@@ -559,8 +567,131 @@ def user_missing_files(generator, key: str) -> list:
 
 def user_model_ready(generator, sentinel: str) -> bool:
     """The user's files are on disk and, for a ComfyUI generation model, so are
-    the companions its graph loads."""
-    return user_files_present(generator, sentinel) and not missing_companions(generator, sentinel)
+    the companions its graph loads; a single-file checkpoint also needs the base
+    config it is rebuilt with."""
+    return (
+        user_files_present(generator, sentinel)
+        and not missing_companions(generator, sentinel)
+        and single_file_config_present(generator, sentinel)
+    )
+
+
+# ── base config of a single-file checkpoint ─────────────────────────────────
+# from_single_file rebuilds an SD / SDXL pipeline from the checkpoint plus the
+# base pipeline's configs and tokenizer files (model_index.json,
+# unet/config.json, tokenizer/vocab.json, ...). Left to itself, diffusers fetches
+# those from the hub the first time the model loads. Install fetches them into
+# base_config/ beside the checkpoint instead, and the loader reads only that.
+
+SINGLE_FILE_CONFIG_DIR = "base_config"
+# What diffusers fetches for this itself (loaders/single_file.py,
+# _download_diffusers_model_config_from_hub): configs and tokenizers, no weights.
+_SINGLE_FILE_CONFIG_PATTERNS = ["**/*.json", "*.json", "*.txt", "**/*.txt", "**/*.model"]
+
+
+def single_file_config_dir(generator, key: str) -> Path | None:
+    """The base config folder of a single-file model, or None for other kinds."""
+    uf = _user_file_entry_for(generator, key)
+    if not uf or uf.get("kind") != "single_file":
+        return None
+    return _user_dest_dir(generator, uf) / SINGLE_FILE_CONFIG_DIR
+
+
+def single_file_config_present(generator, key: str) -> bool:
+    """True when the model needs no base config or its config is on disk.
+
+    The folder appears only once its fetch completed (see
+    provision_single_file_config), so model_index.json in it means all of it.
+    """
+    config_dir = single_file_config_dir(generator, key)
+    return config_dir is None or (config_dir / "model_index.json").is_file()
+
+
+def single_file_config_missing(generator, key: str) -> bool:
+    """The checkpoint is on disk but the base config it loads with is not."""
+    uf = _user_file_entry_for(generator, key)
+    if not uf or uf.get("kind") != "single_file":
+        return False
+    return _entry_files_present(generator, uf) and not single_file_config_present(generator, key)
+
+
+class _SafetensorsCheckpoint(Mapping):
+    """An open safetensors file as the mapping diffusers' model-type check reads:
+    every key, and a tensor only when that key is looked up."""
+
+    def __init__(self, handle):
+        self._handle = handle
+        self._keys = list(handle.keys())
+        self._key_set = set(self._keys)
+
+    def __getitem__(self, key):
+        if key not in self._key_set:
+            raise KeyError(key)
+        return self._handle.get_tensor(key)
+
+    def __contains__(self, key):
+        return key in self._key_set
+
+    def __iter__(self):
+        return iter(self._keys)
+
+    def __len__(self):
+        return len(self._keys)
+
+
+def single_file_base_repo(checkpoint: Path) -> str:
+    """The base pipeline repo diffusers pairs with this checkpoint.
+
+    The choice from_single_file would make (fetch_diffusers_config), read from a
+    safetensors file's keys and the few small tensors the check looks at rather
+    than the whole file. Other formats load the way from_single_file loads them.
+    """
+    from diffusers.loaders.single_file_utils import fetch_diffusers_config
+
+    if checkpoint.suffix.lower() == ".safetensors":
+        from safetensors import safe_open
+        with safe_open(str(checkpoint), framework="pt") as handle:
+            found = fetch_diffusers_config(_SafetensorsCheckpoint(handle))
+    else:
+        from diffusers.models.modeling_utils import load_state_dict
+        state = load_state_dict(str(checkpoint))
+        while "state_dict" in state:
+            state = state["state_dict"]
+        found = fetch_diffusers_config(state)
+    return found["pretrained_model_name_or_path"]
+
+
+def provision_single_file_config(generator, sentinel: str) -> None:
+    """Fetch the base config a single-file checkpoint loads with into its folder.
+
+    Runs from Install, after the checkpoint is on disk. The files land in a
+    ``.partial`` folder that is renamed into place only when the fetch
+    completed, so an interrupted one never reads as installed; the next Install
+    resumes it. Raises with the reason when the config cannot be fetched.
+    """
+    from huggingface_hub import snapshot_download
+
+    target = single_file_config_dir(generator, sentinel)
+    if target is None or single_file_config_present(generator, sentinel):
+        return
+    uf = _user_file_entry_for(generator, sentinel)
+    checkpoint = _user_dest_dir(generator, uf) / uf["files"][0]["dst"]
+    repo = single_file_base_repo(checkpoint)
+    partial = target.with_name(target.name + ".partial")
+    logger.info("Fetching the %s base config for %s into %s", repo, checkpoint.name, target)
+    try:
+        snapshot_download(
+            repo_id=repo,
+            allow_patterns=_SINGLE_FILE_CONFIG_PATTERNS,
+            local_dir=str(partial),
+        )
+    except Exception as e:  # noqa: BLE001 — the message names what was being fetched
+        raise RuntimeError(f"Fetching the {repo} base config for {checkpoint.name} failed: {e}") from e
+    if not (partial / "model_index.json").is_file():
+        raise RuntimeError(
+            f"{repo} has no model_index.json, so {checkpoint.name} has no base config to load with."
+        )
+    partial.replace(target)
 
 
 def download_companions(generator, sentinel: str, stop=None) -> tuple[bool, str | None]:
@@ -585,7 +716,8 @@ def download_companions(generator, sentinel: str, stop=None) -> tuple[bool, str 
 
 def download_user_files(generator, sentinel: str, stop=None) -> tuple[bool, str | None]:
     """hf_hub_download each declared file into the dest dir, resuming partials,
-    then the companions a ComfyUI generation model renders with."""
+    then the base config a single-file checkpoint loads with, then the
+    companions a ComfyUI generation model renders with."""
     from huggingface_hub import hf_hub_download
 
     uf = (getattr(generator, "user_files", {}) or {}).get(sentinel)
@@ -597,11 +729,16 @@ def download_user_files(generator, sentinel: str, stop=None) -> tuple[bool, str 
         for spec in uf.get("files") or []:
             if stop is not None and stop.is_set():
                 return False, "Download stalled"
+            want = base / spec["dst"]
+            # A file already in place is kept. Install re-runs to fetch what is
+            # still missing (a base config, companions), and a file moved off its
+            # repo path would otherwise be fetched whole again.
+            if want.is_file() and want.stat().st_size > 0:
+                continue
             got = Path(hf_hub_download(
                 repo_id=uf["hf_repo"], filename=spec["src"], revision=uf.get("revision") or "main",
                 local_dir=str(base),
             ))
-            want = base / spec["dst"]
             if got.resolve() != want.resolve():
                 want.parent.mkdir(parents=True, exist_ok=True)
                 got.replace(want)
@@ -609,6 +746,10 @@ def download_user_files(generator, sentinel: str, stop=None) -> tuple[bool, str 
             _write_lora_sidecar(base, uf)
         if stop is not None and stop.is_set():
             return False, "Download stalled"
+        if uf.get("kind") == "single_file":
+            provision_single_file_config(generator, sentinel)
+            if stop is not None and stop.is_set():
+                return False, "Download stalled"
         return download_companions(generator, sentinel, stop=stop)
     except Exception as e:  # noqa: BLE001 — the message is the diagnosis
         logger.error("user image file download failed for %s: %s", sentinel, e)
