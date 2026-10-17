@@ -19,14 +19,22 @@ fallbacks) stays in the feature module and layers on top of `normalize`.
 ``json_chat_result`` is the same call reporting why it failed (timeout, call
 error, a reply that is not JSON) instead of folding every failure into
 ``on_error``; ``decide()`` needs the difference.
+
+``decide(decision, state, fallback=...)`` asks one question declared in
+``decision_data.DECISIONS`` and returns a ``DecisionResult``; see its
+docstring for the modes and the rule for when the model is asked.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
 import re
+import sys
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping, Optional
 
@@ -234,3 +242,152 @@ def dispatch(
     """
     intent = classification.get(intent_key)
     return handlers.get(intent, default_handler)(classification)
+
+
+# ---------------------------------------------------------------------------
+# decide(): one declared closed question, answered by the chat model that is
+# already loaded, or by today's code whenever the model may not or cannot.
+
+REASONS = (
+    "ok",               # the model answered and its answer is used
+    "off",              # the decision is off: the fallback, nothing asked
+    "shadow",           # shadow mode: the fallback is used
+    "unknown",          # no such decision is declared
+    "guard_caller",     # called from a guard (decision_data.GUARD_MODULES)
+    "below_floor",      # no measured row for the loaded build qualifies; on acts as shadow
+    "error",            # something failed inside decide()
+)
+
+
+@dataclass(frozen=True)
+class DecisionResult:
+    """What decide() answered and why.
+
+    ``answer`` is what the caller acts on. ``source`` says where it came
+    from: ``"llm"`` (the model), ``"fallback"`` (the caller's own answer,
+    today's code). ``reason`` is one of REASONS. ``model`` and ``digest`` name
+    the build that was asked, when one was.
+    """
+
+    decision: str
+    answer: Any
+    source: str
+    reason: str
+    model: Optional[str] = None
+    confidence: Optional[float] = None
+    latency_ms: int = 0
+    digest: Optional[str] = None
+
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_THIS_FILE = os.path.abspath(__file__)
+
+# Called with (event, state) for every decision that is not off. Nothing is
+# installed by default; a telemetry writer installs itself with
+# set_decision_recorder. The event never carries the state's text, only its
+# hash and size; the writer decides whether to keep the text.
+_recorder: Optional[Callable[[dict, Mapping[str, Any]], None]] = None
+
+
+def set_decision_recorder(recorder: Optional[Callable[[dict, Mapping[str, Any]], None]]) -> None:
+    """Install the function that records each decision made in shadow or on; None removes it."""
+    global _recorder
+    _recorder = recorder
+
+
+def _record(event: dict, state: Mapping[str, Any]) -> None:
+    recorder = _recorder
+    if recorder is None:
+        return
+    try:
+        recorder(event, state)
+    except Exception as e:  # noqa: BLE001 - a recorder failure never changes an answer
+        logger.warning("decide: recording %s failed: %s", event.get("decision"), e)
+
+
+def guard_for(filename: str, function: str) -> Optional[str]:
+    """The GUARD_MODULES entry code in ``filename``/``function`` belongs to, or None."""
+    from backend.services.decision_data import GUARD_MODULES
+
+    try:
+        rel = os.path.relpath(os.path.abspath(filename), _REPO_ROOT)
+    except ValueError:  # another drive on Windows: not in this repository
+        return None
+    if rel.startswith(".."):
+        return None
+    rel = rel.replace(os.sep, "/")
+    for guard, functions in GUARD_MODULES.items():
+        hit = rel.startswith(guard) if guard.endswith("/") else rel == guard
+        if hit and (functions is None or function in functions):
+            return f"{rel}:{function}" if functions else rel
+    return None
+
+
+def _guard_caller() -> Optional[str]:
+    """The guard that called decide(), skipping frames in this module, or None."""
+    frame = sys._getframe(1)
+    while frame is not None and os.path.abspath(frame.f_code.co_filename) == _THIS_FILE:
+        frame = frame.f_back
+    if frame is None:
+        return None
+    return guard_for(frame.f_code.co_filename, frame.f_code.co_name)
+
+
+def _ms(started: float) -> int:
+    return int(round((time.perf_counter() - started) * 1000))
+
+
+def _state_digest(state: Any) -> tuple[str, int]:
+    """(sha256 prefix, characters) of the state as sent, for records without its text."""
+    try:
+        text = json.dumps(state, sort_keys=True, ensure_ascii=False, default=str)
+    except Exception:  # noqa: BLE001
+        text = repr(state)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16], len(text)
+
+
+def decide(
+    decision: str,
+    state: Mapping[str, Any],
+    *,
+    fallback: Any,
+    timeout_s: float = 2.0,
+    ctx: Optional[dict] = None,
+) -> DecisionResult:
+    """Answer the declared closed question ``decision`` about ``state``.
+
+    ``fallback`` is the answer today's code gives; the caller computes it
+    first and acts on ``result.answer``. In off (the default for every
+    decision) the fallback comes back and nothing else happens: no model, no
+    network, no record. decide() never raises; any failure inside it returns
+    the fallback with reason "error".
+    """
+    started = time.perf_counter()
+    try:
+        from backend.services.decision_data import DECISIONS
+        from backend.services.decision_settings import get_decision_mode
+
+        entry = DECISIONS.get(decision)
+        if entry is None:
+            logger.warning("decide: no decision named %r is declared", decision)
+            return DecisionResult(decision, fallback, "fallback", "unknown", latency_ms=_ms(started))
+        guard = _guard_caller()
+        if guard:
+            logger.error("decide(%s) was called from the guard %s; a guard never asks a model", decision, guard)
+            return DecisionResult(decision, fallback, "fallback", "guard_caller", latency_ms=_ms(started))
+        mode = get_decision_mode(decision)
+        if mode == "off":
+            return DecisionResult(decision, fallback, "fallback", "off", latency_ms=_ms(started))
+        reason = "shadow" if mode == "shadow" else "below_floor"
+        result = DecisionResult(decision, fallback, "fallback", reason, latency_ms=_ms(started))
+        sha, chars = _state_digest(state)
+        _record({
+            "ts": time.time(), "decision": decision, "layer": entry["layer"], "mode": mode,
+            "reason": result.reason, "source": result.source, "state_sha256": sha, "state_chars": chars,
+            "fallback_answer": fallback, "used_answer": result.answer, "latency_ms": result.latency_ms,
+            "request_id": (ctx or {}).get("request_id"),
+        }, state)
+        return result
+    except Exception as e:  # noqa: BLE001 - decide() never raises
+        logger.error("decide(%s) failed: %s", decision, e, exc_info=True)
+        return DecisionResult(decision, fallback, "fallback", "error", latency_ms=_ms(started))

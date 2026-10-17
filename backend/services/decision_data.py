@@ -6,7 +6,8 @@ wording, the allowed answers, what goes in the state and where each field
 comes from, the deterministic fallback, the safe side, and the floor a model
 has to reach on the labelled set before the decision may be switched on.
 
-Nothing imports this module at runtime yet. Every entry defaults to "off".
+nl_control_plane.decide() asks these questions; every entry defaults to "off"
+(decision_settings holds the per-decision mode).
 
 Field reference
     feature       subsystem the decision belongs to
@@ -114,6 +115,32 @@ DECISION_MODEL_LICENCE = {
     # Cloudflare Clef: Apache-2.0. Not measured: clef-flash did not run on
     # Ollama when checked (2026-10-06), and it must before it is offered.
     "clef": "recommendable",
+}
+
+# Code that decides whether something may happen at all. A guard must give the
+# same answer for the same input every time and must hold when every model is
+# wrong, so it never asks one: decide() refuses a call made from these files
+# (reason "guard_caller"), and test_decide_safety checks that none of them
+# imports the decision modules. Paths are from the repository root; a path
+# ending in "/" covers every file under it. The value is None when the whole
+# file is a guard, or the names of the functions that are.
+GUARD_MODULES: dict = {
+    "backend/services/tool_execution_guard.py": None,
+    "backend/utils/path_guard.py": None,
+    "backend/utils/auth_guard.py": None,
+    "backend/utils/cross_site_guard.py": None,
+    "backend/utils/sidecar_guard.py": None,
+    "backend/services/inbound_guard_service.py": None,
+    "scripts/inbound_guard/": None,
+    "backend/services/job_operation_gate.py": None,
+    "backend/services/social_outreach/kill_switch.py": None,
+    "backend/services/social_outreach/gates.py": None,
+    "backend/services/social_outreach/platforms.py": None,
+    "backend/services/social_outreach/transitions.py": None,
+    "backend/services/social_outreach/watched_post.py": None,
+    "backend/tools/llama_code_tools.py": ("verify_change",),
+    "backend/utils/agent_web_gate.py": None,
+    "backend/services/mcp_policy.py": None,
 }
 
 DECISIONS: dict = {
