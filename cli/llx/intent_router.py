@@ -11,7 +11,13 @@ import shlex
 import shutil
 from pathlib import Path
 
-from llx.command_catalog import BARE_ONLY_COMMANDS, BARE_OR_NUMBER_COMMANDS, COMMAND_TREE
+from llx.command_catalog import (
+    BARE_ONLY_COMMANDS,
+    BARE_OR_NUMBER_COMMANDS,
+    COMMAND_TREE,
+    ONE_WORD_COMMANDS,
+    OPTIONS_ONLY_COMMANDS,
+)
 
 _AUDIO_EXT = (".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac")
 _SCRIPT_EXT = (".txt", ".md", ".fountain", ".fdx")
@@ -56,6 +62,61 @@ def _names_test_target(tail: str, cwd: Path | None) -> bool:
     """True when the tail starts with an existing path (pytest node ids allowed)."""
     first = _first_word(tail)
     return _path_exists(first.split("::", 1)[0], cwd)
+
+
+def _read_target(tail: str) -> str:
+    """The file a read line names: the tail without /read's offset and limit."""
+    words = tail.split()
+    while words and words[-1].isdigit():
+        words.pop()
+    return " ".join(words)
+
+
+# English verbs that are also local commands. Typed without a slash they run the
+# command only when the rest of the line has the command's shape; otherwise the
+# line is chat: "fix my cover letter wording", "find a good pizza place nearby",
+# "show me how closures work", "list three ideas for dinner", "tasks for today".
+# The Unix spellings (cat, grep, ls, dir) run as before.
+_TODO_WORDS = frozenset(COMMAND_TREE["todo"]) | {"ls", "complete", "finish"}
+
+
+def _has_command_shape(verb: str, cmd: str, tail: str, cwd: Path | None) -> bool:
+    if cmd == "read" and verb in ("read", "show", "view"):
+        return _path_exists(_read_target(tail), cwd, file_only=True)
+    if cmd == "edit":
+        return _path_exists(_first_word(tail), cwd, file_only=True)
+    if cmd == "grep" and verb in ("search", "find"):
+        words = tail.split()
+        return len(words) == 1 or _path_exists(words[-1], cwd)
+    if cmd == "ls" and verb == "list":
+        return not tail or _path_exists(tail, cwd)
+    if cmd == "todo":
+        return not tail or tail.split()[0].lower() in _TODO_WORDS
+    return True
+
+
+def _fits_command_tree(parts: list[str]) -> bool:
+    """Whether a line starting with a command name reads as that command.
+
+    A command with subcommands needs one of them (or an option) next: "files
+    list" and "generate csv report" run, "generate ideas for a party" and
+    "rules for a board game" are chat. The limits in command_catalog apply too.
+    """
+    cmd, rest = parts[0].lower(), parts[1:]
+    if cmd in BARE_ONLY_COMMANDS:
+        return not rest
+    if cmd in BARE_OR_NUMBER_COMMANDS:
+        return not rest or (len(rest) == 1 and rest[0].isdigit())
+    if cmd in OPTIONS_ONLY_COMMANDS:
+        return all(word.startswith("-") for word in rest)
+    if cmd in ONE_WORD_COMMANDS:
+        if cmd == "help":
+            return not rest or (len(rest) == 1 and rest[0].lower().lstrip("/") in COMMAND_TREE)
+        return len(rest) <= 1
+    subcommands = COMMAND_TREE.get(cmd)
+    if subcommands and rest and not rest[0].startswith("-"):
+        return rest[0].lower() in subcommands
+    return True
 
 
 def _music_video_args(tail: str) -> list[str]:
@@ -150,7 +211,7 @@ _NL_INTENT_RULES: list[tuple[re.Pattern[str], str, list[str] | None]] = [
     (re.compile(r"^play\s+(?:that\s+)?(?:voice|audio|clip)\s+(.+)$", re.I), "audio", None),
 
     # Local coding actions (new in this improvement)
-    (re.compile(r"^(?:ls|list(?:\s+files?)?|dir)\s*(.*)$", re.I), "ls", None),
+    (re.compile(r"^(?:ls|list(?:\s+files?)?(?:\s+in)?|dir)\b\s*(.*)$", re.I), "ls", None),
     (re.compile(r"^(?:cd|chdir)\s+(.+)$", re.I), "cd", None),
     (re.compile(r"^pwd\s*$", re.I), "pwd", []),
     (re.compile(r"^(?:cat|read|show|view)\s+(?:file\s+)?(.+)$", re.I), "read", None),
@@ -160,7 +221,7 @@ _NL_INTENT_RULES: list[tuple[re.Pattern[str], str, list[str] | None]] = [
     # with these verbs ("run through the plan", "check the weather") is chat.
     (re.compile(r"^(?:run|exec|execute|sh)\s+(.+)$", re.I), "run", None),
     (re.compile(r"^(?:test|pytest|check)\b\s*(.*)$", re.I), "test", None),
-    (re.compile(r"^(?:todo|task|tasks?)\s*(.*)$", re.I), "todo", None),
+    (re.compile(r"^(?:todo|tasks?)\b\s*(.*)$", re.I), "todo", None),
     (re.compile(r"^(?:context|status|state|where am i)\s*$", re.I), "context", []),
     (re.compile(r"^(?:suggest|what tools?|recommend tools?)\s*$", re.I), "suggest", []),
     (re.compile(r"^(?:init|initialize|setup project|create guaardvark)\s*$", re.I), "init", []),
@@ -209,6 +270,8 @@ def resolve_repl_line(line: str, cwd: Path | None = None) -> tuple[str, list[str
             return None
         if cmd == "test" and tail and not _names_test_target(tail, cwd):
             return None
+        if not _has_command_shape(raw.split()[0].lower(), cmd, tail, cwd):
+            return None
         if cmd in ("ls", "read", "grep", "edit", "run", "test", "cd", "todo"):
             # pass the whole tail as single arg string; slash handler will shlex if needed
             return cmd, [tail] if tail else []
@@ -238,13 +301,7 @@ def resolve_repl_line(line: str, cwd: Path | None = None) -> tuple[str, list[str
         return None
 
     cmd = parts[0].lower()
-    if cmd in BARE_ONLY_COMMANDS and len(parts) > 1:
-        return None
-    if cmd in BARE_OR_NUMBER_COMMANDS and (
-        len(parts) > 2 or (len(parts) == 2 and not parts[1].isdigit())
-    ):
-        return None
-    if cmd in COMMAND_TREE:
+    if cmd in COMMAND_TREE and _fits_command_tree(parts):
         return cmd, parts[1:]
 
     return None
