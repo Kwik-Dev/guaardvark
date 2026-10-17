@@ -778,6 +778,18 @@ INTERCONNECTOR_OPERATOR_ROUTES = (
     ("POST", "/api/interconnector/route-inference"),
     ("POST", "/api/interconnector/nodes/test-all"),
     ("POST", "/api/cluster/routing-table/recompute"),
+    ("POST", "/api/interconnector/enrol"),
+    ("GET", "/api/interconnector/enrolments"),
+    ("GET", "/api/interconnector/nodes"),
+    ("DELETE", "/api/interconnector/nodes/n-1"),
+    ("POST", "/api/interconnector/nodes/n-1/test"),
+    ("GET", "/api/interconnector/debug/nodes"),
+    ("POST", "/api/interconnector/test-connection"),
+    ("POST", "/api/interconnector/updates/apply"),
+    ("POST", "/api/interconnector/sync/preferences"),
+    ("GET", "/api/interconnector/sync/files/test"),
+    ("POST", "/api/interconnector/sync/files/verify"),
+    ("GET", "/api/interconnector/backups"),
 )
 INTERCONNECTOR_OPERATOR_PREFIXES = (
     "/api/interconnector/config",
@@ -788,17 +800,26 @@ INTERCONNECTOR_OPERATOR_PREFIXES = (
     "/api/interconnector/route-inference",
     "/api/interconnector/nodes/test-all",
     "/api/cluster/routing-table/recompute",
+    "/api/interconnector/enrol",
+    "/api/interconnector/debug/",
+    "/api/interconnector/test-connection",
+    "/api/interconnector/updates/apply",
+    "/api/interconnector/sync/files/test",
+    "/api/interconnector/sync/files/verify",
+    "/api/interconnector/backups",
 )
 # Routes other machines call. The guard leaves them to the route, which checks
-# the calling machine itself.
+# the calling machine itself; and reads that stay open.
 INTERCONNECTOR_NODE_ROUTES = (
     ("GET", "/api/interconnector/status"),
     ("POST", "/api/interconnector/nodes/register"),
     ("POST", "/api/interconnector/nodes/n-1/heartbeat"),
+    ("GET", "/api/interconnector/nodes/local-identity"),
     ("GET", "/api/interconnector/sync/pull"),
     ("GET", "/api/interconnector/sync/files/pull"),
     ("GET", "/api/interconnector/updates/manifest"),
     ("GET", "/api/interconnector/sync/history"),
+    ("GET", "/api/interconnector/sync/preferences"),
 )
 OTHER_MACHINE = {"REMOTE_ADDR": "192.0.2.44"}
 THIS_MACHINE = {"REMOTE_ADDR": "127.0.0.1"}

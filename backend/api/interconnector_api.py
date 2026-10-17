@@ -18,7 +18,7 @@ from celery import group  # pyright: ignore[reportMissingImports]
 from backend.celery_app import celery
 from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 # Suppress SSL warnings for self-signed certs (common in local networks)
 import urllib3
@@ -3512,28 +3512,81 @@ def trigger_manual_sync():
         return error_response(f"Synchronization failed: {str(e)}", 500)
 
 
+def _host_port(url: Optional[str]):
+    """(host, port) of an address written the way the Interconnector settings
+    take it (http:// added when left out), or None when it is not one."""
+    text = str(url or "").strip()
+    if not text:
+        return None
+    if not text.startswith(("http://", "https://")):
+        text = f"http://{text}"
+    try:
+        parts = urlsplit(text)
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+    except ValueError:
+        return None
+    if not parts.hostname:
+        return None
+    return parts.hostname.lower(), port
+
+
+def _known_fleet_addresses(config: dict) -> set:
+    """The addresses this machine may probe: its saved master, and the nodes
+    the master has on record."""
+    known = set()
+    master = _host_port(config.get("master_url"))
+    if master:
+        known.add(master)
+    try:
+        for node in db.session.query(InterconnectorNode).all():
+            host = str(node.host or "")
+            address = _host_port(host if host.startswith(("http://", "https://"))
+                                 else f"{host}:{node.port}")
+            if address:
+                known.add(address)
+    except Exception as exc:
+        logger.warning(f"[SYNC] Could not read the node list: {exc}")
+    return known
+
+
 @interconnector_bp.route("/test-connection", methods=["POST"])
 def test_connection():
-    """Test connection to master server (client mode)."""
+    """Test connection to master server (client mode).
+
+    Only an address of this fleet: the saved master address or a node the
+    master has on record. The backend fetches whatever it is given, so an
+    open address would let a caller probe any host this machine can reach.
+    """
     try:
         if not request.is_json:
             return error_response("Request must be JSON", 400)
 
-        data = request.get_json()
+        data = request.get_json() or {}
         master_url = data.get("master_url")
         master_api_key = data.get("master_api_key")
 
         if not master_url:
             return validation_error_response("Master URL is required")
-        
+
+        target = _host_port(master_url)
+        if target is None or target not in _known_fleet_addresses(_get_config()):
+            logger.warning(f"[SYNC] Refused to test an address outside the fleet: {_redact_log_value(master_url)}")
+            return error_response(
+                "Only this fleet's addresses can be tested from here: the saved master "
+                "address, or a node the master has on record. Save the master address first.",
+                400,
+            )
+
         # API key is optional if server doesn't require it
         # But we can't check server config from here, so we'll allow empty API key
         # The server will accept or reject based on its require_api_key setting
 
-        # Clean up URL
-        master_url = master_url.rstrip('/')
-        if not master_url.startswith(('http://', 'https://')):
-            master_url = f"http://{master_url}"
+        # Rebuilt from the checked host and port, so no path or credentials
+        # in the given URL go along.
+        host, port = target
+        scheme = "https" if str(master_url).strip().startswith("https://") else "http"
+        netloc = f"[{host}]" if ":" in host else host
+        master_url = f"{scheme}://{netloc}:{port}"
 
         # Build headers - conditionally include API key
         test_headers = {}

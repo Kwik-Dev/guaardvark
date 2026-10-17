@@ -75,6 +75,22 @@ PROTECTED_PREFIXES = (
     # Enrolling this machine with its master (/enrol), and approving,
     # revoking or removing other machines on the master (/enrolments).
     '/api/interconnector/enrol',
+    # The node list's debug view, probing a master's address, applying
+    # master code here, the master's file-scan test and file check, and the
+    # list of pre-sync code backups.
+    '/api/interconnector/debug/',
+    '/api/interconnector/test-connection',
+    '/api/interconnector/updates/apply',
+    '/api/interconnector/sync/files/test',
+    '/api/interconnector/sync/files/verify',
+    '/api/interconnector/backups',
+)
+
+# Matched whole, any method: the master's list of nodes (hosts and ports).
+# /nodes/register, /nodes/<id>/heartbeat and /nodes/local-identity below it
+# are node routes and stay open.
+PROTECTED_PATHS = (
+    '/api/interconnector/nodes',
 )
 
 # Protected routes the fleet's master may also call on a client, with a
@@ -269,6 +285,8 @@ PROTECTED_DELETE_PREFIXES = (
 # (POST .../consent and the import), so withdrawing is never harder than giving.
 PROTECTED_DELETE_ITEM_PREFIXES = (
     '/api/audio-foundry/voice-clips/',
+    # Disconnecting a node on the master.
+    '/api/interconnector/nodes/',
 )
 
 # Explicitly safe operations that are exempt from the host check even though they
@@ -321,6 +339,8 @@ MUTATION_PROTECTED_PREFIXES = (
     '/api/training/libraries/',
     # Downloading or deleting a training base model; the list stays readable.
     '/api/training/base-models/',
+    # Which entity types this node syncs; reading them stays open.
+    '/api/interconnector/sync/preferences',
 )
 
 # Mutation-only protection for routes whose id sits mid-path: (prefix, suffix).
@@ -328,6 +348,8 @@ MUTATION_PROTECTED_PREFIXES = (
 # LoRA, so it is closed to other hosts; train/generate/upload-refs stay LAN-usable.
 MUTATION_PROTECTED_SUFFIXES = (
     ('/api/cast-library/subjects/', '/import-lora'),
+    # The master probing one client node on the operator's behalf.
+    ('/api/interconnector/nodes/', '/test'),
 )
 
 
@@ -446,6 +468,8 @@ def _is_protected():
     for prefix in PROTECTED_PREFIXES:
         if path.startswith(prefix):
             return True
+    if (path.rstrip('/') or '/') in PROTECTED_PATHS:
+        return True
     if (path in TOOL_ENDPOINT_PATHS or path.startswith(TOOL_ENDPOINT_PREFIXES)) and tool_endpoints_protected():
         return True
     for prefix in PROTECTED_FILE_PREFIXES:
@@ -576,7 +600,8 @@ def protected_summary() -> list[str]:
         "Social outreach",
         "Connections and publishing",
         "WordPress sites and their pages",
-        "Interconnector settings, machines joining the fleet, approvals, broadcasts and fleet routing",
+        "Interconnector settings, the node list, machines joining the fleet, approvals, "
+        "broadcasts, applying master updates and fleet routing",
         "Changing tasks, jobs, schedules, memory and GPU state",
         "Raw file downloads under /outputs/",
         "Managing this API key",
