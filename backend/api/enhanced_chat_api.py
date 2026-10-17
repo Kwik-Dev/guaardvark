@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 from backend.utils.display_paths import display_params
 from backend.utils.settings_utils import get_setting
+from backend.utils.web_search_sources import MAX_SEARCH_QUERY_CHARS
 
 # Local imports
 try:
@@ -1622,7 +1623,7 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
     _URL_RE = re.compile(r"(?:https?://|www\.)[^\s]+")
     # The search query is the user's message as typed, so anything longer than
     # this is a paste or a brief rather than a query and is never sent.
-    _WEB_SEARCH_MAX_CHARS = 300
+    _WEB_SEARCH_MAX_CHARS = MAX_SEARCH_QUERY_CHARS
 
     def _should_use_web_search(self, message: str) -> bool:
         """Return True only for a short message with a link, a domain or a

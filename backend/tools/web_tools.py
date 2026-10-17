@@ -14,7 +14,7 @@ from backend.utils.web_fetch import (
     DEADLINE_SECONDS, IDLE_SECONDS, MAX_PAGE_BYTES, MAX_REDIRECTS, megabytes,
 )
 from backend.utils.web_search_sources import (
-    DEFAULT_SEARCH_RESULTS, MAX_SEARCH_RESULTS, SEARCH_ENGINE, WEATHER_SOURCE,
+    DEFAULT_SEARCH_RESULTS, MAX_SEARCH_QUERY_CHARS, MAX_SEARCH_RESULTS, SEARCH_ENGINE, WEATHER_SOURCE,
 )
 
 logger = logging.getLogger(__name__)
@@ -526,7 +526,10 @@ class WebSearchTool(BaseTool):
             name="query",
             type="string",
             required=True,
-            description="Search query string"
+            description=(
+                f"Search query string, at most {MAX_SEARCH_QUERY_CHARS} characters; a longer "
+                "one is refused unsent"
+            ),
         ),
         "max_results": ToolParameter(
             name="max_results",
@@ -560,6 +563,20 @@ class WebSearchTool(BaseTool):
             return ToolResult(
                 success=False,
                 error="Search query is required"
+            )
+
+        # The same cap enhanced chat applies to the person's message: the whole
+        # query goes to the search engine.
+        if len(query) > MAX_SEARCH_QUERY_CHARS:
+            logger.info(f"web_search refused, query too long (query_len={len(query)})")
+            return ToolResult(
+                success=False,
+                error=(
+                    f"Refused: the query is longer than {MAX_SEARCH_QUERY_CHARS} characters, "
+                    "and a search would send all of it to the search engine. Search with a "
+                    "short query."
+                ),
+                output={"query_length": len(query)},
             )
 
         try:

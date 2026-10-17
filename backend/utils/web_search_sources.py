@@ -25,3 +25,8 @@ WEATHER_SOURCE = "wttr.in"
 # keeps one search to two or three page requests.
 DEFAULT_SEARCH_RESULTS = 5
 MAX_SEARCH_RESULTS = 20
+
+# The longest query chat sends: enhanced chat holds the person's message to it,
+# the web_search tool the query a model or MCP client writes. The whole query
+# goes to the engine, so a longer one is a paste or a brief and is refused unsent.
+MAX_SEARCH_QUERY_CHARS = 300
