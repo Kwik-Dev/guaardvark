@@ -1465,10 +1465,14 @@ def get_sync_history():
         # Get last N sync history records
         limit = int(request.args.get("limit", 10))
         
-        local_node_id = config.get("node_name", "local_node")
-        
+        # Syncs are recorded under this machine's id; installs that predate it
+        # recorded them under the node name.
+        recorded_as = [this_node_id()]
+        if config.get("node_name"):
+            recorded_as.append(config["node_name"])
+
         sync_history_records = db.session.query(InterconnectorSyncHistory).filter(
-            InterconnectorSyncHistory.node_id == local_node_id
+            InterconnectorSyncHistory.node_id.in_(recorded_as)
         ).order_by(
             InterconnectorSyncHistory.sync_timestamp.desc()
         ).limit(limit).all()
