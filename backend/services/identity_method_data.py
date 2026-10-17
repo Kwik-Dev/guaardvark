@@ -142,17 +142,13 @@ NOT_PROVEN_REASON = "not yet proven on labelled pairs"
 def accuracy_lower_bound(correct: int, n: int) -> float:
     """95% lower bound on a method's accuracy from ``correct`` of ``n`` pairs.
 
-    Jeffreys-style beta posterior with a uniform prior, the same shape the
-    decision gate uses (see decision_data.MEASURED_ACCURACY). Returns 0.0 when
-    scipy is unavailable, which withholds the score rather than granting it.
+    The beta posterior bound the decision gate uses (decision_evidence.lcb),
+    at IDENTITY_CONFIDENCE. Returns 0.0 when scipy is unavailable, which
+    withholds the score rather than granting it.
     """
-    if n <= 0 or correct < 0 or correct > n:
-        return 0.0
-    try:
-        from scipy.stats import beta
-    except Exception:  # noqa: BLE001 - a missing scipy must not unlock a score
-        return 0.0
-    return float(beta.ppf(1.0 - IDENTITY_CONFIDENCE, 1 + correct, 1 + n - correct))
+    from backend.services.decision_evidence import lcb
+
+    return lcb(correct, n, q=1.0 - IDENTITY_CONFIDENCE)
 
 
 def proven_for_model(method: str, model: Optional[str], digest: Optional[str] = None) -> bool:

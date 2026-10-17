@@ -53,6 +53,21 @@ SOURCES = ("system", "user", "third_party", "machine")
 
 DEFAULT_FLOOR = 0.95
 GATE_FLOOR = 0.98
+
+# How a measured row is judged (decision_evidence). A decision runs on a model
+# only when the lower confidence bound of that model's accuracy on the
+# labelled set reaches the decision's floor; the plain score is for reference.
+EVIDENCE = {
+    # Quantile of the Beta(1 + correct, 1 + misses) posterior taken as the
+    # bound: a one-sided 95% bound. A short perfect run cannot clear a floor:
+    # 35 of 35 proves 0.920, and a 0.95 floor needs 59 of 59.
+    "lcb_q": 0.05,
+    # What a labelled-set result from another machine adds when rows are
+    # pooled. The same items on the same build and wording are a re-run, not
+    # new evidence: it confirms a row, or marks it disputed when it disagrees,
+    # and adds nothing to correct or n. Only new labelled items add up.
+    "fleet_label_weight": 0.0,
+}
 # Decision-model probabilities are informative; chat-model self-reported
 # confidence is not (it reports 1.0 on its misses), so no threshold applies to it.
 DECISION_MODEL_THRESHOLD = {"nimble": 0.95, "tev1": 0.8}
