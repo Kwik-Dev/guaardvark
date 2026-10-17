@@ -35,16 +35,17 @@ def _writes_text(model_name: str) -> bool:
     the model its capability list decides: it needs "completion", and embedding
     models and decision models (nimble and tev1 report only "decision") cannot
     write a reply. A model Ollama cannot describe, or one described without a
-    capability list, falls back to the name rule in NON_TEXT_NAME_PATTERNS
-    (embedding and vision-only names); decision models have no name rule."""
-    from backend.services.model_capabilities import capabilities_for
+    capability list, falls back to the name rules: NON_TEXT_NAME_PATTERNS
+    (embedding and vision-only names) and DECISION_NAME_PATTERNS."""
+    from backend.services.model_capabilities import capabilities_for, decides_by_name
     try:
         rec = capabilities_for(model_name, with_vision=False)
     except Exception:  # noqa: BLE001
         rec = None
     if rec is None or not rec.exists or not rec.capabilities:
         lower = model_name.lower()
-        return not any(re.search(p, lower) for p in NON_TEXT_NAME_PATTERNS)
+        return (not any(re.search(p, lower) for p in NON_TEXT_NAME_PATTERNS)
+                and not decides_by_name(model_name))
     return rec.completion and not rec.embedding and "decision" not in rec.capabilities
 
 

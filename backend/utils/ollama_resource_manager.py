@@ -135,17 +135,21 @@ def is_text_chat_model(model_name: str) -> bool:
     """Check if a model is suitable as a default text chat LLM.
 
     The name rule leaves out vision-only and embedding models; when Ollama can
-    describe the model, one it lists as embedding is left out too, whatever its
-    name (bge-m3 has no "embed" in it).
+    describe the model, one it lists as embedding or decision is left out too,
+    whatever its name (bge-m3 has no "embed" in it; nimble and tev1 answer
+    with a label, not a reply). When it cannot, DECISION_NAME_PATTERNS stands
+    in for the decision capability.
     """
     if not model_name:
         return False
     lower = model_name.lower()
     if any(re.search(p, lower) for p in NON_TEXT_MODEL_PATTERNS):
         return False
-    from backend.services.model_capabilities import capabilities_for
+    from backend.services.model_capabilities import capabilities_for, decides_by_name
     rec = capabilities_for(model_name, with_vision=False)
-    return not (rec.exists and rec.embedding)
+    if rec.exists and rec.capabilities:
+        return not (rec.embedding or rec.decision)
+    return not (rec.exists and rec.embedding) and not decides_by_name(model_name)
 
 
 def _gpu_memory_mb() -> Optional[tuple]:
