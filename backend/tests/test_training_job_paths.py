@@ -91,6 +91,15 @@ def export_verified(monkeypatch):
     monkeypatch.setattr("backend.services.training_gguf_converter.refusal_for", lambda entry: None)
 
 
+@pytest.fixture(autouse=True)
+def libraries(monkeypatch):
+    """The training libraries count as ready unless a test sets the reason
+    training_libraries.unavailable_reason gives."""
+    state = SimpleNamespace(reason=None)
+    monkeypatch.setattr("backend.services.training_libraries.unavailable_reason", lambda: state.reason)
+    return state
+
+
 @pytest.fixture
 def progress(monkeypatch):
     sent = []
@@ -643,6 +652,59 @@ def test_a_failed_trainer_names_its_log(app, progress, trainer, tmp_path):
     message = _row(job_id).error_message
     assert "CUDA out of memory" in message
     assert str(tmp_path / "models" / "test-out" / "train.log") in message
+
+
+# ---- missing or incomplete training libraries refuse the run up front -----------
+
+INCOMPLETE = ("The training libraries are installed, but incomplete: trl 1.13.0 needs "
+              "accelerate>=1.4.0 (1.2.1 installed). Open Settings > Training libraries and "
+              "click Repair.")
+
+
+def test_incomplete_libraries_fail_the_run_before_the_gpu_wait_and_keep_its_checkpoint(
+        app, progress, trainer, libraries, no_gpu_claim, tmp_path):
+    libraries.reason = INCOMPLETE
+    data = _write(tmp_path / "data.jsonl", _rows(20))
+    job_id = _job(data_path=data, celery_task_id="task-1")
+    row = _row(job_id)
+    row.status, row.is_resumable, row.checkpoint_path = "running", True, "/ckpt/checkpoint-10"
+    db.session.commit()
+
+    with pytest.raises(tt.TrainingLibrariesUnavailable) as refused:
+        tt.finetune_model_task(job_id, {}, resume=True)
+
+    assert str(refused.value) == INCOMPLETE
+    assert trainer.calls == [] and no_gpu_claim == []
+    row = _row(job_id)
+    assert row.status == "failed" and row.error_message == INCOMPLETE
+    assert row.is_resumable is True and row.checkpoint_path == "/ckpt/checkpoint-10"
+    assert row.started_at is None
+    assert progress == [(0, f"Error: {INCOMPLETE}", "error")]
+
+
+def test_a_cancel_stays_a_cancel_when_the_libraries_refuse_the_run(app, progress, trainer, libraries, tmp_path):
+    libraries.reason = INCOMPLETE
+    job_id = _job(data_path=_write(tmp_path / "data.jsonl", _rows(20)))
+    _cancel_in_db(job_id)
+
+    assert tt.finetune_model_task(job_id, {}) == {"cancelled": True}
+    assert _row(job_id).status == "cancelled" and trainer.calls == []
+
+
+def test_the_pipeline_is_refused_before_it_parses(app, progress, parser, trainer, export_steps,
+                                                  libraries, tmp_path):
+    libraries.reason = INCOMPLETE
+    source = _write(tmp_path / "chat.md", ["# a transcript"])
+    job_id = _job(celery_task_id="pipeline-task", input_path=source)
+
+    with pytest.raises(tt.TrainingLibrariesUnavailable):
+        tt.full_training_pipeline_task(job_id, {})
+
+    row = _row(job_id)
+    assert row.status == "failed" and row.error_message == INCOMPLETE
+    assert "parse_report" not in json.loads(row.config_json)
+    assert list((tmp_path / "datasets").iterdir()) == []
+    assert trainer.calls == [] and "at_export" not in export_steps
 
 
 # ---- routes: one dispatch on the training queue, cancel, delete -----------------

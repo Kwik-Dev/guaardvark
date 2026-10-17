@@ -1,7 +1,8 @@
 """Settings > Training libraries: Unsloth, TRL and Datasets install into the
 backend's Python only from the modal's click, hold every other installed
 package where it is, leave out what the project removes or must not import,
-come out again on Remove, and training jobs refuse while they are missing.
+come out again on Remove, and training jobs refuse while they are missing or
+incomplete (a requirement of theirs unmet).
 
 Seams: subprocess.Popen (pip), read by _pip at call time; _spawn (the
 background thread), installed_versions, _requires, hardware_fit,
@@ -150,6 +151,30 @@ def test_unmet_requirements_name_the_package_and_skip_what_is_left_out(env, monk
 
     assert unmet == ["unsloth 2026.10.1 needs bitsandbytes, which is not installed",
                      "trl 1.13.0 needs accelerate>=1.4.0 (1.2.1 installed)"]
+
+
+def _accelerate_put_back(env, monkeypatch):
+    """Every library installed, with accelerate below what TRL declares: what
+    a start-up `pip install -r` left when the requirements pinned 1.2.1."""
+    env.update(INSTALLED)
+    env["accelerate"] = "1.2.1"
+    monkeypatch.setattr(tl, "_requires", lambda name: ["accelerate>=1.4.0"] if name == "trl" else [])
+
+
+INCOMPLETE = ("The training libraries are installed, but incomplete: trl 1.13.0 needs "
+              "accelerate>=1.4.0 (1.2.1 installed). Open Settings > Training libraries and "
+              "click Repair.")
+
+
+def test_an_unmet_requirement_reads_installed_but_not_ready(env, monkeypatch):
+    _accelerate_put_back(env, monkeypatch)
+
+    status = tl.status()
+
+    assert {lib["state"] for lib in status["libraries"]} == {"installed"}
+    assert status["ready"] is False
+    assert status["unmet"] == ["trl 1.13.0 needs accelerate>=1.4.0 (1.2.1 installed)"]
+    assert status["download_mb"] == 0
 
 
 # ---- only the click installs -------------------------------------------------------------
@@ -446,7 +471,7 @@ def test_remove_is_refused_when_nothing_is_installed(env):
     assert refused.value.code == "NOTHING_TO_REMOVE"
 
 
-# ---- jobs refuse while the libraries are missing -------------------------------------
+# ---- jobs refuse while the libraries are missing or incomplete ------------------------
 
 def _missing(*names):
     def version(name):
@@ -467,6 +492,16 @@ def test_the_job_refusal_names_what_is_missing_and_where_to_install_it(env, monk
                                        "Install it in Settings > Training libraries.")
 
     monkeypatch.setattr(tl.metadata, "version", _missing())
+    assert tl.unavailable_reason() is None
+
+
+def test_the_job_refusal_names_an_unmet_requirement_and_points_to_repair(env, monkeypatch):
+    monkeypatch.setattr(tl.metadata, "version", _missing())
+    _accelerate_put_back(env, monkeypatch)
+
+    assert tl.unavailable_reason() == INCOMPLETE
+
+    env["accelerate"] = "1.15.0"
     assert tl.unavailable_reason() is None
 
 
@@ -567,6 +602,31 @@ def test_resume_refuses_while_the_libraries_are_missing(client, monkeypatch):
     assert "Settings > Training libraries" in _error(response)["message"]
     db.session.expire_all()
     assert db.session.get(TrainingJob, job.id).status == "failed"
+
+
+def test_create_start_and_resume_refuse_while_a_requirement_is_unmet(client, env, monkeypatch):
+    monkeypatch.setattr(tl.metadata, "version", _missing())
+    _accelerate_put_back(env, monkeypatch)
+    pending = TrainingJob(job_id="later", name="later", base_model="org/base", dataset_id=1,
+                          status="pending", pipeline_stage="pending")
+    failed = TrainingJob(job_id="old", name="old", base_model="org/base", status="failed",
+                         pipeline_stage="training", is_resumable=True, checkpoint_path="/ckpt/checkpoint-10")
+    db.session.add_all([pending, failed])
+    db.session.commit()
+
+    created = client.post("/api/training/jobs", json={
+        "name": "job", "base_model": "org/base", "dataset_id": 1, "start_immediately": True})
+    started = client.post(f"/api/training/jobs/{pending.id}/start")
+    resumed = client.post(f"/api/training/jobs/{failed.id}/resume")
+
+    for response in (created, started, resumed):
+        assert response.status_code == 409
+        assert _error(response)["code"] == "TRAINING_LIBRARIES_MISSING"
+        assert _error(response)["message"] == INCOMPLETE
+    db.session.expire_all()
+    assert db.session.query(TrainingJob).count() == 2
+    assert db.session.get(TrainingJob, pending.id).status == "pending"
+    assert db.session.get(TrainingJob, failed.id).status == "failed"
 
 
 def test_other_hosts_cannot_install_or_remove():

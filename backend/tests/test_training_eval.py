@@ -91,6 +91,13 @@ def export_verified(monkeypatch):
     monkeypatch.setattr("backend.services.training_gguf_converter.refusal_for", lambda entry: None)
 
 
+@pytest.fixture(autouse=True)
+def libraries_ready(monkeypatch):
+    """The training libraries count as installed and complete; the trainer
+    itself is a stand-in, and the refusal has its own tests."""
+    monkeypatch.setattr("backend.services.training_libraries.unavailable_reason", lambda: None)
+
+
 @pytest.fixture
 def trainer(monkeypatch, tmp_path):
     """Stands in for the text trainer process (tt._run_text_trainer) and the

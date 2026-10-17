@@ -348,7 +348,9 @@ def remove_gguf_converter():
 
 def _libraries_missing_response():
     """The refusal for a job that would fail for want of the training
-    libraries, naming where to install them; None when they are there."""
+    libraries (one missing, or a requirement of theirs unmet), naming where
+    to install or repair them; None when they are ready. Export and import
+    run without them (the merge needs torch, transformers and peft only)."""
     from backend.services import training_libraries
     reason = training_libraries.unavailable_reason()
     if reason:

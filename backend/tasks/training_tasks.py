@@ -764,6 +764,19 @@ class TrainingCancelled(Exception):
     """The job was cancelled or deleted before its trainer started."""
 
 
+class TrainingLibrariesUnavailable(RuntimeError):
+    """The training libraries are missing or incomplete, so the run was
+    refused before it started; the message says what and where to fix it."""
+
+
+def _training_libraries_refusal():
+    """training_libraries.unavailable_reason, read at call time. The routes
+    refuse a job on it too; the task asks again because the libraries can
+    change while the task waits in the queue."""
+    from backend.services import training_libraries
+    return training_libraries.unavailable_reason()
+
+
 def _job_stop_check(job_id: str):
     """should_stop for the GPU wait and the trainer: True once the job is
     cancelled or deleted. Reads the database in its own app context, so the
@@ -829,6 +842,8 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False,
                         in_pipeline: bool = False):
     """Fine-tune the job's base model on its dataset and record the result.
 
+    While the training libraries are missing or incomplete the job is failed
+    with the reason before anything else runs (TrainingLibrariesUnavailable).
     A job without data_path in its config trains on its dataset (dataset_id),
     resolved by dataset_training_files. Without "steps" it trains for
     default_max_steps of its rows. The base model is the declared entry's
@@ -853,6 +868,17 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False,
     emit = _pipeline_emitter(job_id, in_pipeline, PIPELINE_TRAIN_PROGRESS)
     trained_name = None
     stopped = _job_stop_check(job_id)
+
+    # Before the GPU wait and the trainer, and outside the handler below, so
+    # a refused job keeps its checkpoint and can be resumed once repaired. A
+    # cancel that landed first stays a cancel.
+    unavailable = _training_libraries_refusal()
+    if unavailable:
+        if not _claim_job(job_id, status="failed", error_message=unavailable, pid=None):
+            _emit_progress(job_id, 0, "Training cancelled", "cancelled")
+            return {"cancelled": True}
+        _emit_progress(job_id, 0, f"Error: {unavailable}", "error")
+        raise TrainingLibrariesUnavailable(unavailable)
 
     try:
         if in_pipeline:
@@ -1486,8 +1512,13 @@ def import_ollama_task(self, job_id: str, model_dir: str, model_name: str):
              soft_time_limit=259200, time_limit=345600)
 def full_training_pipeline_task(self, job_id: str, config: dict):
     logger.info(f"Starting full_training_pipeline_task for job {job_id}")
-    
+
     try:
+        # Every pipeline trains; refused before it parses or filters anything.
+        unavailable = _training_libraries_refusal()
+        if unavailable:
+            raise TrainingLibrariesUnavailable(unavailable)
+
         _update_job_status(job_id, status="running", started_at=utcnow())
         _emit_progress(job_id, 0, "Starting full training pipeline...", "processing")
 

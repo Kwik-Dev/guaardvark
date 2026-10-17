@@ -246,6 +246,8 @@ const NewTrainingJobModal = ({
   const selectedProfile = deviceProfiles.find(
     (p) => p.id === parseInt(formData.device_profile_id)
   );
+  // Not ready means one is missing or, all installed, a requirement is unmet.
+  const missingLibraries = (libraries?.libraries || []).filter((l) => l.state === "missing");
 
   return (
     <Dialog open={open} onClose={onClose} fullWidth maxWidth="md">
@@ -271,15 +273,19 @@ const NewTrainingJobModal = ({
               </Button>
             }
           >
-            <Typography variant="body2">
-              <strong>Training libraries are not installed.</strong>{" "}
-              Fine-tuning needs{" "}
-              {libraries.libraries
-                .filter((l) => l.state === "missing")
-                .map((l) => l.name)
-                .join(", ")}
-              . Install them from Training libraries (also in Settings), then create the job.
-            </Typography>
+            {missingLibraries.length > 0 ? (
+              <Typography variant="body2">
+                <strong>Training libraries are not installed.</strong>{" "}
+                Fine-tuning needs {missingLibraries.map((l) => l.name).join(", ")}. Install them
+                from Training libraries (also in Settings), then create the job.
+              </Typography>
+            ) : (
+              <Typography variant="body2">
+                <strong>Training libraries are installed, but incomplete.</strong>{" "}
+                {(libraries.unmet || []).join("; ")}. Click Repair in Training libraries (also
+                in Settings), then create the job.
+              </Typography>
+            )}
           </Alert>
         )}
         {loadProblems.length > 0 && (
