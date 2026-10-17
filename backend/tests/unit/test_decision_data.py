@@ -11,6 +11,7 @@ import re
 import pytest
 
 from backend.services.decision_data import (
+    BACKEND_POLICY,
     DECISION_MODEL_LICENCE,
     DECISION_MODEL_THRESHOLD,
     DECISIONS,
@@ -18,6 +19,7 @@ from backend.services.decision_data import (
     LAYERS,
     LICENCE_STATUSES,
     MEASURED_ACCURACY,
+    RUN_KINDS,
     SIDE_EFFECTS,
     SOURCES,
     TYPES,
@@ -138,3 +140,28 @@ def test_tev1_is_measure_only():
     """Its weights licence is not final: measured and used only when the
     person installed it, never suggested, offered or made a default."""
     assert DECISION_MODEL_LICENCE["tev1"] == "measure_only"
+
+
+def test_every_layer_has_a_backend_policy():
+    assert set(BACKEND_POLICY) == set(LAYERS)
+    for layer, policy in BACKEND_POLICY.items():
+        assert set(policy) == {"runs", "backends", "author_must_differ", "when_unanswered", "why"}, layer
+        assert policy["runs"] and set(policy["runs"]) <= set(RUN_KINDS), layer
+        assert set(policy["author_must_differ"]) <= set(policy["runs"]), layer
+        assert policy["backends"] and set(policy["backends"]) <= {"chat", "batch"}, layer
+        assert policy["when_unanswered"] in ("fallback", "safe_side"), layer
+        assert policy["why"].strip(), layer
+
+
+def test_l0_is_never_a_question():
+    assert "L0" not in LAYERS and "L0" not in BACKEND_POLICY
+    assert all(entry["layer"] != "L0" for entry in DECISIONS.values())
+
+
+def test_learning_and_batch_questions_run_in_batch_passes_only():
+    assert BACKEND_POLICY["L5"]["runs"] == ("batch",)
+    assert "batch" in BACKEND_POLICY["L5"]["author_must_differ"]
+
+
+def test_a_check_that_cannot_answer_reads_as_not_verified():
+    assert BACKEND_POLICY["L4"]["when_unanswered"] == "safe_side"

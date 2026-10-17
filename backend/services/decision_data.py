@@ -52,6 +52,56 @@ TYPES = (
 LAYERS = ("L1", "L2", "L3", "L4", "L5")
 SOURCES = ("system", "user", "third_party", "machine")
 
+# Who may ask a question, and what may answer it, by the decision's layer.
+# decide() reads the row for the layer; L0 (facts computed without a model)
+# is never a question, so it has no row.
+#   runs                the run kinds that may ask: "interactive" (a person is
+#                       waiting on the answer), "unattended" (a loop acting on
+#                       its own), "batch" (an offline pass over many items)
+#   backends            what may answer: "chat" is the chat model already
+#                       loaded; "batch" is a batch backend, not built yet
+#   author_must_differ  run kinds whose caller must name the models that wrote
+#                       what is being judged (decide's exclude_models; an
+#                       empty tuple when nothing was written by a model); the
+#                       answering model may not be one of them (INDEPENDENCE)
+#   when_unanswered     what an "on" decision returns when no model answer
+#                       can be used: "fallback" (today's answer) or "safe_side"
+#                       (the entry's safe side; for a check, "not verified")
+RUN_KINDS = ("interactive", "unattended", "batch")
+BACKEND_POLICY: dict = {
+    "L1": {
+        "runs": RUN_KINDS, "backends": ("chat",), "author_must_differ": (), "when_unanswered": "fallback",
+        "why": "Turn routing: a person is waiting, so only the chat model already loaded answers.",
+    },
+    "L2": {
+        "runs": RUN_KINDS, "backends": ("chat",), "author_must_differ": (), "when_unanswered": "fallback",
+        "why": "Checks inside one reply: the chat model already loaded answers.",
+    },
+    "L3": {
+        "runs": RUN_KINDS, "backends": ("chat", "batch"), "author_must_differ": ("unattended", "batch"),
+        "when_unanswered": "fallback",
+        "why": (
+            "Pipeline gates. With a person present the chat model answers; a loop acting on its own uses a batch "
+            "backend or a model other than the one that wrote what it judges."
+        ),
+    },
+    "L4": {
+        "runs": RUN_KINDS, "backends": ("chat",), "author_must_differ": (), "when_unanswered": "safe_side",
+        "why": (
+            "Verification. The chat model checks text only (state is text; visual checks stay with the vision "
+            "model), and a check that could not answer means not verified, never done or a match."
+        ),
+    },
+    "L5": {
+        "runs": ("batch",), "backends": ("batch", "chat"), "author_must_differ": ("batch",),
+        "when_unanswered": "fallback",
+        "why": (
+            "Learning and batch work runs in batch passes only, never on a request, judged by a model other than "
+            "the one whose output it judges."
+        ),
+    },
+}
+
 DEFAULT_FLOOR = 0.95
 GATE_FLOOR = 0.98
 

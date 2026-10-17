@@ -110,3 +110,54 @@ def test_a_draft_checked_only_by_its_own_model_is_not_labelled_passed():
     ext = {"checked": True, "passed": True, "independent": False}
     assert gates.independent_check_label(ext) == "not_independent"
     assert gates.independent_ok(ext) == (True, "not_independent")
+
+
+# ---- qualifies(): a measured row for this build, wording and set, over its floor -------------
+
+from backend.services.decision_data import DECISIONS, MEASURED_ACCURACY  # noqa: E402
+from backend.services.decision_prompt import wording_sha  # noqa: E402
+from backend.tests.fixtures.decision_sets import load_set  # noqa: E402
+
+BUILD = "4eb23ef187e2"
+
+
+def _row(decision_id, **overrides):
+    entry = DECISIONS[decision_id]
+    row = {"backend": "chat", "model": "gemma4:12b", "digest": BUILD, "wording_sha": wording_sha(entry),
+           "set_version": load_set(entry["set"])["set_version"], "correct": 200, "n": 200, "date": "2026-10-16"}
+    return {**row, **overrides}
+
+
+def test_a_row_over_its_floor_qualifies_its_own_build_only(monkeypatch):
+    monkeypatch.setitem(MEASURED_ACCURACY, "chat_route", [_row("chat_route")])
+    assert E.qualifies("chat_route", BUILD + "f" * 52)
+    assert E.qualifies("chat_route", "sha256:" + BUILD + "f" * 52)
+    assert not E.qualifies("chat_route", "2cf98652fdc6" + "a" * 52)
+    assert not E.qualifies("chat_route", None)
+
+
+@pytest.mark.parametrize("overrides", [
+    {"correct": 35, "n": 35},           # 1.0 observed, 0.920 at the bound
+    {"wording_sha": "000000000000"},    # measured on other wording
+    {"set_version": 0},                 # measured on an older set
+    {"backend": "systemone"},
+    {"correct": "many"},
+])
+def test_a_row_that_proves_less_does_not_qualify(monkeypatch, overrides):
+    monkeypatch.setitem(MEASURED_ACCURACY, "chat_route", [_row("chat_route", **overrides)])
+    assert not E.qualifies("chat_route", BUILD)
+
+
+def test_a_gate_needs_a_row_with_no_injection_misses(monkeypatch):
+    assert DECISIONS["accepted_offer"]["type"] == "gate"
+    monkeypatch.setitem(MEASURED_ACCURACY, "accepted_offer", [_row("accepted_offer")])
+    assert not E.qualifies("accepted_offer", BUILD)
+    monkeypatch.setitem(MEASURED_ACCURACY, "accepted_offer", [_row("accepted_offer", injection_misses=1)])
+    assert not E.qualifies("accepted_offer", BUILD)
+    monkeypatch.setitem(MEASURED_ACCURACY, "accepted_offer", [_row("accepted_offer", injection_misses=0)])
+    assert E.qualifies("accepted_offer", BUILD)
+
+
+def test_a_decision_without_a_labelled_set_never_qualifies():
+    assert DECISIONS["memory_relation"]["set"] is None
+    assert not E.qualifies("memory_relation", BUILD)

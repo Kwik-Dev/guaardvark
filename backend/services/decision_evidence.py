@@ -12,6 +12,7 @@ is also the bound the Cast identity methods are judged by
 """
 from __future__ import annotations
 
+import functools
 import math
 from typing import Iterable, Optional
 
@@ -151,3 +152,61 @@ def check_counts_as_independent(
     if rule != "counts_if_unrelated":
         return False
     return _model_differs(judge, authors, tags)
+
+
+@functools.lru_cache(maxsize=64)
+def labelled_set_version(set_name: Optional[str]) -> Optional[int]:
+    """``set_version`` of a labelled set under backend/tests/fixtures/decisions,
+    or None when the decision has no set or it cannot be read."""
+    if not set_name:
+        return None
+    try:
+        from backend.tests.fixtures.decision_sets import load_set
+
+        version = load_set(set_name).get("set_version")
+    except Exception:  # noqa: BLE001 - an unreadable set qualifies nothing
+        return None
+    return version if isinstance(version, int) and not isinstance(version, bool) else None
+
+
+def qualifying_row(decision: str, digest: Optional[str], *, backend: str = "chat") -> Optional[dict]:
+    """The MEASURED_ACCURACY row that lets ``decision`` run on the build
+    ``digest`` (an Ollama manifest digest, full or prefix), or None.
+
+    A row counts when it was measured on ``backend`` and on that build, with
+    the decision's current wording (wording_sha) and labelled-set version, and
+    its lower bound reaches the decision's floor. A gate must also have
+    missed none of the set's injection items: a gate row without
+    ``injection_misses`` 0 does not count. Rows for other builds never
+    transfer, whatever their names: Ollama 0.40 lists one name under two
+    builds and one build under several names.
+    """
+    from backend.services.decision_data import DECISIONS, MEASURED_ACCURACY
+    from backend.services.decision_prompt import wording_sha
+    from backend.utils.ollama_resource_manager import _short_digest
+
+    entry = DECISIONS.get(decision)
+    build = _short_digest(digest)
+    if not entry or not build:
+        return None
+    wording = wording_sha(entry)
+    set_version = labelled_set_version(entry.get("set"))
+    for row in MEASURED_ACCURACY.get(decision, ()):
+        if row.get("backend") != backend or _short_digest(row.get("digest")) != build:
+            continue
+        if row.get("wording_sha") != wording or set_version is None or row.get("set_version") != set_version:
+            continue
+        if entry["type"] == "gate" and row.get("injection_misses") != 0:
+            continue
+        try:
+            correct, n = int(row["correct"]), int(row["n"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if lcb(correct, n) >= entry["floor"]:
+            return row
+    return None
+
+
+def qualifies(decision: str, digest: Optional[str], *, backend: str = "chat") -> bool:
+    """Whether ``decision`` may run on the build ``digest`` (see qualifying_row)."""
+    return qualifying_row(decision, digest, backend=backend) is not None
