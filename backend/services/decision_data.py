@@ -1481,22 +1481,53 @@ DECISIONS: dict = {
               'disk. Labelled set not written yet (planned: fix_addresses_failure.json).'},
 }
 
-# Measured rows: decision -> list of rows. Filled from runs that used the
-# exact wording above; see the module docstring for when a row holds.
-# accepted_offer and outreach_intent were reworded after misses on their own
-# sets (thanks without a go-ahead; approve/reject without a draft number), so
-# their holdout items were seen while tuning; write fresh holdout items before
-# treating those two scores as unbiased.
+# Measured rows: decision -> list of rows, one per build. Produced by
+# scripts/eval_decisions.py --rows, which asks through the same function as
+# decide(); see the module docstring for when a row holds. injection_misses
+# counts the set's injection items answered wrong; a gate qualifies only with 0.
+# The gemma4:12b counts match the first measurement of these wordings
+# (2026-10-06) item for item. accepted_offer and outreach_intent were reworded
+# after misses on their own sets (thanks without a go-ahead; approve/reject
+# without a draft number), so their holdout items were seen while tuning;
+# write fresh holdout items before treating those two scores as unbiased.
+# 2cf98652fdc6 is the gemma4:e2b build Ollama 0.40 loads for that name.
 MEASURED_ACCURACY: dict = {
-    "accepted_offer": [{"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "a236e697ea4e", "set_version": 1, "correct": 27, "n": 27, "date": "2026-10-06"}],
-    "needs_live_data": [{"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "080f1727cb9a", "set_version": 1, "correct": 46, "n": 47, "date": "2026-10-06"}],
-    "image_intent": [{"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "67841514f6ac", "set_version": 1, "correct": 30, "n": 30, "date": "2026-10-06"}],
-    "screen_or_chat": [{"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "d89ca1e4e3f1", "set_version": 1, "correct": 32, "n": 32, "date": "2026-10-06"}],
-    "chat_route": [{"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "f9568f399086", "set_version": 1, "correct": 35, "n": 35, "date": "2026-10-06"}],
-    "context_answers": [{"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "dedb9e3021a1", "set_version": 1, "correct": 20, "n": 20, "date": "2026-10-06"}],
-    "task_done": [{"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "d22e245015fd", "set_version": 1, "correct": 20, "n": 21, "date": "2026-10-06"}],
-    "outreach_intent": [{"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "10e5f54965cc", "set_version": 1, "correct": 35, "n": 35, "date": "2026-10-06"}],
-    "outreach_thread_fit": [{"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "7accbd77b6ce", "set_version": 1, "correct": 30, "n": 30, "date": "2026-10-06"}],
+    "accepted_offer": [
+        {"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "a236e697ea4e", "set_version": 1, "correct": 27, "n": 27, "injection_misses": 0, "date": "2026-10-16"},
+        {"backend": "chat", "model": "gemma4:e2b", "digest": "2cf98652fdc6", "wording_sha": "a236e697ea4e", "set_version": 1, "correct": 26, "n": 27, "injection_misses": 1, "date": "2026-10-16"},
+    ],
+    "chat_route": [
+        {"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "f9568f399086", "set_version": 1, "correct": 35, "n": 35, "injection_misses": 0, "date": "2026-10-16"},
+        {"backend": "chat", "model": "gemma4:e2b", "digest": "2cf98652fdc6", "wording_sha": "f9568f399086", "set_version": 1, "correct": 32, "n": 35, "injection_misses": 2, "date": "2026-10-16"},
+    ],
+    "context_answers": [
+        {"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "dedb9e3021a1", "set_version": 1, "correct": 20, "n": 20, "injection_misses": 0, "date": "2026-10-16"},
+        {"backend": "chat", "model": "gemma4:e2b", "digest": "2cf98652fdc6", "wording_sha": "dedb9e3021a1", "set_version": 1, "correct": 20, "n": 20, "injection_misses": 0, "date": "2026-10-16"},
+    ],
+    "image_intent": [
+        {"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "67841514f6ac", "set_version": 1, "correct": 30, "n": 30, "injection_misses": 0, "date": "2026-10-16"},
+        {"backend": "chat", "model": "gemma4:e2b", "digest": "2cf98652fdc6", "wording_sha": "67841514f6ac", "set_version": 1, "correct": 25, "n": 30, "injection_misses": 0, "date": "2026-10-16"},
+    ],
+    "needs_live_data": [
+        {"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "080f1727cb9a", "set_version": 1, "correct": 46, "n": 47, "injection_misses": 1, "date": "2026-10-16"},
+        {"backend": "chat", "model": "gemma4:e2b", "digest": "2cf98652fdc6", "wording_sha": "080f1727cb9a", "set_version": 1, "correct": 25, "n": 47, "injection_misses": 2, "date": "2026-10-16"},
+    ],
+    "outreach_intent": [
+        {"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "10e5f54965cc", "set_version": 1, "correct": 35, "n": 35, "injection_misses": 0, "date": "2026-10-16"},
+        {"backend": "chat", "model": "gemma4:e2b", "digest": "2cf98652fdc6", "wording_sha": "10e5f54965cc", "set_version": 1, "correct": 26, "n": 35, "injection_misses": 1, "date": "2026-10-16"},
+    ],
+    "outreach_thread_fit": [
+        {"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "7accbd77b6ce", "set_version": 1, "correct": 30, "n": 30, "injection_misses": 0, "date": "2026-10-16"},
+        {"backend": "chat", "model": "gemma4:e2b", "digest": "2cf98652fdc6", "wording_sha": "7accbd77b6ce", "set_version": 1, "correct": 24, "n": 30, "injection_misses": 0, "date": "2026-10-16"},
+    ],
+    "screen_or_chat": [
+        {"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "d89ca1e4e3f1", "set_version": 1, "correct": 32, "n": 32, "injection_misses": 0, "date": "2026-10-16"},
+        {"backend": "chat", "model": "gemma4:e2b", "digest": "2cf98652fdc6", "wording_sha": "d89ca1e4e3f1", "set_version": 1, "correct": 31, "n": 32, "injection_misses": 0, "date": "2026-10-16"},
+    ],
+    "task_done": [
+        {"backend": "chat", "model": "gemma4:12b", "digest": "4eb23ef187e2", "wording_sha": "d22e245015fd", "set_version": 1, "correct": 20, "n": 21, "injection_misses": 0, "date": "2026-10-16"},
+        {"backend": "chat", "model": "gemma4:e2b", "digest": "2cf98652fdc6", "wording_sha": "d22e245015fd", "set_version": 1, "correct": 17, "n": 21, "injection_misses": 0, "date": "2026-10-16"},
+    ],
 }
 MEASURED_SOURCE = (
     "Hand-labelled synthetic sets in backend/tests/fixtures/decisions (labels written for the test, not "

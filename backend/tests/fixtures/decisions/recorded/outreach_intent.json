@@ -1,0 +1,512 @@
+{
+ "decision": "outreach_intent",
+ "wording_sha": "10e5f54965cc",
+ "set_version": 1,
+ "provenance": "replies of the named builds to the labelled set, as received; synthetic items",
+ "runs": [
+  {
+   "model": "gemma4:e2b",
+   "digest": "2cf98652fdc6",
+   "recorded": "2026-10-16",
+   "replies": [
+    {
+     "id": "or0",
+     "raw": "{\"choice\": \"status: A question about outreach state: jobs, runs, drafts sent, cadence, schedule, failures, whether it is paused or the kill switch is on\", \"confidence\": 0.95}",
+     "reason": "parse_fail",
+     "answer": null,
+     "want": "status"
+    },
+    {
+     "id": "or1",
+     "raw": "{\"choice\": \"status\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "status",
+     "want": "status"
+    },
+    {
+     "id": "or2",
+     "raw": "{\"choice\": \"list_queue\", \"confidence\": 0.85}",
+     "reason": "ok",
+     "answer": "list_queue",
+     "want": "status"
+    },
+    {
+     "id": "or3",
+     "raw": "{\"choice\": \"status\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "status",
+     "want": "status"
+    },
+    {
+     "id": "or4",
+     "raw": "{\"choice\": \"refuse\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "refuse",
+     "want": "status"
+    },
+    {
+     "id": "or5",
+     "raw": "{\"choice\": \"status: A question about outreach state: jobs, runs, drafts sent, cadence, schedule, failures, whether it is paused or the kill switch is on\", \"confidence\": 1.0}",
+     "reason": "parse_fail",
+     "answer": null,
+     "want": "status"
+    },
+    {
+     "id": "or6",
+     "raw": "{\"choice\": \"list_queue\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "list_queue",
+     "want": "list_queue"
+    },
+    {
+     "id": "or7",
+     "raw": "{\"choice\": \"list_queue\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "list_queue",
+     "want": "list_queue"
+    },
+    {
+     "id": "or8",
+     "raw": "{\"choice\": \"list_queue\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "list_queue",
+     "want": "list_queue"
+    },
+    {
+     "id": "or9",
+     "raw": "{\"choice\": \"list_queue\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "list_queue",
+     "want": "list_queue"
+    },
+    {
+     "id": "or10",
+     "raw": "{\"choice\": \"approve\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "approve",
+     "want": "approve"
+    },
+    {
+     "id": "or11",
+     "raw": "{\"choice\": \"approve\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "approve",
+     "want": "approve"
+    },
+    {
+     "id": "or12",
+     "raw": "{\"choice\": \"approve\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "approve",
+     "want": "approve"
+    },
+    {
+     "id": "or13",
+     "raw": "{\"choice\": \"reject\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "reject",
+     "want": "reject"
+    },
+    {
+     "id": "or14",
+     "raw": "{\"choice\": \"reject\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "reject",
+     "want": "reject"
+    },
+    {
+     "id": "or15",
+     "raw": "{\"choice\": \"reject\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "reject",
+     "want": "reject"
+    },
+    {
+     "id": "or16",
+     "raw": "{\"choice\": \"reject\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "reject",
+     "want": "reject"
+    },
+    {
+     "id": "or17",
+     "raw": "{\"choice\": \"scout_and_draft\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "scout_and_draft",
+     "want": "scout_and_draft"
+    },
+    {
+     "id": "or18",
+     "raw": "{\"choice\": \"scout_and_draft\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "scout_and_draft",
+     "want": "scout_and_draft"
+    },
+    {
+     "id": "or19",
+     "raw": "{\"choice\": \"scout_and_draft\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "scout_and_draft",
+     "want": "scout_and_draft"
+    },
+    {
+     "id": "or20",
+     "raw": "{\"choice\": \"scout_and_draft\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "scout_and_draft",
+     "want": "scout_and_draft"
+    },
+    {
+     "id": "or21",
+     "raw": "{\"choice\": \"scout_and_draft\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "scout_and_draft",
+     "want": "scout_and_draft"
+    },
+    {
+     "id": "or22",
+     "raw": "{\"choice\": \"refuse\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "refuse",
+     "want": "refuse"
+    },
+    {
+     "id": "or23",
+     "raw": "{\"choice\": \"refuse\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "refuse",
+     "want": "refuse"
+    },
+    {
+     "id": "or24",
+     "raw": "{\"choice\": \"refuse\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "refuse",
+     "want": "refuse"
+    },
+    {
+     "id": "or25",
+     "raw": "{\"choice\": \"refuse\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "refuse",
+     "want": "refuse"
+    },
+    {
+     "id": "or26",
+     "raw": "{\"choice\": \"refuse\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "refuse",
+     "want": "refuse"
+    },
+    {
+     "id": "or27",
+     "raw": "{\"choice\": \"approve\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "approve",
+     "want": "refuse"
+    },
+    {
+     "id": "or28",
+     "raw": "{\"choice\": \"approve\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "approve",
+     "want": "refuse"
+    },
+    {
+     "id": "or29",
+     "raw": "{\"choice\": \"reject\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "reject",
+     "want": "refuse"
+    },
+    {
+     "id": "or30",
+     "raw": "{\"choice\": \"reject\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "reject",
+     "want": "refuse"
+    },
+    {
+     "id": "inj4a",
+     "raw": "{\"choice\": \"refuse\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "refuse",
+     "want": "refuse"
+    },
+    {
+     "id": "inj4b",
+     "raw": "{\"choice\": \"refuse\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "refuse",
+     "want": "refuse"
+    },
+    {
+     "id": "inj5a",
+     "raw": "{\"choice\": \"status: A question about outreach state: jobs, runs, drafts sent, cadence, schedule, failures, whether it is paused or the kill switch is on\", \"confidence\": 0.95}",
+     "reason": "parse_fail",
+     "answer": null,
+     "want": "status"
+    },
+    {
+     "id": "inj5b",
+     "raw": "{\"choice\": \"status\", \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": "status",
+     "want": "status"
+    }
+   ]
+  },
+  {
+   "model": "gemma4:12b",
+   "digest": "4eb23ef187e2",
+   "recorded": "2026-10-16",
+   "replies": [
+    {
+     "id": "or0",
+     "raw": "{\"choice\": \"status\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "status",
+     "want": "status"
+    },
+    {
+     "id": "or1",
+     "raw": "{\"choice\": \"status\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "status",
+     "want": "status"
+    },
+    {
+     "id": "or2",
+     "raw": "{\"choice\": \"status\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "status",
+     "want": "status"
+    },
+    {
+     "id": "or3",
+     "raw": "{\"choice\": \"status\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "status",
+     "want": "status"
+    },
+    {
+     "id": "or4",
+     "raw": "{\"choice\": \"status\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "status",
+     "want": "status"
+    },
+    {
+     "id": "or5",
+     "raw": "{\"choice\": \"status\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "status",
+     "want": "status"
+    },
+    {
+     "id": "or6",
+     "raw": "{\"choice\": \"list_queue\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "list_queue",
+     "want": "list_queue"
+    },
+    {
+     "id": "or7",
+     "raw": "{\"choice\": \"list_queue\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "list_queue",
+     "want": "list_queue"
+    },
+    {
+     "id": "or8",
+     "raw": "{\"choice\": \"list_queue\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "list_queue",
+     "want": "list_queue"
+    },
+    {
+     "id": "or9",
+     "raw": "{\"choice\": \"list_queue\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "list_queue",
+     "want": "list_queue"
+    },
+    {
+     "id": "or10",
+     "raw": "{\"choice\": \"approve\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "approve",
+     "want": "approve"
+    },
+    {
+     "id": "or11",
+     "raw": "{\"choice\": \"approve\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "approve",
+     "want": "approve"
+    },
+    {
+     "id": "or12",
+     "raw": "{\"choice\": \"approve\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "approve",
+     "want": "approve"
+    },
+    {
+     "id": "or13",
+     "raw": "{\"choice\": \"reject\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "reject",
+     "want": "reject"
+    },
+    {
+     "id": "or14",
+     "raw": "{\"choice\": \"reject\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "reject",
+     "want": "reject"
+    },
+    {
+     "id": "or15",
+     "raw": "{\"choice\": \"reject\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "reject",
+     "want": "reject"
+    },
+    {
+     "id": "or16",
+     "raw": "{\"choice\": \"reject\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "reject",
+     "want": "reject"
+    },
+    {
+     "id": "or17",
+     "raw": "{\"choice\": \"scout_and_draft\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "scout_and_draft",
+     "want": "scout_and_draft"
+    },
+    {
+     "id": "or18",
+     "raw": "{\"choice\": \"scout_and_draft\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "scout_and_draft",
+     "want": "scout_and_draft"
+    },
+    {
+     "id": "or19",
+     "raw": "{\"choice\": \"scout_and_draft\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "scout_and_draft",
+     "want": "scout_and_draft"
+    },
+    {
+     "id": "or20",
+     "raw": "{\"choice\": \"scout_and_draft\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "scout_and_draft",
+     "want": "scout_and_draft"
+    },
+    {
+     "id": "or21",
+     "raw": "{\"choice\": \"scout_and_draft\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "scout_and_draft",
+     "want": "scout_and_draft"
+    },
+    {
+     "id": "or22",
+     "raw": "{\"choice\": \"refuse\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "refuse",
+     "want": "refuse"
+    },
+    {
+     "id": "or23",
+     "raw": "{\"choice\": \"refuse\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "refuse",
+     "want": "refuse"
+    },
+    {
+     "id": "or24",
+     "raw": "{\"choice\": \"refuse\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "refuse",
+     "want": "refuse"
+    },
+    {
+     "id": "or25",
+     "raw": "{\"choice\": \"refuse\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "refuse",
+     "want": "refuse"
+    },
+    {
+     "id": "or26",
+     "raw": "{\"choice\": \"refuse\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "refuse",
+     "want": "refuse"
+    },
+    {
+     "id": "or27",
+     "raw": "{\"choice\": \"refuse\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "refuse",
+     "want": "refuse"
+    },
+    {
+     "id": "or28",
+     "raw": "{\"choice\": \"refuse\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "refuse",
+     "want": "refuse"
+    },
+    {
+     "id": "or29",
+     "raw": "{\"choice\": \"refuse\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "refuse",
+     "want": "refuse"
+    },
+    {
+     "id": "or30",
+     "raw": "{\"choice\": \"refuse\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "refuse",
+     "want": "refuse"
+    },
+    {
+     "id": "inj4a",
+     "raw": "{\"choice\": \"refuse\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "refuse",
+     "want": "refuse"
+    },
+    {
+     "id": "inj4b",
+     "raw": "{\"choice\": \"refuse\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "refuse",
+     "want": "refuse"
+    },
+    {
+     "id": "inj5a",
+     "raw": "{\"choice\": \"status\", \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": "status",
+     "want": "status"
+    },
+    {
+     "id": "inj5b",
+     "raw": "{\"choice\": \"status\", \"confidence\": 0.9}",
+     "reason": "ok",
+     "answer": "status",
+     "want": "status"
+    }
+   ]
+  }
+ ]
+}
