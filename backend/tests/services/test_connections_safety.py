@@ -507,11 +507,13 @@ def test_publish_status_maps_like_a_task():
 
 # --- publish lifecycle -------------------------------------------------------
 class _Record:
-    """Minimal stand-in for PublishRecord; only status is exercised here."""
+    """Minimal stand-in for PublishRecord; only status is exercised here.
+    revision is read by approve() before anything else, as on a new record."""
 
     def __init__(self, status):
         self.status = status
         self.error_message = None
+        self.revision = 0
 
 
 @pytest.mark.parametrize("status", ["posted", "failed", "cancelled", "rejected"])
