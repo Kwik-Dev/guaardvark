@@ -497,13 +497,14 @@ class VideoGenerationRouter:
         if comfyui_running:
             try:
                 from backend.services.comfyui_video_generator import ComfyUIVideoGenerator
-                from backend.services.video_model_registry import is_model_installed
+                from backend.services.video_model_registry import is_plan_installed
                 gen = ComfyUIVideoGenerator()
                 face_restore_node_available = (
                     gen.comfy_node_available("FaceRestoreModelLoader")
                     and gen.comfy_node_available("FaceRestoreCFWithModel")
                 )
-                face_restore_model_ready = is_model_installed("codeformer")
+                # CodeFormer plus the face detector and parser the node reads.
+                face_restore_model_ready = is_plan_installed("codeformer")
             except Exception:
                 pass
         return {

@@ -2548,11 +2548,14 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                     if source_ref:
                         self._add_upscale_node(workflow, source_ref, vhs_node_id)
 
-            # Apply FaceRestore if requested (requires facerestore_cf custom node)
+            # Apply FaceRestore if requested (requires facerestore_cf custom node).
+            # The node downloads its face detector and parser when they are
+            # missing, so CodeFormer counts as ready only with its whole install
+            # plan on disk.
             if request.face_restore:
                 try:
-                    from backend.services.video_model_registry import is_model_installed
-                    model_ready = is_model_installed("codeformer")
+                    from backend.services.video_model_registry import is_plan_installed
+                    model_ready = is_plan_installed("codeformer")
                 except Exception:
                     model_ready = False
                 if (
@@ -2576,9 +2579,16 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                             "face restore."
                         )
                     else:
+                        try:
+                            from backend.services.video_model_registry import missing_plan_files
+                            missing_restore = ", ".join(missing_plan_files("codeformer"))
+                        except Exception:
+                            missing_restore = ""
                         logger.warning(
-                            "Face restore requested but codeformer.pth is not installed. "
-                            "Install CodeFormer from Manage Video Models. Continuing without face restore."
+                            "Face restore requested but CodeFormer is not fully installed%s. "
+                            "Install CodeFormer from Manage Video Models. Continuing without "
+                            "face restore.",
+                            f" (missing {missing_restore})" if missing_restore else "",
                         )
 
             # A legacy lora_name that is not a catalog LoRA for this model was
