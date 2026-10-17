@@ -28,7 +28,8 @@ class SaveMemoryTool(BaseTool):
         "recalls relevant entries into its prompts: facts as ground truth, notes as rules, preferences "
         "as defaults. Use it when the user tells you about themselves, their projects or how they want "
         "you to behave; run search_memory first, since a reworded copy is stored as a new entry "
-        "(nothing is merged). Over MCP the entry is visible to every project and session. Entries are "
+        "(nothing is merged). From a project chat the entry stays in that project; over MCP it is visible "
+        "to every project and session. Entries are "
         "edited or deleted on the Agent Memory page, not with this tool. Needs the Guaardvark backend "
         "running."
     )

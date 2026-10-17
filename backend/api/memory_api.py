@@ -560,6 +560,7 @@ def recall_debug():
     data = data or {}
     memories = _query_memories(
         count_access=False,
+        exclude_project_rows=bool(data.get("session_id")),
         limit=int(data.get("limit", 10)),
         query=data.get("query"),
         session_id=data.get("session_id"),
@@ -655,6 +656,7 @@ def _query_memories(
     include_always_on: bool = True,
     count_access: bool = True,
     min_importance: float | None = None,
+    exclude_project_rows: bool = False,
 ):
     """Single source of truth for memory SELECT.
 
@@ -677,6 +679,10 @@ def _query_memories(
     only the rows that fit their budget.
 
     min_importance drops rows below that importance, always-on rows included.
+
+    exclude_project_rows, with no project_id, leaves out rows kept for a
+    project: the caller is a chat outside any project, not a caller that
+    does not know its project.
 
     A query with keywords recalls only rows that share at least one of them as
     a whole word (memory_match_score above 0); the ILIKE prefilter alone would
@@ -708,6 +714,8 @@ def _query_memories(
                 or_(AgentMemory.project_id == project_id, AgentMemory.project_id == None)
                 if include_global else AgentMemory.project_id == project_id
             )
+        elif exclude_project_rows:
+            q = q.filter(AgentMemory.project_id == None)
         if user_id:
             q = q.filter(
                 or_(AgentMemory.user_id == user_id, AgentMemory.user_id == None)
@@ -789,6 +797,8 @@ def _query_memories(
                     or_(AgentMemory.project_id == project_id, AgentMemory.project_id == None)
                     if include_global else AgentMemory.project_id == project_id
                 )
+            elif exclude_project_rows:
+                always_q = always_q.filter(AgentMemory.project_id == None)
             if user_id:
                 always_q = always_q.filter(
                     or_(AgentMemory.user_id == user_id, AgentMemory.user_id == None)
@@ -853,6 +863,10 @@ def get_memories_for_context(
     If a query is provided, it attempts a keyword search. Otherwise, it returns
     the most important/recent memories. Output is one line per memory; lesson
     summaries are flattened from their stored JSON shape into imperative text.
+
+    A chat (a call with a session) outside any project does not recall rows
+    kept for a project; a caller with no session, which may not know its
+    project, is not limited that way.
 
     Returns a formatted string, or empty string if no memories exist.
     """
@@ -956,6 +970,7 @@ def _get_memories_for_context_inner(
         workspace_root=workspace_root,
         cli_working_memory=cli_working_memory,
         count_access=False,
+        exclude_project_rows=bool(session_id),
     )
     _LAST_SELECTED.ids = []
 

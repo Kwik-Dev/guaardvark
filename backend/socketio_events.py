@@ -633,6 +633,7 @@ def _handle_chat_send_local(payload):
                         pass
                     eng = UnifiedChatEngine(registry=reg, llm_instance=llm or object())
                     eng.app = app
+                    eng._project_id = project_id
                     rid = str(uuid.uuid4())
                     disp = message or f"/{options.get('slash_command', d_tool)}"
                     try:

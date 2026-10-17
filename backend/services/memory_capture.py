@@ -5,11 +5,12 @@ Explicit intents only — no LLM. A match writes an ``AgentMemory`` fact via
 saved where it would be recalled is not stored twice (``add_memory`` returns
 the saved row instead).
 
-A fact the person asks to be kept ("remember that …", "remember: …", "from now
-on …", "for future reference …") is stored without the chat's session id, so
-every later chat recalls it; in a project chat it keeps the project id and
-stays in that project. "note that …" and "my X is Y" stay with the chat they
-were said in.
+A fact the person asks to be kept ("remember that …", "remember: …",
+"remember my X is Y", "from now on …", "for future reference …") is stored
+without the chat's session id, so every later chat recalls it; in a project
+chat it keeps the project id and stays in that project. "note that …" and
+"my X is Y" stay with the chat they were said in, and "my X is Y" only when it
+reads as a lasting fact rather than a problem report or a passing state.
 """
 
 from __future__ import annotations
@@ -20,11 +21,16 @@ from backend.api.memory_api import add_memory, _app_context
 
 _MIN_WORDS = 4
 
+# "remember my X is Y": the remainder must itself be a "my/our X is Y"
+# statement, so "remember my keys" or "remember to call" are not facts.
+_REMEMBER_MY_OUR = re.compile(r"^\s*remember\s+(?=(?:my|our)\s)", re.IGNORECASE)
+
 # Prefix intents are stripped; the remainder is the stored fact.
 # These are recalled in every later chat, not only this one.
 _REMEMBER_PATTERNS = (
     re.compile(r"^\s*remember\s+that\s+", re.IGNORECASE),
     re.compile(r"^\s*remember:\s*", re.IGNORECASE),
+    _REMEMBER_MY_OUR,
     re.compile(r"^\s*from\s+now\s+on[,:]?\s+", re.IGNORECASE),
     re.compile(r"^\s*for\s+future\s+reference[,:]?\s+", re.IGNORECASE),
 )
@@ -38,6 +44,22 @@ _MY_OUR_IS = re.compile(
     r"^\s*(?:my|our)\s+"
     r"[A-Za-z][A-Za-z0-9_-]*(?:\s+[A-Za-z][A-Za-z0-9_-]*){0,3}"
     r"\s+is\s+\S",
+    re.IGNORECASE,
+)
+
+# What follows "is" in a "my/our X is Y" message that is not a lasting fact:
+# a problem being reported ("my code is throwing an error", "our build is
+# failing") or a passing state ("my laptop is in the shop until Friday").
+# The same line the memory_fact question in decision_data.py draws. An
+# explicit "remember that …" is stored whatever it says.
+_PROBLEM_REPORT = re.compile(
+    r"\b(?:errors?|exceptions?|traceback|broken|bugs?|buggy|crash\w*|fail\w*|wrong|"
+    r"stuck|frozen|hanging|undefined|null|tim(?:ing|ed)\s+out|not\s+\w+ing)\b",
+    re.IGNORECASE,
+)
+_PASSING_STATE = re.compile(
+    r"\b(?:right\s+now|at\s+the\s+moment|currently|today|tonight|until|for\s+now|"
+    r"this\s+(?:morning|afternoon|evening|week))\b",
     re.IGNORECASE,
 )
 
@@ -72,6 +94,8 @@ def _extract_fact(message: str, *, explicit_only: bool = False) -> str | None:
         match = pattern.match(text)
         if match:
             fact = text[match.end():].strip()
+            if pattern is _REMEMBER_MY_OUR and not _MY_OUR_IS.match(fact):
+                return None
             if explicit_only:
                 fact = _SENTENCE_END.split(fact, 1)[0]
                 if not _CONDITIONAL.match(fact):
@@ -81,8 +105,13 @@ def _extract_fact(message: str, *, explicit_only: bool = False) -> str | None:
                 fact = fact[1:-1].strip()
             return fact or None
 
-    if not explicit_only and _MY_OUR_IS.match(text):
-        return text
+    if not explicit_only:
+        match = _MY_OUR_IS.match(text)
+        if match:
+            said = text[match.end() - 1:]
+            if _PROBLEM_REPORT.search(said) or _PASSING_STATE.search(said):
+                return None
+            return text
 
     return None
 

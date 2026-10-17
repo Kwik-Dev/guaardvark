@@ -399,6 +399,7 @@ class AgentBrain:
                         )
                         if app:
                             temp_engine.app = app
+                        temp_engine._project_id = project_id
                         rid = str(uuid.uuid4())
                         display = message or f"/{ (options or {}).get('slash_command', tool_name) }"
                         # Execute with the caller's emit_fn so UI sees tool_call/result/image/complete
