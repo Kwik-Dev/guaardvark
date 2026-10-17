@@ -171,6 +171,30 @@ QUALITY_TIERS = {
 
 DEFAULT_TIER = "balanced"
 
+OLLAMA_UNKNOWN_VRAM_MB = 4000
+"""Assumed for a loaded Ollama model whose /api/ps entry reports no size."""
+
+
+def ollama_vram_mb(entry: dict) -> int:
+    """MB of GPU memory a loaded Ollama model holds, from its /api/ps entry.
+
+    ``size_vram`` is the part on the GPU; ``size`` is the whole model, CPU
+    part included, so a model partly or wholly offloaded to the CPU was
+    counted as if it all sat in VRAM. ``size`` is used only when Ollama does
+    not report ``size_vram``; a model wholly on the CPU counts 0.
+    """
+    size_vram = entry.get("size_vram")
+    if size_vram is not None:
+        try:
+            return max(0, int(size_vram)) // (1024 * 1024)
+        except (TypeError, ValueError):
+            pass
+    try:
+        size = int(entry.get("size") or 0)
+    except (TypeError, ValueError):
+        size = 0
+    return size // (1024 * 1024) if size > 0 else OLLAMA_UNKNOWN_VRAM_MB
+
 
 # ---------------------------------------------------------------------------
 # The Orchestrator
@@ -1043,8 +1067,7 @@ class GPUMemoryOrchestrator:
                 if resp.status_code == 200:
                     for m in resp.json().get("models", []):
                         name = m.get("name", "")
-                        size_bytes = m.get("size", 0)
-                        vram_mb = size_bytes // (1024 * 1024) if size_bytes else 4000
+                        vram_mb = ollama_vram_mb(m)
 
                         # Determine if it's an embedding or LLM
                         is_embed = any(kw in name.lower() for kw in ("embed", "retrieval", "minilm"))
