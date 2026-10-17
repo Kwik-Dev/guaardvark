@@ -143,16 +143,41 @@ def drop_unrelated(results: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]],
     return kept, len(results) - len(kept)
 
 
-def _pick_device() -> str:
-    """GPU only when there is comfortable headroom; otherwise CPU.
+def _cuda_unusable_reason() -> Optional[str]:
+    """Why this process cannot load the model on CUDA, or None if it can.
 
-    The floor is deliberately above the model's own footprint: admitting it into
-    the last free gigabyte would just move an OOM onto whichever generation job
-    starts next. This choice is made per load, not once per process -- an unload
-    releases it, and the next query re-decides against the card as it is then.
+    NVML (has_gpu) sees the card whatever this process may use. Celery workers
+    run with CUDA_VISIBLE_DEVICES empty, which counts even if torch saw the
+    card before it was blanked.
+    """
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible is not None and not visible.strip():
+        return "CUDA_VISIBLE_DEVICES is empty"
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return None
+        return "torch sees no CUDA device"
+    except Exception as e:  # noqa: BLE001 - a broken CUDA build counts as no CUDA
+        return f"CUDA check failed ({e.__class__.__name__})"
+
+
+def _pick_device() -> str:
+    """GPU only when this process can use one with comfortable headroom; otherwise CPU.
+
+    A Celery worker, where the GPU is hidden, therefore reranks on the CPU with
+    the same model chat uses. The floor is deliberately above the model's own
+    footprint: admitting it into the last free gigabyte would just move an OOM
+    onto whichever generation job starts next. This choice is made per load,
+    not once per process -- an unload releases it, and the next query
+    re-decides against the card as it is then.
     """
     # Memory held by the MCP process is invisible to the backend's GPU admission.
     if in_mcp_process():
+        return "cpu"
+    unusable = _cuda_unusable_reason()
+    if unusable:
+        logger.info("Reranker: no usable GPU in this process (%s) — loading on CPU", unusable)
         return "cpu"
     floor_mb = int(os.environ.get("GUAARDVARK_RERANK_MIN_VRAM_MB", "3000"))
     try:
