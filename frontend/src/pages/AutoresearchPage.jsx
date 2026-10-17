@@ -45,6 +45,7 @@ import { io } from "socket.io-client";
 import { SOCKET_URL } from "../api/apiClient";
 import { ragAutoresearchService } from "../api/ragAutoresearchService";
 import { selfImprovementService } from "../api/selfImprovementService";
+import { guardedMediaSrc } from "../utils/assetGuard";
 import AlertSnackbar from "../components/common/AlertSnackbar";
 import CodeKeepsTable, { formatServerTime as formatDate } from "../components/selfImprovement/CodeKeepsTable";
 import EntityContextMenu from "../components/common/EntityContextMenu";
@@ -916,7 +917,15 @@ const AutoresearchPage = () => {
                   },
                 }}
               >
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{selectedRun.report_md}</ReactMarkdown>
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  components={{
+                    // The report quotes model-proposed values; never load a remote image from it.
+                    img: (props) => <img {...props} src={guardedMediaSrc(props.src)} alt={props.alt || ""} />,
+                  }}
+                >
+                  {selectedRun.report_md}
+                </ReactMarkdown>
               </Box>
             ) : (
               <Typography variant="body2" color="text.secondary">
