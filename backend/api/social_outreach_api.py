@@ -18,6 +18,7 @@ GET  /api/social-outreach/post-now            — Agent Screen presence, the wat
 POST /api/social-outreach/post-now/<id>       — "Post now, I'm watching": start the one browser post for an approved draft
 POST /api/social-outreach/claim/<id>          — the Discord bot takes an approved Discord draft (approved → processing)
 POST /api/social-outreach/submit/<id>         — the Discord bot is about to send (processing → submitting); 409 means do not send
+POST /api/social-outreach/thread-fit          — internal: ask the thread-fit judge whether a message is worth a reply
 POST /api/social-outreach/draft-comment       — internal: draft a reply via the LLM, with grade
 POST /api/social-outreach/scout-url           — agent fetches OP + comments for a URL so the human doesn't paste them
 POST /api/social-outreach/run-pass            — fire a Reddit / self-share pass on demand instead of waiting for the cron
@@ -374,6 +375,48 @@ def begin_submit(event_id: int):
     from backend.services.social_outreach import transitions
 
     return _poster_step(event_id, transitions.begin_submit, "submit", "processing")
+
+
+# --- Thread-fit judge, for callers outside this process ------------------
+
+@social_outreach_bp.post("/thread-fit")
+def thread_fit():
+    """
+    Body: {
+        "text": "the message or post",        # required
+        "title": "Discord message in #help",  # optional
+        "context": ["earlier message", ...],  # optional, oldest first; the judge reads the last three
+        "feature_hint": "voice",              # optional: what the caller's keyword filter matched
+    }
+    Returns external_grader.score_thread_relevance's answer plus ``unfit``
+    (recon.judged_unfit: a grade below MIN_RELEVANCE_GRADE, or a "skip"
+    verdict) and the ``feature_hint`` the message was judged against: the
+    first outreach-profile feature named in the text, else the caller's hint.
+
+    The same judge recon and the Reddit loop ask before drafting. A judge that
+    could not run comes back skipped and not unfit; the caller drafts and
+    passes relevance_unchecked to /draft-comment. Nothing is drafted or
+    recorded here.
+    """
+    from backend.services.social_outreach.recon import judged_unfit
+
+    body = request.get_json(silent=True) or {}
+    text = str(body.get("text") or "").strip()
+    if not text:
+        return jsonify({"error": "text required"}), 400
+    title = str(body.get("title") or "")
+    context = [str(c) for c in (body.get("context") or []) if c]
+    feature_hint = (
+        persona.find_relevant_feature("\n".join([title, text, *context]))
+        or str(body.get("feature_hint") or "").strip()
+    )
+    relevance = external_grader.score_thread_relevance(
+        title=title,
+        selftext=text,
+        top_comments=context[-3:],
+        feature_hint=feature_hint,
+    )
+    return jsonify({**relevance, "unfit": judged_unfit(relevance), "feature_hint": feature_hint})
 
 
 # --- Draft-comment endpoint (the LLM call site) --------------------------
