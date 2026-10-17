@@ -344,6 +344,8 @@ class AgentBrain:
         request_id = str((options or {}).get("request_id") or "") or str(uuid.uuid4())
         if isinstance(options, dict):
             options["request_id"] = request_id
+        self._decide_turn(session_id, message, options, app, image_data, force_tier,
+                          is_voice_message, request_id)
         tier_used = 0
         tools_called: List[str] = []
         tool_params_log: List[Dict] = []
@@ -1505,6 +1507,29 @@ class AgentBrain:
         return None
 
     # -- Routing helpers ----------------------------------------------------
+
+    def _decide_turn(self, session_id, message, options, app, image_data, force_tier,
+                     is_voice_message, request_id):
+        """Build the turn's TurnDecision (turn_router, legacy mode) and hand it to
+        the engine as options["turn"]; route_turn also writes its telemetry row.
+
+        The route below is still chosen by this method's own chain, which the
+        decision reproduces; nothing dispatches on it yet. Never raises.
+        """
+        try:
+            from backend.services.turn_router import route_turn
+            turn = route_turn(
+                message, options, surface=(options or {}).get("surface"), request_id=request_id,
+                session_id=session_id, image_data=image_data, app=app, state=self.state,
+                force_tier=force_tier, screen_drivable=self._screen_drivable,
+                is_voice_message=is_voice_message,
+            )
+        except Exception as e:
+            logger.debug(f"turn decision skipped: {e}")
+            return None
+        if isinstance(options, dict):
+            options["turn"] = turn
+        return turn
 
     # Historical name; the path is no longer Gemma-specific.
     _gemma4_direct = None  # rebound below the class body
