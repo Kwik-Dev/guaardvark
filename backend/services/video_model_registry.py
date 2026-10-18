@@ -559,6 +559,10 @@ VIDEO_MODEL_REGISTRY = {
         "native_fps": 16,
         "max_frames": 81,
         "speed_profiles": WAN14B_SPEED_PROFILES["i2v"],
+        # flf2v: the same experts conditioned on a start and an end frame through
+        # ComfyUI's WanFirstLastFrameToVideo, so a clip can be made to arrive at a
+        # given picture.
+        "modes": ["i2v", "flf2v"],
         # ComfyUI's ck (Comfy Kitchen INT8) attention put NaN patch tokens into these
         # experts' latents, decoded as black rectangles: 6 of 9 Lightning renders at
         # 960x544, seed 1984, 16 GB card (2026-09-12). The same graphs with PyTorch

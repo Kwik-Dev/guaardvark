@@ -193,6 +193,34 @@ def test_rife_checkpoint_is_a_registry_file(comfy):
     assert any(rife["inputs"]["ckpt_name"] in wc.registry_files(mid) for mid in VIDEO_MODEL_REGISTRY)
 
 
+# ── First + last frame ───────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("profile", [None, "lightx2v-4"])
+def test_i2v_end_frame_builds_first_last_frame_conditioning(profile):
+    wf = _build("wan22-14b-i2v", image="start.png", end_image_filename="end.png", speed_profile=profile)
+    wc.assert_valid(wf)
+    assert not wc.orphan_nodes(wf)
+    assert not wc.nodes(wf, "WanImageToVideo")
+    cond = wc.one(wf, "WanFirstLastFrameToVideo")[1]["inputs"]
+    assert wc.source(wf, cond["start_image"])["inputs"]["image"] == "start.png"
+    assert wc.source(wf, cond["end_image"])["inputs"]["image"] == "end.png"
+
+
+def test_rendered_end_frame_reaches_the_conditioning(comfy):
+    result, wf, req = _request(comfy, "wan22-14b-i2v", width=1280, height=736, duration_frames=49,
+                               last_frame_path=comfy.image)
+    assert wf is not None, result.error
+    wc.assert_valid(wf)
+    cond = wc.one(wf, "WanFirstLastFrameToVideo")[1]["inputs"]
+    assert wc.source(wf, cond["end_image"])["inputs"]["image"] == comfy.fake.uploads[-1]
+
+
+def test_rendered_without_an_end_frame_is_unchanged(comfy):
+    result, wf, req = _request(comfy, "wan22-14b-i2v", width=1280, height=736, duration_frames=49)
+    assert wf is not None, result.error
+    assert wc.nodes(wf, "WanImageToVideo") and not wc.nodes(wf, "WanFirstLastFrameToVideo")
+
+
 # ── Attention pin ────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("backend,model,pinned", [

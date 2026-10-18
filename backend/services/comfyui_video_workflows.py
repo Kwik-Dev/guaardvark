@@ -742,10 +742,13 @@ class ComfyUIVideoWorkflowMixin:
         extra_loras: Optional[list] = None,
         text_encoder: Optional[str] = None,
         speed_profile: Optional[str] = UNKNOWN_PROFILE,
+        end_image_filename: Optional[str] = None,
     ) -> dict:
         # Same MoE two-pass dance as Wan T2V, but the empty latent gets swapped
         # for WanImageToVideo — that node bakes the start frame into the
         # conditioning and hands back a properly-shaped image-conditioned latent.
+        # With an end frame, WanFirstLastFrameToVideo takes its place: the same
+        # inputs and outputs plus end_image, which pins the clip's last frame.
         if seed is None:
             seed = int(time.time() * 1000) % (2**31)
 
@@ -797,7 +800,7 @@ class ComfyUIVideoWorkflowMixin:
             # WanImageToVideo: takes pos/neg cond + start image + vae →
             # returns image-conditioned pos/neg + a length-N latent.
             "7": {
-                "class_type": "WanImageToVideo",
+                "class_type": "WanFirstLastFrameToVideo" if end_image_filename else "WanImageToVideo",
                 "inputs": {
                     "positive": ["5", 0],
                     "negative": ["6", 0],
@@ -807,8 +810,11 @@ class ComfyUIVideoWorkflowMixin:
                     "length": num_frames,
                     "batch_size": 1,
                     "start_image": ["14", 0],
+                    **({"end_image": ["15", 0]} if end_image_filename else {}),
                 },
             },
+            **({"15": {"class_type": "LoadImage", "inputs": {"image": end_image_filename}}}
+               if end_image_filename else {}),
             "8": {"class_type": "ModelSamplingSD3", "inputs": {"model": ["1", 0], "shift": shift}},
             "9": {"class_type": "ModelSamplingSD3", "inputs": {"model": ["2", 0], "shift": shift}},
             "10": {
