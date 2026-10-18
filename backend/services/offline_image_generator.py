@@ -3213,10 +3213,24 @@ Negative Prompt: {negative_prompt}""",
                         except Exception:
                             pass
                         self._unload_pipeline()
+                        # Set when evicting Ollama is what freed the card: the
+                        # chat model, not this render, was short of room.
+                        evicted_chat = False
                         try:
                             if torch.cuda.is_available():
                                 free_b, _ = torch.cuda.mem_get_info()
                                 free_mb = free_b // (1024 * 1024)
+                                if free_mb < 4000:
+                                    # The usual other tenant is the chat model,
+                                    # loaded mid-job by a prompt rewrite or a
+                                    # chat turn; it reloads on its next request.
+                                    from backend.services.gpu_resource_policy import evict_ollama_models
+                                    if evict_ollama_models():
+                                        free_mb = torch.cuda.mem_get_info()[0] // (1024 * 1024)
+                                        evicted_chat = free_mb >= 4000
+                                        logger.warning(
+                                            "After OOM unload and Ollama eviction %sMB free", free_mb
+                                        )
                                 if free_mb < 4000:
                                     logger.error(
                                         "After OOM unload only %sMB free — refusing "
@@ -3232,13 +3246,49 @@ Negative Prompt: {negative_prompt}""",
                         except Exception:
                             pass
 
+                        output = None
+                        # Attempt 0: the card was full of the chat model. Reload the
+                        # same model the same way and retry once, keeping the seed.
+                        if evicted_chat:
+                            try:
+                                self._ensure_vram_for_pipeline(model_id, request.width, request.height)
+                                if self._load_pipeline(model_id, force_sequential=(prior_offload == "sequential"),
+                                                       allow_download=request.allow_model_download):
+                                    if request.seed is not None:
+                                        generator = self._seed_generator(request.seed)
+                                    else:
+                                        seed = result.seed_used or torch.randint(0, 2**32, (1,)).item()
+                                        generator = self._seed_generator(seed)
+                                        result.seed_used = seed
+                                    output = _call_pipeline(enhanced_prompt, neg)
+                                    logger.info(
+                                        f"{failed_label} retry succeeded after evicting Ollama"
+                                    )
+                            except Exception as retry_err:
+                                if is_fatal_cuda_error(retry_err):
+                                    raise
+                                if not (self._is_cuda_oom(retry_err) or isinstance(retry_err, RuntimeError)):
+                                    raise
+                                logger.warning(
+                                    f"Retry after evicting Ollama failed for {failed_label}: {retry_err}"
+                                )
+                                _detach_exception(retry_err)
+                                _gc.collect()
+                                self._unload_pipeline()
+                                try:
+                                    if torch.cuda.is_available():
+                                        torch.cuda.empty_cache()
+                                except Exception:
+                                    pass
+                                output = None
+
                         # Large-canvas OOM: reload ladder DISABLED by design
                         # (2026-08-04). With tiling active, a >1MP OOM means genuinely
                         # insufficient memory — a sequential reload retries the same
                         # doomed forward with a second ~24GB host-resident pipeline,
                         # and the old ladder stacked three of them until the desktop
                         # died. Fail the item loudly instead.
-                        if request.width * request.height > 1024 * 1024:
+                        if output is None and request.width * request.height > 1024 * 1024:
                             result.error = (
                                 f"CUDA out of memory at {request.width}x{request.height} "
                                 f"with {failed_label} ({oom_summary}). Large-canvas OOM "
@@ -3248,9 +3298,8 @@ Negative Prompt: {negative_prompt}""",
                             result.generation_time = time.time() - start_time
                             return result
 
-                        output = None
                         # Attempt 1: same model with sequential offload if not already.
-                        if family in ('krea2', 'zimage') and prior_offload != "sequential":
+                        if output is None and family in ('krea2', 'zimage') and prior_offload != "sequential":
                             logger.warning(
                                 f"{family} OOM → retrying with sequential CPU offload"
                             )
