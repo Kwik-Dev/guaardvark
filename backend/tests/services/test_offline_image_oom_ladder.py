@@ -206,3 +206,30 @@ def test_oom_gate_reached_when_cuda_rng_cannot_init(gen, harness, monkeypatch):
     assert result.success is False
     assert result.error and "disabled by design" in result.error
     assert harness["loads"] == [False]
+
+
+def test_oom_with_a_chat_model_on_the_card_evicts_it_and_retries_the_same_model(gen, harness, monkeypatch):
+    # 2026-10-17: a 13 GB chat model reloaded mid-batch; after unloading itself
+    # the render saw ~1.2 GB free and gave up without touching Ollama.
+    monkeypatch.setattr(gen, "_oom_fallback_catalog_key", lambda *_: None)
+    evicted = []
+    monkeypatch.setattr(grp, "evict_ollama_models", lambda: evicted.append(1) or True)
+    monkeypatch.setattr(
+        oig.torch.cuda, "mem_get_info", lambda: ((14 if evicted else 1) * GB, 16 * GB), raising=False
+    )
+    result = gen.generate_image(_request(1024, 1024))
+    assert evicted == [1]
+    assert harness["loads"] == [False, False, True], (
+        "after the eviction the same model reloads in its own mode first, then the ladder runs"
+    )
+    assert result.success is False
+
+
+def test_oom_with_the_card_still_full_after_eviction_refuses(gen, harness, monkeypatch):
+    evicted = []
+    monkeypatch.setattr(grp, "evict_ollama_models", lambda: evicted.append(1) or True)
+    monkeypatch.setattr(oig.torch.cuda, "mem_get_info", lambda: (1 * GB, 16 * GB), raising=False)
+    result = gen.generate_image(_request(1024, 1024))
+    assert evicted == [1]
+    assert result.success is False and "free after OOM unload" in (result.error or "")
+    assert harness["loads"] == [False], "no reload when the eviction freed nothing"
