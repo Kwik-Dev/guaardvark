@@ -32,7 +32,8 @@ try:
         start_batch_from_csv,
         start_batch_from_prompts,
         get_batch_status,
-        cancel_batch
+        cancel_batch,
+        SEED_SPACE,
     )
     from backend.utils.response_utils import success_response, error_response
     from backend.utils.unified_progress_system import ProcessType
@@ -40,6 +41,7 @@ try:
 except ImportError as e:
     logger.error(f"Failed to import batch generation dependencies: {e}")
     service_available = False
+    SEED_SPACE = 2 ** 32
     # Fallback functions
     def error_response(message, status_code=500, error_code=None, data=None, details=None):
         return {"error": message, "status": status_code}
@@ -506,6 +508,18 @@ def _parse_generation_params(data: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict
     params['preserve_order'] = _as_bool(data.get('preserve_order'), True)
     params['generate_thumbnails'] = _as_bool(data.get('generate_thumbnails'), True)
     params['save_metadata'] = _as_bool(data.get('save_metadata'), True)
+    # A typed seed: the first image renders with it, each next image with the
+    # next number (create_batch_from_prompts). Blank keeps a seed per image.
+    raw_seed = data.get('seed')
+    if raw_seed not in (None, ""):
+        try:
+            seed = int(str(raw_seed).strip())
+        except (TypeError, ValueError):
+            seed = -1
+        if 0 <= seed < SEED_SPACE:
+            params['seed'] = seed
+        else:
+            validation_info["warnings"].append(f"Seed {raw_seed!r} is not a whole number from 0 to {SEED_SPACE - 1}; ignored.")
     if 'ui_config' in data:
         params['ui_config'] = data['ui_config']
 

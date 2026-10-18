@@ -10,6 +10,7 @@ import {
   Download as DownloadIcon,
   Edit as EditIcon,
   IosShare as ShareIcon,
+  Casino as SeedIcon,
 } from '@mui/icons-material';
 import ImageEditor from './ImageEditor';
 import { guardedMediaSrc } from '../../utils/assetGuard';
@@ -26,6 +27,9 @@ const ImageLightbox = ({
   onDownload,
   onPublish,
   onImageEdited,
+  // The seed this image rendered with; with onUseSeed the toolbar offers to reuse it.
+  seed = null,
+  onUseSeed,
   hasPrev = false,
   hasNext = false,
   initialEditMode = false,
@@ -128,6 +132,13 @@ const ImageLightbox = ({
             <Tooltip title="Share / Publish (S)">
               <IconButton onClick={onPublish} sx={{ color: 'white' }} size="small">
                 <ShareIcon />
+              </IconButton>
+            </Tooltip>
+          )}
+          {seed != null && onUseSeed && (
+            <Tooltip title={`Use this image's seed (${seed})`}>
+              <IconButton onClick={() => onUseSeed(seed)} sx={{ color: 'white' }} size="small" aria-label={`Use seed ${seed}`}>
+                <SeedIcon />
               </IconButton>
             </Tooltip>
           )}

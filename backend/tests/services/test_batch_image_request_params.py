@@ -83,3 +83,13 @@ def test_find_batch_status_reads_metadata_from_disk(gen):
     with_results = gen.find_batch_status(req.batch_id, include_results=True)
     assert [r.prompt_id for r in with_results.results] == ["p1"]
     assert gen.find_batch_status("nope") is None
+
+
+def test_a_typed_seed_numbers_the_batch_from_itself(gen):
+    req = gen.create_batch_from_prompts(["a red fox"] * 3, model="zimage-turbo", seed=390656711)
+    assert [p.seed for p in req.prompts] == [390656711, 390656712, 390656713]
+
+
+def test_a_blank_seed_leaves_every_slot_to_resolve_image_seed(gen):
+    req = gen.create_batch_from_prompts(["a red fox", "a blue bird"], model="zimage-turbo")
+    assert [p.seed for p in req.prompts] == [None, None]
