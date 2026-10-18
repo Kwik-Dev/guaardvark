@@ -174,6 +174,17 @@ export const stripCopyCounter = (p) =>
 /** Highest quantity the page accepts; the backend caps the prompt list to match. */
 export const MAX_QUANTITY = 100;
 
+/** Largest image seed: the 2**32 space the backend draws image seeds from. */
+export const IMAGE_MAX_SEED = 2 ** 32 - 1;
+
+/** The Seed box's text as a seed, or null for a new seed per image. */
+export const parseImageSeed = (text) => {
+  const t = String(text ?? '').trim();
+  if (!/^\d+$/.test(t)) return null;
+  const n = Number(t);
+  return n <= IMAGE_MAX_SEED ? n : null;
+};
+
 export function clampQuantity(value) {
   const n = parseInt(value, 10);
   if (!Number.isFinite(n) || n < 1) return 1;

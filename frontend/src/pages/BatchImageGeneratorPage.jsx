@@ -70,6 +70,8 @@ import {
   ZIMAGE_PRESET_STEPS,
   ZIMAGE_STEPS,
   MAX_QUANTITY,
+  IMAGE_MAX_SEED,
+  parseImageSeed,
   buildFinalPrompts,
   clampQuantity,
   ignoresNegativeAndAnatomy,
@@ -169,6 +171,8 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  // Typed seed; blank gives every image its own seed.
+  const [seedText, setSeedText] = useState('');
   const [imageModelsModalOpen, setImageModelsModalOpen] = useState(false);
   // Set by an Install button: Manage models opens on that row and starts it.
   const [installModelId, setInstallModelId] = useState(null);
@@ -1080,14 +1084,17 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
           enhanceHands,
           directorEnabled,
           directorGuidance,
+          seedText,
         };
 
+        const typedSeed = parseImageSeed(seedText);
         response = await fetch(`${API_BASE}/batch-image/generate/prompts`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             prompts: promptsToGenerate,
             ...params,
+            ...(typedSeed != null ? { seed: typedSeed } : {}),
             // Cast characters: backend resolves these to LoRA paths + trigger.
             subject_ids: castSubjectIds,
             // User LoRAs switched on below the model select.
@@ -1234,6 +1241,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         if (typeof cfg.enhanceHands === 'boolean') setEnhanceHands(cfg.enhanceHands);
         if (typeof cfg.directorEnabled === 'boolean') setDirectorEnabled(cfg.directorEnabled);
         if (typeof cfg.directorGuidance === 'string') setDirectorGuidance(cfg.directorGuidance);
+        setSeedText(typeof cfg.seedText === 'string' ? cfg.seedText : '');
         setSuccess(`Loaded "${name}" settings into control panel — adjust anything, then Start Generation.`);
       } else if (Array.isArray(rd.prompts)) {
         // rd.prompts is the EXPANDED list - one entry per generated image. A batch of
@@ -1333,6 +1341,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       url,
       name: img.prompt || img.imageFilename || '',
       caption: img.rewrittenPrompt ? `Sent to the model: ${img.rewrittenPrompt}` : '',
+      seed: img.metadata?.seed_used ?? null,
       fileIndex: index,
     });
   }, [activeBatch?.batch_id, buildBatchImageUrl]);
@@ -2239,6 +2248,25 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                         </Grid>
 
                         <Grid item xs={12}>
+                          <TextField
+                            size="small"
+                            label="Seed"
+                            placeholder="random"
+                            value={seedText}
+                            inputProps={{ inputMode: 'numeric' }}
+                            onChange={(e) => setSeedText(e.target.value.replace(/\D/g, '').slice(0, String(IMAGE_MAX_SEED).length))}
+                            sx={{ width: 180 }}
+                          />
+                          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+                            {parseImageSeed(seedText) != null
+                              ? `The first image uses seed ${parseImageSeed(seedText)}, each next image the next number. Same prompt and settings give the same picture.`
+                              : seedText.trim()
+                                ? `Seeds go up to ${IMAGE_MAX_SEED}; this one is ignored.`
+                                : 'Blank: every image gets its own random seed. Open an image and press the dice to reuse its seed.'}
+                          </Typography>
+                        </Grid>
+
+                        <Grid item xs={12}>
                           <Typography gutterBottom>
                             Max Workers: {effectiveWorkers}
                           </Typography>
@@ -2593,7 +2621,10 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                           />
                           <ImageListItemBar
                             title={image.prompt ? image.prompt.substring(0, 30) + '...' : 'No prompt'}
-                            subtitle={image.rewrittenPrompt ? 'Rewritten before rendering; open to read it' : undefined}
+                            subtitle={[
+                              image.metadata?.seed_used != null ? `Seed ${image.metadata.seed_used}` : null,
+                              image.rewrittenPrompt ? 'Rewritten before rendering; open to read it' : null,
+                            ].filter(Boolean).join(' · ') || undefined}
                             actionIcon={
                               <IconButton
                                 sx={{ color: 'rgba(255, 255, 255, 0.54)' }}
@@ -2678,6 +2709,11 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
           imageUrl={lightboxImage.url}
           imageName={lightboxImage.name}
           caption={lightboxImage.caption}
+          seed={lightboxImage.seed}
+          onUseSeed={(s) => {
+            setSeedText(String(s));
+            setSuccess(`Seed ${s} is in the Seed box. Clear it to get random seeds again.`);
+          }}
           onClose={closeLightbox}
           onPrev={handleLightboxPrev}
           onNext={handleLightboxNext}

@@ -1052,6 +1052,9 @@ class BatchImageGenerator:
             guidance = float(prompt.guidance)
         else:
             guidance = _cfg_default
+        # A seed per image, as on the FLUX path; a fixed fallback rendered every
+        # unseeded prompt in a batch with the same noise.
+        seed = resolve_image_seed(prompt)
 
         import tempfile
         out_path = os.path.join(
@@ -1066,7 +1069,7 @@ class BatchImageGenerator:
                 width=width,
                 height=height,
                 negative_prompt=prompt.negative_prompt or "",
-                seed=prompt.seed if prompt.seed is not None else 42,
+                seed=seed,
                 steps=steps,
                 cfg=guidance,
                 model="zimage",
@@ -1077,7 +1080,7 @@ class BatchImageGenerator:
                 prompt_used=prompt.prompt,
                 model_used="zimage",
                 image_size=(width, height),
-                seed_used=prompt.seed,
+                seed_used=seed,
             )
         except Exception as e:
             logger.error("ComfyUI Z-Image batch generation failed: %s", e)
@@ -2714,6 +2717,9 @@ class BatchImageGenerator:
         filled["guidance"] = resolved["guidance"]
 
         from backend.services.image_prompt_sanitize import sanitize_image_prompt
+        # A typed seed numbers the batch from itself, so a reused image seed
+        # renders that image first and the copies after it still differ.
+        base_seed = kwargs.get("seed")
         prompts = []
         for i, prompt in enumerate(prompt_list):
             cleaned = sanitize_image_prompt(prompt)
@@ -2722,6 +2728,7 @@ class BatchImageGenerator:
             prompts.append(BatchPrompt(
                 id=f"prompt_{i+1}",
                 prompt=cleaned,
+                seed=(int(base_seed) + i) % SEED_SPACE if base_seed is not None else None,
                 metadata={
                     "steps_explicit": kwargs.get("steps_explicit", False),
                     "steps_requested": kwargs.get("steps_requested", resolved["steps_requested"]),

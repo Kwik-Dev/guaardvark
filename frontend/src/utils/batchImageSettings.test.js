@@ -3,14 +3,26 @@ import {
   buildFinalPrompts,
   clampQuantity,
   ignoresNegativeAndAnatomy,
+  IMAGE_MAX_SEED,
   imageModelOption,
   isZimageModel,
   modelFamily,
   modelInstallNeed,
   QWEN_IMAGE_21_GUIDANCE_MAX,
+  parseImageSeed,
   qualityPresetsForModel,
   resolveQualityPreset,
 } from './batchImageSettings';
+
+describe('parseImageSeed', () => {
+  it('reads a typed seed across the 2**32 image space and leaves anything else random', () => {
+    expect(parseImageSeed('390656711')).toBe(390656711);
+    expect(parseImageSeed(' 7 ')).toBe(7);
+    expect(parseImageSeed(String(IMAGE_MAX_SEED))).toBe(4294967295);
+    expect(parseImageSeed(String(IMAGE_MAX_SEED + 1))).toBeNull();
+    for (const t of ['', '  ', null, undefined, 'abc', '-3', '2.5']) expect(parseImageSeed(t)).toBeNull();
+  });
+});
 
 describe('modelFamily', () => {
   it('classifies the catalog ids', () => {
