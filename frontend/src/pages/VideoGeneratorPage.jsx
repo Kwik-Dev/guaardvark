@@ -67,6 +67,8 @@ import {
   familyType,
   isCogVideoXModel,
   canvasDimensions,
+  parseSeed,
+  MAX_SEED,
   isWanModel,
   isLtxModel,
   isMinimaxModel,
@@ -225,6 +227,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     adapter_strength: 0.7,
     // User text encoder id ("" = the one the model ships with).
     text_encoder: "",
+    // Typed seed; blank gives every clip a new random seed.
+    seed: "",
   });
   // End frame for models that declare l2v / flf2v (image mode): {ref, name,
   // thumbnailUrl}, ref being an uploaded file's path or a library document id.
@@ -929,6 +933,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       height,
       num_inference_steps: effectiveSteps,
       guidance_scale: advancedParams.guidance_scale,
+      seed: parseSeed(advancedParams.seed),
       generate_frames_only: advancedParams.generate_frames_only,
       frames_per_batch: lowVramClamps(model, modelMeta[model]) ? 1 : advancedParams.frames_per_batch,
       combine_frames: advancedParams.combine_frames,
@@ -1564,6 +1569,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
           lora_strength: p.lora_strength ?? prev.lora_strength,
           frames_per_batch: p.frames_per_batch ?? prev.frames_per_batch,
           combine_frames: !!p.combine_frames,
+          seed: p.seed != null ? String(p.seed) : "",
         }));
         setSuccess(`Loaded "${name}" core settings (older batch — double-check resolution/duration).`);
       }
@@ -1717,6 +1723,13 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     return [
       videoUrl && { label: "Play", onClick: () => openResultPlayer(res, idx, videoUrl) },
       videoUrl && { label: "Open in new tab", onClick: () => window.open(videoUrl, "_blank") },
+      res.metadata?.seed != null && {
+        label: "Use this clip's seed",
+        onClick: () => {
+          setAdvancedParams((prev) => ({ ...prev, seed: String(res.metadata.seed) }));
+          setSuccess(`Seed ${res.metadata.seed} is set in Advanced. Clear it to get random seeds again.`);
+        },
+      },
       held && { label: "Approve clip", onClick: () => handleApproveClip(batchId, res.item_id), dividerBefore: true },
       held && { label: "Re-render clip", onClick: () => handleRerenderClip(batchId, res.item_id) },
       !res.video_path && res.frame_paths?.length > 0 && {
@@ -2574,6 +2587,18 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                     </Select>
                   </FormControl>
                   <TextField
+                    size="small"
+                    label="Seed"
+                    placeholder="random"
+                    value={advancedParams.seed ?? ""}
+                    inputProps={{ inputMode: "numeric" }}
+                    onChange={(e) => {
+                      const digits = e.target.value.replace(/\D/g, "").slice(0, String(MAX_SEED).length);
+                      setAdvancedParams((prev) => ({ ...prev, seed: digits }));
+                    }}
+                    sx={{ width: 150 }}
+                  />
+                  <TextField
                     label="Frames / batch"
                     type="number"
                     size="small"
@@ -2587,6 +2612,12 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   />
                 </Line>
                 {!promptControls.style.active && <Hint>{promptControls.style.note}.</Hint>}
+                {computedParams.seed != null && (
+                  <Hint>Every clip in this batch uses seed {computedParams.seed}. Clear it for a new random seed per clip.</Hint>
+                )}
+                {computedParams.seed == null && String(advancedParams.seed ?? "").trim() !== "" && (
+                  <Hint>Seeds go up to {MAX_SEED}; this one is ignored.</Hint>
+                )}
               </Cluster>
               <VideoGenEffectiveSettings
                 model={model}
