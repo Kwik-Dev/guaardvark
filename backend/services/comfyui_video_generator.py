@@ -2210,6 +2210,16 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                     uploaded_image = self._upload_image_to_comfyui(image_path)
                     if not uploaded_image:
                         return result.fail(RenderErrorKind.INVALID_REQUEST, self._upload_failure("image"))
+                    end_image = None
+                    if request.last_frame_path:
+                        if "flf2v" not in (render_limits.limits_for(model_key, family).get("modes") or []):
+                            return result.fail(RenderErrorKind.INVALID_REQUEST, f"{model_key} takes no end frame.")
+                        if not Path(request.last_frame_path).exists():
+                            return result.fail(RenderErrorKind.INVALID_REQUEST,
+                                               f"End frame not found: {request.last_frame_path}")
+                        end_image = self._upload_image_to_comfyui(request.last_frame_path)
+                        if not end_image:
+                            return result.fail(RenderErrorKind.INVALID_REQUEST, self._upload_failure("end frame"))
                     workflow = self._create_wan22_i2v_workflow(
                         speed_profile=request.speed_profile,
                         image_filename=uploaded_image,
@@ -2231,8 +2241,9 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                         shift_override=wan_shift,
                         extra_loras=extra_loras,
                         text_encoder=te_file,
+                        end_image_filename=end_image,
                     )
-                    logger.info(f"Using Wan 2.2 image-to-video ({model_key}) via ComfyUI GGUF")
+                    logger.info(f"Using Wan 2.2 image-to-video ({model_key}{', first+last frame' if end_image else ''}) via ComfyUI GGUF")
                 else:
                     workflow = self._create_wan22_t2v_workflow(
                         speed_profile=request.speed_profile,
