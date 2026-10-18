@@ -473,6 +473,17 @@ export const resolveAspectRatio = (model, aspectRatio, registryMeta) => {
   return allowed[aspectRatio] ? aspectRatio : Object.keys(allowed)[0];
 };
 
+/** Largest seed the box accepts: the range the backend draws random seeds from. */
+export const MAX_SEED = 2 ** 31 - 1;
+
+/** The Seed box's text as a seed, or null for a new random seed per clip. */
+export const parseSeed = (text) => {
+  const t = String(text ?? "").trim();
+  if (!/^\d+$/.test(t)) return null;
+  const n = Number(t);
+  return n <= MAX_SEED ? n : null;
+};
+
 /** The size on a model's declared canvas: the short side fixed, the long side
  *  following the aspect up to its cap, snapped to the model's grid. */
 export const canvasDimensions = (canvas, ratio, align = 16) => {

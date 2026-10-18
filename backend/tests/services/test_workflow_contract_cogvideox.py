@@ -151,8 +151,16 @@ def test_prompt_and_seed_land_in_the_sampler(comfy, model):
     _, sampler = wc.one(wf, "CogVideoSampler")
     assert wc.encoded_text(wf, sampler["inputs"]["positive"]) == "a red fox in snow"
     assert sampler["inputs"]["seed"] == 4242
+    assert result.metadata["seed"] == 4242
     if model == "cogvideox-5b-i2v":
         assert wc.one(wf, "LoadImage")[1]["inputs"]["image"] == comfy.fake.uploads[-1]
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_an_unset_seed_is_recorded_as_the_one_rendered(comfy, model):
+    result, wf, req = _request(comfy, model, width=720, height=480, duration_frames=49)
+    assert wf is not None, result.error
+    assert result.metadata["seed"] == wc.one(wf, "CogVideoSampler")[1]["inputs"]["seed"]
 
 
 @pytest.mark.parametrize("model", MODELS)

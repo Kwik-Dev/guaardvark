@@ -2089,6 +2089,8 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
             image_path = request.metadata.get("image_path") if request.metadata else None
             model = request.model or "cogvideox-5b"
             seed = request.seed if request.seed is not None else int(time.time() * 1000) % (2**31)
+            # The seed this clip renders with, so the Studio can reuse a take.
+            result.metadata["seed"] = seed
 
             # The running ComfyUI must carry this model's --reserve-vram (a
             # reference board with clips may declare its own).

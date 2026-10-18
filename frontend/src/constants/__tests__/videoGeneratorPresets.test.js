@@ -3,6 +3,8 @@ import {
   ASPECT_RATIO_PRESETS,
   aspectRatiosFor,
   canvasDimensions,
+  MAX_SEED,
+  parseSeed,
   COGVIDEOX15_DURATION_PRESETS,
   durationPresetsFor,
   resolveAspectRatio,
@@ -49,6 +51,17 @@ describe("durationPresetsFor", () => {
     expect(durationPresetsFor("cogvideox-5b-i2v")).toBe(COGVIDEOX15_DURATION_PRESETS);
     expect(Object.values(COGVIDEOX15_DURATION_PRESETS).map((p) => [p.duration_frames, p.fps]))
       .toEqual([[81, 16]]);
+  });
+});
+
+describe("parseSeed", () => {
+  it("reads a typed seed and leaves anything else random", () => {
+    expect(parseSeed("1273355921")).toBe(1273355921);
+    expect(parseSeed(" 42 ")).toBe(42);
+    expect(parseSeed("0")).toBe(0);
+    for (const blank of ["", "  ", null, undefined, "12a", "-5", "1.5"]) expect(parseSeed(blank)).toBeNull();
+    expect(parseSeed(String(MAX_SEED))).toBe(MAX_SEED);
+    expect(parseSeed(String(MAX_SEED + 1))).toBeNull();
   });
 });
 
