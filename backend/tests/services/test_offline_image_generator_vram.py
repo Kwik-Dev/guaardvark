@@ -245,8 +245,23 @@ def test_margin_tips_the_decision(gen, spy, monkeypatch):
     assert spy["evicted"] == 1
 
 
-def test_already_resident_pipeline_skips_admission(gen, spy, monkeypatch):
+def test_resident_pipeline_evicts_a_chat_model_that_filled_the_card(gen, spy, monkeypatch):
+    # The 2026-10-17 failure: a batch's Media Director rewrite reloaded a 13 GB
+    # chat model while Z-Image stayed resident with sequential offload (~1 GB
+    # held); the forward then ran out of memory. Resident means no re-booking,
+    # not no check.
     _set_vram(monkeypatch, free_gb=1)
+    monkeypatch.setattr(oig.torch.cuda, "memory_allocated", lambda *a: 1 * GB)
+    gen._pipeline = object()
+    gen._current_model = "Tongyi-MAI/Z-Image-Turbo"
+    gen._ensure_vram_for_pipeline("Tongyi-MAI/Z-Image-Turbo")
+    assert spy["evicted"] == 1
+    assert spy["requests"] == []
+
+
+def test_resident_pipeline_with_room_leaves_the_chat_model(gen, spy, monkeypatch):
+    _set_vram(monkeypatch, free_gb=14)
+    monkeypatch.setattr(oig.torch.cuda, "memory_allocated", lambda *a: 1 * GB)
     gen._pipeline = object()
     gen._current_model = "Tongyi-MAI/Z-Image-Turbo"
     gen._ensure_vram_for_pipeline("Tongyi-MAI/Z-Image-Turbo")

@@ -1166,7 +1166,12 @@ class OfflineImageGenerator:
         so the booking prices >1MP canvases (2026-08-04).
         """
         if self._pipeline is not None and self._current_model == model_id:
-            return  # already resident — its VRAM is already spent
+            # Already resident and booked, but the card can have filled since it
+            # loaded: a batch's Media Director rewrite, or a chat turn during the
+            # batch, puts the chat model back on it. No re-booking; evict Ollama
+            # when what the pipeline still needs no longer fits.
+            self._evict_ollama_if_card_filled(model_id, width, height)
+            return
         fault = self.gpu_fault_message()
         if fault:
             raise RuntimeError(fault)
@@ -1206,6 +1211,31 @@ class OfflineImageGenerator:
             priority=85,
             hard_fit=True,
         )
+
+    def _evict_ollama_if_card_filled(
+        self, model_id: str, width: Optional[int] = None, height: Optional[int] = None
+    ) -> None:
+        """For a resident pipeline: evict Ollama when the pipeline's estimate,
+        less what this process already holds, no longer fits in the free VRAM
+        with the admission margin. Best-effort; never raises."""
+        try:
+            if self._device != "cuda" or not torch.cuda.is_available():
+                return
+            estimate_mb = self._vram_estimate_mb(model_id, width, height)
+            held_mb = torch.cuda.memory_allocated() // (1024 * 1024)
+            free_b, total_b = torch.cuda.mem_get_info()
+            free_mb, total_mb = free_b // (1024 * 1024), total_b // (1024 * 1024)
+            margin_mb = max(1024, int(total_mb * 0.10))
+            need_mb = max(0, estimate_mb - held_mb)
+            if free_mb - margin_mb < need_mb:
+                from backend.services.gpu_resource_policy import evict_ollama_models
+                logger.info(
+                    f"VRAM check (resident {model_id}): {free_mb}MB free won't fit the "
+                    f"{need_mb}MB it still needs (+{margin_mb}MB margin) — evicting Ollama models"
+                )
+                evict_ollama_models()
+        except Exception as probe_err:  # noqa: BLE001
+            logger.warning(f"VRAM check for resident pipeline failed (continuing): {probe_err}")
 
     def _ram_watchdog_callback(self):
         """Per-step denoise callback: abort before RAM exhaustion kills the box.
