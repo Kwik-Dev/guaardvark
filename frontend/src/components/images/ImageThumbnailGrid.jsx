@@ -9,7 +9,8 @@ import {
 import { Folder as FolderIcon, BrokenImage as BrokenImageIcon } from '@mui/icons-material';
 import axios from 'axios';
 
-const API_BASE = import.meta.env.VITE_API_URL || '';
+// The app's one API base (VITE_API_BASE_URL, default /api), as everywhere else.
+import { BASE_URL as API_BASE } from '../../api/apiClient';
 const THUMB_SIZE = 160;
 const GRID_GAP = 8;
 
@@ -42,7 +43,7 @@ const ImageThumbnailGrid = ({
     setLoading(true);
     setError(null);
     try {
-      const res = await axios.get(`${API_BASE}/api/files/browse`, {
+      const res = await axios.get(`${API_BASE}/files/browse`, {
         params: { path: currentPath, fields: 'light', limit: 500 },
       });
       const data = res.data?.data || res.data;
@@ -264,7 +265,7 @@ const ImageThumbnailGrid = ({
               ) : (
                 <Box
                   component="img"
-                  src={`${API_BASE}/api/files/thumbnail?path=${encodeURIComponent(item.path)}`}
+                  src={`${API_BASE}/files/thumbnail?path=${encodeURIComponent(item.path)}`}
                   alt={item.filename}
                   loading="lazy"
                   sx={{ width: 28, height: 28, objectFit: 'cover', borderRadius: 0.5, flexShrink: 0 }}
@@ -372,7 +373,7 @@ const ImageThumbnailGrid = ({
               >
                 <Box
                   component="img"
-                  src={`${API_BASE}/api/files/thumbnail?path=${encodeURIComponent(item.path)}`}
+                  src={`${API_BASE}/files/thumbnail?path=${encodeURIComponent(item.path)}`}
                   alt={item.filename}
                   loading="lazy"
                   sx={{

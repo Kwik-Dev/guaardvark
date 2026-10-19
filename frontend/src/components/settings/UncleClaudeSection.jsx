@@ -14,6 +14,7 @@ import { useNavigate } from "react-router-dom";
 import { UNCLE_GOLD } from "../../utils/familyColors";
 import { ActionButton, Cluster, Hint, Line, Sep, SettingChip, StatusPill } from "./ui";
 import { claudeAdvisorService } from "../../api/claudeAdvisorService";
+import { formatUiError } from "../../utils/uiError";
 
 export default function UncleClaudeSection() {
   const navigate = useNavigate();
@@ -21,11 +22,18 @@ export default function UncleClaudeSection() {
   const [loading, setLoading] = useState(true);
   const [testResult, setTestResult] = useState(null);
   const [testing, setTesting] = useState(false);
+  // A failed status read or config save, said under the controls. Without it
+  // a failed read showed "Not configured" and a failed save did nothing.
+  const [failure, setFailure] = useState(null);
 
   const fetchStatus = useCallback(async () => {
     try {
       const [claudeRes] = await Promise.allSettled([claudeAdvisorService.getStatus()]);
-      if (claudeRes.status === "fulfilled") setStatus(claudeRes.value?.data);
+      if (claudeRes.status === "fulfilled") {
+        setStatus(claudeRes.value?.data);
+      } else {
+        setFailure(`Uncle Claude's status could not be read: ${formatUiError(claudeRes.reason) || "the request failed"}.`);
+      }
     } catch (err) {
       console.error("Failed to fetch Uncle Claude status:", err);
     } finally {
@@ -52,19 +60,23 @@ export default function UncleClaudeSection() {
 
   const handleEscalationModeChange = async (e) => {
     try {
+      setFailure(null);
       await claudeAdvisorService.updateConfig({ escalation_mode: e.target.value });
       fetchStatus();
     } catch (err) {
       console.error("Failed to update escalation mode:", err);
+      setFailure(`Escalation was not changed: ${formatUiError(err) || "the request failed"}.`);
     }
   };
 
   const handleToggleScheduledSends = async (next) => {
     try {
+      setFailure(null);
       await claudeAdvisorService.updateConfig({ scheduled_sends: next });
       fetchStatus();
     } catch (err) {
       console.error("Failed to update scheduled sends:", err);
+      setFailure(`Scheduled sends were not changed: ${formatUiError(err) || "the request failed"}.`);
     }
   };
 
@@ -74,7 +86,9 @@ export default function UncleClaudeSection() {
 
   const usage = status?.usage || {};
   const budgetPercent = usage.budget_used_percent || 0;
-  const connection = !status?.available
+  const connection = !status && failure
+    ? { tone: "error", label: "Status unknown" }
+    : !status?.available
     ? { tone: "warn", label: "Not configured" }
     : testResult === null
       ? { tone: "ok", label: "API key set" }
@@ -122,6 +136,11 @@ export default function UncleClaudeSection() {
             tooltip="On: Uncle Claude contacts Anthropic on its own schedule — advice twice a day (time and GPU details) and reviews of servo changes (a source excerpt and the diff). Off: it only runs when you start it here."
           />
         </Line>
+        {failure && (
+          <Alert severity="error" sx={{ py: 0.25 }} onClose={() => setFailure(null)}>
+            {failure}
+          </Alert>
+        )}
         {testResult && (
           <Alert severity={testResult.success ? "success" : "error"} sx={{ py: 0.25 }} onClose={() => setTestResult(null)}>
             {testResult.message}

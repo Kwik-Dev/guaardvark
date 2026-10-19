@@ -418,7 +418,16 @@ const InterconnectorSettings = () => {
       }
       console.error("[INTERCONNECTOR] Error loading nodes:", error);
       setNodes([]);
+      // Otherwise the node list just looks empty.
+      showMessage(`Connected machines could not be loaded: ${errorMsg || "the request failed"}`, "error");
     }
+  };
+
+  // A disabled interconnector plugin answers "Not Found" / "not enabled":
+  // that is the off state, not a failure to report.
+  const isDisabledPluginError = (error) => {
+    const msg = error?.message || error?.data?.message || "";
+    return msg === "Not Found" || /not enabled/i.test(msg);
   };
 
   const loadProfiles = async () => {
@@ -432,6 +441,9 @@ const InterconnectorSettings = () => {
       }
     } catch (error) {
       console.warn("[INTERCONNECTOR] Failed to load sync profiles:", error.message);
+      if (!isDisabledPluginError(error)) {
+        showMessage(`Sync profiles could not be loaded: ${error.message || "the request failed"}`, "error");
+      }
     }
   };
 
@@ -443,6 +455,9 @@ const InterconnectorSettings = () => {
       setPendingApprovals(approvals);
     } catch (error) {
       console.warn("[INTERCONNECTOR] Failed to load approvals:", error.message);
+      if (!isDisabledPluginError(error)) {
+        showMessage(`Pending approvals could not be loaded: ${error.message || "the request failed"}`, "error");
+      }
     } finally {
       setIsLoadingApprovals(false);
     }
