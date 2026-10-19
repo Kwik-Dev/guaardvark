@@ -8,18 +8,17 @@ from flask import current_app
 
 from backend.models import db, Production, Subject, ProductionShot, ProductionShotSubject, ProductionSubject, SwarmMessage, Document
 from backend.services.production_service import ProductionService
+from backend.services.swarm.agents.screenwriter import Screenwriter
+from backend.services.swarm.agents.cinematographer import Cinematographer, ShotPlan, ShotPlanList
+from backend.services.swarm.agents.casting_director import CastingDirector
+from backend.services.swarm.agents.editor import Editor
+from backend.services.swarm.script_markup import parse_markup, apply_intents
 
 
 def _render_kind(exc):
     """The RenderErrorKind an exception carries or is classified as (job_types)."""
     from backend.services.job_operation_gate import classify_render_exception
     return classify_render_exception(exc)
-
-from backend.services.swarm.agents.screenwriter import Screenwriter
-from backend.services.swarm.agents.cinematographer import Cinematographer, ShotPlan, ShotPlanList
-from backend.services.swarm.agents.casting_director import CastingDirector
-from backend.services.swarm.agents.editor import Editor
-from backend.services.swarm.script_markup import parse_markup, apply_intents
 
 
 class _AgentNonOK(Exception):
@@ -573,7 +572,9 @@ def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
             elif not ready and not resolve_err:
                 resolve_err = prep_err
         if resolve_err:
-            ctx.fail(resolve_err)
+            # ComfyUI down: the sentence every tool gives for a stopped service.
+            from backend.services.video_model_registry import comfyui_down_failure
+            ctx.fail(comfyui_down_failure(resolve_err, "film-crew"))
             return
         caps = model_capabilities(resolved)
         vram_estimate_mb = vram_mb_for_model(resolved, default=14000)

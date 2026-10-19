@@ -464,6 +464,51 @@ def job_service_start_enabled(context: Optional[str] = None) -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
+# Display names for the plugins a job can need.
+SERVICE_LABELS = {"comfyui": "ComfyUI", "audio_foundry": "Audio Foundry", "upscaling": "Upscaling"}
+
+
+def _start_switches(context: Optional[str]) -> List[str]:
+    """The settings that are off and keep Guaardvark from starting a stopped
+    service for a job in ``context``, as NAME=1 strings.
+
+    "video" renders start ComfyUI through video_model_registry.prepare_video_model,
+    which only the auto-orchestrator gates. Music-video stages start theirs
+    through PipelineService.prepare_stage (GUAARDVARK_PIPELINE_STAGE_PREP). The
+    other job contexts, and Film Crew's render ("film-crew"), go through
+    start_for_job and need GUAARDVARK_JOB_SERVICE_START.
+    """
+    switches = []
+    if context == "music-video":
+        from backend.services.pipeline_service import STAGE_PREP_ENV, stage_prep_enabled
+        if not stage_prep_enabled():
+            switches.append(f"{STAGE_PREP_ENV}=1")
+    elif context != "video" and not job_service_start_enabled(context):
+        switches.append(f"{JOB_SERVICE_START_ENV}=1")
+    if not auto_orchestrator_enabled():
+        switches.append("GUAARDVARK_PLUGIN_AUTO_ORCHESTRATOR=1")
+    return switches
+
+
+def service_down_message(plugin_id: str, context: Optional[str] = None, why: str = "") -> str:
+    """The one sentence every tool gives when a service its job needs is down.
+
+    Names the plugin and how to start it. While automatic start is off for
+    this kind of job (``context``, see _start_switches) it names the setting
+    that turns it on; when automatic start is on and did not help, ``why``.
+    Changes no default.
+    """
+    label = SERVICE_LABELS.get(plugin_id, plugin_id)
+    text = (f"{label} is not running. Start the {label} plugin on the Plugins page "
+            f"(or POST /api/plugins/{plugin_id}/start)")
+    switches = _start_switches(context)
+    if switches:
+        text += f", or set {' and '.join(switches)} so Guaardvark starts it when a job needs it"
+    elif why:
+        text += f". Automatic start did not bring it up: {why}"
+    return text + "."
+
+
 def _stage_wait_s(context: str, stage: str) -> float:
     """Longest health wait the stage's plugins declare (plugin.json ``timeout``)."""
     waits = [30.0]

@@ -190,8 +190,9 @@ def _comfyui_note(model_id: str):
     if job_service_start_enabled():
         return ("ComfyUI is not running now; it is started when the clips render, the last "
                 "stage, which you start from Film Crew.")
-    return ("ComfyUI is not running now. Nothing needs it until the clips render, the last stage, "
-            "which you start from Film Crew: start the ComfyUI plugin (Plugins) before then.")
+    from backend.services.plugin_bridge import service_down_message
+    return ("Nothing needs ComfyUI until the clips render, the last stage, which you start from "
+            "Film Crew. " + service_down_message("comfyui", context="film-crew"))
 
 
 def _dispatch_first_stage(svc, row_id: int, agent: str):

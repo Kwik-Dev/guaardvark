@@ -35,6 +35,7 @@ SPEECH_POLL_S = 2.0
 # default 120 s per-call timeout (backend/mcp/config.py).
 SPEECH_SUBMIT_TIMEOUT_S = 110
 
+# The older wording; the tools now give plugin_bridge.service_down_message.
 AUDIO_FOUNDRY_NOT_RUNNING = (
     "Audio Foundry is not running. Start it from the Studio's Plugins page "
     "(or POST /api/plugins/audio_foundry/start), then try again."
@@ -59,12 +60,17 @@ def plugin_stopped(error) -> bool:
 
 def _backend_error_text(error) -> str:
     """What a failed backend call says, as a job_types.RenderFailure when the
-    failure has a kind (a refusal whose body names its ``error_kind`` keeps it)."""
+    failure has a kind (a stopped Audio Foundry is SERVICE_DOWN; a refusal
+    whose body names its ``error_kind`` keeps it)."""
     from backend.services.job_types import RenderErrorKind, RenderFailure
 
-    if plugin_stopped(error):
-        return AUDIO_FOUNDRY_NOT_RUNNING
     body = error.body if isinstance(getattr(error, "body", None), dict) else {}
+    if plugin_stopped(error):
+        # The backend's own sentence (plugin_bridge.service_down_message): it
+        # knows whether automatic start is on there. Older backends lack it.
+        from backend.services.plugin_bridge import service_down_message
+        return RenderFailure(RenderErrorKind.SERVICE_DOWN, str(
+            body.get("message") or service_down_message("audio_foundry", context="audio")))
     if error.kind in ("plugin_offline", "auth", "http") and body.get("detail"):
         # The plugin's own words; backend_http's hints are about the backend.
         text = str(body["detail"])

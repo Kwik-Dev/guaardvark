@@ -471,19 +471,27 @@ class ComfyUIImageGenerator:
         return engines
 
     def _require_up(self, down_message: str) -> None:
-        """Raise ``down_message`` (a COMFYUI_DOWN failure) unless ComfyUI answers.
+        """Raise ``down_message`` unless ComfyUI answers, followed by the
+        sentence every tool gives for a stopped service
+        (plugin_bridge.service_down_message), as a COMFYUI_DOWN failure.
 
         With GUAARDVARK_JOB_SERVICE_START on, ComfyUI is started first through
         the image stage; the reason a start did not help is added to the error.
         """
         if self._available():
             return
-        from backend.services.plugin_bridge import job_service_start_enabled, start_for_job
-        if not job_service_start_enabled():
-            raise RuntimeError(_failure(K.COMFYUI_DOWN, down_message))
-        ok, why = start_for_job("image", "generating", is_up=self._available)
-        if not ok:
-            raise RuntimeError(_failure(K.COMFYUI_DOWN, f"{down_message} ({why})"))
+        from backend.services.plugin_bridge import (
+            job_service_start_enabled, service_down_message, start_for_job,
+        )
+        why = ""
+        if job_service_start_enabled():
+            ok, why = start_for_job("image", "generating", is_up=self._available)
+            if ok:
+                return
+        raise RuntimeError(_failure(
+            K.COMFYUI_DOWN,
+            f"{down_message}. {service_down_message('comfyui', context='image', why=why)}",
+        ))
 
     # ── workflow ──────────────────────────────────────────────────────
     def _build_workflow(
@@ -1445,7 +1453,7 @@ class ComfyUIImageGenerator:
         cancels this prompt only and raises RenderStopped.
         """
         self._require_up(
-            f"ComfyUI not reachable at {self.comfy_url} — cannot generate storyboard image"
+            f"ComfyUI not reachable at {self.comfy_url} — cannot generate the image"
         )
 
         effective_model = model or self.model

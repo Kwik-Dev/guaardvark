@@ -71,7 +71,8 @@ def test_every_kind_has_a_policy():
 
 
 def test_retryable_kinds_are_the_transient_ones():
-    assert {k for k in K if retry_waits(k)} == {K.COMFYUI_DOWN, K.VRAM_BUSY, K.RENDER_TIMEOUT, K.OUTPUT_MISSING}
+    assert {k for k in K if retry_waits(k)} == {
+        K.COMFYUI_DOWN, K.SERVICE_DOWN, K.VRAM_BUSY, K.RENDER_TIMEOUT, K.OUTPUT_MISSING}
 
 
 def test_a_failure_message_carries_its_kind_through_string_handling():

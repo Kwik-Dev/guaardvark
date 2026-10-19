@@ -1106,18 +1106,20 @@ class GenerationStatusTool(BaseTool):
         }
 
     @staticmethod
-    def _audio_foundry_stopped(job_id: str):
+    def _audio_foundry_stopped(job_id: str, said: Optional[str] = None):
         """The answer for an audio job id while Audio Foundry is stopped: the
         backend answered, the plugin that holds the job did not, and retrying
-        will not change that until someone starts it."""
+        will not change that until someone starts it. ``said`` is the
+        backend's own service-down sentence, when its 503 carried one."""
+        from backend.services.plugin_bridge import service_down_message
         from backend.tools.audio_tools import STUDIO_URL
+        message = ((said or service_down_message("audio_foundry", context="audio"))
+                   + " Until then this job cannot be read. A job that was running when it stopped is "
+                     "marked interrupted when it starts again; a finished file is already in the library.")
         return {
             "kind": "audio", "batch_id": job_id, "status": "unknown", "progress": None,
-            "error": ("Audio Foundry is not running (start it in Plugins, or POST "
-                      "/api/plugins/audio_foundry/start), so this job cannot be read. A job that was "
-                      "running when it stopped is marked interrupted when it starts again; a finished "
-                      "file is already in the library."),
-            "errors": [], "files": [], "studio_url": STUDIO_URL,
+            "error": message, "errors": [], "files": [], "studio_url": STUDIO_URL,
+            "failure": describe_failure("service_down", message, "audio"), "failures": [],
         }
 
     @classmethod
@@ -1129,7 +1131,8 @@ class GenerationStatusTool(BaseTool):
             job = _http_json("GET", f"/api/audio-foundry/jobs/{job_id}")
         except RuntimeError as e:
             if plugin_stopped(e):
-                return cls._audio_foundry_stopped(job_id)
+                body = e.body if isinstance(getattr(e, "body", None), dict) else {}
+                return cls._audio_foundry_stopped(job_id, said=body.get("message"))
             if "not found" in str(e).lower() or "unknown job" in str(e).lower() or "404" in str(e):
                 return None
             raise

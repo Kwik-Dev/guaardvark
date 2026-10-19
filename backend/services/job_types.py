@@ -238,6 +238,7 @@ class RenderErrorKind(str, Enum):
     MODEL_NOT_INSTALLED = "model_not_installed"
     COMPANION_MISSING = "companion_missing"    # the model is installed, a file it needs is not
     COMFYUI_DOWN = "comfyui_down"              # unreachable, refused to start, or died mid-render
+    SERVICE_DOWN = "service_down"              # another plugin the job needs (Audio Foundry, ...) is not running
     NODE_MISSING = "node_missing"              # a custom node the graph uses is not loaded
     CARD_TOO_SMALL = "card_too_small"          # the model can never fit this card
     VRAM_BUSY = "vram_busy"                    # the card did not free up before the wait ran out
@@ -276,6 +277,9 @@ RENDER_ERROR_POLICY: dict[RenderErrorKind, dict[str, Any]] = {
     RenderErrorKind.COMFYUI_DOWN: {
         "label": "ComfyUI not running", "retryable": True, "retry_after_s": [30],
         "action": "Start the ComfyUI plugin; if it does not stay up, read logs/comfyui.log."},
+    RenderErrorKind.SERVICE_DOWN: {
+        "label": "Service not running", "retryable": True, "retry_after_s": [30],
+        "action": "Start the plugin the message names; if it does not stay up, read its log in logs/."},
     RenderErrorKind.NODE_MISSING: {
         "label": "ComfyUI node missing", "retryable": False, "retry_after_s": [],
         "action": "Run plugins/comfyui/scripts/install_deps.sh, then restart the ComfyUI plugin."},

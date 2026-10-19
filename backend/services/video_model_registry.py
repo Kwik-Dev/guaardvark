@@ -1922,6 +1922,25 @@ def _comfyui_reachable() -> bool:
 COMFYUI_AUTOSTART_WAIT_S = 90
 
 
+# How the ComfyUI requirements in preflight_video_model end ("Start the ComfyUI
+# plugin, then retry.", "Start ComfyUI, then retry.").
+_START_COMFYUI_TAIL = re.compile(r"\s*Start (?:the )?ComfyUI(?: plugin)?, then retry\.\s*$")
+
+
+def comfyui_down_failure(err, context: Optional[str] = "video", why: str = ""):
+    """A COMFYUI_DOWN preflight error with the sentence every tool gives for a
+    stopped service (plugin_bridge.service_down_message for ``context``) in
+    place of its own "Start the ComfyUI plugin, then retry.". Any other error,
+    or one that already has the sentence, is returned unchanged."""
+    from backend.services.job_types import failure_kind
+    if failure_kind(err) != RenderErrorKind.COMFYUI_DOWN or "/api/plugins/comfyui/start" in str(err):
+        return err
+    from backend.services.plugin_bridge import service_down_message
+    requirement = _START_COMFYUI_TAIL.sub("", str(err)).rstrip()
+    return RenderFailure(RenderErrorKind.COMFYUI_DOWN, (
+        f"{requirement} {service_down_message('comfyui', context=context, why=why)}").strip())
+
+
 def prepare_video_model(model_id: str) -> tuple[bool, str]:
     """preflight_video_model, starting ComfyUI first when that is all that is missing.
 
@@ -1929,7 +1948,8 @@ def prepare_video_model(model_id: str) -> tuple[bool, str]:
     generate_video tool). The start goes through plugin_bridge's stage path
     (no persisted preference, an explicit user-disable still wins, GPU
     conflicts resolved there); GUAARDVARK_PLUGIN_AUTO_ORCHESTRATOR=0 turns it
-    off and the original "Start the ComfyUI plugin" error is returned.
+    off and the error names the model's requirement and how to start ComfyUI
+    (comfyui_down_failure).
     """
     ready, err = preflight_video_model(model_id)
     if ready or "ComfyUI" not in (err or ""):
@@ -1939,7 +1959,7 @@ def prepare_video_model(model_id: str) -> tuple[bool, str]:
     except Exception:
         return ready, err
     if not plugin_bridge.auto_orchestrator_enabled():
-        return ready, err
+        return ready, comfyui_down_failure(err, "video")
 
     logger.info("Video model %s needs ComfyUI; starting it", model_id)
     try:
