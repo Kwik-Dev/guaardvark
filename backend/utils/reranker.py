@@ -335,12 +335,16 @@ def start_install() -> Dict[str, Any]:
     if is_installed():
         return install_status()
     with _install_lock:
-        if _install["state"] == "running":
-            return install_status()
-        _install.update({"state": "running", "model": name, "progress": 0 if INSTALL_SIZE_GB.get(name) else None,
-                         "downloaded_gb": 0.0, "error": None, "started_at": time.time()})
-    threading.Thread(target=_run_install, args=(name,), daemon=True,
-                     name="reranker-install").start()
+        # install_status() takes _install_lock too, so it is called only
+        # after the lock is released: a second Install used to hang here.
+        already_running = _install["state"] == "running"
+        if not already_running:
+            _install.update({"state": "running", "model": name,
+                             "progress": 0 if INSTALL_SIZE_GB.get(name) else None,
+                             "downloaded_gb": 0.0, "error": None, "started_at": time.time()})
+    if not already_running:
+        threading.Thread(target=_run_install, args=(name,), daemon=True,
+                         name="reranker-install").start()
     return install_status()
 
 

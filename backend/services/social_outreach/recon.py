@@ -181,6 +181,13 @@ class RecondAgent:
         if not profile.load().features:
             report["reason"] = NO_FEATURES_REASON
             return report
+        # Reading Reddit is an outside request: the same gate as the YouTube
+        # scout and posting (Settings, web access; off by default).
+        blocked = web_access_block_reason("scout Reddit for outreach")
+        if blocked:
+            logger.info("recon: reddit pass skipped: %s", blocked)
+            report["reason"] = "web_access_off"
+            return report
 
         rules = fetch_subreddit_rules(subreddit)
         if rules is None:

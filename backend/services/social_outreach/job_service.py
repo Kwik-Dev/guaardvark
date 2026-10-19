@@ -29,6 +29,15 @@ OUTREACH_TASK_TYPES = {
     "discord": "social_outreach_discord",
 }
 
+# Runs that read an outside site, by what they read; with web access off they
+# are not queued, and each pass checks again when it runs.
+WEB_READING_RUNS = {
+    "social_outreach_youtube": "scout YouTube for outreach",
+    "social_outreach_recon": "scout Reddit for outreach",
+    "social_outreach_reddit": "scout Reddit for outreach",
+    "social_outreach_share": "scout Reddit for outreach",
+}
+
 
 def queue_outreach_run(
     platform: str,
@@ -45,8 +54,8 @@ def queue_outreach_run(
 
     Raises:
         ValueError: unsupported platform.
-        RuntimeError: Outreach is disabled, web access is off for a YouTube
-            scout, or Celery submission fails.
+        RuntimeError: Outreach is disabled, web access is off for a run that
+            reads an outside site, or Celery submission fails.
     """
     normalized = (platform or "").strip().lower()
     task_type = OUTREACH_TASK_TYPES.get(normalized)
@@ -57,13 +66,10 @@ def queue_outreach_run(
     if not kill_switch.is_enabled():
         raise RuntimeError("outreach is disabled (kill switch is off)")
 
-    if task_type == "social_outreach_youtube":
-        # The YouTube scout sends its query to the web search engine, so it is
-        # not queued with web access off; the recon itself checks again when
-        # it runs (scout_youtube).
+    if task_type in WEB_READING_RUNS:
         from backend.utils.settings_utils import web_access_block_reason
 
-        blocked = web_access_block_reason("scout YouTube for outreach")
+        blocked = web_access_block_reason(WEB_READING_RUNS[task_type])
         if blocked:
             raise RuntimeError(blocked)
 

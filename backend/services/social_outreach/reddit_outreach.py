@@ -30,6 +30,7 @@ import requests
 
 from backend.services.social_outreach import audit, external_grader, kill_switch, persona
 from backend.services.social_outreach.transitions import WITHDRAWN_BEFORE_SUBMIT
+from backend.utils.settings_utils import web_access_block_reason
 
 logger = logging.getLogger(__name__)
 
@@ -905,6 +906,24 @@ def post_comment_via_servo(
     return True, "ok"
 
 
+def web_access_refused(subreddit: str, report: dict, task_id: Optional[int] = None) -> bool:
+    """True, with the pass reported as skipped, when web access (Settings, off
+    by default) is off. Reading a subreddit is an outside request, gated the
+    way the YouTube scout and posting are."""
+    blocked = web_access_block_reason("scout Reddit for outreach")
+    if not blocked:
+        return False
+    logger.info("reddit outreach: r/%s pass skipped: %s", subreddit, blocked)
+    report["reason"] = "web_access_off"
+    audit.log_outreach_event(
+        platform="reddit", action="abort",
+        target_url=f"{REDDIT_BASE}/r/{subreddit}",
+        status="aborted", abort_reason="web_access_off",
+        task_id=task_id,
+    )
+    return True
+
+
 class RedditOutreachLoop:
     """One pass = visit one subreddit, find up to MAX_THREADS_PER_PASS candidates, draft + maybe post."""
 
@@ -930,6 +949,8 @@ class RedditOutreachLoop:
                 status="aborted", abort_reason="kill_switch_off",
                 task_id=task_id,
             )
+            return report
+        if web_access_refused(subreddit, report, task_id):
             return report
 
         rules_list = fetch_subreddit_rules(subreddit)

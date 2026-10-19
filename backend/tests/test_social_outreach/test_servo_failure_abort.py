@@ -22,6 +22,7 @@ def test_loop_drafts_without_calling_servo():
     ]
 
     with patch("backend.services.social_outreach.reddit_outreach.kill_switch.is_enabled", return_value=True), \
+         patch("backend.services.social_outreach.reddit_outreach.web_access_block_reason", return_value=None), \
          patch("backend.services.social_outreach.reddit_outreach.fetch_subreddit_rules", return_value=[]), \
          patch("backend.services.social_outreach.reddit_outreach.fetch_hot_threads", return_value=fake_threads), \
          patch("backend.services.social_outreach.reddit_outreach.audit.recent_thread_ids", return_value=set()), \
