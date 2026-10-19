@@ -273,6 +273,21 @@ def _dispatch_document(progress_system, index_document_task, doc):
     return None
 
 
+# Documents that belong in the index whatever happened on their last run: the
+# indexed ones, those waiting or running, and those whose last run failed
+# (their vectors were kept until a successful run, and an index rebuilt from
+# scratch should try them again). NOT_INDEXED, STORED and STORAGE_FAILED rows
+# were never meant to be searchable.
+REBUILD_STATUSES = ("INDEXED", "INDEXING", "PENDING", "ERROR")
+
+
+def requeue_documents_for_new_index() -> dict:
+    """requeue_indexed_documents for every document in REBUILD_STATUSES, after
+    the vector tables were emptied (an embedding model switch). Also returns
+    ``by_status``: how many of each status were taken."""
+    return _requeue(REBUILD_STATUSES)
+
+
 def requeue_indexed_documents() -> dict:
     """Index every INDEXED document again, after its vectors were cleared.
 
@@ -283,9 +298,20 @@ def requeue_indexed_documents() -> dict:
     refused one ERROR, as in a bulk run). Returns {"queued": n, "pending": n},
     where pending counts every document not queued.
     """
-    docs = DBDocument.query.filter(DBDocument.index_status == "INDEXED").order_by(DBDocument.id).all()
+    out = _requeue(("INDEXED",))
+    return {"queued": out["queued"], "pending": out["pending"]}
+
+
+def _requeue(statuses) -> dict:
+    """Queue every document whose status is in ``statuses`` (see
+    requeue_indexed_documents); adds ``by_status``."""
+    docs = (DBDocument.query.filter(DBDocument.index_status.in_(list(statuses)))
+            .order_by(DBDocument.id).all())
+    by_status: dict = {}
+    for doc in docs:
+        by_status[doc.index_status] = by_status.get(doc.index_status, 0) + 1
     if not docs:
-        return {"queued": 0, "pending": 0}
+        return {"queued": 0, "pending": 0, "by_status": by_status}
     progress_system = get_unified_progress()
     from backend.celery_tasks_isolated import index_document_task
     queued = 0
@@ -303,7 +329,7 @@ def requeue_indexed_documents() -> dict:
             stopped = True
             continue
         update_document_status(doc.id, "PENDING")
-    return {"queued": queued, "pending": len(docs) - queued}
+    return {"queued": queued, "pending": len(docs) - queued, "by_status": by_status}
 
 
 def _get_all_document_ids_recursive(folder_id):

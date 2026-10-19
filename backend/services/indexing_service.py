@@ -1345,6 +1345,63 @@ def drop_all_vector_stores(keep_width: Optional[int] = None) -> Dict[str, Any]:
     return {"backend": "pgvector", "dropped": dropped, "failed": failed}
 
 
+# Rows that come from no Document and so are not rebuilt by re-indexing the
+# documents, by content_type, with how each is rebuilt.
+NOT_REBUILT_HOW = {
+    "raptor_summary": "Corpus summaries: build them again (POST /api/index/build-corpus-summaries).",
+    "repository_summary": "Repository summaries: index the repository's folder again "
+                          "(POST /api/index/bulk with its folder id).",
+    "repository_map": "Repository maps: index the repository's folder again "
+                      "(POST /api/index/bulk with its folder id).",
+}
+NOT_REBUILT_OTHER = ("Other indexed text with no document behind it (entities, relationships, "
+                     "metadata): POST /api/entity-indexing/index-all rebuilds entity and "
+                     "relationship text; the rest returns when its source indexes it again.")
+
+
+def rows_not_rebuilt(dim) -> List[Dict[str, Any]]:
+    """What emptying the vector tables of one width loses that re-indexing the
+    documents does not bring back: rows whose document_id is not a
+    ``doc_<id>_`` source, counted by content_type, each with how to rebuild it.
+    Empty when there are none or the tables cannot be read."""
+    if _vector_backend() != "pgvector" or not dim:
+        return []
+    counts: Dict[str, int] = {}
+    try:
+        conn = _pg_connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT tablename FROM pg_tables "
+                    "WHERE schemaname = current_schema() AND tablename LIKE %s",
+                    ("data_guaardvark%",),
+                )
+                tables = [r[0] for r in cur.fetchall() if r[0].endswith(f"_{int(dim)}")]
+                for t in tables:
+                    cur.execute(
+                        f"SELECT COALESCE(metadata_->>'content_type', ''), count(*) FROM \"{t}\" "
+                        "WHERE COALESCE(metadata_->>'document_id', '') !~ '^doc_[0-9]+_' "
+                        "GROUP BY 1"
+                    )
+                    for kind, n in cur.fetchall():
+                        counts[kind] = counts.get(kind, 0) + int(n)
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning("Could not count rows a rebuild will not restore: %s", e)
+        return []
+    out = []
+    other = 0
+    for kind, n in sorted(counts.items()):
+        if kind in NOT_REBUILT_HOW:
+            out.append({"kind": kind, "rows": n, "how": NOT_REBUILT_HOW[kind]})
+        else:
+            other += n
+    if other:
+        out.append({"kind": "other", "rows": other, "how": NOT_REBUILT_OTHER})
+    return out
+
+
 def empty_vector_tables(dim: int) -> Dict[str, Any]:
     """Empty every vector table of one width, keeping the tables.
 
