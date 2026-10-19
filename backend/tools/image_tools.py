@@ -794,7 +794,9 @@ class GenerationStatusTool(BaseTool):
         "generate_image with wait_for_result=false or started in the Studio, a video batch "
         "from generate_video, a bulk CSV job (bulk_gen_...) from generate_bulk_csv, a song "
         "(a 32-character job id) from generate_music, or a tool job (tooljob_...) from edit_image, "
-        "inpaint_image, outpaint_image, remove_background or generate_animation called over MCP. "
+        "inpaint_image, outpaint_image, remove_background or generate_animation called over MCP, "
+        "a music video (music_video:<id>) from generate_music_video, or a Film Crew production "
+        "(production:<id>) from start_film_crew. "
         "Returns status (a tool job is queued, running, done or failed, with the time since it "
         "started), progress while running (a video batch names its pipeline stage, such as gpu_wait "
         "or generate, with the share of clips finished), and each finished file (URL for images, video and "
@@ -1168,12 +1170,58 @@ class GenerationStatusTool(BaseTool):
                                 "so it runs the same version as this MCP server.")}
         return cls._tool_job_info(snapshot)
 
+    @staticmethod
+    def _pipeline_status(batch_id: str):
+        """A music video or Film Crew run, read from its row in this process."""
+        from backend.services import pipeline_status as ps
+        parsed = ps.parse_pipeline_id(batch_id)
+        if not parsed:
+            return None
+        kind, row_id = parsed
+        from backend.models import db
+        if kind == "music_video":
+            from backend.api.music_video_api import _mv_dict
+            from backend.models import MusicVideo
+            mv = db.session.get(MusicVideo, row_id)
+            return ps.music_video_info(_mv_dict(mv)) if mv else None
+        from backend.api.production_api import _shot_to_dict
+        from backend.models import Production
+        prod = db.session.get(Production, row_id)
+        if prod is None:
+            return None
+        return ps.production_info({
+            "id": prod.id, "status": prod.status, "current_stage": prod.current_stage,
+            "error_blob": prod.error_blob, "shots": [_shot_to_dict(sh) for sh in prod.shots],
+        })
+
+    @staticmethod
+    def _pipeline_status_http(batch_id: str):
+        """The same, through the backend's music video and Film Crew routes."""
+        from backend.services import pipeline_status as ps
+        parsed = ps.parse_pipeline_id(batch_id)
+        if not parsed:
+            return None
+        kind, row_id = parsed
+        path = f"/api/music-video/{row_id}" if kind == "music_video" else f"/api/production/{row_id}"
+        try:
+            d = _http_json("GET", path)
+        except RuntimeError as e:
+            if "not found" in str(e).lower() or "404" in str(e):
+                return None
+            raise
+        if not isinstance(d, dict) or "current_stage" not in d:
+            return None
+        return ps.music_video_info(d) if kind == "music_video" else ps.production_info(d)
+
     def _read(self, batch_id: str):
         """(info, unreachable): the job from whichever reader knows its id."""
         info = None
         unreachable = None
         remote = self._context.get("transport") == "mcp"
-        if _tool_jobs.is_job_id(batch_id):
+        from backend.services.pipeline_status import parse_pipeline_id
+        if parse_pipeline_id(batch_id):
+            readers = (self._pipeline_status_http,) if remote else (self._pipeline_status,)
+        elif _tool_jobs.is_job_id(batch_id):
             readers = (self._tool_job_status_http,) if remote else (self._tool_job_status,)
         else:
             readers = (
@@ -1221,14 +1269,20 @@ class GenerationStatusTool(BaseTool):
                 f"Could not read {batch_id}: the Guaardvark backend did not answer ({unreachable}). "
                 "Try again shortly."))
         if info is None:
-            return ToolResult(success=False, error=f"No image, video, audio or bulk CSV job named {batch_id}")
+            hint = ""
+            if batch_id.isdigit():
+                hint = (f" A music video or Film Crew id needs its kind: music_video:{batch_id} "
+                        f"or production:{batch_id}.")
+            return ToolResult(success=False, error=(
+                f"No image, video, audio, bulk CSV, music video or Film Crew job named {batch_id}.{hint}"))
         if info.get("missing"):
             return ToolResult(success=False, error=info["missing"])
         total = info.get("total")
         done = info.get("completed") or 0
-        noun = info.get("noun") or (
+        noun = info["noun"] if "noun" in info else (
             "job" if info["kind"] in ("song", "speech", "sound effect", "audio") else "batch")
-        head = f"{info['kind'][0].upper()}{info['kind'][1:]} {noun} {batch_id}: {info['status']}"
+        head = " ".join(p for p in (f"{info['kind'][0].upper()}{info['kind'][1:]}", noun, batch_id) if p)
+        head += f": {info['status']}"
         if total:
             head += f" ({done}/{total} finished"
             if info.get("failed"):
@@ -1284,6 +1338,8 @@ class GenerationStatusTool(BaseTool):
             lines.append(info["note"])
         if info.get("output"):
             lines.append(str(info["output"]))
+        if info.get("eta_seconds") and info["status"] == "running":
+            lines.append(f"About {int(info['eta_seconds']) // 60} min {int(info['eta_seconds']) % 60} s left (estimate)")
         if info["status"] in ("queued", "pending", "running"):
             lines.append("Still running; poll again in a few seconds, or pass wait_seconds to wait here.")
         if info.get("studio_url"):

@@ -8,6 +8,13 @@ from flask import current_app
 
 from backend.models import db, Production, Subject, ProductionShot, ProductionShotSubject, ProductionSubject, SwarmMessage, Document
 from backend.services.production_service import ProductionService
+
+
+def _render_kind(exc):
+    """The RenderErrorKind an exception carries or is classified as (job_types)."""
+    from backend.services.job_operation_gate import classify_render_exception
+    return classify_render_exception(exc)
+
 from backend.services.swarm.agents.screenwriter import Screenwriter
 from backend.services.swarm.agents.cinematographer import Cinematographer, ShotPlan, ShotPlanList
 from backend.services.swarm.agents.casting_director import CastingDirector
@@ -66,7 +73,7 @@ def _agent_run(prod_id: int, *, agent_name: str, expected_stage: str, next_agent
     except Exception as e:
         # Catch all other exceptions, fail stage, and absorb.
         # Absorbing is safer because Celery retry behavior is default, which WILL retry.
-        ProductionService(db.session).fail_stage(prod_id, stage=expected_stage, error=str(e))
+        ProductionService(db.session).fail_stage(prod_id, stage=expected_stage, error=str(e), kind=_render_kind(e))
         pass
     else:
         # Clean exit
