@@ -230,22 +230,56 @@ def set_approval_response(
     approved: bool,
     scope: Optional[str] = None,
     tools: Optional[List[str]] = None,
-):
-    """Set the response for a pending tool approval.
+    request_id: Optional[str] = None,
+    approval_id: Optional[str] = None,
+) -> bool:
+    """Answer the approval card a turn on ``session_id`` is waiting on.
+
+    The answer must name the card it answers: ``approval_id`` (sent with every
+    ``chat:tool_approval_request``) or, from older clients, the turn's
+    ``request_id``. An answer naming another card, or arriving when no card is
+    waiting, is ignored, so a stale or crafted reply cannot approve a later
+    call. A reply that names neither still answers the waiting card, but only
+    for this call ("once"): standing grants need a bound answer.
 
     scope: once | session | task | always (defaults to once). "always" also
         stores the tools so later chats run them without a card.
-    tools: optional explicit list from client; otherwise uses pending batch.
+    tools: optional list from the client; only the tools the waiting card
+        named are granted, whatever else the list holds.
+
+    Returns True when the answer was applied.
     """
-    tools = tools or []
+    approved = approved is True
     sc = (scope or "once").strip().lower()
     if sc not in ("once", "session", "task", "always"):
         sc = "once"
     with _approval_lock:
         pending = _approval_batch_meta.get(session_id) or {}
-        batch_tools = list(tools) if tools else list(pending.get("tools") or [])
+        if not pending.get("pending") or session_id not in _approval_events:
+            logger.warning("approval answer for %s ignored: no card is waiting", session_id)
+            return False
+        if approval_id is not None and approval_id != pending.get("approval_id"):
+            logger.warning("approval answer for %s ignored: it answers another card", session_id)
+            return False
+        if approval_id is None and request_id is not None and request_id != pending.get("request_id"):
+            logger.warning("approval answer for %s ignored: it answers another request", session_id)
+            return False
+        if approval_id is None and request_id is None:
+            sc = "once"
+        asked = list(pending.get("tools") or [])
+        if tools:
+            batch_tools = [t for t in asked if t in set(tools)]
+            if not batch_tools:
+                logger.warning(
+                    "approval answer for %s ignored: it names %s, the card asked for %s",
+                    session_id, list(tools), asked,
+                )
+                return False
+        else:
+            batch_tools = asked
         _approval_batch_meta[session_id] = {
             **pending,
+            "pending": False,
             "approved": approved,
             "scope": sc,
             "tools": batch_tools,
@@ -262,14 +296,14 @@ def set_approval_response(
                 g = _task_tool_grants.setdefault(session_id, set())
                 g.update(batch_tools)
         _approval_responses[session_id] = approved
-        if session_id in _approval_events:
-            _approval_events[session_id].set()
+        _approval_events[session_id].set()
     if approved and batch_tools and sc == "always":
         try:
             from backend.services.tool_approval_prefs import allow_always
             allow_always(batch_tools)
         except Exception:
             logger.warning("could not store always-approved tools %s", batch_tools, exc_info=True)
+    return True
 
 
 # How long a turn waits for the approval card before treating silence as a
@@ -4128,11 +4162,14 @@ class UnifiedChatEngine:
             ),
         })
         event = threading.Event()
+        approval_id = uuid.uuid4().hex
         with _approval_lock:
             _approval_batch_meta[session_id] = {
                 "tools": list(approval_jobs),
                 "iteration": iteration,
                 "request_id": request_id,
+                "approval_id": approval_id,
+                "pending": True,
                 "approved": None,
                 "scope": None,
             }
@@ -4145,6 +4182,7 @@ class UnifiedChatEngine:
             "available_scopes": ["once", "session", "task", "always"],
             "session_id": session_id,
             "request_id": request_id,
+            "approval_id": approval_id,
         }
         if consent:
             payload["consent"] = True
@@ -4153,7 +4191,12 @@ class UnifiedChatEngine:
         event.wait(timeout=APPROVAL_TIMEOUT_S)
 
         with _approval_lock:
-            _approval_events.pop(session_id, None)
+            # The card is closed either way: a late answer must not grant anything.
+            meta = _approval_batch_meta.get(session_id)
+            if meta and meta.get("approval_id") == approval_id:
+                meta["pending"] = False
+            if _approval_events.get(session_id) is event:
+                _approval_events.pop(session_id, None)
             approved = bool(_approval_responses.pop(session_id, False))
         if not approved:
             logger.warning(f"Session {session_id} tool approval REJECTED or TIMED OUT")

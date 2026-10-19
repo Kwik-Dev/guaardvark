@@ -268,10 +268,19 @@ def handle_tool_approval_response(data):
         return
     try:
         from backend.services.unified_chat_engine import set_approval_response
-        set_approval_response(session_id, approved, scope=scope, tools=tools)
+        applied = set_approval_response(
+            session_id, approved, scope=scope, tools=tools,
+            request_id=data.get("request_id"), approval_id=data.get("approval_id"),
+        )
+        if not applied:
+            emit("chat:tool_approval_ignored", {
+                "session_id": session_id,
+                "approval_id": data.get("approval_id"),
+                "error": "No approval card matching this answer is waiting.",
+            })
         logger.info(
             f"Tool approval response received for session {session_id}: "
-            f"approved={approved} scope={scope}"
+            f"approved={approved} scope={scope} applied={applied}"
         )
         
         # Check if this session is Suspended and needs to be resumed
