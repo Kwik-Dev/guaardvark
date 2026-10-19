@@ -14,6 +14,7 @@ import pytest
 def _scouting_needs_web_access(web_access_on):
     """The loops read Reddit, so they run only with web access on (Settings)."""
 
+
 def test_mark_draft_aborted_preserves_draft_text(app):
     """A drafted row updated to 'aborted' must keep its draft_text."""
     from backend.services.social_outreach import audit

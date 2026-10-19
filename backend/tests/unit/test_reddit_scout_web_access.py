@@ -15,7 +15,8 @@ def test_reddit_scout_reads_nothing_with_web_access_off():
         report = recon.RecondAgent().scout_reddit("LocalLLaMA")
     assert report["reason"] == "web_access_off" and report["candidates"] == 0
     gate.assert_called_once_with("scout Reddit for outreach")
-    rules.assert_not_called() and hot.assert_not_called()
+    rules.assert_not_called()
+    hot.assert_not_called()
 
 
 def test_reddit_scout_reads_with_web_access_on():
