@@ -5260,7 +5260,6 @@ class UnifiedChatEngine:
             # error, so gate on is_thinking_model. Default-off keeps chat snappy.
             if is_thinking_model and getattr(self, "_think", None) is not None:
                 _chat_kwargs["think"] = bool(self._think)
-            stream = ollama.chat(**_chat_kwargs)
 
             # XML filter: stream tokens to client until <tool_call is detected,
             # then suppress further emission (tool calls are announced separately).
@@ -5364,6 +5363,9 @@ class UnifiedChatEngine:
                 text = "".join(accumulated).strip()
                 return split_inline_reasoning(text, reasoning_tags, leading_only=leading_only)[1]
 
+            # Opened after the stream helpers exist, so the retries in the
+            # except block below can always drain through them.
+            stream = ollama.chat(**_chat_kwargs)
             _consume(stream)
             content = _visible_content()
             thinking = "".join(accumulated_thinking).strip()
@@ -5433,39 +5435,25 @@ class UnifiedChatEngine:
                     sanitized = _template_safe(
                         model_name, self._sanitize_messages_for_thinking_model(messages, aggressive=True),
                     )
-                    # The retry keeps the turn's thinking choice; rebuilding the
-                    # kwargs without it would hand the model its own default (on).
-                    _sanitized_kwargs = dict(
-                        model=model_name,
-                        messages=sanitized,
-                        stream=True,
-                        options=opts,
-                    )
+                    # Same call as the first attempt (keep_alive, tools, the
+                    # turn's thinking choice) with only the messages swapped, and
+                    # drained by the same consumer so tokens stream as they arrive.
+                    _sanitized_kwargs = dict(locals().get("_chat_kwargs") or dict(
+                        model=model_name, stream=True, options=opts,
+                    ))
+                    _sanitized_kwargs["messages"] = sanitized
                     if getattr(self, "_think", None) is not None:
                         _sanitized_kwargs["think"] = bool(self._think)
-                    stream = ollama.chat(**_sanitized_kwargs)
-                    for chunk in stream:
-                        if is_aborted(session_id):
-                            break
-                        msg = chunk.get("message", {})
-                        token = msg.get("content", "")
-                        thinking_token = msg.get("thinking", "")
-                        if token:
-                            accumulated.append(token)
-                        if thinking_token:
-                            accumulated_thinking.append(thinking_token)
-                            reasoning_buf.append(thinking_token)
-                            _flush_reasoning()
-                        if chunk.get("done"):
-                            input_tokens = chunk.get("prompt_eval_count", 0) or 0
-                            output_tokens = chunk.get("eval_count", 0) or 0
-                            done_reason = chunk.get("done_reason") or None
-
-                    inline, content = split_inline_reasoning("".join(accumulated), reasoning_tags)
-                    if inline:
-                        accumulated_thinking.append(inline)
+                    accumulated.clear()
+                    xml_detected = False
+                    inline_reasoning = InlineReasoningStream(reasoning_tags, leading_only=leading_only)
+                    think_buffer = ""
+                    _consume(ollama.chat(**_sanitized_kwargs))
+                    content = _visible_content()
                     thinking = "".join(accumulated_thinking).strip()
-                    if not content and thinking:
+                    if _native_active:
+                        self._native_pending_tool_calls = _native_tool_calls_acc or None
+                    if not content and thinking and not _native_tool_calls_acc:
                         logger.info(f"Sanitized retry returned reasoning only ({len(thinking)} chars)")
                         content = _REASONING_ONLY_FALLBACK_TEXT
                         if emit_tokens:
@@ -5552,35 +5540,13 @@ class UnifiedChatEngine:
                         except Exception as warm_err:
                             logger.debug(f"EOF runner warmup ping skipped: {warm_err}")
                         _time.sleep(2.0)
-                        stream = ollama.chat(**_retry_kwargs)
-                        for chunk in stream:
-                            if is_aborted(session_id):
-                                break
-                            msg = chunk.get("message", {})
-                            token = msg.get("content", "")
-                            thinking_token = msg.get("thinking", "")
-                            if _native_active:
-                                try:
-                                    _tc = msg.get("tool_calls") if isinstance(msg, dict) else getattr(msg, "tool_calls", None)
-                                except Exception:
-                                    _tc = None
-                                if _tc:
-                                    _native_tool_calls_acc.extend(_tc)
-                            if token:
-                                accumulated.append(token)
-                            if thinking_token:
-                                accumulated_thinking.append(thinking_token)
-                                reasoning_buf.append(thinking_token)
-                                _flush_reasoning()
-                            if chunk.get("done"):
-                                input_tokens = chunk.get("prompt_eval_count", 0) or 0
-                                output_tokens = chunk.get("eval_count", 0) or 0
-                                done_reason = chunk.get("done_reason") or None
-                        inline, content = split_inline_reasoning(
-                            "".join(accumulated), reasoning_tags, leading_only=leading_only,
-                        )
-                        if inline:
-                            accumulated_thinking.append(inline)
+                        # Streamed through the same consumer as the first
+                        # attempt, so the answer reaches chat:token as it arrives.
+                        xml_detected = False
+                        inline_reasoning = InlineReasoningStream(reasoning_tags, leading_only=leading_only)
+                        think_buffer = ""
+                        _consume(ollama.chat(**_retry_kwargs))
+                        content = _visible_content()
                         if _native_active:
                             self._native_pending_tool_calls = _native_tool_calls_acc or None
                         if content:
