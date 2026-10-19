@@ -144,17 +144,19 @@ def test_a_refused_task_stops_the_queueing(app, dispatch, monkeypatch):
 
 
 def test_a_new_index_requeues_every_document_that_belongs_in_it(app, dispatch):
-    """After a switch empties the tables, a failed or waiting document is not
-    left out of the new index: only those never meant to be searchable are."""
-    keep = [_doc("a.md", "INDEXED"), _doc("b.pdf", "ERROR"), _doc("c.py", "PENDING"),
-            _doc("d.txt", "INDEXING")]
+    """After a switch empties the tables, a failed or running document is not
+    left out of the new index. A waiting one stays waiting for the resume beat;
+    those never meant to be searchable are left alone."""
+    keep = [_doc("a.md", "INDEXED"), _doc("b.pdf", "ERROR"), _doc("d.txt", "INDEXING")]
+    waiting = _doc("c.py", "PENDING")
     media = _doc("frame.png", "STORED")
     skipped = _doc("e.md", "NOT_INDEXED")
 
     out = indexing_api.requeue_documents_for_new_index()
-    assert out["queued"] == 4 and out["pending"] == 0
-    assert out["by_status"] == {"INDEXED": 1, "ERROR": 1, "PENDING": 1, "INDEXING": 1}
+    assert out["queued"] == 3 and out["pending"] == 0
+    assert out["by_status"] == {"INDEXED": 1, "ERROR": 1, "INDEXING": 1}
     assert dispatch == [d.id for d in keep]
+    assert db.session.get(DBDocument, waiting.id).index_status == "PENDING"
     assert db.session.get(DBDocument, media.id).index_status == "STORED"
     assert db.session.get(DBDocument, skipped.id).index_status == "NOT_INDEXED"
 

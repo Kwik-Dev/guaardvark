@@ -2256,8 +2256,10 @@ def search_with_llamaindex(
         if _filter_pairs:
             try:
                 from llama_index.core.vector_stores.types import MetadataFilters, MetadataFilter, FilterOperator
-                _eq = [MetadataFilter(key=_k, value=_v, operator=FilterOperator.EQ)
-                       for _k, _v in _filter_pairs if _k != "project_id"]
+                # The caller's own filters as equalities (a project_id among them
+                # included); the project_id argument becomes the scope below.
+                _eq = [MetadataFilter(key=str(_k), value=str(_v), operator=FilterOperator.EQ)
+                       for _k, _v in (filters or {}).items() if _v is not None]
                 if project_id is not None:
                     if _vector_backend() == "pgvector":
                         # The project's rows, or a corpus summary that belongs to
@@ -2296,6 +2298,7 @@ def search_with_llamaindex(
             float(os.environ.get("GUAARDVARK_HYBRID_SEARCH_ALPHA", "0.3")),
         )
         retriever = base_retriever  # Default to vector-only
+        bm25_retriever = None
         use_query_embedding = True  # False only when we fall back to BM25-only (no vector leg)
         trace["base_alpha"] = hybrid_alpha
         trace["legs"] = ["vector"]
@@ -2405,7 +2408,7 @@ def search_with_llamaindex(
 
         # The keyword leg answers errors with an empty list; the trace must not
         # keep naming a leg that did not run.
-        _sparse = locals().get("bm25_retriever")
+        _sparse = bm25_retriever
         _sparse_error = getattr(_sparse, "last_error", None) if "bm25" in trace["legs"] else None
         if _sparse_error:
             trace["legs"] = [leg for leg in trace["legs"] if leg != "bm25"]

@@ -273,12 +273,14 @@ def _dispatch_document(progress_system, index_document_task, doc):
     return None
 
 
-# Documents that belong in the index whatever happened on their last run: the
-# indexed ones, those waiting or running, and those whose last run failed
-# (their vectors were kept until a successful run, and an index rebuilt from
-# scratch should try them again). NOT_INDEXED, STORED and STORAGE_FAILED rows
-# were never meant to be searchable.
-REBUILD_STATUSES = ("INDEXED", "INDEXING", "PENDING", "ERROR")
+# Documents an emptied index must take again: the indexed ones, those being
+# indexed, and those whose last run failed (their vectors were kept until a
+# successful run, and an index rebuilt from scratch should try them again).
+# PENDING ones are already waiting: the resume beat (GUAARDVARK_INDEX_AUTO_RESUME,
+# on by default) indexes them with the new model, and queuing them here would
+# override an install that holds its backlog. NOT_INDEXED, STORED and
+# STORAGE_FAILED rows were never meant to be searchable.
+REBUILD_STATUSES = ("INDEXED", "INDEXING", "ERROR")
 
 
 def requeue_documents_for_new_index() -> dict:
