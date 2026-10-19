@@ -413,9 +413,19 @@ def get_document_context(doc_id):
             if os.path.exists(full_path):
                 file_size = os.path.getsize(full_path)
 
-        # Estimate chunk count based on file size (rough estimate: 1KB per chunk)
-        chunk_count = max(1, file_size // 1024) if file_size > 0 else 1
-        avg_chunk_size = file_size // chunk_count if chunk_count > 0 else 0
+        # The chunks actually stored for it, counted in the vector table. This
+        # used to be a guess (one chunk per KB of file). None when the table
+        # cannot be read (a file-backed store), rather than a made-up number.
+        chunk_count = None
+        avg_chunk_size = None
+        try:
+            from backend.services.indexing_service import document_vector_stats
+            vstats = document_vector_stats(document.id, getattr(document, "project_id", None))
+            if vstats is not None:
+                chunk_count = vstats["chunks"]
+                avg_chunk_size = vstats["avg_chars"]
+        except Exception as count_err:
+            logger.warning(f"Could not count chunks for document {doc_id}: {count_err}")
 
         # Determine content types based on file extension
         content_types = []

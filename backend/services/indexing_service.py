@@ -1387,8 +1387,48 @@ def find_orphaned_vectors(project_id=None, profile: Optional[str] = None,
     return {"backend": "pgvector", "table": f"data_{table}", "orphans": n, "removed": removed}
 
 
+# One pass over a vector table: all rows, chunks, RAPTOR summaries, and the
+# documents (doc_<id>_ sources) that have rows.
+_COUNT_SQL = (
+    "SELECT count(*), "
+    "count(*) FILTER (WHERE COALESCE(metadata_->>'content_type', '') <> 'raptor_summary'), "
+    "count(*) FILTER (WHERE metadata_->>'content_type' = 'raptor_summary'), "
+    "count(DISTINCT substring(metadata_->>'document_id' from '^doc_([0-9]+)_')) "
+    'FROM "{table}"'
+)
+
+
+def document_vector_stats(document_id, project_id=None, profile: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """{"chunks", "avg_chars"} for one document, counted in the vector table, or
+    None when that cannot be read (not pgvector, no table, an error)."""
+    if _vector_backend() != "pgvector" or document_id is None:
+        return None
+    table = _pg_table_name(_store_scope(project_id), profile)
+    if not table:
+        return None
+    pattern = "doc\\_{}\\_%".format(str(document_id).replace("\\", "\\\\"))
+    try:
+        conn = _pg_connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f'SELECT count(*), COALESCE(avg(length(text)), 0) FROM "data_{table}" '
+                    f"WHERE metadata_->>'document_id' LIKE %s ESCAPE '\\' "
+                    f"AND COALESCE(metadata_->>'content_type', '') <> 'raptor_summary'",
+                    (pattern,),
+                )
+                chunks, avg_chars = cur.fetchone()
+        finally:
+            conn.close()
+        return {"chunks": int(chunks), "avg_chars": int(round(float(avg_chars or 0)))}
+    except Exception as e:
+        logger.warning("Could not count vectors for document %s: %s", document_id, e)
+        return None
+
+
 def vector_store_stats(project_id=None, profile: Optional[str] = None) -> Dict[str, Any]:
-    """Row count and on-disk size of the backing vector store."""
+    """Row counts (all rows, chunks, RAPTOR summaries, documents) and on-disk size
+    of the backing vector store."""
     if _vector_backend() != "pgvector":
         return {"backend": "simple"}
     table = _pg_table_name(project_id, profile)
@@ -1403,12 +1443,16 @@ def vector_store_stats(project_id=None, profile: Optional[str] = None) -> Dict[s
                 if cur.fetchone()[0] is None:
                     return {"backend": "pgvector", "table": full, "exists": False,
                             "rows": 0, "size_bytes": 0}
-                cur.execute(f'SELECT count(*) FROM "{full}"')
-                rows = cur.fetchone()[0]
+                cur.execute(_COUNT_SQL.format(table=full))
+                rows, chunks, summaries, documents = cur.fetchone()
                 cur.execute("SELECT pg_total_relation_size(%s)", (f"public.{full}",))
                 size = cur.fetchone()[0]
+            # rows: everything in the table; chunks: passages of documents and other
+            # indexed text; summaries: RAPTOR corpus summaries, which are not
+            # chunks of anything; documents: files with at least one chunk.
             return {"backend": "pgvector", "table": full, "exists": True,
-                    "rows": rows, "size_bytes": int(size or 0),
+                    "rows": int(rows), "chunks": int(chunks), "summaries": int(summaries),
+                    "documents": int(documents), "size_bytes": int(size or 0),
                     "embed_dim": _active_embed_dim()}
         finally:
             conn.close()

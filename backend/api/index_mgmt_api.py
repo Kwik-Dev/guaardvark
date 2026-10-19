@@ -59,6 +59,25 @@ def get_index_info():
         except Exception as e:
             logger.error(f"Index info: Error reading docstore.json: {e}", exc_info=True)
 
+    # With pgvector the vectors live in the database and docstore.json is never
+    # filled, so it read 0 however much was indexed: count the vector table.
+    summary_count = None
+    document_count = None
+    count_source = "docstore"
+    try:
+        from backend.services.indexing_service import vector_store_stats
+        stats = vector_store_stats()
+        if stats.get("backend") == "pgvector":
+            count_source = "vector_table"
+            chunk_count = int(stats.get("chunks", 0)) if stats.get("exists") else 0
+            summary_count = int(stats.get("summaries", 0)) if stats.get("exists") else 0
+            document_count = int(stats.get("documents", 0)) if stats.get("exists") else 0
+            if stats.get("error"):
+                count_source = "vector_table_unreadable"
+                chunk_count = None
+    except Exception as e:
+        logger.warning(f"Index info: could not count the vector table: {e}")
+
     # ==========================================================================
     # PROTECTED CODE - DO NOT MODIFY WITHOUT EXPLICIT PERMISSION
     # --------------------------------------------------------------------------
@@ -150,6 +169,9 @@ def get_index_info():
         jsonify(
             {
                 "chunk_count": chunk_count,
+                "summary_count": summary_count,
+                "document_count": document_count,
+                "count_source": count_source,
                 "embedding_model": model_name,
                 "last_rebuilt": last_rebuilt,
             }
