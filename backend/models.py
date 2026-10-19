@@ -3291,6 +3291,49 @@ class MusicVideo(VideoProjectLifecycleMixin, db.Model):
     project = db.relationship("Project", backref="music_videos")
 
 
+class MusicVideoRevision(db.Model):
+    """A saved version of a music video's creative state (plan, prompts, settings).
+
+    Written on approve / reassemble / revise and on an explicit "Save version";
+    restore brings the plan back and keeps any clip file whose inputs still match.
+    A NEW table (create_all adds it on boot; no ALTER of music_videos).
+    """
+    __tablename__ = "music_video_revisions"
+
+    id = db.Column(db.Integer, primary_key=True)
+    music_video_id = db.Column(
+        db.Integer,
+        db.ForeignKey("music_videos.id", name="fk_mv_revision_music_video_id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    label = db.Column(db.String(255), nullable=True)
+    # approve | reassemble | revise | manual | restore
+    reason = db.Column(db.String(32), nullable=False, default="manual")
+    snapshot = db.Column(db.JSON, nullable=False, default=dict)
+    created_at = db.Column(db.DateTime, nullable=False, default=db.func.now())
+
+    music_video = db.relationship(
+        "MusicVideo",
+        backref=db.backref("revisions", cascade="all, delete-orphan", lazy="dynamic"),
+    )
+
+    def to_dict(self, *, include_snapshot: bool = False) -> dict:
+        snap = self.snapshot or {}
+        out = {
+            "id": self.id,
+            "music_video_id": self.music_video_id,
+            "label": self.label,
+            "reason": self.reason,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "cut_count": len(snap.get("cut_plan") or []),
+            "clips_done": sum(1 for c in (snap.get("clips") or []) if c.get("status") == "done"),
+            "stage": snap.get("stage"),
+        }
+        if include_snapshot:
+            out["snapshot"] = snap
+        return out
+
+
 class Subject(db.Model):
     """A trainable LoRA subject — character, environment, or prop. Reusable across productions (Cast Library)."""
     __tablename__ = "subjects"

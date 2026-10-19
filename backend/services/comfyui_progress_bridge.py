@@ -289,7 +289,7 @@ class ComfyUIProgressBridge:
                         last_pct = pct
                         msg = f"{stage} {value}/{total}"
                         free_mb = _free_vram_mb()
-                        add = {"stage": stage, "node": node, **extra}
+                        add = {"stage": stage, "node": node, "step": value, "steps": total, **extra}
                         # Surface offload thrash risk on the UnifiedProgress rail
                         # (free near zero while denoising ≈ CPU weight thrash).
                         if free_mb is not None:

@@ -510,6 +510,11 @@ function ProjectsPage() {
                             <Typography variant="caption">
                               Rules: {project.rule_count ?? 0}
                             </Typography>
+                            {project.video_count > 0 && (
+                              <Typography variant="caption">
+                                Videos: {project.video_count}
+                              </Typography>
+                            )}
                           </Box>
                         </Grid>
                         <Grid item xs={3} sx={{ textAlign: "right" }}>

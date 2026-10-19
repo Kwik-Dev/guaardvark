@@ -127,3 +127,61 @@ export const regenMusicVideoStoryboard = async (id, index, data = {}) => {
   const response = await axios.post(`${API_BASE}/music-video/${id}/regen-storyboard/${index}`, data);
   return response.data;
 };
+
+/** The progress meter alone: { id, current_stage, status, progress }. */
+export const getMusicVideoProgress = async (id) => {
+  const response = await axios.get(`${API_BASE}/music-video/${id}/progress`);
+  return response.data;
+};
+
+/** Music videos filed under one project (projectId "none" lists unfiled ones). */
+export const listMusicVideosForProject = async (projectId) => {
+  const response = await axios.get(`${API_BASE}/music-video`, { params: { project_id: projectId } });
+  return response.data;
+};
+
+/** Rename / file under a project / notes / tags: { name?, project_id?, notes?, tags? }. */
+export const updateMusicVideo = async (id, data) => {
+  const response = await axios.patch(`${API_BASE}/music-video/${id}`, data);
+  return response.data;
+};
+
+/** Copy into a new music video: { name?, project_id?, keep_storyboards?, keep_clips? }. */
+export const duplicateMusicVideo = async (id, data = {}) => {
+  const response = await axios.post(`${API_BASE}/music-video/${id}/duplicate`, data);
+  return response.data;
+};
+
+/** Reopen a finished/failed/cancelled video for editing; finished clips are kept and
+ *  only cuts you change render again on approval. */
+export const reviseMusicVideo = async (id) => {
+  const response = await axios.post(`${API_BASE}/music-video/${id}/revise`);
+  return response.data;
+};
+
+/** Edit one cut: { prompt?, seed? (int|null), locked? (bool) }. */
+export const editMusicVideoCut = async (id, index, data) => {
+  const response = await axios.post(`${API_BASE}/music-video/${id}/cut/${index}`, data);
+  return response.data;
+};
+
+export const listMusicVideoRevisions = async (id) => {
+  const response = await axios.get(`${API_BASE}/music-video/${id}/revisions`);
+  return response.data;
+};
+
+export const saveMusicVideoRevision = async (id, label) => {
+  const response = await axios.post(`${API_BASE}/music-video/${id}/revisions`, { label });
+  return response.data;
+};
+
+export const restoreMusicVideoRevision = async (id, revisionId) => {
+  const response = await axios.post(`${API_BASE}/music-video/${id}/revisions/${revisionId}/restore`);
+  return response.data;
+};
+
+/** Every video project (music video, Film Crew) filed under a Guaardvark Project. */
+export const listProjectVideos = async (projectId) => {
+  const response = await axios.get(`${API_BASE}/projects/${projectId}/videos`);
+  return response.data;
+};

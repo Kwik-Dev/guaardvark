@@ -98,7 +98,23 @@ def test_list_all_spans_kinds(app):
     assert by_kind["film"]["name"] == "P1"
     assert by_kind["music_video"]["name"] == "M1"
     # normalized spine shape — no kind-specific payload leaks in
-    assert set(rows[0]) == {"kind", "id", "name", "status", "current_stage", "created_at", "updated_at"}
+    assert set(rows[0]) == {"kind", "id", "name", "status", "current_stage", "project_id",
+                            "created_at", "updated_at"}
+
+
+def test_list_all_filters_by_project(app):
+    from backend.models import Project
+    p = Project(name="Filed")
+    db.session.add(p)
+    db.session.commit()
+    ProductionService(db.session).create(name="P1", script_text="x", project_id=p.id)
+    MusicVideoService(db.session).create(
+        name="M1", song_document_id=1, song_path=None, style_prompt="x", project_id=p.id)
+    MusicVideoService(db.session).create(
+        name="M2", song_document_id=1, song_path=None, style_prompt="x", project_id=None)
+    rows = reg.list_all(db.session, project_id=p.id)
+    assert sorted(r["name"] for r in rows) == ["M1", "P1"]
+    assert reg.count_by_project(db.session) == {p.id: 2}
 
 
 def test_resume_all_kinds_counts_per_kind(app, sent):

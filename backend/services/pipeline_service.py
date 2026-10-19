@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime
 
 from sqlalchemy.orm import Session
 
@@ -84,6 +85,10 @@ class PipelineService:
     stage_to_agent: dict[str, "str | None"] = {}
     task_namespace: str = ""
     stage_context: str = ""
+    #: Opt-in: write stage start/end times into settings_json["stage_timings"]
+    #: (the music-video progress meter reads them). Off by default so kinds whose
+    #: settings_json is user-facing verbatim keep it unchanged.
+    record_stage_timings: bool = False
 
     def __init__(self, session: Session, gate=None):
         self.s = session
@@ -113,7 +118,50 @@ class PipelineService:
             )
         )
         self.s.commit()
+        if rows > 0:
+            self.stamp_stage(row_id, next_stage, ended=expected_predecessor)
         return rows > 0
+
+    def stamp_stage(self, row_id: int, started: str | None, *, ended: str | None = None,
+                    failed: str | None = None) -> None:
+        """Record stage boundaries in ``settings_json["stage_timings"]`` for the
+        progress meter: ``{stage: {started_at, ended_at, failed_at}}``.
+
+        Runs AFTER the atomic transition has committed, as a separate best-effort
+        write: a failure here is logged and never undoes or blocks a transition.
+        The row's settings are re-read first so a concurrent settings write is
+        not clobbered with a stale copy.
+        """
+        if not self.record_stage_timings:
+            return
+        try:
+            row = self.s.get(self.model_cls, row_id)
+            if row is None:
+                return
+            self.s.refresh(row, ["settings_json"])
+            settings = dict(row.settings_json or {})
+            timings = {k: dict(v) for k, v in (settings.get("stage_timings") or {}).items()
+                       if isinstance(v, dict)}
+            now = datetime.now().isoformat(timespec="seconds")
+            if ended:
+                timings.setdefault(ended, {})["ended_at"] = now
+            if failed:
+                timings.setdefault(failed, {})["failed_at"] = now
+            if started:
+                # A re-entered stage (revise, re-analyze) starts a fresh timing.
+                timings[started] = {"started_at": now}
+            settings["stage_timings"] = timings
+            # Live step detail belongs to the stage that just ended.
+            if ended:
+                settings.pop("progress", None)
+            row.settings_json = settings
+            self.s.commit()
+        except Exception as e:  # noqa: BLE001 — timing is display-only
+            log.warning("stamp_stage failed for %s %s: %s", self.task_namespace, row_id, e)
+            try:
+                self.s.rollback()
+            except Exception:  # noqa: BLE001
+                pass
 
     def fail_stage(self, row_id: int, *, stage: str, error) -> None:
         """Persist a ``failed_<stage>`` status + error blob so the boot resumer skips it."""
@@ -123,6 +171,7 @@ class PipelineService:
         row.status = f"failed_{stage}"
         row.error_blob = {"stage": stage, "error": _coerce_error(error)}
         self.s.commit()
+        self.stamp_stage(row_id, None, failed=stage)
 
     # --- Resumability ------------------------------------------------------
 

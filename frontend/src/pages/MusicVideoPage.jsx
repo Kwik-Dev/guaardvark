@@ -16,10 +16,23 @@ import {
   Link,
   IconButton,
   Tooltip,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  List,
+  ListItem,
+  ListItemText,
 } from "@mui/material";
 import MusicVideoIcon from "@mui/icons-material/MusicVideo";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import CloseIcon from "@mui/icons-material/Close";
+import LockIcon from "@mui/icons-material/Lock";
+import LockOpenIcon from "@mui/icons-material/LockOpen";
+import EditIcon from "@mui/icons-material/Edit";
+import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import HistoryIcon from "@mui/icons-material/History";
+import { Link as RouterLink, useSearchParams } from "react-router-dom";
 
 import { uploadFile } from "../api/documentService";
 import {
@@ -41,7 +54,16 @@ import {
   approveMusicVideoCut,
   rerenderMusicVideoCut,
   reassembleMusicVideo,
+  updateMusicVideo,
+  duplicateMusicVideo,
+  reviseMusicVideo,
+  editMusicVideoCut,
+  listMusicVideoRevisions,
+  saveMusicVideoRevision,
+  restoreMusicVideoRevision,
 } from "../api/musicVideoService";
+import { getProjects } from "../api/projectService";
+import MusicVideoProgress from "../components/videogen/MusicVideoProgress";
 import { getAllPluginStatus } from "../api/pluginsService";
 import { getAvailableModels } from "../api/modelService";
 import GpuGateBanner from "../components/common/GpuGateBanner";
@@ -62,12 +84,30 @@ const DEFAULT_KEYFRAME_MODEL = "flux-schnell";
 const CUT_PREFIX = "cut:";
 const cutKey = (index) => `${CUT_PREFIX}${index}`;
 
+// Plan autosave is on unless this browser turned it off. Storage can be
+// unavailable (private window, blocked site data): then it is simply on.
+const AUTOSAVE_PREF_KEY = "mv.autosave";
+const readAutosavePref = () => {
+  try {
+    return window.localStorage.getItem(AUTOSAVE_PREF_KEY) !== "off";
+  } catch {
+    return true;
+  }
+};
+const writeAutosavePref = (on) => {
+  try {
+    window.localStorage.setItem(AUTOSAVE_PREF_KEY, on ? "on" : "off");
+  } catch {
+    // not remembered; the toggle still applies to this visit
+  }
+};
+
 const planFieldLabel = (key) => (key === "treatment" ? "The treatment" : `Cut #${key.slice(CUT_PREFIX.length)}`);
 
 // Local presentational + interactive component for the cut plan + Director prompts.
 // Keeps the main page component from exploding in size.
 // onDirtyChange(bool) tells the page whether the plan has unsaved edits.
-function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, onGenerateStoryboards, onRegenStoryboard, onDirtyChange, comfyReady = true, comfyDisabled = false, comfyInfo = null, gpuBlocked = false }) {
+function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, onGenerateStoryboards, onRegenStoryboard, onEditCut, onDirtyChange, onRegisterFlush, comfyReady = true, comfyDisabled = false, comfyInfo = null, gpuBlocked = false }) {
   const cutPlan = detail.cut_plan || [];
   const clips = detail.clips || [];
   const isEditable = detail.current_stage === "awaiting_approval";
@@ -83,6 +123,8 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
       section: c.section_label || c.section || "unlabeled",
       prompt: clip.prompt || "",
       storyboard_path: clip.storyboard_path || null,
+      locked: !!clip.locked,
+      seed: Number.isInteger(clip.seed) ? clip.seed : null,
     };
   });
 
@@ -203,18 +245,95 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
 
   const hasLocalEdits = planDirty;
 
-  // Sends only what changed. Edits stay pending when the save fails.
-  const handleSave = async () => {
-    const changes = planForm.changes;
-    if (!Object.keys(changes).length) return;
-    const payload = { prompts: {} };
-    Object.entries(changes).forEach(([key, value]) => {
-      if (key === "treatment") payload.treatment = value;
-      else payload.prompts[key.slice(CUT_PREFIX.length)] = value;
-    });
-    const saved = await onSavePlan(payload);
-    if (saved !== false) planForm.markSaved(changes);
-  };
+  // Autosave: plan edits are saved ~1.5 s after the last keystroke. Approving,
+  // duplicating or opening another video saves what is pending first; leaving
+  // the page with unsaved edits still asks. The Save button saves at once.
+  // Nothing autosaves while a conflict notice is open (the person picks) or
+  // while another action on the video is running.
+  const [autosave, setAutosave] = useState(readAutosavePref);
+  const [savedAt, setSavedAt] = useState(null);
+  const [saveState, setSaveState] = useState("idle"); // idle | saving | error
+  const changesKey = JSON.stringify(planForm.changes);
+  const hasConflicts = Object.keys(planForm.conflicts || {}).length > 0;
+  const formRef = useRef(planForm);
+  formRef.current = planForm;
+  const saveRef = useRef(onSavePlan);
+  saveRef.current = onSavePlan;
+  const autosaveRef = useRef(autosave);
+  autosaveRef.current = autosave;
+  const inFlight = useRef(null);
+  const unsavedAfterSave = useRef([]);
+  const autosaveTimer = useRef(null);
+  useEffect(() => {
+    writeAutosavePref(autosave);
+  }, [autosave]);
+
+  // Sends what is pending when it starts, one save at a time, so two saves
+  // never land out of order. An emptied field is not sent (the server refuses
+  // an empty prompt, and an empty treatment would erase the Director's); it
+  // stays dirty. Edits stay pending when the save fails.
+  const handleSave = useCallback(async ({ quiet = false } = {}) => {
+    while (inFlight.current) {
+      try {
+        await inFlight.current;
+      } catch {
+        // the earlier save already reported its own failure
+      }
+    }
+    const run = (async () => {
+      const changes = formRef.current.changes;
+      const payload = { prompts: {} };
+      const sent = {};
+      Object.entries(changes).forEach(([key, value]) => {
+        if (!String(value || "").trim()) return;
+        if (key === "treatment") payload.treatment = value;
+        else payload.prompts[key.slice(CUT_PREFIX.length)] = value;
+        sent[key] = value;
+      });
+      unsavedAfterSave.current = Object.keys(changes).filter((k) => !(k in sent));
+      if (!Object.keys(sent).length) return true;
+      const saved = await saveRef.current(payload, undefined, { quiet, videoId: detail.id });
+      if (saved !== false) {
+        formRef.current.markSaved(sent);
+        setSavedAt(new Date());
+      } else {
+        unsavedAfterSave.current = Object.keys(changes);
+      }
+      return saved;
+    })();
+    inFlight.current = run;
+    try {
+      return await run;
+    } finally {
+      if (inFlight.current === run) inFlight.current = null;
+    }
+  }, [detail.id]);
+
+  useEffect(() => {
+    if (!autosave || !isEditable || !planForm.isDirty || busy || hasConflicts) return undefined;
+    autosaveTimer.current = setTimeout(async () => {
+      setSaveState("saving");
+      const ok = await handleSave({ quiet: true });
+      setSaveState(ok === false ? "error" : "idle");
+    }, 1500);
+    return () => clearTimeout(autosaveTimer.current);
+  }, [autosave, isEditable, changesKey, busy, hasConflicts, handleSave]);
+
+  // For the page: save pending edits now. True when nothing unsaved is left;
+  // false sends the page to its "drop the unsaved edits?" question.
+  const flushPlanEdits = useCallback(async () => {
+    clearTimeout(autosaveTimer.current);
+    const form = formRef.current;
+    if (!isEditable || !form.isDirty) return true;
+    if (!autosaveRef.current || Object.keys(form.conflicts || {}).length) return false;
+    const saved = await handleSave({ quiet: true });
+    return saved !== false && unsavedAfterSave.current.length === 0;
+  }, [isEditable, handleSave]);
+  useEffect(() => {
+    if (!onRegisterFlush) return undefined;
+    onRegisterFlush(flushPlanEdits);
+    return () => onRegisterFlush(null);
+  }, [onRegisterFlush, flushPlanEdits]);
 
   const handleRegen = async () => {
     if (planForm.isDirty && !window.confirm(
@@ -481,7 +600,7 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
               const displayed = getDisplayedPrompt(row);
               const timeLabel = `${row.start.toFixed(2)}s – ${row.end.toFixed(2)}s`;
               return (
-                <Box key={row.index} sx={{ pl: 0.5 }}>
+                <Box key={row.index} id={`mv-cut-${row.index}`} sx={{ pl: 0.5 }}>
                   <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.25 }}>
                     <Chip size="small" label={`#${row.index}`} />
                     <Typography variant="caption" sx={{ fontFamily: "monospace" }}>
@@ -491,6 +610,50 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
                     <Typography variant="caption" color="text.secondary">
                       energy {(row.energy || 0).toFixed(2)}
                     </Typography>
+                    <Box sx={{ flex: 1 }} />
+                    {onEditCut && isEditable && (
+                      <>
+                        <TextField
+                          size="small"
+                          type="number"
+                          label="Seed"
+                          placeholder="auto"
+                          defaultValue={row.seed ?? ""}
+                          key={`seed-${detail.id}-${row.index}-${row.seed ?? "auto"}`}
+                          onBlur={(e) => {
+                            // Text a number field rejects reads as "": keep the seed.
+                            if (e.target.validity?.badInput) {
+                              e.target.value = row.seed ?? "";
+                              return;
+                            }
+                            const raw = e.target.value.trim();
+                            const next = raw === "" ? null : Number.parseInt(raw, 10);
+                            if (raw !== "" && !Number.isInteger(next)) return;
+                            if (next !== row.seed) onEditCut(row.index, { seed: next });
+                          }}
+                          inputProps={{ min: 0, step: 1, style: { width: 82, padding: "2px 6px" } }}
+                          InputLabelProps={{ shrink: true }}
+                          sx={{ "& .MuiInputBase-root": { fontSize: "0.75rem" } }}
+                        />
+                        <Tooltip title={row.locked
+                          ? "Locked: Regenerate Plan keeps this cut's prompt and storyboard. Click to unlock."
+                          : "Lock this cut so Regenerate Plan does not rewrite it."}
+                        >
+                          <span>
+                            <IconButton
+                              size="small"
+                              aria-label={row.locked ? `Unlock cut ${row.index}` : `Lock cut ${row.index}`}
+                              onClick={() => onEditCut(row.index, { locked: !row.locked })}
+                              disabled={busy}
+                              color={row.locked ? "warning" : "default"}
+                            >
+                              {row.locked ? <LockIcon fontSize="inherit" /> : <LockOpenIcon fontSize="inherit" />}
+                            </IconButton>
+                          </span>
+                        </Tooltip>
+                      </>
+                    )}
+                    {!isEditable && row.locked && <LockIcon fontSize="inherit" color="warning" />}
                   </Stack>
 
                   {isEditable ? (
@@ -561,10 +724,32 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
               size="small"
               variant="outlined"
               disabled={!hasLocalEdits || busy}
-              onClick={handleSave}
+              onClick={() => handleSave()}
             >
               Save plan changes
             </Button>
+            <Tooltip title="Save plan edits automatically a moment after you stop typing">
+              <Stack direction="row" alignItems="center" spacing={0.5}>
+                <input
+                  type="checkbox"
+                  id="mv-autosave"
+                  checked={autosave}
+                  onChange={(e) => setAutosave(e.target.checked)}
+                />
+                <label htmlFor="mv-autosave" style={{ fontSize: "0.75rem" }}>Autosave</label>
+              </Stack>
+            </Tooltip>
+            <Typography variant="caption" color={saveState === "error" ? "error" : "text.secondary"} data-testid="mv-save-state">
+              {saveState === "saving"
+                ? "Saving…"
+                : saveState === "error"
+                  ? "Not saved"
+                  : hasLocalEdits
+                    ? "Unsaved edits"
+                    : savedAt
+                      ? `Saved ${savedAt.toLocaleTimeString()}`
+                      : ""}
+            </Typography>
             {hasLocalEdits && (
               <Link component="button" variant="caption" onClick={() => planForm.reset(serverPlan)}>
                 discard local edits
@@ -659,6 +844,108 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
 }
 
 
+// Saved versions of one music video: list, save the current state, restore one.
+function VersionsDialog({ open, video, onClose, onRestored }) {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [label, setLabel] = useState("");
+  // Shown in the dialog itself: the page's error area sits behind it.
+  const [dialogError, setDialogError] = useState(null);
+  const showError = (e, fallback) => setDialogError(formatUiError(e?.response?.data?.error) || e.message || fallback);
+  const load = useCallback(async () => {
+    if (!video) return;
+    setLoading(true);
+    try {
+      setRows((await listMusicVideoRevisions(video.id)).revisions || []);
+      setLoaded(true);
+      setDialogError(null);
+    } catch (e) {
+      setLoaded(false);
+      setDialogError(formatUiError(e?.response?.data?.error) || e.message || "Could not load versions");
+    } finally {
+      setLoading(false);
+    }
+  }, [video?.id]);
+  useEffect(() => { if (open) load(); }, [open, load]);
+
+  const busyStage = video && ["analyzing", "generating", "assembling"].includes(video.current_stage)
+    && !/^(failed|cancelled)/.test(video.status || "");
+
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
+      <DialogTitle>Versions of “{video?.name}”</DialogTitle>
+      <DialogContent dividers>
+        <Stack direction="row" spacing={1} sx={{ mb: 2 }}>
+          <TextField
+            size="small" fullWidth label="Name this version" value={label}
+            onChange={(e) => setLabel(e.target.value)}
+          />
+          <Button
+            variant="outlined"
+            onClick={async () => {
+              try {
+                await saveMusicVideoRevision(video.id, label.trim() || "Saved version");
+                setLabel("");
+                await load();
+              } catch (e) {
+                showError(e, "Save failed");
+              }
+            }}
+          >
+            Save
+          </Button>
+        </Stack>
+        {dialogError && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setDialogError(null)}>{dialogError}</Alert>}
+        {loading && <LinearProgress />}
+        {!loading && loaded && rows.length === 0 && (
+          <Typography variant="body2" color="text.secondary">
+            No versions yet. One is saved automatically when you approve, re-assemble, revise or restore.
+          </Typography>
+        )}
+        <List dense>
+          {rows.map((r) => (
+            <ListItem
+              key={r.id}
+              secondaryAction={
+                <Button
+                  size="small"
+                  disabled={busyStage || !r.cut_count}
+                  onClick={async () => {
+                    if (!window.confirm("Restore this version? The current state is saved as a version first, and the video goes back to plan review. Clips whose prompt and settings still match are kept.")) return;
+                    try {
+                      const updated = await restoreMusicVideoRevision(video.id, r.id);
+                      onRestored(updated);
+                      onClose();
+                    } catch (e) {
+                      showError(e, "Restore failed");
+                    }
+                  }}
+                >
+                  Restore
+                </Button>
+              }
+            >
+              <ListItemText
+                primary={r.label || r.reason}
+                secondary={`${new Date(r.created_at).toLocaleString()} · ${r.reason} · ${r.cut_count} cuts · ${r.clips_done} rendered`}
+              />
+            </ListItem>
+          ))}
+        </List>
+        {busyStage && (
+          <Typography variant="caption" color="text.secondary">
+            Cancel the running stage to restore a version.
+          </Typography>
+        )}
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose}>Close</Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
 const stageColor = (stage, status, cutCount = 0) => {
   if ((status || "").startsWith("cancelled") || stage === "cancelled") return "default";
   if ((status || "").startsWith("failed")) return "error";
@@ -674,6 +961,11 @@ const hasCutPlan = (mv) => (mv?.cut_plan?.length || mv?.cut_count || 0) > 0;
 const needsAnalysis = (mv) => !!mv && !hasCutPlan(mv);
 const isAnalysisRunning = (mv) =>
   mv?.current_stage === "analyzing" && !(mv?.status || "").startsWith("failed");
+
+// Working right now (shows the compact meter in the list).
+const isRunning = (mv) =>
+  ["analyzing", "generating", "assembling"].includes(mv?.current_stage)
+  && !/^(failed|cancelled)/.test(mv?.status || "");
 
 const stageLabel = (mv) => {
   if (!mv) return "";
@@ -692,8 +984,16 @@ const MusicVideoPage = () => {
   const [selectedId, setSelectedId] = useState(null);
   // The open plan has edits not yet saved (reported by PlanViewer).
   const [planDirty, setPlanDirty] = useState(false);
-  const confirmDropPlanEdits = (what) =>
-    !planDirty || window.confirm(`The plan has unsaved edits. ${what} without them?`);
+  const confirmDropPlanEdits = (what, dirty = planDirty) =>
+    !dirty || window.confirm(`The plan has unsaved edits. ${what} without them?`);
+  // The plan editor's "save what is pending now", registered while it is open.
+  const planFlushRef = useRef(null);
+  const registerPlanFlush = useCallback((fn) => { planFlushRef.current = fn; }, []);
+  // Saves pending plan edits (autosave on), then asks about any that remain.
+  const settlePlanEdits = async (what) => {
+    const clean = planFlushRef.current ? await planFlushRef.current() : !planDirty;
+    return confirmDropPlanEdits(what, !clean);
+  };
   const [detail, setDetail] = useState(null);
 
   const [name, setName] = useState("");
@@ -708,6 +1008,37 @@ const MusicVideoPage = () => {
   const [pluginStatus, setPluginStatus] = useState(null); // {comfyui_reachable, ...} or {status:{comfyui:'stopped',...}} or {plugins:[...]} for storyboard guards
   const [models, setModels] = useState([]); // installed Ollama models for the director-model dropdown (embedding models filtered backend-side)
   const fileInputRef = useRef(null);
+
+  // Guaardvark Projects: file a music video under one (create form, header, list filter).
+  const [searchParams] = useSearchParams();
+  const urlProjectId = searchParams.get("project_id") || "";
+  const [projects, setProjects] = useState([]);
+  const [createProjectId, setCreateProjectId] = useState(urlProjectId);
+  const [projectFilter, setProjectFilter] = useState(urlProjectId || "all");
+  const [versionsOpen, setVersionsOpen] = useState(false);
+  const [renaming, setRenaming] = useState(null); // draft name while editing the header
+  // Escape closes the field; the blur that follows must not save the draft.
+  const renameCancelled = useRef(false);
+  const [duplicateAsk, setDuplicateAsk] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    getProjects().then((res) => {
+      if (alive && Array.isArray(res)) setProjects(res);
+    }).catch((e) => {
+      if (alive) setError(`Projects could not be loaded, so the project picker is empty: ${formatUiError(e?.response?.data?.error) || e.message}`);
+    });
+    return () => { alive = false; };
+  }, []);
+  const urlVideoId = searchParams.get("id") || "";
+  useEffect(() => {
+    // Opened from a project's page: new videos are filed under it and the list
+    // shows its videos; ?id= opens that video.
+    if (urlProjectId) {
+      setCreateProjectId(urlProjectId);
+      setProjectFilter(urlProjectId);
+    }
+    if (urlVideoId && Number(urlVideoId)) setSelectedId(Number(urlVideoId));
+  }, [urlProjectId, urlVideoId]);
 
   // Load installed chat models once so the director-model dropdown only offers models that
   // actually exist (the list is small and rarely changes; /api/model/list already filters
@@ -1017,6 +1348,7 @@ const MusicVideoPage = () => {
         song_document_id: songDocId,
         style_prompt: stylePrompt.trim(),
         user_treatment: userTreatment.trim() || undefined,
+        project_id: createProjectId ? Number(createProjectId) : undefined,
         settings,
       });
       setName("");
@@ -1060,7 +1392,7 @@ const MusicVideoPage = () => {
   const handleApprove = async () => {
     if (!detail) return;
     // Approving locks the plan, so unsaved edits could never be saved after.
-    if (!confirmDropPlanEdits("Approve and lock the plan")) return;
+    if (!(await settlePlanEdits("Approve and lock the plan"))) return;
     setBusy(true);
     setError(null);
     try {
@@ -1107,6 +1439,72 @@ const MusicVideoPage = () => {
     } finally {
       setBusy(false);
     }
+  };
+
+  // --- Saving / editing the video as a project ---------------------------------
+  const runUpdate = async (fn, failText) => {
+    if (!detail) return null;
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await fn();
+      noteDispatch(updated?.id ?? detail.id, updated);
+      return updated;
+    } catch (e) {
+      setError(formatUiError(e?.response?.data?.error) || e.message || failText);
+      return null;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRename = async () => {
+    if (renameCancelled.current) {
+      renameCancelled.current = false;
+      return;
+    }
+    const next = (renaming || "").trim();
+    setRenaming(null);
+    if (!next || next === detail.name) return;
+    const updated = await runUpdate(() => updateMusicVideo(detail.id, { name: next }), "Rename failed.");
+    if (updated) { setDetail(updated); await refreshList(); }
+  };
+
+  const handleMoveProject = async (value) => {
+    const updated = await runUpdate(
+      () => updateMusicVideo(detail.id, { project_id: value === "" ? null : Number(value) }),
+      "Could not file the video under that project.",
+    );
+    if (updated) { setDetail(updated); await refreshList(); }
+  };
+
+  const handleDuplicate = async () => {
+    if (!(await settlePlanEdits("Duplicate"))) return;
+    if ((detail.clips_done || 0) > 0) {
+      setDuplicateAsk(true);  // reuse the rendered clips, render fresh, or cancel
+      return;
+    }
+    await runDuplicate(false);
+  };
+
+  const runDuplicate = async (keepClips) => {
+    setDuplicateAsk(false);
+    const copy = await runUpdate(
+      () => duplicateMusicVideo(detail.id, { keep_clips: keepClips }),
+      "Duplicate failed.",
+    );
+    if (copy) { await refreshList(); setSelectedId(copy.id); }
+  };
+
+  const handleRevise = async () => {
+    if (!window.confirm("Reopen this video for editing? Rendered clips are kept; after you edit, approving renders only the cuts whose prompt, seed or settings changed, then assembles again. The current state is saved as a version.")) return;
+    const updated = await runUpdate(() => reviseMusicVideo(detail.id), "Could not reopen the video.");
+    if (updated) { setDetail(updated); await refreshList(); }
+  };
+
+  const handleEditCut = async (index, data) => {
+    const updated = await runUpdate(() => editMusicVideoCut(detail.id, index, data), "Cut edit failed.");
+    if (updated) setDetail(updated);
   };
 
   const handleCancel = async () => {
@@ -1179,6 +1577,12 @@ const MusicVideoPage = () => {
       v.current_stage === "cancelled",
   ).length;
 
+  const shownVideos = videos.filter((v) => {
+    if (projectFilter === "all") return true;
+    if (projectFilter === "none") return !v.project_id;
+    return String(v.project_id) === String(projectFilter);
+  });
+
   const hasActiveGeneration = videos.some(
     (v) =>
       (v.current_stage === "generating" || v.current_stage === "assembling") &&
@@ -1213,6 +1617,17 @@ const MusicVideoPage = () => {
                 label="Name" size="small" fullWidth value={name}
                 onChange={(e) => setName(e.target.value)}
               />
+              <TextField
+                select size="small" fullWidth label="Project (optional)"
+                value={createProjectId}
+                onChange={(e) => setCreateProjectId(e.target.value)}
+                helperText="File it under a Guaardvark project: the finished video shows in that project's Videos and Documents."
+              >
+                <MenuItem value="">No project</MenuItem>
+                {projects.map((p) => (
+                  <MenuItem key={p.id} value={String(p.id)}>{p.name}</MenuItem>
+                ))}
+              </TextField>
               <TextField
                 label="Visual style / prompt" size="small" fullWidth multiline minRows={3}
                 placeholder="animation style, deep blue colors, loss and heartache, slow movement"
@@ -1446,16 +1861,30 @@ const MusicVideoPage = () => {
                 </Link>
               )}
             </Stack>
-            {videos.length === 0 && (
-              <Typography variant="body2" color="text.secondary">None yet.</Typography>
+            {projects.length > 0 && (
+              <TextField
+                select size="small" fullWidth label="Show" sx={{ mb: 1 }}
+                value={projectFilter} onChange={(e) => setProjectFilter(e.target.value)}
+              >
+                <MenuItem value="all">All music videos</MenuItem>
+                <MenuItem value="none">Not in a project</MenuItem>
+                {projects.map((p) => (
+                  <MenuItem key={p.id} value={String(p.id)}>Project: {p.name}</MenuItem>
+                ))}
+              </TextField>
+            )}
+            {shownVideos.length === 0 && (
+              <Typography variant="body2" color="text.secondary">
+                {videos.length === 0 ? "None yet." : "None in this project."}
+              </Typography>
             )}
             <Stack spacing={1}>
-              {videos.map((v) => (
+              {shownVideos.map((v) => (
                 <Paper
                   key={v.id}
                   variant="outlined"
-                  onClick={() => {
-                    if (v.id !== selectedId && !confirmDropPlanEdits("Open another video")) return;
+                  onClick={async () => {
+                    if (v.id !== selectedId && !(await settlePlanEdits("Open another video"))) return;
                     setSelectedId(v.id);
                   }}
                   sx={{
@@ -1479,6 +1908,18 @@ const MusicVideoPage = () => {
                       </IconButton>
                     </Tooltip>
                   </Stack>
+                  {(v.project_name || isRunning(v)) && (
+                    <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 0.5 }}>
+                      {v.project_name && (
+                        <Chip size="small" variant="outlined" label={v.project_name} sx={{ maxWidth: 140 }} />
+                      )}
+                      {isRunning(v) && (
+                        <Box sx={{ flex: 1, minWidth: 0 }}>
+                          <MusicVideoProgress progress={v.progress} compact running />
+                        </Box>
+                      )}
+                    </Stack>
+                  )}
                 </Paper>
               ))}
             </Stack>
@@ -1495,9 +1936,44 @@ const MusicVideoPage = () => {
             </Paper>
           ) : (
             <Paper variant="outlined" sx={{ p: 2.5 }}>
-              <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
-                <Typography variant="h6">{detail.name}</Typography>
-                <Stack direction="row" spacing={1} alignItems="center">
+              <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }} flexWrap="wrap" useFlexGap spacing={1}>
+                {renaming !== null ? (
+                  <TextField
+                    size="small" autoFocus value={renaming}
+                    onChange={(e) => setRenaming(e.target.value)}
+                    onBlur={handleRename}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") handleRename();
+                      if (e.key === "Escape") {
+                        renameCancelled.current = true;
+                        setRenaming(null);
+                      }
+                    }}
+                    inputProps={{ "aria-label": "Music video name" }}
+                  />
+                ) : (
+                  <Stack direction="row" alignItems="center" spacing={0.5} sx={{ minWidth: 0 }}>
+                    <Typography variant="h6" noWrap>{detail.name}</Typography>
+                    <Tooltip title="Rename">
+                      <IconButton size="small" aria-label="Rename" onClick={() => setRenaming(detail.name)}>
+                        <EditIcon fontSize="inherit" />
+                      </IconButton>
+                    </Tooltip>
+                  </Stack>
+                )}
+                <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                  <Tooltip title="Duplicate into a new music video (same song, story, plan and settings)">
+                    <span>
+                      <IconButton size="small" aria-label="Duplicate" onClick={handleDuplicate} disabled={busy}>
+                        <ContentCopyIcon fontSize="small" />
+                      </IconButton>
+                    </span>
+                  </Tooltip>
+                  <Tooltip title="Versions: save, compare and restore">
+                    <IconButton size="small" aria-label="Versions" onClick={() => setVersionsOpen(true)}>
+                      <HistoryIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
                   <Chip label={stageLabel(detail)} color={stageColor(detail.current_stage, detail.status, detail.cut_count)} />
                   {needsAnalysis(detail) && !isAnalysisRunning(detail) && (
                     <Button
@@ -1509,6 +1985,15 @@ const MusicVideoPage = () => {
                     >
                       {busy ? <CircularProgress size={18} /> : "Continue & Analyze"}
                     </Button>
+                  )}
+                  {hasCutPlan(detail) && (detail.current_stage === "complete" || (detail.status || "").match(/^(failed|cancelled)/) || detail.current_stage === "cancelled") && (
+                    <Tooltip title="Back to plan review, keeping rendered clips: only cuts you change render again">
+                      <span>
+                        <Button size="small" variant="contained" onClick={handleRevise} disabled={busy}>
+                          Edit & Re-render Changes
+                        </Button>
+                      </span>
+                    </Tooltip>
                   )}
                   {hasCutPlan(detail) && (detail.current_stage === "complete" || (detail.status || "").match(/^(failed|cancelled)/) || detail.current_stage === "cancelled") && (
                     <Button
@@ -1530,7 +2015,7 @@ const MusicVideoPage = () => {
                       }}
                       disabled={busy}
                     >
-                      Re-plan & Re-render
+                      Re-render Everything
                     </Button>
                   )}
                   {needsAnalysis(detail) && ((detail.status || "").match(/^(failed|cancelled)/) || detail.current_stage === "cancelled") && (
@@ -1545,9 +2030,39 @@ const MusicVideoPage = () => {
                   )}
                 </Stack>
               </Stack>
-              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
                 {detail.style_prompt}
               </Typography>
+              <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 2 }}>
+                <TextField
+                  select size="small" label="Project" sx={{ minWidth: 220 }}
+                  value={detail.project_id ? String(detail.project_id) : ""}
+                  onChange={(e) => handleMoveProject(e.target.value)}
+                  disabled={busy}
+                >
+                  <MenuItem value="">No project</MenuItem>
+                  {projects.map((p) => (
+                    <MenuItem key={p.id} value={String(p.id)}>{p.name}</MenuItem>
+                  ))}
+                </TextField>
+                {detail.project_id && (
+                  <Link component={RouterLink} to={`/projects/${detail.project_id}?tab=videos`} variant="caption">
+                    Open project
+                  </Link>
+                )}
+              </Stack>
+
+              <Box sx={{ mb: 2 }}>
+                <MusicVideoProgress
+                  progress={detail.progress}
+                  clips={detail.clips}
+                  running={isRunning(detail)}
+                  onCutClick={(index) => {
+                    const el = document.getElementById(`mv-cut-${index}`);
+                    if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+                  }}
+                />
+              </Box>
               <Divider sx={{ mb: 2 }} />
 
               {notice && notice.id === detail.id && (
@@ -1596,17 +2111,22 @@ const MusicVideoPage = () => {
               {/* === Video Plan / Director output (visible after analysis) === */}
               {detail.cut_plan && detail.cut_plan.length > 0 && (
                 <PlanViewer
+                  key={detail.id}
                   detail={detail}
                   busy={busy}
                   onDirtyChange={setPlanDirty}
+                  onRegisterFlush={registerPlanFlush}
                   gpuBlocked={gpuBusy}
                   models={models}
                   comfyReady={comfyReady}
                   comfyDisabled={comfyDisabled}
                   comfyInfo={comfyInfo}
-                  onSavePlan={async (arg1, arg2) => {
+                  onEditCut={handleEditCut}
+                  onSavePlan={async (arg1, arg2, opts = {}) => {
+                    const quiet = !!opts.quiet;
+                    const videoId = opts.videoId ?? detail.id;
                     try {
-                      setBusy(true);
+                      if (!quiet) setBusy(true);
                       let payload = {};
                       if (arg1 && typeof arg1 === 'object' && !Array.isArray(arg1)) {
                         // New shape from PlanViewer: {prompts, treatment?, style_prompt? }
@@ -1616,14 +2136,14 @@ const MusicVideoPage = () => {
                         payload = { prompts: arg1 || {} };
                         if (arg2 && arg2.trim()) payload.style_prompt = arg2.trim();
                       }
-                      await updateMusicVideoPlan(detail.id, payload);
-                      await refreshDetail(detail.id);
+                      await updateMusicVideoPlan(videoId, payload);
+                      if (videoId === detail.id) await refreshDetail(videoId);
                       return true;
                     } catch (e) {
                       setError(formatUiError(e?.response?.data?.error) || e.message || "Failed to save plan edits");
                       return false;
                     } finally {
-                      setBusy(false);
+                      if (!quiet) setBusy(false);
                     }
                   }}
                   onGenerateStoryboards={async () => {
@@ -1677,7 +2197,6 @@ const MusicVideoPage = () => {
               {isAnalysisRunning(detail) && (
                 <Stack spacing={1} sx={{ mb: 2 }}>
                   <Typography variant="body2">Analyzing the song for beats &amp; energy…</Typography>
-                  <LinearProgress />
                   <Button
                     size="small"
                     variant="outlined"
@@ -1698,6 +2217,12 @@ const MusicVideoPage = () => {
                       ? "Storyboards generated — review/regen individuals below, then Approve & Generate the full video (i2v)." 
                       : "Use the 'Generate Storyboards' button in the plan below to create thumbnails first for review." }
                     <br />Estimated full video time after storyboards: <b>{detail.estimate.estimated_human}</b>.
+                    {detail.cuts_to_render != null && detail.cuts_to_render < detail.cut_count && (
+                      <>
+                        <br />Only <b>{detail.cuts_to_render}</b> of {detail.cut_count} cuts will render: the rest
+                        are already rendered with the same prompt and settings and are kept.
+                      </>
+                    )}
                   </Alert>
                   <Box>
                     <GpuGateBanner gpuBusy={gpuBusy} blockReason={blockReason} blockDetail={blockDetail} queueMode />
@@ -1724,10 +2249,6 @@ const MusicVideoPage = () => {
                   <Typography variant="body2">
                     Generating clips: {detail.clips_done} / {detail.clip_count}
                   </Typography>
-                  <LinearProgress
-                    variant={detail.clip_count ? "determinate" : "indeterminate"}
-                    value={detail.clip_count ? (detail.clips_done / detail.clip_count) * 100 : 0}
-                  />
                   {activeClipStep && (
                     <Box>
                       <LiveLatentPreview src={getPreviewUrl(activeClipStep.job_id)} />
@@ -1766,7 +2287,6 @@ const MusicVideoPage = () => {
               {detail.current_stage === "assembling" && !(detail.status || "").startsWith("failed") && (
                 <Stack spacing={1}>
                   <Typography variant="body2">Assembling the final cut in sync with your song…</Typography>
-                  <LinearProgress />
                   <Button
                     size="small"
                     variant="outlined"
@@ -1826,6 +2346,29 @@ const MusicVideoPage = () => {
           )}
         </Box>
       </Box>
+      <Dialog open={duplicateAsk} onClose={() => setDuplicateAsk(false)} maxWidth="xs" fullWidth>
+        <DialogTitle>Duplicate “{detail?.name}”</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2">
+            The copy can reuse the clips already rendered, so only the cuts you change render again,
+            or render every cut fresh.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDuplicateAsk(false)}>Cancel</Button>
+          <Button onClick={() => runDuplicate(false)}>Render every cut fresh</Button>
+          <Button variant="contained" onClick={() => runDuplicate(true)}>Reuse rendered clips</Button>
+        </DialogActions>
+      </Dialog>
+      <VersionsDialog
+        open={versionsOpen}
+        video={detail}
+        onClose={() => setVersionsOpen(false)}
+        onRestored={async (updated) => {
+          setDetail(updated);
+          await refreshList();
+        }}
+      />
     </Box>
   );
 };
