@@ -1157,9 +1157,9 @@ ${currentTab.content}
             <Box
               component="iframe"
               srcDoc={getPreviewContent()}
-              // Scripts run, but on an opaque origin: the previewed page cannot
-              // read the app, its storage or call its API as the app.
-              sandbox="allow-scripts"
+              // Scripts, dialogs and forms work, on an opaque origin: the previewed
+              // page cannot read the app, its storage or call its API as the app.
+              sandbox="allow-scripts allow-modals allow-forms"
               sx={{
                 width: '100%',
                 height: '70vh',
