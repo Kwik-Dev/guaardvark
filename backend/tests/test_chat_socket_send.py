@@ -139,3 +139,41 @@ def test_a_voice_turn_over_socket_reaches_the_brain_as_voice(brain_turn):
     _send(app, room, {"session_id": "sock-voice-1", "message": "hello there", "is_voice_message": True})
 
     assert calls[0]["is_voice_message"] is True
+
+
+def test_a_second_chat_send_does_not_run_beside_a_live_turn(socket_turn, monkeypatch):
+    """chat:send shares the REST in-flight slot: no two turns on one session at once."""
+    import backend.config as config
+    from backend import socketio_events
+    from backend.api import unified_chat_api as api
+    from backend.services.agent_brain import AgentBrain
+
+    app, room, _tool = socket_turn
+    monkeypatch.setattr(config, "AGENT_BRAIN_ENABLED", True)
+    monkeypatch.setattr(api, "INFLIGHT_GRACE_S", 0.2)
+    app.brain_state = type("State", (), {"is_ready": True})()
+    release = threading.Event()
+    started = []
+    running = threading.Semaphore(0)
+
+    def process(self, **kwargs):
+        started.append(kwargs["message"])
+        running.release()
+        release.wait(10)
+
+    monkeypatch.setattr(AgentBrain, "process", process)
+    sid = "sock-serial-1"
+    try:
+        with app.test_request_context("/"):
+            socketio_events._handle_chat_send_local({"session_id": sid, "message": "first"})
+            assert running.acquire(timeout=5)
+            socketio_events._handle_chat_send_local({"session_id": sid, "message": "second"})
+        assert started == ["first"]
+        errors = [p for e, p in room.events if e == "chat:error"]
+        assert errors and "still running" in errors[-1]["error"]
+    finally:
+        release.set()
+        with api._inflight_lock:
+            t = api._inflight.get(sid)
+        if t is not None:
+            t.join(5)

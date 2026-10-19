@@ -249,6 +249,8 @@ def handle_chat_abort(data):
     try:
         from backend.services.unified_chat_engine import set_abort_flag
         set_abort_flag(session_id)
+        from backend.api.unified_chat_api import release_turn_slot
+        release_turn_slot(session_id)
         logger.info(f"Abort requested for chat session: {session_id}")
         emit("chat:aborted", {"session_id": session_id})
     except Exception as e:
@@ -689,7 +691,19 @@ def _handle_chat_send_local(payload):
             interactive_turn.close()
             end_turn(session_id)
 
-    threading.Thread(target=_run, daemon=True, name=f"bridge-chat-{session_id[:8]}").start()
+    # One turn per session, shared with POST /api/chat/unified: the previous
+    # turn (stopped by begin_new_turn above) gets a moment to exit first.
+    from backend.api.unified_chat_api import start_turn_thread
+    if start_turn_thread(session_id, _run, f"bridge-chat-{session_id[:8]}") is None:
+        logger.warning("[BRIDGE-LOCAL] session %s: previous turn still running; refused", session_id)
+        try:
+            _sio.emit("chat:error", {
+                "session_id": session_id,
+                "error": "A previous request for this session is still running and didn't "
+                         "respond to the abort signal. Stop it, or start a new chat.",
+            }, room=session_id)
+        except Exception as _e:
+            logger.warning("[BRIDGE-LOCAL] emit chat:error failed: %s", _e)
 
 
 @socketio.on("chat:send")

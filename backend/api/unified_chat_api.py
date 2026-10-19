@@ -43,6 +43,69 @@ def chat_config():
 # already running get a 409 instead.
 _inflight: dict = {}
 _inflight_lock = threading.Lock()
+# Threads a hard abort released: still running, but already stopped and muted
+# (turn_replaced), so the next turn on the session may take their slot.
+_released_by_abort: dict = {}
+# How long a new turn waits for the previous turn on the session to notice its
+# stop flag and exit before replacing it or refusing.
+INFLIGHT_GRACE_S = 1.5
+
+
+def release_turn_slot(session_id: str) -> bool:
+    """After a hard abort: let the next turn on the session take the slot.
+
+    A thread that is still running stays in the slot, so the next turn first
+    waits for it to exit and only then replaces it; dropping it here let a new
+    turn start beside it. Returns True when there was a slot to release.
+    """
+    with _inflight_lock:
+        existing = _inflight.get(session_id)
+        if existing is None:
+            return False
+        if existing.is_alive():
+            _released_by_abort[session_id] = existing
+        else:
+            _inflight.pop(session_id, None)
+        return True
+
+
+def start_turn_thread(session_id: str, target, name: str):
+    """Run ``target`` as the session's one chat turn; None when the slot is held.
+
+    Called after begin_new_turn() has stopped the previous turn. Waits up to
+    INFLIGHT_GRACE_S for that turn's thread to exit. A thread still running
+    after a hard abort is replaced (its events are already dropped by
+    turn_replaced); any other live thread keeps the slot and this returns None.
+    Shared by POST /api/chat/unified and chat:send so the two never run two
+    turns on one session at once.
+    """
+    with _inflight_lock:
+        existing = _inflight.get(session_id)
+    if existing is not None and existing.is_alive() and existing is not threading.current_thread():
+        existing.join(timeout=INFLIGHT_GRACE_S)
+
+    def _run():
+        try:
+            target()
+        finally:
+            with _inflight_lock:
+                if _inflight.get(session_id) is threading.current_thread():
+                    _inflight.pop(session_id, None)
+
+    with _inflight_lock:
+        existing = _inflight.get(session_id)
+        if existing is not None and existing.is_alive():
+            if _released_by_abort.get(session_id) is not existing:
+                return None
+            logger.warning(
+                f"[UNIFIED_CHAT] session {session_id}: replacing a turn that was "
+                f"hard-aborted and has not exited yet"
+            )
+        _released_by_abort.pop(session_id, None)
+        thread = threading.Thread(target=_run, daemon=True, name=name)
+        _inflight[session_id] = thread
+        thread.start()
+        return thread
 
 
 def _project_root_dir(value) -> str | None:
@@ -431,39 +494,24 @@ def unified_chat():
                 if _inflight.get(session_id) is threading.current_thread():
                     _inflight.pop(session_id, None)
 
-    # Snapshot the existing thread (if any) so we can wait for it to unwind
-    # outside the lock — we already set the abort flag above, the old thread
-    # just needs a moment to notice and exit. Without this grace period, the
-    # new request races the abort signal and almost always loses with 409,
-    # even though we explicitly asked the old thread to step aside.
-    with _inflight_lock:
-        existing = _inflight.get(session_id)
-
-    if existing is not None and existing.is_alive():
-        existing.join(timeout=1.5)
-
-    # Now claim the slot. If the old thread is *still* alive after the grace
-    # period, it's genuinely wedged (stuck Ollama call, frozen tool, etc.) —
-    # reject and tell the user to hard-abort or start a new session.
-    with _inflight_lock:
-        existing = _inflight.get(session_id)
-        if existing is not None and existing.is_alive():
-            logger.warning(
-                f"[UNIFIED_CHAT] Rejecting request {request_id[:8]} — session "
-                f"{session_id} has a wedged chat thread that didn't unwind "
-                f"after abort signal"
-            )
-            return jsonify({
-                "success": False,
-                "error": "A previous request for this session is still running "
-                         "and didn't respond to the abort signal. "
-                         "Use /abort (CLI), POST /api/chat/unified/<session_id>/abort, "
-                         "or /new for a fresh session.",
-                "request_id": request_id,
-            }), 409
-        thread = threading.Thread(target=run_engine, daemon=True, name=f"unified-chat-{request_id[:8]}")
-        _inflight[session_id] = thread
-        thread.start()
+    # The previous turn was stopped above (begin_new_turn); give its thread a
+    # moment to notice and exit. A thread that is still alive and was not
+    # hard-aborted is wedged (stuck Ollama call, frozen tool): refuse.
+    thread = start_turn_thread(session_id, run_engine, f"unified-chat-{request_id[:8]}")
+    if thread is None:
+        logger.warning(
+            f"[UNIFIED_CHAT] Rejecting request {request_id[:8]} — session "
+            f"{session_id} has a wedged chat thread that didn't unwind "
+            f"after abort signal"
+        )
+        return jsonify({
+            "success": False,
+            "error": "A previous request for this session is still running "
+                     "and didn't respond to the abort signal. "
+                     "Use /abort (CLI), POST /api/chat/unified/<session_id>/abort, "
+                     "or /new for a fresh session.",
+            "request_id": request_id,
+        }), 409
 
     return jsonify({
         "success": True,
@@ -598,13 +646,7 @@ def abort_chat(session_id):
     except Exception:
         pass
 
-    # Force-release the session slot. The old thread's finally block uses an
-    # identity check, so a late exit will not clobber a newer claim.
-    cleared = False
-    with _inflight_lock:
-        if session_id in _inflight:
-            _inflight.pop(session_id, None)
-            cleared = True
+    cleared = release_turn_slot(session_id)
 
     try:
         from backend.socketio_instance import socketio
