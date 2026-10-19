@@ -1005,7 +1005,31 @@ class PurgeResult(int):
         return f"PurgeResult({int(self)}, reason={self.reason!r})"
 
 
-def purge_document_vectors(document_id, project_id=None, profile: Optional[str] = None) -> PurgeResult:
+def vector_row_watermark(project_id=None, profile: Optional[str] = None) -> Optional[int]:
+    """The highest row id in the scope's vector table (0 when it is empty), or
+    None when that cannot be read (not pgvector, no table, an error). Rows above
+    it were inserted afterwards; purge_document_vectors(up_to_row=...) leaves them."""
+    if _vector_backend() != "pgvector":
+        return None
+    table = _pg_table_name(_store_scope(project_id), profile)
+    if not table:
+        return None
+    try:
+        conn = _pg_connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f'SELECT COALESCE(MAX(id), 0) FROM "data_{table}"')
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        return int(row[0]) if row else 0
+    except Exception as e:
+        logger.warning("Could not read the vector table watermark: %s", e)
+        return None
+
+
+def purge_document_vectors(document_id, project_id=None, profile: Optional[str] = None,
+                           up_to_row: Optional[int] = None) -> PurgeResult:
     """Remove a document's existing vectors before re-indexing it.
 
     Returns a `PurgeResult`: the rows removed, with `reason` set when no DELETE
@@ -1021,6 +1045,9 @@ def purge_document_vectors(document_id, project_id=None, profile: Optional[str] 
 
     Deletes by the `document_id` metadata stamped on every node at ingest, which
     covers all of a file's parsed documents at once (a PDF contributes one per page).
+
+    ``up_to_row`` limits it to rows with an id up to that one (vector_row_watermark
+    read before a re-index inserted), so the copy just inserted stays.
     """
     if _vector_backend() != "pgvector":
         return PurgeResult(0, "not_pgvector")
@@ -1043,11 +1070,18 @@ def purge_document_vectors(document_id, project_id=None, profile: Optional[str] 
         conn = _pg_connect()
         try:
             with conn.cursor() as cur:
-                cur.execute(
-                    f'DELETE FROM "data_{table}" '
-                    f'WHERE metadata_->>\'document_id\' LIKE %s ESCAPE \'\\\'',
-                    (pattern,),
-                )
+                if up_to_row is None:
+                    cur.execute(
+                        f'DELETE FROM "data_{table}" '
+                        f'WHERE metadata_->>\'document_id\' LIKE %s ESCAPE \'\\\'',
+                        (pattern,),
+                    )
+                else:
+                    cur.execute(
+                        f'DELETE FROM "data_{table}" '
+                        f'WHERE metadata_->>\'document_id\' LIKE %s ESCAPE \'\\\' AND id <= %s',
+                        (pattern, int(up_to_row)),
+                    )
                 removed = cur.rowcount or 0
             conn.commit()
         finally:
@@ -1353,8 +1387,48 @@ def find_orphaned_vectors(project_id=None, profile: Optional[str] = None,
     return {"backend": "pgvector", "table": f"data_{table}", "orphans": n, "removed": removed}
 
 
+# One pass over a vector table: all rows, chunks, RAPTOR summaries, and the
+# documents (doc_<id>_ sources) that have rows.
+_COUNT_SQL = (
+    "SELECT count(*), "
+    "count(*) FILTER (WHERE COALESCE(metadata_->>'content_type', '') <> 'raptor_summary'), "
+    "count(*) FILTER (WHERE metadata_->>'content_type' = 'raptor_summary'), "
+    "count(DISTINCT substring(metadata_->>'document_id' from '^doc_([0-9]+)_')) "
+    'FROM "{table}"'
+)
+
+
+def document_vector_stats(document_id, project_id=None, profile: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """{"chunks", "avg_chars"} for one document, counted in the vector table, or
+    None when that cannot be read (not pgvector, no table, an error)."""
+    if _vector_backend() != "pgvector" or document_id is None:
+        return None
+    table = _pg_table_name(_store_scope(project_id), profile)
+    if not table:
+        return None
+    pattern = "doc\\_{}\\_%".format(str(document_id).replace("\\", "\\\\"))
+    try:
+        conn = _pg_connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f'SELECT count(*), COALESCE(avg(length(text)), 0) FROM "data_{table}" '
+                    f"WHERE metadata_->>'document_id' LIKE %s ESCAPE '\\' "
+                    f"AND COALESCE(metadata_->>'content_type', '') <> 'raptor_summary'",
+                    (pattern,),
+                )
+                chunks, avg_chars = cur.fetchone()
+        finally:
+            conn.close()
+        return {"chunks": int(chunks), "avg_chars": int(round(float(avg_chars or 0)))}
+    except Exception as e:
+        logger.warning("Could not count vectors for document %s: %s", document_id, e)
+        return None
+
+
 def vector_store_stats(project_id=None, profile: Optional[str] = None) -> Dict[str, Any]:
-    """Row count and on-disk size of the backing vector store."""
+    """Row counts (all rows, chunks, RAPTOR summaries, documents) and on-disk size
+    of the backing vector store."""
     if _vector_backend() != "pgvector":
         return {"backend": "simple"}
     table = _pg_table_name(project_id, profile)
@@ -1369,12 +1443,16 @@ def vector_store_stats(project_id=None, profile: Optional[str] = None) -> Dict[s
                 if cur.fetchone()[0] is None:
                     return {"backend": "pgvector", "table": full, "exists": False,
                             "rows": 0, "size_bytes": 0}
-                cur.execute(f'SELECT count(*) FROM "{full}"')
-                rows = cur.fetchone()[0]
+                cur.execute(_COUNT_SQL.format(table=full))
+                rows, chunks, summaries, documents = cur.fetchone()
                 cur.execute("SELECT pg_total_relation_size(%s)", (f"public.{full}",))
                 size = cur.fetchone()[0]
+            # rows: everything in the table; chunks: passages of documents and other
+            # indexed text; summaries: RAPTOR corpus summaries, which are not
+            # chunks of anything; documents: files with at least one chunk.
             return {"backend": "pgvector", "table": full, "exists": True,
-                    "rows": rows, "size_bytes": int(size or 0),
+                    "rows": int(rows), "chunks": int(chunks), "summaries": int(summaries),
+                    "documents": int(documents), "size_bytes": int(size or 0),
                     "embed_dim": _active_embed_dim()}
         finally:
             conn.close()
@@ -2630,6 +2708,44 @@ def no_content_reason(document_id) -> Optional[str]:
     return _NO_CONTENT_REASONS.get(str(document_id))
 
 
+# The text the loaders put in a document they could read nothing from
+# ("Image file: x.png (no text content extracted)", get_documents_from_file and
+# file_processor_adapter). It says why there is nothing; it is not content, and
+# embedded it would answer searches as the file's text.
+_PLACEHOLDER_TEXT = re.compile(
+    r"^(?:Image |Excel |Code )?[Ff]ile: .+ \(no text content (?:extracted|detected through OCR)\)$")
+
+
+def is_placeholder_document(doc) -> bool:
+    """True for a loader's stand-in for a file it read no text from."""
+    meta = getattr(doc, "metadata", None) or {}
+    if meta.get("no_text_extracted"):
+        return True
+    return bool(_PLACEHOLDER_TEXT.match((getattr(doc, "text", None) or "").strip()))
+
+
+def _placeholder_reason(docs, filename) -> str:
+    """Why nothing could be read, from what the loaders recorded."""
+    for d in docs:
+        meta = getattr(d, "metadata", None) or {}
+        why = meta.get("extraction_error") or meta.get("processing_error")
+        if why:
+            return f"nothing to index: no text could be read from {filename} ({why})"
+    return f"nothing to index: no text could be read from {filename}"
+
+
+def _fail_ingest(progress_system, db_document, process_id, reason: str) -> bool:
+    """Record why this ingest failed (index_document_task writes it on the
+    document) and report the failure. The document's previous vectors stay."""
+    _NO_CONTENT_REASONS[str(db_document.id)] = reason
+    logger.error("Indexing %s failed: %s", getattr(db_document, "filename", db_document.id), reason)
+    try:
+        progress_system.error_process(process_id, reason)
+    except Exception:  # noqa: BLE001 - the failure is already recorded
+        pass
+    return False
+
+
 def get_documents_from_file(file_path: str, client: Optional[str] = None, upload_date: Optional[str] = None) -> List[LlamaDocument]:
     documents: List[LlamaDocument] = []
     try:
@@ -3171,14 +3287,16 @@ def add_file_to_index(file_path: str, db_document: DBDocument, progress_callback
 
             # A file with bytes in it that yields no text would index as zero
             # nodes and read as indexed. A 0-byte file is left to the caller,
-            # which stores it as an empty document.
+            # which stores it as an empty document. A loader's "(no text content
+            # extracted)" stand-in is not text: it is dropped, and a file that
+            # has only stand-ins fails with the loader's reason.
+            placeholders = [d for d in (documents or []) if is_placeholder_document(d)]
+            if placeholders:
+                documents = [d for d in documents if not is_placeholder_document(d)]
             if not documents or (
                     file_size_bytes and not any((d.text or "").strip() for d in documents)):
-                reason = f"nothing to index: no text could be read from {db_document.filename}"
-                _NO_CONTENT_REASONS[str(db_document.id)] = reason
-                logger.error(f"{reason} ({file_path})")
-                progress_system.error_process(process_id, reason)
-                return False
+                return _fail_ingest(progress_system, db_document, process_id,
+                                    _placeholder_reason(placeholders, db_document.filename))
             
             logger.info(f"Loaded {len(documents)} document(s) from {file_path}")
             
@@ -3224,7 +3342,7 @@ def add_file_to_index(file_path: str, db_document: DBDocument, progress_callback
         
         try:
             # Determine if this is a code file and route to appropriate chunker
-            from backend.utils.code_chunker import CodeAwareChunker
+            from backend.utils.code_chunker import CodeAwareChunker, bind_chunks_to_document
             from backend.utils.contextual_prepender import prepend_context_to_nodes
 
             code_chunker = CodeAwareChunker()
@@ -3236,6 +3354,9 @@ def add_file_to_index(file_path: str, db_document: DBDocument, progress_callback
                 nodes = []
                 for doc in documents:
                     doc_nodes = code_chunker.chunk_code(doc.text, language, file_path)
+                    # Same ids and source link as prose chunks, so a re-index or a
+                    # delete finds these rows (purge_document_vectors).
+                    bind_chunks_to_document(doc_nodes, doc)
                     # Carry over document-level metadata to each node
                     for node in doc_nodes:
                         node.metadata.update(doc.metadata or {})
@@ -3286,9 +3407,17 @@ def add_file_to_index(file_path: str, db_document: DBDocument, progress_callback
                 # Standard chunking for non-code files
                 from backend.utils.enhanced_rag_chunking import get_shared_chunker
                 rag_chunker = get_shared_chunker()
+                chunk_errors: List[str] = []
                 with _phase("chunk_ms", timings):
-                    nodes = rag_chunker.chunk_documents(documents, strategy_name='auto')
+                    nodes = rag_chunker.chunk_documents(documents, strategy_name='auto',
+                                                        errors=chunk_errors)
                 logger.info(f"Enhanced RAG chunking produced {len(nodes)} nodes from {len(documents)} documents")
+                # A part that could not be chunked would be missing from the index
+                # while the document reads as indexed.
+                if chunk_errors:
+                    return _fail_ingest(progress_system, db_document, process_id, (
+                        f"chunking failed for {len(chunk_errors)} of {len(documents)} part(s) "
+                        f"of {db_document.filename}: {chunk_errors[0]}"))
 
                 # Contextual Retrieval for prose, mirroring the code branch above: the
                 # embedded text names its document, section and page, so a chunk lifted
@@ -3308,25 +3437,21 @@ def add_file_to_index(file_path: str, db_document: DBDocument, progress_callback
                     pass
 
             logger.info(f"Generated {len(nodes)} nodes from {len(documents)} documents")
-            
-            # Replace, don't append: pgvector INSERTs rather than upserting by node id,
-            # so without this a re-index leaves the previous copy in place alongside
-            # the new one.
-            try:
-                with _phase("purge_ms", timings):
-                    _purged = purge_document_vectors(getattr(db_document, "id", None),
-                                                     getattr(db_document, "project_id", None))
-                # A file-backed store overwrites nodes in place, so there is nothing
-                # to purge there. Anywhere else, a purge that did not run means the
-                # insert below may leave the previous copy beside the new one.
-                if not _purged.ok and _purged.reason != "not_pgvector":
-                    logger.warning(
-                        "Pre-insert purge did not run for document %s (%s); a previous "
-                        "copy may remain in the index",
-                        getattr(db_document, "id", None), _purged.reason,
-                    )
-            except Exception as _pe:
-                logger.warning("Pre-insert purge skipped: %s", _pe)
+
+            # Nothing to insert is a failed ingest, not an empty success: the
+            # document keeps its previous vectors and says why.
+            if not nodes:
+                return _fail_ingest(progress_system, db_document, process_id,
+                                    f"nothing to index: {db_document.filename} produced no chunks")
+
+            # Rows already in the table: the previous copy, removed only once the
+            # new one is in (below), so a failed re-index leaves it searchable.
+            _replace_before = vector_row_watermark(getattr(db_document, "project_id", None))
+            if _replace_before is None and _vector_backend() == "pgvector":
+                # The watermark could not be read, so the previous copy cannot be
+                # told from the new one afterwards: remove it first, as before.
+                purge_document_vectors(getattr(db_document, "id", None),
+                                       getattr(db_document, "project_id", None))
 
             # Collapse duplicate node ids before inserting. Node ids are derived from
             # (document, section, chunk text), so a document that genuinely repeats
@@ -3366,6 +3491,29 @@ def add_file_to_index(file_path: str, db_document: DBDocument, progress_callback
                         except Exception:
                             pass
                 _record_index_embedding_model(getattr(db_document, "project_id", None))  # stamp model
+
+                # Replace, don't append: pgvector INSERTs rather than upserting by
+                # node id, so the previous copy (rows up to the watermark) goes now
+                # that the new one is in.
+                try:
+                    with _phase("purge_ms", timings):
+                        if _replace_before is None and _vector_backend() == "pgvector":
+                            _purged = PurgeResult(0)  # removed before the insert
+                        else:
+                            _purged = purge_document_vectors(getattr(db_document, "id", None),
+                                                             getattr(db_document, "project_id", None),
+                                                             up_to_row=_replace_before)
+                    # A file-backed store overwrites nodes in place, so there is nothing
+                    # to purge there. Anywhere else, a purge that did not run means the
+                    # previous copy is still beside the new one.
+                    if not _purged.ok and _purged.reason != "not_pgvector":
+                        logger.warning(
+                            "Purge of the previous copy did not run for document %s (%s); "
+                            "it may remain in the index",
+                            getattr(db_document, "id", None), _purged.reason,
+                        )
+                except Exception as _pe:
+                    logger.warning("Purge of the previous copy skipped: %s", _pe)
 
                 logger.info(f"Persisting index for {db_document.filename}")
                 progress_system.update_process(process_id, 90, f"Persisting index: {db_document.filename}")

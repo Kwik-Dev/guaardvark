@@ -125,6 +125,9 @@ def processed_content_to_llamaindex_docs(
     
     # Create main document
     text_content = processed.text_content or f"File: {filename} (no text content extracted)"
+    if not processed.text_content:
+        # A stand-in, not content: indexing_service.is_placeholder_document drops it.
+        metadata["no_text_extracted"] = True
     
     document = LlamaDocument(
         text=text_content,

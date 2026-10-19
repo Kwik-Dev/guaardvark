@@ -252,7 +252,9 @@ def enhanced_code_aware_indexing(file_path, document, document_id, update_progre
 
 
 def simple_index_document(file_path, document_id):
-    """Enhanced document indexing for code files without LlamaIndex dependencies"""
+    """Record a code file's metadata without LlamaIndex. It adds nothing to the
+    vector index, so it does not mark the document INDEXED; True means the
+    metadata was written, not that the document is searchable."""
     try:
         logger.info(f"Starting enhanced indexing for document {document_id}")
 
@@ -296,10 +298,9 @@ def simple_index_document(file_path, document_id):
                     # Update the document with enhanced status
                     session.execute(text("""
                         UPDATE documents
-                        SET index_status = :index_status, indexed_at = :indexed_at, file_metadata = :file_metadata
+                        SET file_metadata = :file_metadata
                         WHERE id = :document_id
-                    """), {"index_status": 'INDEXED', "indexed_at": datetime.datetime.now().isoformat(),
-                           "file_metadata": json.dumps(metadata), "document_id": document_id})
+                    """), {"file_metadata": json.dumps(metadata), "document_id": document_id})
 
                     session.commit()
                     logger.info(f"Enhanced code file indexing completed for document {document_id}: {metadata['line_count']} lines, {metadata['char_count']} characters")
@@ -311,16 +312,15 @@ def simple_index_document(file_path, document_id):
                 finally:
                     session.close()
             else:
-                logger.info(f"Processing as regular file: {file_path}")
-                # For non-code files, use basic processing
-                pass
+                # Nothing to record for other files, and nothing was indexed.
+                logger.info(f"Fallback indexing does nothing for a non-code file: {file_path}")
+                return False
 
             return True
 
         except UnicodeDecodeError as e:
             logger.warning(f"Text encoding issue for {file_path}: {e}")
-            # Still mark as indexed but note the encoding issue
-            return True
+            return False
         except Exception as e:
             logger.error(f"Error processing file content for {document_id}: {e}")
             return False
@@ -444,13 +444,18 @@ def index_document_task(document_id, process_id=None):
         
         # Index the document using enhanced code-aware processing
         update_progress(70, f'Processing file content for {document["filename"]}')
+        fallback_reason = None
         try:
             # Use the enhanced indexing that works with the existing CodeChunker system
             success = enhanced_code_aware_indexing(full_file_path, document, document_id, update_progress)
         except Exception as e:
             logger.error(f"Enhanced indexing failed: {e}, falling back to simple indexing")
             update_progress(75, f'Using fallback indexing due to error for {document["filename"]}')
-            success = simple_index_document(full_file_path, document_id)
+            # The fallback records file metadata; it adds nothing to the vector
+            # index, so it never makes the document searchable.
+            simple_index_document(full_file_path, document_id)
+            success = False
+            fallback_reason = f"Indexing failed for {document['filename']}: {e}"
 
         if success == DEFERRED:
             message = f"Indexing deferred for {document['filename']}: vector store not in use; left PENDING"
@@ -489,7 +494,7 @@ def index_document_task(document_id, process_id=None):
                 reason = no_content_reason(document_id)
             except Exception:
                 reason = None
-            error_msg = reason or f"Indexing failed for document {document_id}"
+            error_msg = reason or fallback_reason or f"Indexing failed for document {document_id}"
             logger.error(error_msg)
 
             # Update document status
