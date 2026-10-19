@@ -412,32 +412,9 @@ def unified_chat():
             # to brain or legacy. This guarantees the bypass even when AgentBrain
             # is the sole router. Avoids LLM involvement and the associated eviction EOFs.
             try:
-                from backend.services.slash_command_executor import resolve_slash_direct_tool
-                from backend.services.unified_chat_engine import UnifiedChatEngine
-                from backend.utils.llm_service import get_llm_for_startup
-                from backend.tools.tool_registry_init import initialize_all_tools
-                d_tool, d_params = resolve_slash_direct_tool(options)
-                if d_tool:
-                    logger.info(f"[UNIFIED_API] Direct slash/direct intercept for {d_tool} before router")
-                    reg = initialize_all_tools()
-                    llm = None
-                    try:
-                        llm = get_llm_for_startup()
-                    except Exception:
-                        pass
-                    eng = UnifiedChatEngine(tool_registry=reg, llm_instance=llm or object())
-                    eng.app = app
-                    eng._project_id = project_id
-                    rid = str(uuid.uuid4())
-                    disp = message or f"/{options.get('slash_command', d_tool)}"
-                    try:
-                        from backend.services.turn_router import direct_turn
-                        with app.app_context():
-                            direct_turn(disp, d_tool, surface=options.get("surface"), request_id=rid)
-                    except Exception as _turn_e:
-                        logger.debug(f"direct turn not recorded: {_turn_e}")
-                    with app.app_context():
-                        eng._run_direct_tool_execution(d_tool, d_params, session_id, emit_fn, rid, disp, options)
+                from backend.services.slash_command_executor import run_direct_tool_turn
+                if run_direct_tool_turn(options, message, session_id, emit_fn, app,
+                                        project_id=project_id, log_tag="UNIFIED_API"):
                     return  # done, direct path emitted everything
             except Exception as _dir_e:
                 logger.debug(f"Direct intercept pre-check skipped or failed (will route normally): {_dir_e}")
