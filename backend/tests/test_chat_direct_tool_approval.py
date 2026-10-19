@@ -9,11 +9,19 @@ the MCP service (the external server) is the only stand-in.
 import pytest
 
 import backend.services.unified_chat_engine as uce
-import backend.tools.mcp_tools as mcp_tools
 from backend.services.agent_tools import ToolRegistry
 from backend.services.mcp_policy import PolicyDecision
 
 SID = "direct-gated"
+
+
+def _mcp_tools():
+    # Imported when a test runs, not at collection: the backend test conftest
+    # puts backend/ on sys.path, where backend/mcp shadows the MCP SDK, and the
+    # client service decides once at import whether the SDK is there. Test
+    # modules that need the real SDK load it during collection.
+    import backend.tools.mcp_tools as mcp_tools
+    return mcp_tools
 
 
 class _FakeMcpService:
@@ -27,6 +35,7 @@ class _FakeMcpService:
 
 @pytest.fixture
 def gated(monkeypatch):
+    mcp_tools = _mcp_tools()
     service = _FakeMcpService()
     monkeypatch.setattr(mcp_tools, "get_mcp_service", lambda: service)
     tool = mcp_tools.MCPProxyTool(
