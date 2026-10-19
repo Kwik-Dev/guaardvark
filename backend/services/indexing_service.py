@@ -3224,7 +3224,7 @@ def add_file_to_index(file_path: str, db_document: DBDocument, progress_callback
         
         try:
             # Determine if this is a code file and route to appropriate chunker
-            from backend.utils.code_chunker import CodeAwareChunker
+            from backend.utils.code_chunker import CodeAwareChunker, bind_chunks_to_document
             from backend.utils.contextual_prepender import prepend_context_to_nodes
 
             code_chunker = CodeAwareChunker()
@@ -3236,6 +3236,9 @@ def add_file_to_index(file_path: str, db_document: DBDocument, progress_callback
                 nodes = []
                 for doc in documents:
                     doc_nodes = code_chunker.chunk_code(doc.text, language, file_path)
+                    # Same ids and source link as prose chunks, so a re-index or a
+                    # delete finds these rows (purge_document_vectors).
+                    bind_chunks_to_document(doc_nodes, doc)
                     # Carry over document-level metadata to each node
                     for node in doc_nodes:
                         node.metadata.update(doc.metadata or {})

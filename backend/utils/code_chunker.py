@@ -1,10 +1,11 @@
 """AST-aware code chunking using LlamaIndex CodeSplitter with tree-sitter."""
 
+import hashlib
 import logging
 import os
 from typing import List, Optional
 
-from llama_index.core.schema import TextNode
+from llama_index.core.schema import NodeRelationship, TextNode
 
 logger = logging.getLogger(__name__)
 
@@ -144,3 +145,26 @@ class CodeAwareChunker:
             ))
 
         return nodes
+
+
+def bind_chunks_to_document(nodes: List[TextNode], document) -> List[TextNode]:
+    """Give code chunks the id and source link prose chunks have.
+
+    The chunkers above split a throwaway document (AST) or none (line-based),
+    so a chunk's source was a random id or nothing. PGVectorStore stores the
+    source id as the row's ``document_id`` (LlamaIndex
+    ``node_to_metadata_dict``: ``node.ref_doc_id or "None"``), and re-index
+    and delete remove a file's rows by ``doc_<db id>_`` in that field
+    (indexing_service.purge_document_vectors), so code vectors were never
+    removed. Each chunk now points at ``document`` (id ``doc_<db id>_<sha16>``)
+    and is named ``<document id>_<md5 of its text, 8 chars>``, the scheme
+    enhanced_rag_chunking uses for prose chunk ids.
+    """
+    source = document.as_related_node_info()
+    doc_id = document.doc_id
+    for node in nodes:
+        text = node.get_content()
+        node.id_ = f"{doc_id}_{hashlib.md5(text.encode()).hexdigest()[:8]}"
+        node.relationships = {NodeRelationship.SOURCE: source}
+    return nodes
+

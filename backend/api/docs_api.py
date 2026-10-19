@@ -784,8 +784,22 @@ def manage_document(doc_id):
                 logger.warning(f"Failed to cancel indexing job {document.indexing_job_id}: {cancel_error}")
                 # Continue with deletion even if job cancellation fails
         
-        # Only try to remove from index if it was actually indexed
-        if not is_code_file and index_status in ["INDEXED", "INDEXING"]:
+        # Remove its vectors whatever its kind and status: code files are chunked
+        # into the vector table too, and a document whose last re-index failed
+        # (ERROR) keeps the vectors of its previous successful one.
+        try:
+            from backend.services.indexing_service import purge_document_vectors
+            # Node ids are `doc_<id>_<hash>` per source fragment, so `delete_ref_doc`
+            # matched on a bare document id never found anything -- it removed nothing
+            # and logged success, leaving deleted documents answering questions.
+            # purge_document_vectors does the prefix match the ids actually need.
+            _removed = purge_document_vectors(document.id, getattr(document, "project_id", None))
+            logger.info(f"Removed document {doc_id} from vector index ({_removed} chunk(s), "
+                        f"{'not run: ' + _removed.reason if _removed.reason else 'purged'})")
+        except Exception as index_err:
+            logger.warning(f"Failed to remove from index (continuing with deletion): {index_err}")
+
+        if index_status in ["INDEXED", "INDEXING", "ERROR"]:
             index_instance: Optional[VectorStoreIndex] = current_app.config.get("LLAMA_INDEX_INDEX")
             storage_dir: Optional[str] = current_app.config.get("STORAGE_DIR")
             
@@ -794,27 +808,14 @@ def manage_document(doc_id):
                 hasattr(index_instance, "delete_ref_doc")):
                 
                 try:
-                    from backend.services.indexing_service import purge_document_vectors
-                    # Node ids are `doc_<id>_<hash>` per source fragment, so `delete_ref_doc`
-                    # matched on a bare document id never found anything -- it removed nothing
-                    # and logged success, leaving deleted documents answering questions.
-                    # purge_document_vectors does the prefix match the ids actually need.
-                    _removed = purge_document_vectors(
-                        document.id, getattr(document, "project_id", None))
-                    logger.info(f"Removed document {doc_id} from vector index ({_removed} chunk(s))")
-                    
-                    try:
-                        index_instance.storage_context.persist(persist_dir=storage_dir)
-                        logger.info(f"Persisted index changes after deleting doc {doc_id}")
-                    except Exception as persist_err:
-                        logger.warning(f"Failed to persist index after deletion: {persist_err}")
-                        
-                except Exception as index_err:
-                    logger.warning(f"Failed to remove from index (continuing with deletion): {index_err}")
+                    index_instance.storage_context.persist(persist_dir=storage_dir)
+                    logger.info(f"Persisted index changes after deleting doc {doc_id}")
+                except Exception as persist_err:
+                    logger.warning(f"Failed to persist index after deletion: {persist_err}")
             else:
-                logger.info(f"Index not available for document {doc_id} - skipping index removal")
+                logger.info(f"Index not available for document {doc_id} - nothing to persist")
         else:
-            logger.info(f"Document {doc_id} is a code file (stored={index_status}) - skipping index removal")
+            logger.info(f"Document {doc_id} was not indexed (status={index_status}) - nothing to persist")
 
         try:
             doc_filename = document.filename
