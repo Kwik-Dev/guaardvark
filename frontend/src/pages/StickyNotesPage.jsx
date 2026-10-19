@@ -65,6 +65,7 @@ import { ContextualLoader } from "../components/common/LoadingStates";
 import { opaqueMenuPaperSx } from "../components/common/opaqueMenuPaper";
 import { toHexColor } from "../utils/colorHex";
 import copyText from "../utils/copyText";
+import { guardHtmlMedia, unguardHtmlMedia } from "../utils/assetGuard";
 
 const LAYOUT_MODES = ["normal", "compact", "collapsed"];
 const LAYOUT_MODE_LABELS = {
@@ -165,7 +166,8 @@ const StickyNote = React.memo(
     useEffect(() => {
       const el = contentRef.current;
       if (!el) return;
-      const next = content || "";
+      // Remote images are shown as a placeholder: innerHTML would fetch them.
+      const next = guardHtmlMedia(content || "");
       // Skip while equal so typing does not reset the caret. Undo and reopen
       // change `content` from outside and must rewrite the editor.
       if (el.innerHTML !== next) el.innerHTML = next;
@@ -214,7 +216,7 @@ const StickyNote = React.memo(
     const publishContent = useCallback(() => {
       const el = contentRef.current;
       if (!el || !el.isConnected) return;
-      const html = el.innerHTML;
+      const html = unguardHtmlMedia(el.innerHTML);
       const stored = contentPropRef.current || "";
       const focused = document.activeElement === el;
       if (!html && stored && !focused) return;
@@ -495,7 +497,7 @@ const StickyNote = React.memo(
                 contentRef.current = el;
                 if (noteRef) noteRef(el);
                 if (el && !el.innerHTML && contentPropRef.current) {
-                  el.innerHTML = contentPropRef.current;
+                  el.innerHTML = guardHtmlMedia(contentPropRef.current);
                 }
               }}
               className="note-content non-draggable"
@@ -861,7 +863,7 @@ const StickyNotesPage = () => {
     if (!note) return current;
     const el = noteRefs.current[noteId];
     if (!el || !el.isConnected) return current;
-    const html = el.innerHTML;
+    const html = unguardHtmlMedia(el.innerHTML);
     if (!html && note.content && document.activeElement !== el) return current;
     if ((note.content || "") === html) return current;
     const newNotes = { ...current, [noteId]: { ...note, content: html } };
@@ -1382,7 +1384,7 @@ const StickyNotesPage = () => {
         el.appendChild(document.createTextNode(text));
       }
     }
-    handleNoteContentChange(noteId, el.innerHTML);
+    handleNoteContentChange(noteId, unguardHtmlMedia(el.innerHTML));
   }, [handleNoteContentChange]);
 
   // ── Render ───────────────────────────────────────────────────────────────
