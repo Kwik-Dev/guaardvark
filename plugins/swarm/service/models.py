@@ -25,6 +25,15 @@ class SwarmStatus(str, Enum):
     NEEDS_REVIEW = "needs_review"  # merge conflict or test failure
     MERGED = "merged"            # branch merged into base
     CANCELLED = "cancelled"      # user killed it
+    NO_CHANGES = "no_changes"    # agent exited cleanly but committed and changed nothing
+    TIMED_OUT = "timed_out"      # agent ran past agent_timeout_minutes and was stopped
+
+
+# A task in one of these states will not change again in this run.
+TERMINAL_STATUSES = frozenset({
+    SwarmStatus.DONE, SwarmStatus.FAILED, SwarmStatus.MERGED, SwarmStatus.NEEDS_REVIEW,
+    SwarmStatus.CANCELLED, SwarmStatus.NO_CHANGES, SwarmStatus.TIMED_OUT,
+})
 
 
 class AgentStatus(str, Enum):
@@ -201,6 +210,8 @@ class SwarmResult:
         done = sum(1 for t in self.tasks if t.status == SwarmStatus.DONE)
         failed = sum(1 for t in self.tasks if t.status == SwarmStatus.FAILED)
         review = sum(1 for t in self.tasks if t.status == SwarmStatus.NEEDS_REVIEW)
+        no_changes = sum(1 for t in self.tasks if t.status == SwarmStatus.NO_CHANGES)
+        timed_out = sum(1 for t in self.tasks if t.status == SwarmStatus.TIMED_OUT)
 
         elapsed = self.total_elapsed_seconds
         time_str = "-"
@@ -221,7 +232,9 @@ class SwarmResult:
         cost = f"${self.total_cost_usd:.2f}" if self.total_cost_usd > 0 else "free (local)"
 
         lines = [
-            f"Swarm complete{mode}: {total} tasks — {merged} merged, {done} done, {failed} failed, {review} needs review",
+            f"Swarm complete{mode}: {total} tasks — {merged} merged, {done} done, {failed} failed, {review} needs review"
+            + (f", {no_changes} produced no changes" if no_changes else "")
+            + (f", {timed_out} timed out" if timed_out else ""),
             f"Total time: {time_str} | Longest task: {longest_str}",
             f"Total cost: {cost} | Tokens: {self.total_tokens:,}",
         ]

@@ -675,10 +675,17 @@ def check_connectivity():
     )
     available_backends = []
     if _config:
+        from service.orchestrator import backend_installed
+
         for name, bc in _config.backends.items():
+            # Usable means its CLI is installed and, if it needs the internet,
+            # the machine is online. Online alone said "available" for a CLI
+            # that was never installed.
+            installed = backend_installed(name, bc)
             available_backends.append({
                 "name": name,
-                "available": not bc.requires_internet or online,
+                "available": installed and (not bc.requires_internet or online),
+                "installed": installed,
                 "requires_internet": bc.requires_internet,
                 "priority": bc.priority,
             })

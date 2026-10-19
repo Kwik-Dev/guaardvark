@@ -12,6 +12,10 @@ defaults:
   run_tests_before_merge: true
   test_command: "python3 -m pytest"
   flight_mode: false
+  # Stop an agent that runs longer than this and mark its task timed_out
+  # (0 = no limit). A ceiling for a hung CLI, not a budget for normal work;
+  # see agent_timeout_minutes in service/config.py.
+  agent_timeout_minutes: 120
 
 backends:
   claude:

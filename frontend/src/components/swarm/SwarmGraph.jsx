@@ -22,6 +22,8 @@ const STATUS_COLORS = {
   needs_review: "#ed6c02",
   merged: "#2e7d32",
   cancelled: "#757575",
+  no_changes: "#ed6c02",
+  timed_out: "#d32f2f",
 };
 
 /**
