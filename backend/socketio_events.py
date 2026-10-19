@@ -550,8 +550,15 @@ def _handle_chat_send_local(payload):
     # the first picture is the primary one, the rest ride along for the model.
     options.pop("attached_images", None)
     options.pop("attached_image_urls", None)
+    # Saved for chat history exactly as POST /api/chat/unified does: one URL per
+    # picture, None where a save failed, the first one is the turn's image_url.
+    from backend.api.unified_chat_api import _save_chat_image
+    image_urls = [_save_chat_image(img) for img in attached_images]
+    image_url = image_urls[0] if image_urls else None
     if len(attached_images) > 1:
         options["attached_images"] = attached_images
+        if any(image_urls):
+            options["attached_image_urls"] = image_urls
     # Named here so the brain's turn decision and its telemetry row say where
     # the turn came from; AgentBrain reuses an id it is given.
     options["surface"] = "cluster"
@@ -669,11 +676,12 @@ def _handle_chat_send_local(payload):
                     session_id=session_id, message=message,
                     options=options, emit_fn=emit_fn, app=app,
                     project_id=project_id, image_data=image_data,
+                    image_url=image_url, is_voice_message=is_voice_message,
                 )
             else:
                 engine.chat(session_id, message, options, emit_fn, app=app,
                             project_id=project_id, image_data=image_data,
-                            is_voice_message=is_voice_message)
+                            image_url=image_url, is_voice_message=is_voice_message)
         except Exception as _e:
             logger.error("[BRIDGE-LOCAL] engine error: %s", _e, exc_info=True)
             emit_fn("chat:error", {"error": str(_e)})
