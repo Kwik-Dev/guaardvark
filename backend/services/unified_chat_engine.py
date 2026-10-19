@@ -2906,7 +2906,7 @@ class UnifiedChatEngine:
         )
 
         # 4. Compact history if approaching context window limit
-        history = self._compact_history(history, context_window=8192)
+        history = self._compact_history(history, context_window=self._compaction_window())
 
         # 5. Build Ollama messages array — static content first for prefix cache
         ollama_messages = [{"role": "system", "content": system_prompt}]
@@ -5175,17 +5175,7 @@ class UnifiedChatEngine:
             # Use adaptive num_ctx from LLM instance, with resource-aware fallback.
             # A boot-time placeholder (Ollama not yet answering /api/show) is
             # re-resolved here on first use instead of pinning the process.
-            try:
-                from backend.utils.ollama_resource_manager import refresh_context_window
-                ctx_window = refresh_context_window(self.llm)
-            except Exception:
-                ctx_window = getattr(self.llm, "context_window", None)
-            if not ctx_window or ctx_window <= 0:
-                try:
-                    from backend.utils.ollama_resource_manager import compute_optimal_num_ctx
-                    ctx_window = compute_optimal_num_ctx(model_name)
-                except Exception:
-                    ctx_window = 8192
+            ctx_window = self._chat_context_window()
 
             # Validate context window before sending.  Prune if the estimated
             # token count exceeds 85 % of the window so Ollama never receives a
@@ -5601,8 +5591,7 @@ class UnifiedChatEngine:
 
     def _compact_history(self, messages: List[Dict], context_window: int) -> List[Dict]:
         """Compact old messages when approaching context window limit."""
-        total_chars = sum(len(m.get("content", "")) for m in messages)
-        estimated_tokens = total_chars // 4
+        estimated_tokens = self._history_tokens(messages)
 
         from backend.config import COMPACTION_THRESHOLD
         if estimated_tokens < context_window * COMPACTION_THRESHOLD:
@@ -6151,6 +6140,45 @@ You are a private, local AI assistant running on the user's own hardware. There 
         return sanitized
 
     # ── Context-window helpers ────────────────────────────────────────────────
+
+    def _chat_context_window(self) -> int:
+        """The context window the chat call runs with (num_ctx).
+
+        The model's resolved window (refresh_context_window re-resolves a boot
+        placeholder), else the resource manager's computed size, else 8192.
+        """
+        try:
+            from backend.utils.ollama_resource_manager import refresh_context_window
+            ctx_window = refresh_context_window(self.llm)
+        except Exception:
+            ctx_window = getattr(self.llm, "context_window", None)
+        if not ctx_window or ctx_window <= 0:
+            try:
+                from backend.utils.ollama_resource_manager import compute_optimal_num_ctx
+                ctx_window = compute_optimal_num_ctx(getattr(self.llm, "model", "gemma4:e4b"))
+            except Exception:
+                ctx_window = 8192
+        return ctx_window
+
+    @staticmethod
+    def _compact_to_model_window() -> bool:
+        """GUAARDVARK_COMPACT_TO_MODEL_WINDOW: compact history against the chat
+        call's real window with the pruning token estimate. Off by default: on,
+        a model with a window larger than 8192 compacts later (and a smaller one
+        earlier), and history is counted at 3 chars a token instead of 4."""
+        return os.environ.get("GUAARDVARK_COMPACT_TO_MODEL_WINDOW", "").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+
+    def _compaction_window(self) -> int:
+        if self._compact_to_model_window():
+            return self._chat_context_window()
+        return 8192  # historical fixed window, kept while the setting is off
+
+    def _history_tokens(self, messages: List[Dict]) -> int:
+        if self._compact_to_model_window():
+            return self._estimate_tokens(messages)
+        return sum(len(m.get("content", "")) for m in messages) // 4
 
     @staticmethod
     def _estimate_tokens(messages: List[Dict[str, str]]) -> int:
