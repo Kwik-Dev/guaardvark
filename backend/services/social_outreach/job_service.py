@@ -57,13 +57,14 @@ def queue_outreach_run(
     if not kill_switch.is_enabled():
         raise RuntimeError("outreach is disabled (kill switch is off)")
 
-    if task_type == "social_outreach_youtube":
-        # The YouTube scout sends its query to the web search engine, so it is
-        # not queued with web access off; the recon itself checks again when
-        # it runs (scout_youtube).
+    if task_type in ("social_outreach_youtube", "social_outreach_recon"):
+        # The scouts read the web (YouTube through the search engine, Reddit
+        # directly), so they are not queued with web access off; the recon
+        # itself checks again when it runs.
         from backend.utils.settings_utils import web_access_block_reason
 
-        blocked = web_access_block_reason("scout YouTube for outreach")
+        where = "YouTube" if task_type == "social_outreach_youtube" else "Reddit"
+        blocked = web_access_block_reason(f"scout {where} for outreach")
         if blocked:
             raise RuntimeError(blocked)
 
