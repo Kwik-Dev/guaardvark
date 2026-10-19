@@ -5,7 +5,8 @@
  */
 
 import { useAppStore } from "../stores/useAppStore";
-import { BASE_URL } from "../api/apiClient";
+import { BASE_URL, handleResponse } from "../api/apiClient";
+import { stopChatTurn } from "../api/chatStopService";
 import { getChatImageModel, setChatImageModel as persistChatImageModel } from "../api/settingsService";
 import { getPlugin } from "../api/pluginsService";
 
@@ -183,8 +184,10 @@ async function handleModel(args, { addMessage }) {
         fetch("/api/model/active"),
         fetch("/api/model/list"),
       ]);
-      const active = await activeRes.json();
-      const list = await listRes.json();
+      // handleResponse: a 4xx/5xx or an offline backend becomes an error with
+      // the server's message, instead of a JSON parse failure or "Unknown".
+      const active = await handleResponse(activeRes);
+      const list = await handleResponse(listRes);
       const models = list?.data?.models || list?.message?.models || list?.data || [];
       const modelNames = models.map((m) => m.name || m).slice(0, 20);
       addMessage({
@@ -206,7 +209,7 @@ async function handleModel(args, { addMessage }) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ model: args.trim() }),
     });
-    const data = await res.json();
+    const data = await handleResponse(res);
     addMessage({
       role: "system",
       content: data.success !== false ? `Model switched to **${args.trim()}**.` : `Failed: ${data.error || data.message}`,
@@ -246,7 +249,7 @@ async function handleImageModel(args, { addMessage }) {
         fetch("/api/batch-image/models"),
         resolveCurrentImageModel("auto"),
       ]);
-      const data = await modelsRes.json();
+      const data = await handleResponse(modelsRes);
       const models = data?.data?.models || data?.models || [];
       const editBackends = data?.data?.editing || data?.editing || [];
       const editLines = editBackends.length
@@ -313,7 +316,7 @@ async function handleImageModel(args, { addMessage }) {
 
   try {
     const res = await fetch("/api/batch-image/models");
-    const data = await res.json();
+    const data = await handleResponse(res);
     const models = data?.data?.models || data?.models || [];
     const match = models.find((m) => m.id === modelName || m.id.startsWith(modelName));
     if (match) {
@@ -837,7 +840,14 @@ async function handleTraining(args, { addMessage }) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ task: args, training_mode: true }),
     });
-    const data = await res.json();
+    // A refusal (409 "Agent already active") carries JSON the branch below
+    // explains; a body that is not JSON (backend offline) still says why.
+    const data = await res.json().catch(() => ({
+      success: false,
+      error: res.status === 502 || res.status === 504
+        ? "the backend is not reachable"
+        : `the backend answered HTTP ${res.status}`,
+    }));
     if (data.success) {
       addMessage({
         role: "system",
@@ -1081,16 +1091,15 @@ async function handleChatMode(_args, { addMessage, chatState }) {
   const previousMode = useAppStore.getState().getSessionMode(sessionId);
 
   try {
-    await fetch(`/api/chat/unified/${encodeURIComponent(sessionId)}/abort`, {
-      method: "POST"
-    }).catch((err) => {
-      console.warn("Failed to send abort signal:", err);
-    });
-    await fetch("/api/agent-control/kill", {
-      method: "POST"
-    }).catch((err) => {
-      console.warn("Failed to kill agent task:", err);
-    });
+    const stopped = await stopChatTurn(sessionId);
+    if (!stopped.ok) {
+      addMessage({
+        role: "system",
+        content: stopped.error,
+        tempId: `chat-stop-${Date.now()}`,
+        type: "command",
+      });
+    }
 
     const data = await _patchSessionMode(sessionId, "chat");
     useAppStore.getState().setSessionMode(sessionId, data?.mode || "chat");

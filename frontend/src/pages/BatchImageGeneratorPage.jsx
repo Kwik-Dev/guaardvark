@@ -63,6 +63,7 @@ import PromptTokenCounter from '../components/images/PromptTokenCounter';
 import GpuGateBanner from '../components/common/GpuGateBanner';
 import useJobsGate from '../hooks/useJobsGate';
 import { formatUiError } from '../utils/uiError';
+import { handleResponse } from '../api/apiClient';
 import { ActionButton, Hint, SettingChip } from '../components/settings/ui';
 import {
   QWEN_IMAGE_21_GUIDANCE_MAX,
@@ -130,6 +131,8 @@ const POLLABLE_STATUSES = new Set(['queued', 'pending', 'running']);
 const TERMINAL_BATCH_STATUSES = new Set(['completed', 'error', 'cancelled']);
 // Recent Batches reloads at most this often while a batch is landing images.
 const GALLERY_REFRESH_MS = 1500;
+// The queue polls every 2.5s: three misses in a row (~7.5s) is an outage, not a blip.
+const QUEUE_FAILURES_BEFORE_NOTICE = 3;
 
 const debugLog = (...args) => {
   if (import.meta.env.DEV) {
@@ -184,6 +187,9 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   // Live queue panel (mirrors Video Gen) — stacked batches drain one-at-a-time
   const [queue, setQueue] = useState([]);
   const queueSignatureRef = useRef('');
+  const queueFailuresRef = useRef(0);
+  // Why Recent Batches could not be loaded; shown instead of "No image batches found".
+  const [historyError, setHistoryError] = useState(null);
   const { gpuBusy, blockReason, blockDetail } = useJobsGate({ submitMode: 'queue' });
 
   // Director intelligence (new) — expand high-level concept via media_director (same as MV)
@@ -291,7 +297,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   const loadImageModels = useCallback(async () => {
     try {
       const response = await fetch(`${API_BASE}/batch-image/models`);
-      const data = await response.json();
+      const data = await handleResponse(response, { quiet: true });
       if (data.success && data.data?.models) {
         const fetched = data.data.models.map(imageModelOption);
         setModelOptions([AUTO_MODEL_OPTION, ...fetched]);
@@ -302,6 +308,8 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       }
     } catch (e) {
       debugLog('Failed to load image models', e);
+      // Only "Auto" is left to pick from; say why instead of a near-empty list.
+      setError(`Image models could not be loaded: ${formatUiError(e) || 'the request failed'}. Only Auto is offered until they load.`);
     }
   }, []);
 
@@ -534,16 +542,19 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
 
       if (!response.ok) {
         console.error(`Failed to load batch history: HTTP ${response.status}`);
+        setHistoryError(`the backend answered HTTP ${response.status}`);
         return;
       }
 
       const contentType = response.headers.get('content-type');
       if (!contentType || !contentType.includes('application/json')) {
         console.error('Response is not JSON:', contentType);
+        setHistoryError('the backend did not answer with batch data');
         return;
       }
 
       const data = await response.json();
+      setHistoryError(null);
 
       if (data.success) {
         let storedCleared = [];
@@ -558,6 +569,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       }
     } catch (err) {
       console.error('Failed to load batch history:', err);
+      setHistoryError(formatUiError(err) || 'the request failed');
     }
   }, []);
 
@@ -577,7 +589,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   const fetchQueue = useCallback(async () => {
     try {
       const response = await fetch(`${API_BASE}/batch-image/queue`);
-      if (!response.ok) return;
+      if (!response.ok) throw new Error(`the backend answered HTTP ${response.status}`);
       const data = await response.json();
       const rows = data?.data?.queue ?? data?.queue ?? [];
       // Frontend-only dismissal: hide terminal rows the user cleared. Only
@@ -598,11 +610,17 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       const signature = visible
         .map((q) => `${q.batch_id}:${q.status}:${q.completed_images ?? ''}/${q.total_images ?? ''}`)
         .join('|');
+      queueFailuresRef.current = 0;
       if (signature === queueSignatureRef.current) return;
       queueSignatureRef.current = signature;
       setQueue(visible);
     } catch (err) {
       console.debug('Failed to load image batch queue:', err);
+      // A poll: one miss stays quiet; a failure that persists is said once.
+      queueFailuresRef.current += 1;
+      if (queueFailuresRef.current === QUEUE_FAILURES_BEFORE_NOTICE) {
+        setError(`The batch queue is not updating: ${formatUiError(err) || 'the request failed'}.`);
+      }
     }
   }, []);
 
@@ -2689,7 +2707,16 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                   ))}
                 </Grid>
 
-                {batchHistory.length === 0 && (
+                {historyError && (
+                  <Alert
+                    severity="error"
+                    sx={{ mb: 1 }}
+                    action={<Button color="inherit" size="small" onClick={loadBatchHistory}>Retry</Button>}
+                  >
+                    Recent batches could not be loaded: {historyError}
+                  </Alert>
+                )}
+                {batchHistory.length === 0 && !historyError && (
                   <Box sx={{ textAlign: 'center', py: 4 }}>
                     <ImageIcon sx={{ fontSize: 48, color: 'text.disabled', mb: 1 }} />
                     <Typography variant="body2" color="text.secondary">

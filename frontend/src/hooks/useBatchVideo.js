@@ -1,11 +1,14 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { io } from "socket.io-client";
-import { SOCKET_URL } from "../api/apiClient";
+import { SOCKET_URL, handleResponse } from "../api/apiClient";
+import { formatUiError } from "../utils/uiError";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 const ACTIVE_STATUSES = new Set(["queued", "pending", "running"]);
 const TERMINAL_STATUSES = new Set(["completed", "error", "cancelled"]);
 const STATUS_POLL_MS = 2000;
+// Queue and list polls: this many misses in a row is an outage, said once.
+const POLL_FAILURES_BEFORE_NOTICE = 3;
 
 /**
  * Batch video queue state, WebSocket progress, and batch lifecycle handlers.
@@ -21,6 +24,8 @@ export function useBatchVideo({ setError, setSuccess, computedParams } = {}) {
   const queuePollingRef = useRef(null);
   const socketRef = useRef(null);
   const activeBatchIdRef = useRef(null);
+  const listFailuresRef = useRef(0);
+  const queueFailuresRef = useRef(0);
 
   useEffect(() => {
     activeBatchIdRef.current = activeBatchId;
@@ -36,33 +41,40 @@ export function useBatchVideo({ setError, setSuccess, computedParams } = {}) {
   const fetchBatches = useCallback(async () => {
     try {
       const res = await fetch(`${API_BASE}/batch-video/list`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success) {
-          const sorted = (data.data.batches || []).sort((a, b) => {
-            const ta = a.start_time || a.end_time || "";
-            const tb = b.start_time || b.end_time || "";
-            return tb.localeCompare(ta);
-          });
-          setBatches(sorted);
-        }
+      const data = await handleResponse(res, { quiet: true });
+      listFailuresRef.current = 0;
+      if (data.success) {
+        const sorted = (data.data.batches || []).sort((a, b) => {
+          const ta = a.start_time || a.end_time || "";
+          const tb = b.start_time || b.end_time || "";
+          return tb.localeCompare(ta);
+        });
+        setBatches(sorted);
       }
-    } catch {
-      // ignore
+    } catch (e) {
+      // The first load failing would look like "no batches"; a repeated
+      // refresh failing is said once.
+      listFailuresRef.current += 1;
+      if (listFailuresRef.current === 1 || listFailuresRef.current === POLL_FAILURES_BEFORE_NOTICE) {
+        setError?.(`Video batches could not be loaded: ${formatUiError(e) || "the request failed"}.`);
+      }
     }
   }, []);
 
   const fetchQueue = useCallback(async () => {
     try {
       const res = await fetch(`${API_BASE}/batch-video/queue`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success) {
-          setQueue(data.data.queue || []);
-        }
+      const data = await handleResponse(res, { quiet: true });
+      queueFailuresRef.current = 0;
+      if (data.success) {
+        setQueue(data.data.queue || []);
       }
-    } catch {
-      // ignore polling errors
+    } catch (e) {
+      // A poll: one miss stays quiet; a failure that persists is said once.
+      queueFailuresRef.current += 1;
+      if (queueFailuresRef.current === POLL_FAILURES_BEFORE_NOTICE) {
+        setError?.(`The video queue is not updating: ${formatUiError(e) || "the request failed"}.`);
+      }
     }
   }, []);
 
@@ -159,16 +171,15 @@ export function useBatchVideo({ setError, setSuccess, computedParams } = {}) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ fps: computedParams?.fps || 7, item_id: itemId }),
       });
-      if (res.ok) {
-        await fetchBatches();
-        if (activeBatchId === batchId) {
-          startPollingStatus(batchId);
-        }
+      await handleResponse(res, { quiet: true });
+      await fetchBatches();
+      if (activeBatchId === batchId) {
+        startPollingStatus(batchId);
       }
-    } catch {
-      // ignore
+    } catch (e) {
+      setError?.(`Combining frames failed: ${formatUiError(e) || "the request failed"}.`);
     }
-  }, [activeBatchId, computedParams, fetchBatches, startPollingStatus]);
+  }, [activeBatchId, computedParams, fetchBatches, startPollingStatus, setError]);
 
   const handleDeleteBatch = useCallback(async (batchId) => {
     try {
@@ -194,17 +205,16 @@ export function useBatchVideo({ setError, setSuccess, computedParams } = {}) {
   const handleCancelBatch = useCallback(async (batchId) => {
     try {
       const res = await fetch(`${API_BASE}/batch-video/batch/${batchId}/cancel`, { method: "POST" });
-      if (res.ok) {
-        await fetchBatches();
-        await fetchQueue();
-        if (activeBatchId === batchId) {
-          startPollingStatus(batchId);
-        }
+      await handleResponse(res, { quiet: true });
+      await fetchBatches();
+      await fetchQueue();
+      if (activeBatchId === batchId) {
+        startPollingStatus(batchId);
       }
-    } catch {
-      // ignore
+    } catch (e) {
+      setError?.(`Cancel failed: ${formatUiError(e) || "the request failed"}. The batch may still be running.`);
     }
-  }, [activeBatchId, fetchBatches, fetchQueue, startPollingStatus]);
+  }, [activeBatchId, fetchBatches, fetchQueue, startPollingStatus, setError]);
 
   const handleRetryBatch = useCallback(async (batchId) => {
     try {

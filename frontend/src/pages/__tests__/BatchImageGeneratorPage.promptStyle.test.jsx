@@ -28,21 +28,25 @@ const mockModels = (autoPromptStyle) => {
   global.fetch = vi.fn(async (url) => {
     const u = String(url);
     if (u.endsWith("/batch-image/models")) {
+      const body = {
+        success: true,
+        data: {
+          models: [
+            { id: "zimage-turbo", label: "Z-Image", is_downloaded: true, prompt_style: "natural" },
+            { id: "sd-xl", label: "SDXL", is_downloaded: true, prompt_style: "tags" },
+          ],
+          auto_prompt_style: autoPromptStyle,
+          unavailable_models: [],
+          adapters: [],
+        },
+      };
+      // json() for older readers; text() for apiClient.handleResponse.
       return {
         ok: true,
+        status: 200,
         headers: { get: () => "application/json" },
-        json: async () => ({
-          success: true,
-          data: {
-            models: [
-              { id: "zimage-turbo", label: "Z-Image", is_downloaded: true, prompt_style: "natural" },
-              { id: "sd-xl", label: "SDXL", is_downloaded: true, prompt_style: "tags" },
-            ],
-            auto_prompt_style: autoPromptStyle,
-            unavailable_models: [],
-            adapters: [],
-          },
-        }),
+        json: async () => body,
+        text: async () => JSON.stringify(body),
       };
     }
     return { ok: true, headers: { get: () => "application/json" }, json: async () => ({}) };

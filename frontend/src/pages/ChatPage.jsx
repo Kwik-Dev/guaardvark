@@ -46,6 +46,7 @@ import {
 import { useAgentRouter } from "../hooks/useAgentRouter";
 import { routeAndExecute } from "../api/toolsService";
 import UnifiedChatService, { steerAgent } from "../api/unifiedChatService";
+import { stopChatTurn } from "../api/chatStopService";
 import StreamingMessage from "../components/chat/StreamingMessage";
 import { webSearchSend } from "../components/chat/webSearchOffer";
 import { useUnifiedProgress } from "../contexts/UnifiedProgressContext";
@@ -884,8 +885,15 @@ const ChatPage = () => {
     setAgentWorking(false);
     streamingServiceRef.current = null;
     // Abort the backend chat + kill any running agent task
-    fetch(`/api/chat/unified/${sessionId}/abort`, { method: 'POST' }).catch(() => {});
-    fetch('/api/agent-control/kill', { method: 'POST' }).catch(() => {});
+    stopChatTurn(sessionId).then((result) => {
+      if (result.ok) return;
+      setMessages((prev) => [...prev, {
+        id: `stop_err_${Date.now()}`,
+        role: "system",
+        content: `Error: ${result.error}`,
+        timestamp: new Date().toISOString(),
+      }]);
+    });
   }, [resourceManager, processId, sessionId, isStreamingMessage, unifiedChatService]);
 
   // Writes the file a chat request asked for: from the card's Create, or at

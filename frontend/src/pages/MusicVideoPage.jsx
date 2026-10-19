@@ -72,6 +72,7 @@ import { useUnifiedProgress } from "../contexts/UnifiedProgressContext";
 import LiveLatentPreview from "../components/videogen/LiveLatentPreview";
 import CutQualityList from "../components/videogen/CutQualityList";
 import { formatUiError } from "../utils/uiError";
+import { handleResponse } from "../api/apiClient";
 import { dispatchWarning } from "../api/taskQueue";
 import ChangedElsewhereNotice from "../components/common/ChangedElsewhereNotice";
 import useServerSyncedForm from "../hooks/useServerSyncedForm";
@@ -1175,10 +1176,14 @@ const MusicVideoPage = () => {
   // Cast picker: trained character Subjects whose LoRA + bible lock identity per cut.
   const [castSubjects, setCastSubjects] = useState([]);
   const [selectedSubjectIds, setSelectedSubjectIds] = useState([]);
+  // Why the Cast Library could not be read; shown instead of "no characters".
+  const [castError, setCastError] = useState(null);
+  const [castReload, setCastReload] = useState(0);
   useEffect(() => {
     let alive = true;
+    setCastError(null);
     fetch("/api/cast-library")
-      .then((r) => (r.ok ? r.json() : { subjects: [] }))
+      .then((r) => handleResponse(r, { quiet: true }))
       .then((d) => {
         if (!alive) return;
         const trained = (d.subjects || []).filter(
@@ -1186,9 +1191,11 @@ const MusicVideoPage = () => {
         );
         setCastSubjects(trained);
       })
-      .catch(() => {});
+      .catch((e) => {
+        if (alive) setCastError(formatUiError(e) || "the request failed");
+      });
     return () => { alive = false; };
-  }, []);
+  }, [castReload]);
 
   // I2V-capable models. The registry decides which models animate a keyframe
   // (capabilities.supports_i2v); this static list only stands in until the
@@ -1771,8 +1778,16 @@ const MusicVideoPage = () => {
                             .map((s) => s.name)
                             .join(", ") || "Select cast…",
                       }}
+                      error={Boolean(castError)}
                       helperText={
-                        castSubjects.length === 0
+                        castError ? (
+                          <>
+                            Cast Library could not be loaded: {castError}.{" "}
+                            <Link component="button" type="button" onClick={() => setCastReload((n) => n + 1)}>
+                              Retry
+                            </Link>
+                          </>
+                        ) : castSubjects.length === 0
                           ? "No trained characters found. Train one in the Cast Library first."
                           : "Their trigger word + appearance bible are injected into every keyframe."
                       }

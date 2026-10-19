@@ -120,6 +120,7 @@ import {
 import axios from "axios";
 import { uploadDroppedMedia } from "../components/videoeditor/useExternalDrop";
 import { formatUiError } from "../utils/uiError";
+import { handleResponse } from "../api/apiClient";
 import EntityContextMenu from "../components/common/EntityContextMenu";
 import TextInputDialog from "../components/common/TextInputDialog";
 import useContextMenu from "../hooks/useContextMenu";
@@ -256,10 +257,14 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   // Training images are never used as start frames (keyframes always on-demand).
   const [castSubjects, setCastSubjects] = useState([]);
   const [selectedSubjectIds, setSelectedSubjectIds] = useState([]);
+  // Why the Cast Library could not be read; shown instead of "train a character".
+  const [castError, setCastError] = useState(null);
+  const [castReload, setCastReload] = useState(0);
   useEffect(() => {
     let alive = true;
+    setCastError(null);
     fetch("/api/cast-library")
-      .then((r) => (r.ok ? r.json() : { subjects: [] }))
+      .then((r) => handleResponse(r, { quiet: true }))
       .then((d) => {
         if (!alive) return;
         const trained = (d.subjects || []).filter(
@@ -267,9 +272,11 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         );
         setCastSubjects(trained);
       })
-      .catch(() => {});
+      .catch((e) => {
+        if (alive) setCastError(formatUiError(e) || "the request failed");
+      });
     return () => { alive = false; };
-  }, []);
+  }, [castReload]);
 
   // CogVideoX temporal-coherence feature (quality, not speed)
   const [fetaEnabled, setFetaEnabled] = useState(false);
@@ -439,7 +446,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   const refreshModels = useCallback(async () => {
     try {
       const res = await fetch(`${API_BASE}/batch-video/models`);
-      const data = await res.json();
+      const data = await handleResponse(res, { quiet: true });
       if (data.success && data.data?.models) {
         const vids = data.data.models.filter(m => GENERATION_TYPES.has(m.type));
         const ids = new Set(vids.map(m => m.id));
@@ -470,7 +477,9 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         setModelNotReady(prev => (prev && meta[prev.id]?.is_ready ? null : prev));
       }
     } catch (e) {
-      // Offline / API down — fall back to the (already-culled) MODEL_OPTIONS.
+      // Offline / API down — fall back to the (already-culled) MODEL_OPTIONS,
+      // and say so: without the API nobody knows which of them are installed.
+      setError(`Video models could not be checked: ${formatUiError(e) || "the request failed"}. The list shows the defaults; a model may not be installed.`);
     }
   }, []);
 
@@ -2254,7 +2263,19 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                 </Select>
               </FormControl>
               <Hint>
-                {castSubjects.length === 0
+                {castError ? (
+                  <Box component="span" sx={{ color: "error.main" }}>
+                    Cast Library could not be loaded: {castError}.{" "}
+                    <Box
+                      component="button"
+                      type="button"
+                      onClick={() => setCastReload((n) => n + 1)}
+                      sx={{ background: "none", border: 0, p: 0, color: "inherit", textDecoration: "underline", cursor: "pointer", font: "inherit" }}
+                    >
+                      Retry
+                    </Box>
+                  </Box>
+                ) : castSubjects.length === 0
                   ? "Train a character in Cast Library to lock identity into every keyframe."
                   : "LoRA + prompt invent each keyframe still, then animate."}
               </Hint>
