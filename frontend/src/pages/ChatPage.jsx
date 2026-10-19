@@ -9,7 +9,7 @@ import StopCircleIcon from "@mui/icons-material/StopCircle";
 import LessonPearlsFloater from "../components/agent/LessonPearlsFloater";
 import LessonSummaryModal from "../components/modals/LessonSummaryModal";
 import { useAppStore } from "../stores/useAppStore";
-import { BASE_URL } from "../api/apiClient";
+import { BASE_URL, handleResponse } from "../api/apiClient";
 import ChatSessionDrawer from "../components/chat/ChatSessionDrawer";
 // AgentScreenViewer is now global in Sidebar — available on all pages
 import React, { useCallback, useEffect, useRef, useState } from "react";
@@ -47,6 +47,7 @@ import { useAgentRouter } from "../hooks/useAgentRouter";
 import { routeAndExecute } from "../api/toolsService";
 import UnifiedChatService, { steerAgent } from "../api/unifiedChatService";
 import { stopChatTurn } from "../api/chatStopService";
+import { formatUiError } from "../utils/uiError";
 import StreamingMessage from "../components/chat/StreamingMessage";
 import { webSearchSend } from "../components/chat/webSearchOffer";
 import { useUnifiedProgress } from "../contexts/UnifiedProgressContext";
@@ -487,6 +488,7 @@ const ChatPage = () => {
         // Graceful degradation — surface but don't crash. Most common reason:
         // backend restart orphaned the in-memory ACTIVE_LESSONS entry.
         console.warn("End lesson:", data?.error || `HTTP ${res.status}`);
+        setError(`The lesson ended but was not saved: ${formatUiError(data?.error) || `the backend answered HTTP ${res.status}`}.`);
         setActiveLessonId(null);
         clearLessonPearls();
         return;
@@ -501,6 +503,7 @@ const ChatPage = () => {
       clearLessonPearls();
     } catch (err) {
       console.error("End lesson error:", err);
+      setError(`The lesson ended but was not saved: ${formatUiError(err) || "the request failed"}.`);
       setActiveLessonId(null);
       clearLessonPearls();
     } finally {
@@ -521,7 +524,13 @@ const ChatPage = () => {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ mode: "agent" }),
-      }).catch(() => {});
+      })
+        .then((res) => handleResponse(res, { quiet: true }))
+        .catch((e) => {
+          // The badge says agent mode; without the saved mode the backend
+          // treats the new chat as chat mode, so say it did not stick.
+          setError(`Agent mode was not saved for the new chat: ${formatUiError(e) || "the request failed"}. Send /agent to try again.`);
+        });
     }
 
     setMessages([]);

@@ -66,6 +66,7 @@ import { useAppStore } from '../stores/useAppStore';
 import { NAV_CHROME } from '../config/navCatalog';
 import { useLayout } from '../contexts/LayoutContext';
 import { useSnackbar } from '../components/common/SnackbarProvider';
+import { formatUiError } from '../utils/uiError';
 import { ContextualLoader } from '../components/common/LoadingStates';
 import { useStatus } from '../contexts/StatusContext';
 import axios from 'axios';
@@ -237,9 +238,13 @@ const ImagesPage = () => {
 
       return { folders, files };
     } catch (err) {
-      // If /Images/ doesn't exist yet, treat as empty
+      // If /Images/ doesn't exist yet (404), it is simply empty; any other
+      // failure is said, so an outage does not look like an empty library.
       setRootFolders([]);
       setRootFiles([]);
+      if (err?.response?.status !== 404) {
+        showMessage?.(`Images could not be loaded: ${formatUiError(err?.response?.data) || formatUiError(err) || 'the request failed'}`, 'error');
+      }
       return { folders: [], files: [] };
     } finally {
       setLoading(false);
@@ -1256,6 +1261,7 @@ const ImagesPage = () => {
       dragDropHandledRef.current = true;
 
       let successCount = 0;
+      const moveFailures = [];
       for (const item of itemsToMove) {
         try {
           if (item.itemType === 'folder' || item.type === 'folder') {
@@ -1270,7 +1276,8 @@ const ImagesPage = () => {
             successCount++;
           }
         } catch (itemErr) {
-          // Continue with other items
+          // Continue with other items; the ones that failed are named below.
+          moveFailures.push(`${item.filename || item.name || item.path}: ${formatUiError(itemErr?.response?.data) || formatUiError(itemErr)}`);
         }
       }
 
@@ -1285,6 +1292,12 @@ const ImagesPage = () => {
           });
           return updated;
         });
+      }
+      if (moveFailures.length) {
+        showMessage?.(
+          `${moveFailures.length} item(s) could not be moved — ${moveFailures.slice(0, 3).join('; ')}`,
+          'error',
+        );
       }
     } catch (err) {
       showMessage?.('Move failed', 'error');

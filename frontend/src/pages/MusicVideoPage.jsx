@@ -1268,12 +1268,17 @@ const MusicVideoPage = () => {
     return () => { alive = false; };
   }, []);
 
+  // Why the list could not be read; shown instead of "None yet." while the
+  // poll keeps failing, and cleared by the next good read.
+  const [listError, setListError] = useState(null);
   const refreshList = useCallback(async () => {
     try {
       const data = await listMusicVideos();
       setVideos(data.music_videos || []);
+      setListError(null);
     } catch (e) {
-      // non-fatal — keep the last list
+      // keep the last list; say why it is not updating
+      setListError(formatUiError(e?.response?.data) || formatUiError(e) || "the request failed");
     }
   }, []);
 
@@ -1888,7 +1893,16 @@ const MusicVideoPage = () => {
                 ))}
               </TextField>
             )}
-            {shownVideos.length === 0 && (
+            {listError && (
+              <Alert
+                severity="error"
+                sx={{ mb: 1 }}
+                action={<Button color="inherit" size="small" onClick={refreshList}>Retry</Button>}
+              >
+                Music videos could not be loaded: {listError}
+              </Alert>
+            )}
+            {shownVideos.length === 0 && !listError && (
               <Typography variant="body2" color="text.secondary">
                 {videos.length === 0 ? "None yet." : "None in this project."}
               </Typography>

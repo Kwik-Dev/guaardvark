@@ -46,6 +46,7 @@ import {
 } from "@mui/icons-material";
 import { useNavigate } from "react-router-dom";
 import * as upscalingService from "../api/upscalingService";
+import { formatUiError } from "../utils/uiError";
 import { enablePlugin, listPlugins, startPlugin } from "../api/pluginsService";
 import lazyWithReload from "../utils/lazyWithReload";
 
@@ -239,8 +240,9 @@ const UpscalingPage = ({ embedded = false }) => {
         } else if (data.downloaded?.length > 0) {
           setSelectedModel((current) => current || data.downloaded[0].name);
         }
-      } catch {
-        // ignore
+      } catch (e) {
+        // Without the list the model picker is empty; say why.
+        setError(`Upscaling models could not be loaded: ${formatUiError(e) || "the request failed"}.`);
       }
     },
     [serviceAvailable],
@@ -537,8 +539,8 @@ const UpscalingPage = ({ embedded = false }) => {
     try {
       await upscalingService.cancelJob(jobId);
       await fetchJobs();
-    } catch {
-      // ignore
+    } catch (e) {
+      setError(`Cancel failed: ${formatUiError(e) || "the request failed"}. The job may still be running.`);
     }
   };
 
@@ -547,8 +549,8 @@ const UpscalingPage = ({ embedded = false }) => {
     try {
       await upscalingService.clearFinishedJobs();
       await fetchJobs();
-    } catch {
-      // ignore
+    } catch (e) {
+      setError(`Clearing finished jobs failed: ${formatUiError(e) || "the request failed"}.`);
     }
   };
 

@@ -14,15 +14,19 @@ import {
   Box,
   Chip,
   CircularProgress,
+  Alert,
 } from "@mui/material";
 import CloseIcon from "@mui/icons-material/Close";
 import { listChatSessions, deleteChatSession } from "../../api/chatService";
 import EntityContextMenu from "../common/EntityContextMenu";
 import useContextMenu from "../../hooks/useContextMenu";
+import { formatUiError } from "../../utils/uiError";
 
 const PreviousChatsModal = ({ open, onClose, projectId, currentSessionId, onSelectSession }) => {
   const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(false);
+  // A failed load or delete, said in the dialog instead of an empty list.
+  const [failure, setFailure] = useState(null);
   const rowMenu = useContextMenu();
   useEffect(() => {
     if (open) {
@@ -32,11 +36,13 @@ const PreviousChatsModal = ({ open, onClose, projectId, currentSessionId, onSele
 
   const loadSessions = async () => {
     setLoading(true);
+    setFailure(null);
     try {
       const data = await listChatSessions(projectId);
       setSessions(data.sessions || []);
     } catch (err) {
       console.error("Failed to load sessions:", err);
+      setFailure({ load: true, text: `Previous chats could not be loaded: ${formatUiError(err) || "the request failed"}.` });
     } finally {
       setLoading(false);
     }
@@ -52,6 +58,7 @@ const PreviousChatsModal = ({ open, onClose, projectId, currentSessionId, onSele
       }
     } catch (err) {
       console.error("Failed to delete session:", err);
+      setFailure({ load: false, text: `The chat was not deleted: ${formatUiError(err) || "the request failed"}.` });
     }
   };
 
@@ -78,11 +85,21 @@ const PreviousChatsModal = ({ open, onClose, projectId, currentSessionId, onSele
     <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
       <DialogTitle>Previous Chats</DialogTitle>
       <DialogContent dividers sx={{ p: 0, height: 400, overflowY: "auto", display: "flex", flexDirection: "column", justifyContent: "flex-start" }}>
+        {failure && (
+          <Alert
+            severity="error"
+            sx={{ m: 1 }}
+            onClose={failure.load ? undefined : () => setFailure(null)}
+            action={failure.load ? <Button color="inherit" size="small" onClick={loadSessions}>Retry</Button> : undefined}
+          >
+            {failure.text}
+          </Alert>
+        )}
         {loading ? (
           <Box sx={{ display: "flex", justifyContent: "center", py: 4 }}>
             <CircularProgress size={32} />
           </Box>
-        ) : sessions.length === 0 ? (
+        ) : failure?.load ? null : sessions.length === 0 ? (
           <Box sx={{ display: "flex", justifyContent: "center", py: 4 }}>
             <Typography color="text.secondary">No previous chats</Typography>
           </Box>

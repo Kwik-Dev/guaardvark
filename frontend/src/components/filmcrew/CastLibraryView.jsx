@@ -25,6 +25,10 @@ import { listCastLibrary, createCastSubject, deleteCastSubject } from '../../api
 import DragDropImageUpload from './DragDropImageUpload';
 import EntityContextMenu from '../common/EntityContextMenu';
 import useContextMenu from '../../hooks/useContextMenu';
+import { formatUiError } from '../../utils/uiError';
+
+// The server's reason from an axios error, else the error's own message.
+const reason = (err) => formatUiError(err?.response?.data) || formatUiError(err) || 'the request failed';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
 
@@ -59,6 +63,8 @@ const CastLibraryView = ({ onOpenSubject } = {}) => {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ name: '', kind: 'character', description: '', trigger_word: '' });
   const [submitting, setSubmitting] = useState(false);
+  // Why the list could not be loaded; shown instead of the empty-library text.
+  const [loadError, setLoadError] = useState(null);
   const uploaderRef = useRef(null);
   const navigate = useNavigate();
   const cardMenu = useContextMenu();
@@ -71,11 +77,12 @@ const CastLibraryView = ({ onOpenSubject } = {}) => {
 
   const loadLibrary = async () => {
     setLoading(true);
+    setLoadError(null);
     try {
       const data = await listCastLibrary();
       setSubjects(data.subjects || []);
     } catch (err) {
-      setError('Failed to load cast library');
+      setLoadError(`The cast library could not be loaded: ${reason(err)}`);
     } finally {
       setLoading(false);
     }
@@ -94,7 +101,7 @@ const CastLibraryView = ({ onOpenSubject } = {}) => {
       setForm({ name: '', kind: 'character', description: '', trigger_word: '' });
       loadLibrary();
     } catch (err) {
-      setError('Failed to create subject');
+      setError(`Failed to create subject: ${reason(err)}`);
     } finally {
       setSubmitting(false);
     }
@@ -106,7 +113,7 @@ const CastLibraryView = ({ onOpenSubject } = {}) => {
         await deleteCastSubject(id);
         loadLibrary();
       } catch (err) {
-        setError('Failed to delete subject');
+        setError(`Failed to delete subject: ${reason(err)}`);
       }
     }
   };
@@ -130,6 +137,13 @@ const CastLibraryView = ({ onOpenSubject } = {}) => {
         <Box sx={{ display: 'flex', justifyContent: 'center', p: 5 }}>
           <CircularProgress />
         </Box>
+      ) : loadError ? (
+        <Alert
+          severity="error"
+          action={<Button color="inherit" size="small" onClick={loadLibrary}>Retry</Button>}
+        >
+          {loadError}
+        </Alert>
       ) : subjects.length === 0 ? (
         <Typography color="text.secondary" sx={{ textAlign: 'center', p: 5 }}>
           No subjects in the library yet. Click "New Subject" to add one.
