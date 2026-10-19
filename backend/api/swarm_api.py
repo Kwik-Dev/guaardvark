@@ -160,11 +160,19 @@ def health():
 
 # --- Launch ---
 
-@swarm_bp.route("/launch", methods=["POST"])
-def launch():
-    body = flask_request.get_json() or {}
-    # A plan can also arrive as text: the markdown itself, or a sentence that
-    # becomes a one-task plan. Either is saved and launched like a plan file.
+def prepare_launch(body: dict):
+    """Turn a launch request into the body the sidecar takes, or refuse it.
+
+    The one launch path for the Swarm page (POST /api/swarm/launch) and the
+    launch_swarm chat/MCP tool. A plan may arrive as plan_path, as markdown
+    (plan_markdown), or as a sentence (prompt or goal) that becomes a one-task
+    plan; the sidecar only reads plan_path. Self-code swarms are pinned to the
+    configured repository, never auto-merge, and need acknowledge_dirty_tree
+    on a dirty tree.
+
+    Returns (body, None) to send, or (None, (message, http_status, code)).
+    """
+    body = dict(body or {})
     markdown = str(body.pop("plan_markdown", "") or "")
     prompt = str(body.pop("prompt", "") or body.pop("goal", "") or "").strip()
     if not body.get("plan_path"):
@@ -172,6 +180,8 @@ def launch():
             body["plan_path"] = _write_plan(markdown)
         elif prompt:
             body["plan_path"] = _write_plan(_plan_from_prompt(prompt))
+        else:
+            return None, ("A plan is required: plan_path, plan_markdown, or a goal", 400, "NO_PLAN")
 
     # Securely resolve target repository path.
     # If the request targets GUAARDVARK_ROOT (or defaults to it), we MUST treat it
@@ -182,7 +192,7 @@ def launch():
             repo_path = Path(repo_path_str).resolve()
             is_targeting_self = (repo_path == default_repo_root())
         except Exception as e:
-            return error_response(f"Invalid repo_path: {e}", 400)
+            return None, (f"Invalid repo_path: {e}", 400, None)
     else:
         is_targeting_self = True
         repo_path = default_repo_root()
@@ -191,9 +201,9 @@ def launch():
         body["self_code"] = True
         body["auto_merge"] = False
         if repo_path != default_repo_root():
-            return error_response("Self-code swarms may only target the configured repository root", 403)
+            return None, ("Self-code swarms may only target the configured repository root", 403, None)
         if not (repo_path / ".git").exists():
-            return error_response("Configured repository root is not a git repository", 400)
+            return None, ("Configured repository root is not a git repository", 400, None)
         status = subprocess.run(
             ["git", "-C", str(repo_path), "status", "--porcelain"],
             capture_output=True,
@@ -201,11 +211,20 @@ def launch():
             timeout=5,
         )
         if status.stdout.strip() and not body.get("acknowledge_dirty_tree"):
-            return error_response(
+            return None, (
                 "Repository has uncommitted changes; acknowledge_dirty_tree is required for self-code swarms",
                 409,
                 "DIRTY_TREE",
             )
+    return body, None
+
+
+@swarm_bp.route("/launch", methods=["POST"])
+def launch():
+    body, refusal = prepare_launch(flask_request.get_json() or {})
+    if refusal:
+        message, status, code = refusal
+        return error_response(message, status, code) if code else error_response(message, status)
     data, status = _proxy_post("/swarm/launch", body, timeout=30)
     if status >= 400:
         return error_response(_extract_error(data, "Launch failed"), status)
