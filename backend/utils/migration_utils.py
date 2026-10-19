@@ -71,6 +71,16 @@ def _revision_paths_for_head(migrations_dir: str, head: str) -> set[Path]:
     return keep
 
 
+def _chain_reaches(migrations_dir: str, head: str, revision: str) -> bool:
+    """Whether ``revision`` is on the chain from base to ``head``."""
+    try:
+        cfg = _alembic_config(migrations_dir)
+        script = ScriptDirectory.from_config(cfg)
+        return any(rev.revision == revision for rev in script.walk_revisions(base="base", head=head))
+    except Exception:
+        return False
+
+
 def prune_stale_migration_versions(
     migrations_dir: str = MIGRATIONS_DIR,
     *,
@@ -117,10 +127,15 @@ def prune_stale_migration_versions(
         heads = result["heads_before"]
         if not heads:
             return result
+        on_baseline = [h for h in heads if _chain_reaches(migrations_dir, h, PREFERRED_BASELINE_REVISION)]
         if len(heads) == 1:
             preferred_head = heads[0]
         elif PREFERRED_BASELINE_REVISION in heads:
             preferred_head = PREFERRED_BASELINE_REVISION
+        elif len(on_baseline) == 1:
+            # A migration on top of the baseline is the live chain; the other heads
+            # are pre-squash leftovers.
+            preferred_head = on_baseline[0]
         else:
             preferred_head = sorted(heads)[-1]
             logger.warning(
