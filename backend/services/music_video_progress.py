@@ -60,9 +60,9 @@ ASSEMBLE_STEPS: list[tuple[str, str, float]] = [
     ("register", "Adding to the library", 10.0),
 ]
 
-DEFAULT_ASSEMBLE_S = 90
+DEFAULT_ASSEMBLE_S = 90  # display-only fallback for the assembler's share of the ETA
 
-NEEDS_REVIEW = "needs_review"  # display-only fallback for the assembler's share of the ETA
+NEEDS_REVIEW = "needs_review"
 
 
 def _parse_ts(value) -> datetime | None:
@@ -298,7 +298,14 @@ def compute_progress(
         asm = next((r for r in stages if r["key"] == "assembling"), {})
         eta = DEFAULT_ASSEMBLE_S * (1.0 - float(asm.get("pct") or 0) / 100.0)
 
-    started = _parse_ts((timings.get("analyzing") or {}).get("started_at"))
+    # Elapsed is the render's own time: from the latest start of generating once
+    # it has begun (a revise or restore starts it again), not from the first
+    # analysis or the wait at the approval gate.
+    run_started = _parse_ts((timings.get("generating") or {}).get("started_at"))
+    if stage in ("generating", "assembling", "complete") and run_started:
+        started = run_started
+    else:
+        started = _parse_ts((timings.get("analyzing") or {}).get("started_at"))
     out: dict[str, Any] = {
         "overall_pct": overall,
         "stage": stage,

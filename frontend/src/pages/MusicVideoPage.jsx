@@ -84,12 +84,30 @@ const DEFAULT_KEYFRAME_MODEL = "flux-schnell";
 const CUT_PREFIX = "cut:";
 const cutKey = (index) => `${CUT_PREFIX}${index}`;
 
+// Plan autosave is on unless this browser turned it off. Storage can be
+// unavailable (private window, blocked site data): then it is simply on.
+const AUTOSAVE_PREF_KEY = "mv.autosave";
+const readAutosavePref = () => {
+  try {
+    return window.localStorage.getItem(AUTOSAVE_PREF_KEY) !== "off";
+  } catch {
+    return true;
+  }
+};
+const writeAutosavePref = (on) => {
+  try {
+    window.localStorage.setItem(AUTOSAVE_PREF_KEY, on ? "on" : "off");
+  } catch {
+    // not remembered; the toggle still applies to this visit
+  }
+};
+
 const planFieldLabel = (key) => (key === "treatment" ? "The treatment" : `Cut #${key.slice(CUT_PREFIX.length)}`);
 
 // Local presentational + interactive component for the cut plan + Director prompts.
 // Keeps the main page component from exploding in size.
 // onDirtyChange(bool) tells the page whether the plan has unsaved edits.
-function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, onGenerateStoryboards, onRegenStoryboard, onEditCut, onDirtyChange, comfyReady = true, comfyDisabled = false, comfyInfo = null, gpuBlocked = false }) {
+function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, onGenerateStoryboards, onRegenStoryboard, onEditCut, onDirtyChange, onRegisterFlush, comfyReady = true, comfyDisabled = false, comfyInfo = null, gpuBlocked = false }) {
   const cutPlan = detail.cut_plan || [];
   const clips = detail.clips || [];
   const isEditable = detail.current_stage === "awaiting_approval";
@@ -227,46 +245,95 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
 
   const hasLocalEdits = planDirty;
 
-  // Autosave: plan edits are saved ~1.5 s after the last keystroke, so leaving
-  // the page or approving never loses them. The Save button still saves at once.
-  const [autosave, setAutosave] = useState(() => localStorage.getItem("mv.autosave") !== "off");
+  // Autosave: plan edits are saved ~1.5 s after the last keystroke. Approving,
+  // duplicating or opening another video saves what is pending first; leaving
+  // the page with unsaved edits still asks. The Save button saves at once.
+  // Nothing autosaves while a conflict notice is open (the person picks) or
+  // while another action on the video is running.
+  const [autosave, setAutosave] = useState(readAutosavePref);
   const [savedAt, setSavedAt] = useState(null);
   const [saveState, setSaveState] = useState("idle"); // idle | saving | error
   const changesKey = JSON.stringify(planForm.changes);
+  const hasConflicts = Object.keys(planForm.conflicts || {}).length > 0;
+  const formRef = useRef(planForm);
+  formRef.current = planForm;
+  const saveRef = useRef(onSavePlan);
+  saveRef.current = onSavePlan;
+  const autosaveRef = useRef(autosave);
+  autosaveRef.current = autosave;
+  const inFlight = useRef(null);
+  const unsavedAfterSave = useRef([]);
+  const autosaveTimer = useRef(null);
   useEffect(() => {
-    localStorage.setItem("mv.autosave", autosave ? "on" : "off");
+    writeAutosavePref(autosave);
   }, [autosave]);
+
+  // Sends what is pending when it starts, one save at a time, so two saves
+  // never land out of order. An emptied field is not sent (the server refuses
+  // an empty prompt, and an empty treatment would erase the Director's); it
+  // stays dirty. Edits stay pending when the save fails.
+  const handleSave = useCallback(async ({ quiet = false } = {}) => {
+    while (inFlight.current) {
+      try {
+        await inFlight.current;
+      } catch {
+        // the earlier save already reported its own failure
+      }
+    }
+    const run = (async () => {
+      const changes = formRef.current.changes;
+      const payload = { prompts: {} };
+      const sent = {};
+      Object.entries(changes).forEach(([key, value]) => {
+        if (!String(value || "").trim()) return;
+        if (key === "treatment") payload.treatment = value;
+        else payload.prompts[key.slice(CUT_PREFIX.length)] = value;
+        sent[key] = value;
+      });
+      unsavedAfterSave.current = Object.keys(changes).filter((k) => !(k in sent));
+      if (!Object.keys(sent).length) return true;
+      const saved = await saveRef.current(payload, undefined, { quiet, videoId: detail.id });
+      if (saved !== false) {
+        formRef.current.markSaved(sent);
+        setSavedAt(new Date());
+      } else {
+        unsavedAfterSave.current = Object.keys(changes);
+      }
+      return saved;
+    })();
+    inFlight.current = run;
+    try {
+      return await run;
+    } finally {
+      if (inFlight.current === run) inFlight.current = null;
+    }
+  }, [detail.id]);
+
   useEffect(() => {
-    if (!autosave || !isEditable || !planForm.isDirty) return undefined;
-    const t = setTimeout(async () => {
+    if (!autosave || !isEditable || !planForm.isDirty || busy || hasConflicts) return undefined;
+    autosaveTimer.current = setTimeout(async () => {
       setSaveState("saving");
       const ok = await handleSave({ quiet: true });
       setSaveState(ok === false ? "error" : "idle");
-      if (ok !== false) setSavedAt(new Date());
     }, 1500);
-    return () => clearTimeout(t);
-  }, [autosave, isEditable, changesKey]);
+    return () => clearTimeout(autosaveTimer.current);
+  }, [autosave, isEditable, changesKey, busy, hasConflicts, handleSave]);
 
-  // Sends only what changed. Edits stay pending when the save fails.
-  const handleSave = async ({ quiet = false } = {}) => {
-    const changes = planForm.changes;
-    if (!Object.keys(changes).length) return true;
-    const payload = { prompts: {} };
-    Object.entries(changes).forEach(([key, value]) => {
-      if (key === "treatment") payload.treatment = value;
-      else payload.prompts[key.slice(CUT_PREFIX.length)] = value;
-    });
-    // An emptied field is not sent (the server refuses an empty prompt); it stays dirty.
-    Object.keys(payload.prompts).forEach((k) => {
-      if (!String(payload.prompts[k] || "").trim()) delete payload.prompts[k];
-    });
-    const saved = await onSavePlan(payload, undefined, { quiet });
-    if (saved !== false) {
-      planForm.markSaved(changes);
-      setSavedAt(new Date());
-    }
-    return saved;
-  };
+  // For the page: save pending edits now. True when nothing unsaved is left;
+  // false sends the page to its "drop the unsaved edits?" question.
+  const flushPlanEdits = useCallback(async () => {
+    clearTimeout(autosaveTimer.current);
+    const form = formRef.current;
+    if (!isEditable || !form.isDirty) return true;
+    if (!autosaveRef.current || Object.keys(form.conflicts || {}).length) return false;
+    const saved = await handleSave({ quiet: true });
+    return saved !== false && unsavedAfterSave.current.length === 0;
+  }, [isEditable, handleSave]);
+  useEffect(() => {
+    if (!onRegisterFlush) return undefined;
+    onRegisterFlush(flushPlanEdits);
+    return () => onRegisterFlush(null);
+  }, [onRegisterFlush, flushPlanEdits]);
 
   const handleRegen = async () => {
     if (planForm.isDirty && !window.confirm(
@@ -554,6 +621,11 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
                           defaultValue={row.seed ?? ""}
                           key={`seed-${detail.id}-${row.index}-${row.seed ?? "auto"}`}
                           onBlur={(e) => {
+                            // Text a number field rejects reads as "": keep the seed.
+                            if (e.target.validity?.badInput) {
+                              e.target.value = row.seed ?? "";
+                              return;
+                            }
                             const raw = e.target.value.trim();
                             const next = raw === "" ? null : Number.parseInt(raw, 10);
                             if (raw !== "" && !Number.isInteger(next)) return;
@@ -567,15 +639,17 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
                           ? "Locked: Regenerate Plan keeps this cut's prompt and storyboard. Click to unlock."
                           : "Lock this cut so Regenerate Plan does not rewrite it."}
                         >
-                          <IconButton
-                            size="small"
-                            aria-label={row.locked ? `Unlock cut ${row.index}` : `Lock cut ${row.index}`}
-                            onClick={() => onEditCut(row.index, { locked: !row.locked })}
-                            disabled={busy}
-                            color={row.locked ? "warning" : "default"}
-                          >
-                            {row.locked ? <LockIcon fontSize="inherit" /> : <LockOpenIcon fontSize="inherit" />}
-                          </IconButton>
+                          <span>
+                            <IconButton
+                              size="small"
+                              aria-label={row.locked ? `Unlock cut ${row.index}` : `Lock cut ${row.index}`}
+                              onClick={() => onEditCut(row.index, { locked: !row.locked })}
+                              disabled={busy}
+                              color={row.locked ? "warning" : "default"}
+                            >
+                              {row.locked ? <LockIcon fontSize="inherit" /> : <LockOpenIcon fontSize="inherit" />}
+                            </IconButton>
+                          </span>
                         </Tooltip>
                       </>
                     )}
@@ -771,17 +845,24 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
 
 
 // Saved versions of one music video: list, save the current state, restore one.
-function VersionsDialog({ open, video, onClose, onRestored, onError }) {
+function VersionsDialog({ open, video, onClose, onRestored }) {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [loaded, setLoaded] = useState(false);
   const [label, setLabel] = useState("");
+  // Shown in the dialog itself: the page's error area sits behind it.
+  const [dialogError, setDialogError] = useState(null);
+  const showError = (e, fallback) => setDialogError(formatUiError(e?.response?.data?.error) || e.message || fallback);
   const load = useCallback(async () => {
     if (!video) return;
     setLoading(true);
     try {
       setRows((await listMusicVideoRevisions(video.id)).revisions || []);
+      setLoaded(true);
+      setDialogError(null);
     } catch (e) {
-      onError(formatUiError(e?.response?.data?.error) || e.message || "Could not load versions");
+      setLoaded(false);
+      setDialogError(formatUiError(e?.response?.data?.error) || e.message || "Could not load versions");
     } finally {
       setLoading(false);
     }
@@ -808,15 +889,16 @@ function VersionsDialog({ open, video, onClose, onRestored, onError }) {
                 setLabel("");
                 await load();
               } catch (e) {
-                onError(formatUiError(e?.response?.data?.error) || e.message || "Save failed");
+                showError(e, "Save failed");
               }
             }}
           >
             Save
           </Button>
         </Stack>
+        {dialogError && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setDialogError(null)}>{dialogError}</Alert>}
         {loading && <LinearProgress />}
-        {!loading && rows.length === 0 && (
+        {!loading && loaded && rows.length === 0 && (
           <Typography variant="body2" color="text.secondary">
             No versions yet. One is saved automatically when you approve, re-assemble, revise or restore.
           </Typography>
@@ -836,7 +918,7 @@ function VersionsDialog({ open, video, onClose, onRestored, onError }) {
                       onRestored(updated);
                       onClose();
                     } catch (e) {
-                      onError(formatUiError(e?.response?.data?.error) || e.message || "Restore failed");
+                      showError(e, "Restore failed");
                     }
                   }}
                 >
@@ -902,8 +984,16 @@ const MusicVideoPage = () => {
   const [selectedId, setSelectedId] = useState(null);
   // The open plan has edits not yet saved (reported by PlanViewer).
   const [planDirty, setPlanDirty] = useState(false);
-  const confirmDropPlanEdits = (what) =>
-    !planDirty || window.confirm(`The plan has unsaved edits. ${what} without them?`);
+  const confirmDropPlanEdits = (what, dirty = planDirty) =>
+    !dirty || window.confirm(`The plan has unsaved edits. ${what} without them?`);
+  // The plan editor's "save what is pending now", registered while it is open.
+  const planFlushRef = useRef(null);
+  const registerPlanFlush = useCallback((fn) => { planFlushRef.current = fn; }, []);
+  // Saves pending plan edits (autosave on), then asks about any that remain.
+  const settlePlanEdits = async (what) => {
+    const clean = planFlushRef.current ? await planFlushRef.current() : !planDirty;
+    return confirmDropPlanEdits(what, !clean);
+  };
   const [detail, setDetail] = useState(null);
 
   const [name, setName] = useState("");
@@ -927,22 +1017,28 @@ const MusicVideoPage = () => {
   const [projectFilter, setProjectFilter] = useState(urlProjectId || "all");
   const [versionsOpen, setVersionsOpen] = useState(false);
   const [renaming, setRenaming] = useState(null); // draft name while editing the header
+  // Escape closes the field; the blur that follows must not save the draft.
+  const renameCancelled = useRef(false);
+  const [duplicateAsk, setDuplicateAsk] = useState(false);
   useEffect(() => {
     let alive = true;
     getProjects().then((res) => {
       if (alive && Array.isArray(res)) setProjects(res);
+    }).catch((e) => {
+      if (alive) setError(`Projects could not be loaded, so the project picker is empty: ${formatUiError(e?.response?.data?.error) || e.message}`);
     });
     return () => { alive = false; };
   }, []);
+  const urlVideoId = searchParams.get("id") || "";
   useEffect(() => {
-    // Opened from a project's page: select its newest video if none is open.
+    // Opened from a project's page: new videos are filed under it and the list
+    // shows its videos; ?id= opens that video.
     if (urlProjectId) {
       setCreateProjectId(urlProjectId);
       setProjectFilter(urlProjectId);
     }
-    const open = searchParams.get("id");
-    if (open && Number(open)) setSelectedId(Number(open));
-  }, [urlProjectId]);
+    if (urlVideoId && Number(urlVideoId)) setSelectedId(Number(urlVideoId));
+  }, [urlProjectId, urlVideoId]);
 
   // Load installed chat models once so the director-model dropdown only offers models that
   // actually exist (the list is small and rarely changes; /api/model/list already filters
@@ -1296,7 +1392,7 @@ const MusicVideoPage = () => {
   const handleApprove = async () => {
     if (!detail) return;
     // Approving locks the plan, so unsaved edits could never be saved after.
-    if (!confirmDropPlanEdits("Approve and lock the plan")) return;
+    if (!(await settlePlanEdits("Approve and lock the plan"))) return;
     setBusy(true);
     setError(null);
     try {
@@ -1363,6 +1459,10 @@ const MusicVideoPage = () => {
   };
 
   const handleRename = async () => {
+    if (renameCancelled.current) {
+      renameCancelled.current = false;
+      return;
+    }
     const next = (renaming || "").trim();
     setRenaming(null);
     if (!next || next === detail.name) return;
@@ -1379,9 +1479,16 @@ const MusicVideoPage = () => {
   };
 
   const handleDuplicate = async () => {
-    if (!confirmDropPlanEdits("Duplicate")) return;
-    const keepClips = (detail.clips_done || 0) > 0
-      && window.confirm("Reuse the clips already rendered? OK = only the cuts you change will render. Cancel = render every cut fresh.");
+    if (!(await settlePlanEdits("Duplicate"))) return;
+    if ((detail.clips_done || 0) > 0) {
+      setDuplicateAsk(true);  // reuse the rendered clips, render fresh, or cancel
+      return;
+    }
+    await runDuplicate(false);
+  };
+
+  const runDuplicate = async (keepClips) => {
+    setDuplicateAsk(false);
     const copy = await runUpdate(
       () => duplicateMusicVideo(detail.id, { keep_clips: keepClips }),
       "Duplicate failed.",
@@ -1776,8 +1883,8 @@ const MusicVideoPage = () => {
                 <Paper
                   key={v.id}
                   variant="outlined"
-                  onClick={() => {
-                    if (v.id !== selectedId && !confirmDropPlanEdits("Open another video")) return;
+                  onClick={async () => {
+                    if (v.id !== selectedId && !(await settlePlanEdits("Open another video"))) return;
                     setSelectedId(v.id);
                   }}
                   sx={{
@@ -1808,7 +1915,7 @@ const MusicVideoPage = () => {
                       )}
                       {isRunning(v) && (
                         <Box sx={{ flex: 1, minWidth: 0 }}>
-                          <MusicVideoProgress progress={v.progress} compact />
+                          <MusicVideoProgress progress={v.progress} compact running />
                         </Box>
                       )}
                     </Stack>
@@ -1837,7 +1944,10 @@ const MusicVideoPage = () => {
                     onBlur={handleRename}
                     onKeyDown={(e) => {
                       if (e.key === "Enter") handleRename();
-                      if (e.key === "Escape") setRenaming(null);
+                      if (e.key === "Escape") {
+                        renameCancelled.current = true;
+                        setRenaming(null);
+                      }
                     }}
                     inputProps={{ "aria-label": "Music video name" }}
                   />
@@ -1878,9 +1988,11 @@ const MusicVideoPage = () => {
                   )}
                   {hasCutPlan(detail) && (detail.current_stage === "complete" || (detail.status || "").match(/^(failed|cancelled)/) || detail.current_stage === "cancelled") && (
                     <Tooltip title="Back to plan review, keeping rendered clips: only cuts you change render again">
-                      <Button size="small" variant="contained" onClick={handleRevise} disabled={busy}>
-                        Edit & Re-render Changes
-                      </Button>
+                      <span>
+                        <Button size="small" variant="contained" onClick={handleRevise} disabled={busy}>
+                          Edit & Re-render Changes
+                        </Button>
+                      </span>
                     </Tooltip>
                   )}
                   {hasCutPlan(detail) && (detail.current_stage === "complete" || (detail.status || "").match(/^(failed|cancelled)/) || detail.current_stage === "cancelled") && (
@@ -1944,6 +2056,7 @@ const MusicVideoPage = () => {
                 <MusicVideoProgress
                   progress={detail.progress}
                   clips={detail.clips}
+                  running={isRunning(detail)}
                   onCutClick={(index) => {
                     const el = document.getElementById(`mv-cut-${index}`);
                     if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -1998,9 +2111,11 @@ const MusicVideoPage = () => {
               {/* === Video Plan / Director output (visible after analysis) === */}
               {detail.cut_plan && detail.cut_plan.length > 0 && (
                 <PlanViewer
+                  key={detail.id}
                   detail={detail}
                   busy={busy}
                   onDirtyChange={setPlanDirty}
+                  onRegisterFlush={registerPlanFlush}
                   gpuBlocked={gpuBusy}
                   models={models}
                   comfyReady={comfyReady}
@@ -2009,6 +2124,7 @@ const MusicVideoPage = () => {
                   onEditCut={handleEditCut}
                   onSavePlan={async (arg1, arg2, opts = {}) => {
                     const quiet = !!opts.quiet;
+                    const videoId = opts.videoId ?? detail.id;
                     try {
                       if (!quiet) setBusy(true);
                       let payload = {};
@@ -2020,8 +2136,8 @@ const MusicVideoPage = () => {
                         payload = { prompts: arg1 || {} };
                         if (arg2 && arg2.trim()) payload.style_prompt = arg2.trim();
                       }
-                      await updateMusicVideoPlan(detail.id, payload);
-                      await refreshDetail(detail.id);
+                      await updateMusicVideoPlan(videoId, payload);
+                      if (videoId === detail.id) await refreshDetail(videoId);
                       return true;
                     } catch (e) {
                       setError(formatUiError(e?.response?.data?.error) || e.message || "Failed to save plan edits");
@@ -2230,11 +2346,24 @@ const MusicVideoPage = () => {
           )}
         </Box>
       </Box>
+      <Dialog open={duplicateAsk} onClose={() => setDuplicateAsk(false)} maxWidth="xs" fullWidth>
+        <DialogTitle>Duplicate “{detail?.name}”</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2">
+            The copy can reuse the clips already rendered, so only the cuts you change render again,
+            or render every cut fresh.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDuplicateAsk(false)}>Cancel</Button>
+          <Button onClick={() => runDuplicate(false)}>Render every cut fresh</Button>
+          <Button variant="contained" onClick={() => runDuplicate(true)}>Reuse rendered clips</Button>
+        </DialogActions>
+      </Dialog>
       <VersionsDialog
         open={versionsOpen}
         video={detail}
         onClose={() => setVersionsOpen(false)}
-        onError={setError}
         onRestored={async (updated) => {
           setDetail(updated);
           await refreshList();

@@ -480,7 +480,7 @@ class MusicVideoTool(BaseTool):
                 ]),
                 metadata={
                     "music_video_id": mv.id,
-                    "project_id": mv.project_id,
+                    "project_id": project_id,
                     "stage": mv.current_stage,
                     "studio_url": studio,
                     "i2v_model": settings.get("i2v_model"),

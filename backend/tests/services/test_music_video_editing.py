@@ -1,11 +1,19 @@
 """Pure tests for music-video editing helpers: input hashing, restore, cleanup."""
 from types import SimpleNamespace
 
+import os
+import shutil
+
 from backend.services.music_video_service import (
     TRANSIENT_SETTING_KEYS,
     clean_settings,
+    clip_file_name,
     clip_input_hash,
     clip_is_stale,
+    clip_needs_render,
+    is_marked_video_output,
+    mark_video_output,
+    prune_unused_clip_files,
     restored_clips,
     snapshot_of,
 )
@@ -34,7 +42,71 @@ def test_hash_changes_with_prompt_seed_and_render_settings():
     assert h != clip_input_hash(_clip(prompt="a blue door"), SETTINGS)
     assert h != clip_input_hash(_clip(seed=7), SETTINGS)
     assert h != clip_input_hash(c, {**SETTINGS, "i2v_model": "cogvideox-5b-i2v"})
-    assert h != clip_input_hash(_clip(storyboard_path="/tmp/sb.png"), SETTINGS)
+    assert h != clip_input_hash(c, {**SETTINGS, "flux_unet": "other.safetensors"})
+    assert h != clip_input_hash(_clip(rerenders=1), SETTINGS)
+
+
+def test_storyboard_counts_by_its_file(tmp_path):
+    sb = tmp_path / "storyboard_0.png"
+    sb.write_bytes(b"first")
+    with_sb = _clip(storyboard_path=str(sb))
+    first = clip_input_hash(with_sb, SETTINGS)
+    assert first != clip_input_hash(_clip(), SETTINGS)
+    # Regenerated in place: the clip animated from the old picture is stale.
+    sb.write_bytes(b"second, longer")
+    os.utime(sb, ns=(1, 1))
+    second = clip_input_hash(with_sb, SETTINGS)
+    assert second != first
+    # A copy that keeps the timestamp (a duplicated video) matches.
+    copy = tmp_path / "copy" / "storyboard_0.png"
+    copy.parent.mkdir()
+    shutil.copy2(sb, copy)
+    assert clip_input_hash(_clip(storyboard_path=str(copy)), SETTINGS) == second
+
+
+def test_a_cut_without_a_prompt_hashes_the_style_it_renders_from():
+    bare = _clip(prompt="")
+    assert clip_input_hash(bare, SETTINGS, "neon city") != clip_input_hash(bare, SETTINGS, "forest")
+    assert clip_input_hash(_clip(), SETTINGS, "neon city") == clip_input_hash(_clip(), SETTINGS, "forest")
+
+
+def test_needs_render():
+    on_disk = lambda p: p == "/tmp/clip_0.mp4"  # noqa: E731
+    done = _clip()
+    done["input_hash"] = clip_input_hash(done, SETTINGS)
+    assert not clip_needs_render(done, SETTINGS, exists=on_disk)
+    assert clip_needs_render({**done, "prompt": "changed"}, SETTINGS, exists=on_disk)
+    assert clip_needs_render({**done, "clip_path": "/gone.mp4"}, SETTINGS, exists=on_disk)
+    assert clip_needs_render(_clip(status="pending"), SETTINGS, exists=on_disk)
+    assert not clip_needs_render(_clip(status="cancelled"), SETTINGS, exists=on_disk)
+
+
+def test_each_set_of_inputs_renders_to_its_own_file():
+    a, b = clip_input_hash(_clip(), SETTINGS), clip_input_hash(_clip(seed=3), SETTINGS)
+    assert clip_file_name(0, a) != clip_file_name(0, b)
+    assert clip_file_name(0, a) == f"clip_0_{a}.mp4"
+
+
+def test_pruning_keeps_what_a_version_points_at_and_foreign_files(tmp_path):
+    names = ["clip_0_" + "a" * 16 + ".mp4", "clip_0_" + "b" * 16 + ".mp4",
+             "clip_0.mp4", "clip_1_" + "c" * 16 + ".mp4", "notes.txt"]
+    for n in names:
+        (tmp_path / n).write_bytes(b"x")
+    kept = str(tmp_path / names[0])
+    removed = prune_unused_clip_files(tmp_path, 0, {kept})
+    assert removed == [str(tmp_path / names[1])]
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted(n for n in names if n != names[1])
+
+
+def test_video_output_mark_survives_other_metadata():
+    doc = SimpleNamespace(file_metadata='{"source": "editor"}')
+    assert not is_marked_video_output(doc)
+    mark_video_output(doc, "music_video", 7)
+    assert is_marked_video_output(doc)
+    assert '"source": "editor"' in doc.file_metadata
+    bad = SimpleNamespace(file_metadata="not json")
+    mark_video_output(bad, "music_video", 7)
+    assert is_marked_video_output(bad)
 
 
 def test_stale_only_when_recorded_hash_differs():

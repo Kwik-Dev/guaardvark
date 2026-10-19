@@ -2,6 +2,8 @@
 
 Same in-memory SQLite fixture as test_music_video_api.py: never touches the live DB.
 """
+import os
+
 import pytest
 
 try:
@@ -31,9 +33,21 @@ def client(app):
     return app.test_client()
 
 
+DISPATCHED = []
+
+
 @pytest.fixture(autouse=True)
-def _no_dispatch(monkeypatch):
-    monkeypatch.setattr(MusicVideoService, "dispatch_agent", lambda self, mv_id, agent: None)
+def _no_dispatch(monkeypatch, tmp_path):
+    DISPATCHED.clear()
+    monkeypatch.setattr(MusicVideoService, "dispatch_agent",
+                        lambda self, mv_id, agent, **kw: DISPATCHED.append((mv_id, agent)))
+
+    # A copied video's files land under the test's own folder, never data/outputs.
+    def _clip_dir(mv_id):
+        d = tmp_path / "outputs" / f"music_video_{mv_id}" / "clips"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+    monkeypatch.setattr("backend.tasks.music_video_tasks._clip_dir", _clip_dir)
     monkeypatch.setattr(
         "backend.services.video_model_registry.resolve_active_video_model",
         lambda role, explicit=None, surface=None, **k: (explicit or "wan22-5b", None),
@@ -220,3 +234,115 @@ def test_project_delete_keeps_the_rendered_video(app, tmp_path):
         db.session.commit()
         assert db.session.get(Document, out.id) is not None
         assert db.session.get(MusicVideo, mv_id).project_id is None
+
+
+def test_plan_save_keeps_the_treatment_and_style(client, app, tmp_path):
+    with app.app_context():
+        mv_id = _video(tmp_path, stage="awaiting_approval", rendered=False)
+    r = client.post(f"/api/music-video/{mv_id}/plan",
+                    json={"treatment": "A slow night drive", "style_prompt": "neon"})
+    assert r.status_code == 200, r.get_json()
+    body = client.get(f"/api/music-video/{mv_id}").get_json()
+    assert body["user_treatment"] == "A slow night drive"
+    assert body["style_prompt"] == "neon"
+
+
+def test_plan_refuses_an_oversized_prompt(client, app, tmp_path):
+    with app.app_context():
+        mv_id = _video(tmp_path, stage="awaiting_approval", rendered=False)
+    r = client.post(f"/api/music-video/{mv_id}/plan", json={"prompts": {"0": "x" * 8001}})
+    assert r.status_code == 400
+
+
+def test_approve_saves_one_version_and_queues_changed_cuts(client, app, tmp_path):
+    with app.app_context():
+        mv_id = _video(tmp_path, stage="awaiting_approval")
+    client.post(f"/api/music-video/{mv_id}/plan", json={"prompts": {"1": "a different shot"}})
+    r = client.post(f"/api/music-video/{mv_id}/approve")
+    assert r.status_code == 200, r.get_json()
+    statuses = [c["status"] for c in sorted(r.get_json()["clips"], key=lambda c: c["index"])]
+    assert statuses == ["done", "pending", "done"]
+    assert client.post(f"/api/music-video/{mv_id}/approve").status_code == 409
+    with app.app_context():
+        assert MusicVideoRevision.query.filter_by(music_video_id=mv_id, reason="approve").count() == 1
+
+
+def test_a_cut_edit_mid_render_starts_no_second_chain(client, app, tmp_path):
+    with app.app_context():
+        mv_id = _video(tmp_path, stage="generating")
+        mv = db.session.get(MusicVideo, mv_id)
+        clips = [dict(c) for c in mv.clips]
+        clips[2].update(status="pending", clip_path=None)
+        mv.clips = clips
+        db.session.commit()
+    DISPATCHED.clear()
+    r = client.post(f"/api/music-video/{mv_id}/cut/0", json={"prompt": "changed"})
+    assert r.status_code == 200, r.get_json()
+    assert DISPATCHED == []  # the running chain reaches cut 0 itself
+
+
+def test_a_cut_edit_after_the_render_stopped_starts_it(client, app, tmp_path):
+    with app.app_context():
+        mv_id = _video(tmp_path, stage="generating")
+    DISPATCHED.clear()
+    r = client.post(f"/api/music-video/{mv_id}/cut/0", json={"prompt": "changed"})
+    assert r.status_code == 200, r.get_json()
+    assert DISPATCHED == [(mv_id, "clip_generator")]
+
+
+def test_restore_refused_while_storyboards_render(client, app, tmp_path):
+    import time
+    with app.app_context():
+        mv_id = _video(tmp_path, stage="awaiting_approval", rendered=False)
+    rid = client.post(f"/api/music-video/{mv_id}/revisions", json={}).get_json()["id"]
+    with app.app_context():
+        mv = db.session.get(MusicVideo, mv_id)
+        mv.settings_json = {**(mv.settings_json or {}), "storyboard_generating": True,
+                            "storyboard_started_at": time.time()}
+        db.session.commit()
+    assert client.post(f"/api/music-video/{mv_id}/revisions/{rid}/restore").status_code == 409
+
+
+def test_a_duplicate_with_clips_owns_its_files(client, app, tmp_path):
+    with app.app_context():
+        mv_id = _video(tmp_path)
+    kept = client.post(f"/api/music-video/{mv_id}/duplicate", json={"keep_clips": True}).get_json()
+    assert kept["clips_done"] == 3 and kept["cuts_to_render"] == 0
+    for c in kept["clips"]:
+        assert f"music_video_{kept['id']}" in c["clip_path"]
+        assert os.path.exists(c["clip_path"])
+    # The original's file changing leaves the copy as it was.
+    (tmp_path / "clip_0.mp4").write_bytes(b"re-rendered")
+    copied = next(c for c in kept["clips"] if c["index"] == 0)["clip_path"]
+    assert open(copied, "rb").read() == b"x"
+
+
+def test_patch_and_duplicate_refuse_a_name_that_is_not_text(client, app, tmp_path):
+    with app.app_context():
+        mv_id = _video(tmp_path)
+    assert client.patch(f"/api/music-video/{mv_id}", json={"name": 5}).status_code == 400
+    assert client.post(f"/api/music-video/{mv_id}/duplicate", json={"name": ["x"]}).status_code == 400
+    assert client.post(f"/api/music-video/{mv_id}/revisions", json={"label": 3}).status_code == 400
+
+
+def test_project_delete_keeps_outputs_of_a_video_deleted_earlier(client, app, tmp_path):
+    from backend.services.music_video_service import attach_outputs_to_project
+    from backend.services.video_project_registry import detach_project_media
+    with app.app_context():
+        p = Project(name="Album")
+        db.session.add(p)
+        db.session.commit()
+        mv_id = _video(tmp_path, project_id=p.id)
+        out = Document(filename="final.mp4", path=str(tmp_path / "final3.mp4"), type="mp4")
+        db.session.add(out)
+        db.session.commit()
+        mv = db.session.get(MusicVideo, mv_id)
+        attach_outputs_to_project(mv, [out.id])
+        db.session.commit()
+        pid, out_id = p.id, out.id
+    assert client.delete(f"/api/music-video/{mv_id}").status_code == 200
+    with app.app_context():
+        assert detach_project_media(db.session, pid) == 1
+        db.session.delete(db.session.get(Project, pid))
+        db.session.commit()
+        assert db.session.get(Document, out_id) is not None

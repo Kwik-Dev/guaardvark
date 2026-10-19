@@ -26,8 +26,9 @@ from backend.models import db, MusicVideo, Document
 from backend.services.music_video_service import (
     MusicVideoService,
     attach_outputs_to_project,
+    clip_file_name,
     clip_input_hash,
-    clip_is_stale,
+    clip_needs_render,
     compute_bar_cut_plan,
     compute_cut_plan,
     fill_clip_to_duration,
@@ -769,16 +770,9 @@ def run_clip_generator(mv_id: int):
 
     clips = list(mv.clips or [])
     raw_settings = mv.settings_json or {}
-    target = None
-    for c in clips:
-        if c.get("status") == "cancelled":
-            continue
-        on_disk = c.get("clip_path") and os.path.exists(c["clip_path"])
-        # A done clip whose prompt/seed/settings changed since it was rendered
-        # (revise, restore, per-cut edit) is rendered again; the rest are kept.
-        if not (c.get("status") == "done" and on_disk) or clip_is_stale(c, raw_settings):
-            target = c
-            break
+    # A done clip whose prompt/seed/settings changed since it was rendered
+    # (revise, restore, per-cut edit) is rendered again; the rest are kept.
+    target = next((c for c in clips if clip_needs_render(c, raw_settings, mv.style_prompt)), None)
 
     if target is None:
         # A cut a quality check held waits for a person: the video is not
@@ -816,9 +810,9 @@ def run_clip_generator(mv_id: int):
                 error=f"clip {target.get('index')} waited {int(CLIP_DEFER_MAX_S // 60)} min for the GPU/plugin: {e}",
             )
             return
-        target["deferred_since"] = since
-        mv.clips = clips
-        db.session.commit()
+        # Written onto the clips as they are now: the list read above may be
+        # minutes old, and writing it back would undo another cut's progress.
+        _update_clip(mv, target.get("index"), deferred_since=since)
         log.info("music_video %s clip %s deferred (transient): %s", mv_id, target.get("index"), e)
         celery.send_task("music_video.run_clip_generator", args=[mv_id], countdown=GPU_COOLDOWN_RETRY_S)
         return
@@ -827,12 +821,7 @@ def run_clip_generator(mv_id: int):
         if "execution_interrupted" in err.lower() and not (mv.status or "").startswith("cancelled"):
             log.warning("music_video %s clip %s interrupted; marking clip failed and continuing",
                         mv_id, target.get("index"))
-            target["status"] = "failed"
-            target["error"] = err
-            mv.clips = list(clips)
-            from sqlalchemy.orm.attributes import flag_modified
-            flag_modified(mv, "clips")
-            db.session.commit()
+            _update_clip(mv, target.get("index"), status="failed", error=err)
             celery.send_task("music_video.run_clip_generator", args=[mv_id], countdown=GPU_COOLDOWN_RETRY_S)
             return
         log.exception("music_video %s clip %s generation failed", mv_id, target.get("index"))
@@ -843,6 +832,30 @@ def run_clip_generator(mv_id: int):
     # the next clip doesn't immediately trip "GPU cooling down". Re-queues at the
     # back, so other work interleaves between clips rather than starving.
     celery.send_task("music_video.run_clip_generator", args=[mv_id], countdown=GPU_COOLDOWN_RETRY_S)
+
+
+def _update_clip(mv: MusicVideo, idx, **fields) -> None:
+    """Set fields on one cut in the clips as stored now, and commit."""
+    import copy
+    db.session.refresh(mv)
+    clips = copy.deepcopy(mv.clips or [])
+    for c in clips:
+        if c.get("index") == idx:
+            c.update(fields)
+            break
+    mv.clips = clips
+    db.session.commit()
+
+
+def _referenced_clip_paths(mv: MusicVideo) -> set:
+    """Every clip file the video or one of its saved versions points at."""
+    from backend.models import MusicVideoRevision
+    paths = {c.get("clip_path") for c in (mv.clips or []) if c.get("clip_path")}
+    for rev in MusicVideoRevision.query.filter_by(music_video_id=mv.id).all():
+        for c in ((rev.snapshot or {}).get("clips") or []):
+            if c.get("clip_path"):
+                paths.add(c["clip_path"])
+    return paths
 
 
 def _cut_quality(s: dict, video_path, req, keyframe_path) -> tuple:
@@ -909,9 +922,12 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
     clip_started = time.time()
     # Hash of the inputs as they are NOW (raw settings, not defaults), recorded on
     # the finished clip so a later edit can tell which clips went stale.
-    render_hash = clip_input_hash(clip, mv.settings_json or {})
+    render_hash = clip_input_hash(clip, mv.settings_json or {}, mv.style_prompt)
     # Per-cut seed (set from the plan editor); the historical default otherwise.
-    still_seed = int(clip["seed"]) if isinstance(clip.get("seed"), int) else 1000 + idx
+    # A seed the person set also fixes the animation; without one the i2v seed
+    # stays random, so rendering a cut again gives a new take.
+    chosen_seed = int(clip["seed"]) if isinstance(clip.get("seed"), int) else None
+    still_seed = chosen_seed if chosen_seed is not None else 1000 + idx
 
     def _substage(name: str) -> None:
         _set_progress(mv.id, "generating", clip_index=idx, substage=name, clip_started_at=clip_started)
@@ -932,7 +948,7 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
     clip_prompt = clip.get("prompt") or mv.style_prompt
     out_dir = _clip_dir(mv.id)
     still_path = str(out_dir / f"still_{idx}.png")
-    final_path = str(out_dir / f"clip_{idx}.mp4")
+    final_path = str(out_dir / clip_file_name(idx, render_hash))
     base_slot_s = float(clip["end"]) - float(clip["start"])
     # Planner (Director) can suggest artistic duration for this shot (longer for drama, shorter for punch).
     # This controls only the *generated motion* length for the i2v call (saves VRAM/compute on long dreamy shots).
@@ -1104,6 +1120,8 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
                     }]
             if s.get("i2v_steps"):
                 req_kwargs["num_inference_steps"] = int(s["i2v_steps"])
+            if chosen_seed is not None:
+                req_kwargs["seed"] = chosen_seed
             req = VideoGenerationRequest(**req_kwargs)
             vg = get_video_generator()
             if not getattr(vg, "service_available", True):
@@ -1158,6 +1176,11 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
                 break
         mv.clips = clips
         db.session.commit()
+        try:
+            from backend.services.music_video_service import prune_unused_clip_files
+            prune_unused_clip_files(out_dir, idx, _referenced_clip_paths(mv))
+        except Exception as e:  # noqa: BLE001 - tidying never fails a rendered cut
+            log.warning("music_video %s cut %s: could not tidy earlier renders: %s", mv.id, idx, e)
         progress.complete_process(process_id, f"Clip {idx + 1}/{clip_count} complete")
         log.info("music_video %s clip %s done (%.2fs)", mv.id, idx, fill_target_s)
     except Exception as e:
@@ -1384,6 +1407,7 @@ def run_storyboard_generator(mv_id: int, force: bool = False):
         if force or not (c.get("storyboard_path") and os.path.exists(c.get("storyboard_path")))
     ]
     sb_done = 0
+    done_indices: set = set()
     _set_storyboard_progress(mv_id, 0, len(todo))
 
     error_msg = None
@@ -1437,6 +1461,7 @@ def run_storyboard_generator(mv_id: int, force: bool = False):
                         )
                     c["storyboard_path"] = still_path
                     c["storyboard_variation"] = None
+                    done_indices.add(idx)
                 except RuntimeError as e:
                     log.error("run_storyboard_generator ComfyUI failure for mv %s cut %s: %s", mv_id, idx, e)
                 except Exception as e:
@@ -1454,9 +1479,18 @@ def run_storyboard_generator(mv_id: int, force: bool = False):
         log.exception("run_storyboard_generator failed for mv %s", mv_id)
         error_msg = str(e)
     else:
+        # Only the storyboards this run made go onto the clips as they are now:
+        # prompts edited or a version restored while it ran are kept.
+        made = {c["index"]: (c.get("storyboard_path"), c.get("storyboard_variation"))
+                for c in clips if c.get("index") in done_indices}
         mv = db.session.get(MusicVideo, mv_id)
-        if mv:
-            mv.clips = clips
+        if mv and made:
+            db.session.refresh(mv)
+            fresh = copy.deepcopy(mv.clips or [])
+            for c in fresh:
+                if c.get("index") in made:
+                    c["storyboard_path"], c["storyboard_variation"] = made[c["index"]]
+            mv.clips = fresh
             db.session.commit()
 
     _set_storyboard_generating(mv_id, generating=False, error=error_msg)

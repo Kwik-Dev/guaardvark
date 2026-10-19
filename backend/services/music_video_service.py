@@ -463,6 +463,7 @@ CLIP_RENDER_SETTING_KEYS = (
     "i2v_width", "i2v_height", "i2v_steps", "still_width", "still_height",
     "fill_method", "max_stretch", "interpolation_multiplier", "fps", "width", "height",
     "use_lora_consistency", "subject_ids", "loras", "lora_paths", "high_consistency",
+    "flux_unet", "flux_t5", "flux_clip", "flux_vae", "prompt_style",
 )
 
 # Run-time bookkeeping that never travels into a copy or a saved version.
@@ -474,32 +475,98 @@ TRANSIENT_SETTING_KEYS = (
 MAX_REVISIONS_PER_VIDEO = 50
 
 
-def clip_input_hash(clip: dict, settings: dict | None) -> str:
-    """Stable digest of everything that decides a clip's pixels."""
+def _file_signature(path) -> list | None:
+    """[size, mtime_ns] of a file, or None when there is none. Survives a copy
+    that keeps the timestamp (shutil.copy2, a hard link), so a duplicated
+    video's storyboards still match the clips rendered from them."""
+    import os as _os
+    if not path:
+        return None
+    try:
+        st = _os.stat(path)
+    except OSError:
+        return None
+    return [st.st_size, st.st_mtime_ns]
+
+
+def clip_input_hash(clip: dict, settings: dict | None, fallback_prompt: str | None = None) -> str:
+    """Stable digest of everything that decides a clip's pixels.
+
+    ``fallback_prompt`` is the video's style prompt, which a cut with no prompt
+    of its own renders from. The storyboard counts by its file, so regenerating
+    it in place makes the clip animated from the old one stale."""
     import hashlib
     import json as _json
     s = settings or {}
     payload = {
-        "prompt": (clip.get("prompt") or "").strip(),
+        "prompt": (clip.get("prompt") or fallback_prompt or "").strip(),
         "start": round(float(clip.get("start") or 0.0), 3),
         "end": round(float(clip.get("end") or 0.0), 3),
         "seed": clip.get("seed"),
-        "storyboard": clip.get("storyboard_path"),
+        "storyboard": _file_signature(clip.get("storyboard_path")),
         "storyboard_variation": clip.get("storyboard_variation"),
         "duration": clip.get("duration_seconds"),
+        # A held cut rendered again is a new take with its own file, so a saved
+        # version keeps the take it was saved with.
+        "rerenders": int(clip.get("rerenders") or 0),
         "settings": {k: s.get(k) for k in CLIP_RENDER_SETTING_KEYS},
     }
     raw = _json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
-def clip_is_stale(clip: dict, settings: dict | None) -> bool:
+def clip_is_stale(clip: dict, settings: dict | None, fallback_prompt: str | None = None) -> bool:
     """A done clip rendered from different inputs than it has now. Clips from
     before input hashing (no input_hash) are never called stale."""
     recorded = clip.get("input_hash")
     if not recorded:
         return False
-    return recorded != clip_input_hash(clip, settings)
+    return recorded != clip_input_hash(clip, settings, fallback_prompt)
+
+
+def clip_needs_render(clip: dict, settings: dict | None, fallback_prompt: str | None = None, exists=None) -> bool:
+    """Whether the clip generator would render this cut: not done, its file is
+    gone, or its inputs changed since it was rendered. Cancelled cuts never are."""
+    import os as _os
+    if clip.get("status") == "cancelled":
+        return False
+    exists = exists or _os.path.exists
+    on_disk = bool(clip.get("clip_path")) and exists(clip["clip_path"])
+    return not (clip.get("status") == "done" and on_disk) or clip_is_stale(clip, settings, fallback_prompt)
+
+
+def clip_file_name(idx: int, render_hash: str) -> str:
+    """One file per cut and set of inputs. A new render never overwrites the
+    footage a saved version (or a copy of the video) still points at."""
+    return f"clip_{idx}_{render_hash}.mp4"
+
+
+def prune_unused_clip_files(clip_dir, idx: int, keep_paths) -> list[str]:
+    """Delete this cut's earlier renders that no clip list still points at.
+
+    Only files this module names (``clip_<idx>_<16 hex>.mp4``) in the video's
+    own clip folder are considered, so a hand-placed file or a pre-hash
+    ``clip_<idx>.mp4`` is never touched. ``keep_paths``: every clip_path in the
+    current clips and in every saved version. Returns the paths removed."""
+    import os as _os
+    import re as _re
+    from pathlib import Path as _Path
+    pattern = _re.compile(rf"^clip_{int(idx)}_[0-9a-f]{{16}}\.mp4$")
+    keep = {_os.path.realpath(str(p)) for p in keep_paths if p}
+    removed = []
+    try:
+        entries = list(_Path(clip_dir).iterdir())
+    except OSError:
+        return removed
+    for f in entries:
+        if not pattern.match(f.name) or _os.path.realpath(str(f)) in keep:
+            continue
+        try:
+            f.unlink()
+            removed.append(str(f))
+        except OSError:
+            pass
+    return removed
 
 
 def clean_settings(settings: dict | None) -> dict:
@@ -556,7 +623,34 @@ def attach_outputs_to_project(mv, doc_ids) -> list[int]:
     from backend.models import Document
     for doc in Document.query.filter(Document.id.in_(ids)).all():
         doc.project_id = mv.project_id
+        mark_video_output(doc, "music_video", mv.id)
     return ids
+
+
+VIDEO_OUTPUT_MARK = "video_output"
+
+
+def mark_video_output(doc, kind: str, row_id: int) -> None:
+    """Record on the Document itself that it is a rendered video's output, so a
+    project delete keeps it even after the video's own row is gone."""
+    import json as _json
+    try:
+        meta = _json.loads(doc.file_metadata) if doc.file_metadata else {}
+    except (TypeError, ValueError):
+        meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
+    meta[VIDEO_OUTPUT_MARK] = {"kind": kind, "id": int(row_id)}
+    doc.file_metadata = _json.dumps(meta)
+
+
+def is_marked_video_output(doc) -> bool:
+    import json as _json
+    try:
+        meta = _json.loads(doc.file_metadata) if doc.file_metadata else {}
+    except (TypeError, ValueError):
+        return False
+    return isinstance(meta, dict) and isinstance(meta.get(VIDEO_OUTPUT_MARK), dict)
 
 
 class MusicVideoService(PipelineService):

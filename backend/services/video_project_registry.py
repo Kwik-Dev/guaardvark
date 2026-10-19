@@ -109,7 +109,7 @@ def count_by_project(session) -> dict[int, int]:
 def detach_project_media(session, project_id: int) -> int:
     """Before a Project is deleted: un-file the rendered outputs its videos put
     under it, so Project.documents' delete-orphan cascade does not delete them.
-    Returns the number of Documents detached. Does not commit."""
+    Returns the number of Documents detached. Flushes; does not commit."""
     from backend.models import Document
     ids: set[int] = set()
     for vk in VIDEO_KINDS.values():
@@ -119,11 +119,21 @@ def detach_project_media(session, project_id: int) -> int:
             out_id = getattr(row, "output_document_id", None)
             if out_id:
                 ids.add(out_id)
+    # Outputs whose video row was deleted earlier still carry their own mark.
+    from backend.services.music_video_service import VIDEO_OUTPUT_MARK, is_marked_video_output
+    marked = (session.query(Document)
+              .filter(Document.project_id == project_id,
+                      Document.file_metadata.like(f'%"{VIDEO_OUTPUT_MARK}"%'))
+              .all())
+    ids.update(d.id for d in marked if is_marked_video_output(d))
     if not ids:
         return 0
     docs = session.query(Document).filter(Document.id.in_(ids), Document.project_id == project_id).all()
     for d in docs:
         d.project_id = None
+    # Written now: the project's delete cascade selects its documents from the
+    # database, and an unflushed change would still list these under it.
+    session.flush()
     return len(docs)
 
 

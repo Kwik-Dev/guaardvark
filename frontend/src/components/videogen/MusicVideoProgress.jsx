@@ -1,7 +1,6 @@
 import React from "react";
 import {
   Box,
-  Chip,
   LinearProgress,
   Stack,
   Step,
@@ -12,7 +11,6 @@ import {
 } from "@mui/material";
 import {
   CLIP_CELL_COLOR,
-  STAGE_STATE_COLOR,
   STAGE_STATE_TEXT,
   activeStepIndex,
   clipCellState,
@@ -21,15 +19,30 @@ import {
   formatDuration,
   visibleStages,
 } from "./musicVideoProgressModel";
+import StatusPill from "../settings/ui/StatusPill";
+
+const STATE_TONE = { queued: "warn", waiting: "warn", failed: "error", cancelled: "neutral", active: "info", done: "ok" };
 
 /**
  * Whole-run progress for a music video: a stage stepper, the overall bar with
  * an ETA, and one cell per cut. Reads `progress` from the music-video API
  * (backend/services/music_video_progress.py). `compact` draws only the bar and
- * one line, for list rows and project cards.
+ * one line, for list rows and project cards. `running`: the video is working,
+ * so a bar is drawn even when the server sends no percentage (an error in the
+ * meter, or a backend that predates it).
  */
-export default function MusicVideoProgress({ progress, clips = [], compact = false, onCutClick }) {
-  if (!progress || !Array.isArray(progress.stages) || progress.overall_pct == null) return null;
+export default function MusicVideoProgress({ progress, clips = [], compact = false, running = false, onCutClick }) {
+  if (!progress || !Array.isArray(progress.stages) || progress.overall_pct == null) {
+    if (!running) return null;
+    return (
+      <Box sx={{ minWidth: 120 }} data-testid="mv-progress-unknown">
+        <LinearProgress sx={{ height: compact ? 4 : 8, borderRadius: 1 }} />
+        <Typography variant="caption" color="text.secondary" noWrap display="block">
+          Working…
+        </Typography>
+      </Box>
+    );
+  }
   const stages = visibleStages(progress);
   const active = stages.find((s) => ["active", "queued", "waiting", "failed", "cancelled"].includes(s.state));
   const failed = stages.some((s) => s.state === "failed");
@@ -99,10 +112,9 @@ export default function MusicVideoProgress({ progress, clips = [], compact = fal
           sx={{ height: 8, borderRadius: 1, mt: 0.5 }}
         />
         {active && active.state && active.state !== "active" && (
-          <Chip
-            size="small"
+          <StatusPill
             sx={{ mt: 0.75 }}
-            color={STAGE_STATE_COLOR[active.state] || "default"}
+            tone={STATE_TONE[active.state] || "neutral"}
             label={STAGE_STATE_TEXT[active.state]}
           />
         )}
@@ -122,8 +134,15 @@ export default function MusicVideoProgress({ progress, clips = [], compact = fal
                 <Tooltip key={c.index} title={`Cut #${c.index} · ${state}${c.locked ? " · locked" : ""}`}>
                   <Box
                     role={onCutClick ? "button" : undefined}
+                    tabIndex={onCutClick ? 0 : undefined}
                     aria-label={`Cut ${c.index} ${state}`}
                     onClick={onCutClick ? () => onCutClick(c.index) : undefined}
+                    onKeyDown={onCutClick ? (e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        onCutClick(c.index);
+                      }
+                    } : undefined}
                     sx={{
                       width: 14,
                       height: 14,
