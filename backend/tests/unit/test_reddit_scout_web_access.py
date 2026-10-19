@@ -2,6 +2,8 @@
 off by default) it reads nothing, like the YouTube scout and posting."""
 from unittest.mock import patch
 
+import pytest
+
 from backend.services.social_outreach import recon
 
 
@@ -45,3 +47,15 @@ def test_the_beat_driven_loops_read_nothing_with_web_access_off():
     rules.assert_not_called()
     share_rules.assert_not_called()
     assert [c.kwargs["abort_reason"] for c in logged.call_args_list] == ["web_access_off"] * 2
+
+
+@pytest.mark.parametrize("platform", ["reddit", "share", "recon", "youtube"])
+def test_a_run_that_reads_the_web_is_not_queued_with_web_access_off(platform):
+    from backend.services.social_outreach import job_service
+
+    off = "Web access is disabled. Enable it in Settings to scout Reddit for outreach."
+    with patch.object(job_service.kill_switch, "is_enabled", return_value=True), \
+            patch("backend.utils.settings_utils.web_access_block_reason", return_value=off) as gate:
+        with pytest.raises(RuntimeError, match="Web access is disabled"):
+            job_service.queue_outreach_run(platform)
+    gate.assert_called_once_with(job_service.WEB_READING_RUNS[job_service.OUTREACH_TASK_TYPES[platform]])
