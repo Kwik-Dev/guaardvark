@@ -201,3 +201,51 @@ def record_from_info(tag: str, info: Optional[dict], *, with_vision: bool = True
         evidence=evidence,
         decision=bool(values["decision"]),
     )
+
+
+# ── start.sh's model bootstrap ────────────────────────────────────────────
+# Names that mark an embedding model, used only for a tag Ollama could not
+# describe and no declared row covers (start.sh's older rule).
+_EMBED_NAME_FALLBACK = re.compile(r"embed|minilm", re.IGNORECASE)
+
+
+def model_kind(tag: str) -> Tuple[str, str]:
+    """("embedding" | "chat", why) for an installed Ollama tag: Ollama's own
+    capabilities, then a declared row's ``embedding`` (record_from_info), and
+    only when neither answers, the name."""
+    record = capabilities_for(tag, with_vision=False)
+    declared = record.evidence.get("embedding") in ("declared_row", "local_row")
+    if record.exists or declared:
+        return ("embedding" if record.embedding else "chat"), record.evidence.get("embedding", "")
+    return ("embedding" if _EMBED_NAME_FALLBACK.search(tag) else "chat"), "name_fallback"
+
+
+def _tags_from_ollama_list(text: str) -> list:
+    """Model tags from ``ollama list`` output (first column, header skipped)."""
+    tags = []
+    for line in (text or "").splitlines():
+        first = line.split()[0] if line.split() else ""
+        if first and first != "NAME" and ":" in first:
+            tags.append(first)
+    return tags
+
+
+def main(argv=None) -> int:
+    """``python -m backend.services.model_capabilities kinds`` reads
+    ``ollama list`` on stdin and prints ``<tag>\t<embedding|chat>\t<why>``
+    per model, for start.sh to tell chat models from embedding models."""
+    import sys
+    args = argv if argv is not None else sys.argv[1:]
+    if args[:1] != ["kinds"]:
+        print("usage: python -m backend.services.model_capabilities kinds < ollama-list-output",
+              file=sys.stderr)
+        return 2
+    for tag in _tags_from_ollama_list(sys.stdin.read()):
+        kind, why = model_kind(tag)
+        print(f"{tag}\t{kind}\t{why}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+

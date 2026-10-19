@@ -1107,15 +1107,31 @@ check_migrations_preflight() {
     fi
 }
 
+# "<tag>\t<embedding|chat>\t<why>" per model in the `ollama list` output on
+# stdin. Ollama's own capabilities (/api/show) decide, then a declared row
+# (backend/services/model_capabilities.py model_kind); the old name rule
+# ("embed"/"minilm") is used only when the venv cannot answer at all, or for
+# a tag Ollama cannot describe.
+ollama_model_kinds() {
+    local _list _out
+    _list="$(cat)"
+    _out="$(printf '%s\n' "$_list" | timeout 30 "$VENV_DIR/bin/python" -m backend.services.model_capabilities kinds 2>/dev/null)"
+    if [ $? -eq 0 ] && [ -n "$_out" ]; then
+        printf '%s\n' "$_out"
+        return 0
+    fi
+    printf '%s\n' "$_list" | awk 'NR > 1 && $1 ~ /:/ { kind = (tolower($1) ~ /embed|minilm/) ? "embedding" : "chat"; print $1 "\t" kind "\tname_fallback" }'
+}
+
 check_ollama_model() {
     if [ "$OLLAMA_AVAILABLE" -eq 0 ]; then
         return 0
     fi
-    # Pass when ANY chat (non-embed) model is installed — the system doesn't default
+    # Pass when ANY chat (non-embedding) model is installed — the system doesn't default
     # to a single fixed tag (it auto-selects via config.get_default_llm, gemma/llama3
     # family), and the fresh-install bootstrap guarantees one. The old check grepped
     # the literal "llama2", a model the system never defaults to → always failed.
-    timeout 5 ollama list 2>/dev/null | grep -viE 'embed|minilm' | grep -qE '[a-zA-Z0-9].*:'
+    timeout 5 ollama list 2>/dev/null | ollama_model_kinds | grep -q "	chat	"
 }
 
 run_health_checks() {
@@ -2481,8 +2497,10 @@ except Exception:
     [ -n "${GUAARDVARK_EMBEDDING_MODEL:-}" ] && BOOT_EMBED_MODEL="$GUAARDVARK_EMBEDDING_MODEL"
 
     BOOT_LIST="$(timeout 10 ollama list 2>/dev/null || true)"
-    # A "chat model" is any non-embed tag. Detect absence of either class.
-    if ! echo "$BOOT_LIST" | grep -viE 'embed|minilm' | grep -qE '[a-zA-Z0-9].*:'; then
+    # Each installed model is a chat or an embedding model by what Ollama
+    # reports for it (ollama_model_kinds). Detect absence of either class.
+    BOOT_KINDS="$(printf '%s\n' "$BOOT_LIST" | ollama_model_kinds)"
+    if ! printf '%s\n' "$BOOT_KINDS" | grep -q "	chat	"; then
         vader_info "No chat model found — pulling $BOOT_CHAT_MODEL (one-time, ~minutes)..."
         ollama_pull_retry "$BOOT_CHAT_MODEL" \
             && vader_success "Chat model ready: $BOOT_CHAT_MODEL" \
@@ -2490,7 +2508,7 @@ except Exception:
     else
         vader_success "Chat model already present"
     fi
-    if ! echo "$BOOT_LIST" | grep -qiE 'embed|minilm'; then
+    if ! printf '%s\n' "$BOOT_KINDS" | grep -q "	embedding	"; then
         vader_info "No embedding model found — pulling $BOOT_EMBED_MODEL (one-time)..."
         ollama_pull_retry "$BOOT_EMBED_MODEL" \
             && vader_success "Embedding model ready: $BOOT_EMBED_MODEL" \
