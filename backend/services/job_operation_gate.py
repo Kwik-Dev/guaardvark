@@ -171,6 +171,12 @@ def classify_render_exception(exc: BaseException):
     carried = failure_kind(exc) or next((failure_kind(a) for a in getattr(exc, "args", ()) if failure_kind(a)), None)
     if carried:
         return carried
+    try:
+        from backend.services.gpu_resource_policy import RenderStopped
+        if isinstance(exc, RenderStopped):
+            return RenderErrorKind.CANCELLED
+    except ImportError:  # pragma: no cover
+        pass
     if isinstance(exc, GpuCapacityError):
         return RenderErrorKind.CARD_TOO_SMALL
     if isinstance(exc, GpuBusyError):
@@ -179,10 +185,11 @@ def classify_render_exception(exc: BaseException):
         return RenderErrorKind.OOM
     try:
         import requests
-        if isinstance(exc, (requests.ConnectionError, requests.Timeout)):
-            return RenderErrorKind.COMFYUI_DOWN
-    except ImportError:  # pragma: no cover - requests is a backend dependency
-        pass
+        unreachable = (requests.ConnectionError, requests.Timeout)
+    except (ImportError, AttributeError):  # pragma: no cover - requests is a backend dependency
+        unreachable = ()
+    if unreachable and isinstance(exc, unreachable):
+        return RenderErrorKind.COMFYUI_DOWN
     return RenderErrorKind.UNKNOWN
 
 

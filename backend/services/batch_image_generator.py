@@ -44,6 +44,30 @@ except ImportError:
     CACHE_DIR = "/tmp/guaardvark_cache"
     UPLOAD_DIR = "/tmp/guaardvark_uploads"
 
+def _kind_of(error) -> Optional[str]:
+    """The RenderErrorKind value an error carries (a RenderFailure, or an
+    exception classified by job_operation_gate), else None."""
+    if error is None:
+        return None
+    if isinstance(error, BaseException):
+        from backend.services.job_operation_gate import classify_render_exception
+        kind = classify_render_exception(error)
+    else:
+        from backend.services.job_types import failure_kind
+        kind = failure_kind(error)
+    value = getattr(kind, "value", None)
+    return value if value and value != "unknown" else None
+
+
+def _error_with_kind(exc: BaseException):
+    """``str(exc)``, keeping the failure kind with it (job_types.RenderFailure)."""
+    kind = _kind_of(exc)
+    if kind is None:
+        return str(exc)
+    from backend.services.job_types import RenderFailure
+    return RenderFailure(kind, str(exc))
+
+
 @dataclass
 class BatchPrompt:
     id: str
@@ -124,6 +148,8 @@ class BatchImageResult:
     generation_time: float = 0.0
     error: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    # RenderErrorKind value (job_types) of a failed image, named where it failed.
+    error_kind: Optional[str] = None
 
 @dataclass
 class BatchGenerationStatus:
@@ -147,6 +173,8 @@ class BatchGenerationStatus:
     retry_data: Optional[Dict[str, Any]] = None
     # Set while the batch is admitted-but-waiting on VRAM; cleared on admit.
     gpu_wait_reason: Optional[str] = None
+    # RenderErrorKind value (job_types) of the batch's own error, when it has one.
+    error_kind: Optional[str] = None
 
 # Seed space shared with the offline path (offline_image_generator uses
 # torch.randint(0, 2**32)), so seeds stay comparable across generators.
@@ -834,6 +862,7 @@ class BatchImageGenerator:
         before the GPU session so nothing was evicted for it."""
         batch_status.status = "error"
         batch_status.error = reason
+        batch_status.error_kind = "model_not_installed"
         batch_status.failed_images = batch_status.total_images
         batch_status.end_time = datetime.now()
         batch_status.gpu_wait_reason = None
@@ -1007,7 +1036,7 @@ class BatchImageGenerator:
         except Exception as e:
             logger.error("ComfyUI %s batch generation failed: %s", model_tag, e)
             return ImageGenerationResult(
-                success=False, error=str(e), prompt_used=prompt.prompt
+                success=False, error=_error_with_kind(e), prompt_used=prompt.prompt
             )
 
     # ── Z-Image via ComfyUI (optional; GUAARDVARK_ZIMAGE_USE_COMFYUI=1) ────────
@@ -1085,7 +1114,7 @@ class BatchImageGenerator:
         except Exception as e:
             logger.error("ComfyUI Z-Image batch generation failed: %s", e)
             return ImageGenerationResult(
-                success=False, error=str(e), prompt_used=prompt.prompt
+                success=False, error=_error_with_kind(e), prompt_used=prompt.prompt
             )
 
     def _generate_with_character_lora(self, prompt: BatchPrompt) -> Optional[ImageGenerationResult]:
@@ -1160,7 +1189,7 @@ class BatchImageGenerator:
             )
         except Exception as e:
             logger.error(f"Character LoRA generation failed: {e}")
-            return ImageGenerationResult(success=False, error=str(e), prompt_used=final_prompt)
+            return ImageGenerationResult(success=False, error=_error_with_kind(e), prompt_used=final_prompt)
 
     def _generate_single_image(self, batch_id: str, prompt: BatchPrompt, output_dir: Path,
                              batch_status: BatchGenerationStatus) -> BatchImageResult:
@@ -1248,7 +1277,8 @@ class BatchImageGenerator:
                     prompt_id=prompt.id,
                     success=False,
                     generation_time=time.time() - start_time,
-                    error=error_msg
+                    error=error_msg,
+                    error_kind=_kind_of(result.error),
                 )
 
             image_ext = Path(result.image_path).suffix or ".png"
@@ -1324,7 +1354,8 @@ class BatchImageGenerator:
                 prompt_id=prompt.id,
                 success=False,
                 generation_time=time.time() - start_time,
-                error=str(e)
+                error=str(e),
+                error_kind=_kind_of(e),
             )
         finally:
             # An exception raised here would replace the function's return value
@@ -1347,6 +1378,8 @@ class BatchImageGenerator:
                 "batch_id": batch_status.batch_id,
                 "display_name": getattr(batch_status, "display_name", None),
                 "status": batch_status.status,
+                "error": str(batch_status.error) if batch_status.error else None,
+                "error_kind": batch_status.error_kind,
                 "total_images": batch_status.total_images,
                 "completed_images": batch_status.completed_images,
                 "failed_images": batch_status.failed_images,
@@ -1367,6 +1400,7 @@ class BatchImageGenerator:
                         "thumbnail_path": r.thumbnail_path,
                         "generation_time": r.generation_time,
                         "error": r.error,
+                        "error_kind": r.error_kind,
                         "metadata": r.metadata
                     }
                     for r in batch_status.results
@@ -1776,6 +1810,7 @@ class BatchImageGenerator:
                                                 batch_status.failed_images += 1
                                                 if not batch_status.error:
                                                     batch_status.error = result.error
+                                                    batch_status.error_kind = result.error_kind
 
                                             batch_status.results = _ordered_results()
 
@@ -2571,6 +2606,8 @@ class BatchImageGenerator:
                 output_dir=str(batch_folder),
                 display_name=metadata.get("display_name"),
                 retry_data=metadata.get("retry_data"),
+                error=metadata.get("error"),
+                error_kind=metadata.get("error_kind"),
             )
         except (ValueError, KeyError, TypeError) as e:
             logger.warning(f"Failed to load metadata for batch {batch_folder.name}: {e}")
@@ -2585,6 +2622,7 @@ class BatchImageGenerator:
                     thumbnail_path=r.get("thumbnail_path"),
                     generation_time=r.get("generation_time", 0.0) or 0.0,
                     error=r.get("error"),
+                    error_kind=r.get("error_kind"),
                     metadata=r.get("metadata") or {},
                 )
                 for r in metadata.get("results", []) or []

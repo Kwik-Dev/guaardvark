@@ -432,6 +432,7 @@ def job_status(job_id):
                 "attribution": job.get("attribution"), "seed": job.get("seed"),
             }
         return jsonify({"id": job_id, "status": status, "error": job.get("error"),
+                        "error_kind": job.get("error_kind"),
                         "progress": {"current": 0, "total": 0}, "result": result}), 200
     body, status_code = _proxy_get(f"/jobs/{job_id}")
     return body, status_code

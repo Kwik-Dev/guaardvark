@@ -63,7 +63,9 @@ def _execution_error(exception_type, message, node_type="KSampler", node_id="10"
 def test_every_kind_has_a_policy():
     assert set(RENDER_ERROR_POLICY) == set(K)
     for kind, policy in RENDER_ERROR_POLICY.items():
-        assert set(policy) == {"label", "retryable", "retry_after_s", "action"}, kind
+        required = {"label", "retryable", "retry_after_s", "action"}
+        optional = {"label_by_surface", "action_by_surface"}  # wording for image/audio/voice jobs
+        assert required <= set(policy) <= required | optional, kind
         assert policy["retryable"] == bool(policy["retry_after_s"]), kind
         assert policy["label"], kind
 

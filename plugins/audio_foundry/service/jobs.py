@@ -43,6 +43,24 @@ from backends.base import GenerationCancelled
 
 logger = logging.getLogger(__name__)
 
+
+def failure_kind_of(exc: BaseException) -> Optional[str]:
+    """The failure kind of an exception a backend raised, or None when unknown.
+    Never raises: it runs inside the job's own failure handler."""
+    try:
+        from backends.hub_weights import WeightsNotInstalled
+    except Exception:  # noqa: BLE001 - classification is best effort
+        WeightsNotInstalled = ()
+
+    if isinstance(exc, WeightsNotInstalled):
+        return "model_not_installed"
+    name = type(exc).__name__
+    text = str(exc).lower()
+    # torch.cuda.OutOfMemoryError, or the RuntimeError older torch raises.
+    if name == "OutOfMemoryError" or "out of memory" in text:
+        return "oom"
+    return None
+
 # runner(intent_value, params, progress_cb, cancel_event) -> finalized response dict
 Runner = Callable[[str, dict, Callable[[int, int, str], None], threading.Event], dict]
 
@@ -56,6 +74,10 @@ class Job:
     progress: dict = field(default_factory=lambda: {"current": 0, "total": 0, "stage": ""})
     result: Optional[dict] = None     # finalized response dict on success
     error: Optional[str] = None
+    # Kind of failure, named where the job failed. The values are the backend's
+    # RenderErrorKind values (backend/services/job_types.py), which this
+    # process cannot import: model_not_installed, oom, cancelled.
+    error_kind: Optional[str] = None
     created_at: float = 0.0
     started_at: Optional[float] = None
     finished_at: Optional[float] = None
@@ -179,11 +201,13 @@ class JobManager:
             except GenerationCancelled:
                 with self._lock:
                     job.status = "cancelled"
+                    job.error_kind = "cancelled"
             except Exception as e:  # noqa: BLE001 — surface any backend failure as job error
                 logger.exception("Audio job %s failed", job_id)
                 with self._lock:
                     job.status = "error"
                     job.error = f"{type(e).__name__}: {e}"
+                    job.error_kind = failure_kind_of(e)
             finally:
                 with self._lock:
                     job.finished_at = time.time()

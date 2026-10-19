@@ -88,7 +88,8 @@ def test_status_tool_reads_an_image_batch(monkeypatch):
     assert result.metadata["kind"] == "image"
     assert result.metadata["files"][0]["url"] == "/api/batch-image/image/ImageBatch_x/img_1.png"
     assert "1/2 finished, 1 failed" in result.output
-    assert "Failed item: oom" in result.output
+    # An image failure with no kind of its own reads as the vocabulary's unknown kind.
+    assert "Failed item: Render failed: oom" in result.output
     assert "Steps: 8" in result.output
     assert "Raised sampling to 8 steps." in result.output
 
