@@ -2152,13 +2152,21 @@ const SettingsPage = () => {
         const dims = payload?.dimensions;
         const queued = payload?.reindex_queued ?? 0;
         const pending = payload?.reindex_pending ?? 0;
+        // Indexed text with no document behind it is not re-indexed; say what
+        // and how to rebuild it.
+        const notRebuilt = payload?.not_rebuilt || [];
+        const notRebuiltText = notRebuilt.length
+          ? " Not rebuilt automatically: " +
+            notRebuilt.map((n) => `${n.rows} ${n.kind.replace(/_/g, " ")} row(s). ${n.how}`).join(" ")
+          : "";
         showMessage(
           payload?.index_cleared
             ? `Embedding switched to ${selectedEmbeddingModel} (${dims}d). The index was emptied and ${queued} ` +
                 `document(s) queued to be indexed again` +
-                (pending ? `; ${pending} wait for indexing to resume.` : ".")
+                (pending ? `; ${pending} wait for indexing to resume.` : ".") +
+                notRebuiltText
             : `Embedding model is already ${selectedEmbeddingModel}; index kept.`,
-          payload?.index_cleared && pending ? "warning" : "success",
+          payload?.index_cleared && (pending || notRebuilt.length) ? "warning" : "success",
         );
         fetchResources();
         setProfilesReloadKey((k) => k + 1);

@@ -141,3 +141,54 @@ def test_a_refused_task_stops_the_queueing(app, dispatch, monkeypatch):
     assert db.session.get(DBDocument, a.id).index_status == "ERROR"
     assert db.session.get(DBDocument, a.id).error_message == "redis down"
     assert db.session.get(DBDocument, b.id).index_status == "PENDING"
+
+
+def test_a_new_index_requeues_every_document_that_belongs_in_it(app, dispatch):
+    """After a switch empties the tables, a failed or running document is not
+    left out of the new index. A waiting one stays waiting for the resume beat;
+    those never meant to be searchable are left alone."""
+    keep = [_doc("a.md", "INDEXED"), _doc("b.pdf", "ERROR"), _doc("d.txt", "INDEXING")]
+    waiting = _doc("c.py", "PENDING")
+    media = _doc("frame.png", "STORED")
+    skipped = _doc("e.md", "NOT_INDEXED")
+
+    out = indexing_api.requeue_documents_for_new_index()
+    assert out["queued"] == 3 and out["pending"] == 0
+    assert out["by_status"] == {"INDEXED": 1, "ERROR": 1, "INDEXING": 1}
+    assert dispatch == [d.id for d in keep]
+    assert db.session.get(DBDocument, waiting.id).index_status == "PENDING"
+    assert db.session.get(DBDocument, media.id).index_status == "STORED"
+    assert db.session.get(DBDocument, skipped.id).index_status == "NOT_INDEXED"
+
+
+class _CountCursor(_Cursor):
+    """Answers the table list, then each table's not-rebuilt rows by kind."""
+
+    def __init__(self, tables, ran, groups):
+        super().__init__(tables, ran)
+        self._groups = groups
+
+    def fetchall(self):
+        last = self._ran[-1]
+        if "GROUP BY" in last:
+            table = last.split('FROM "')[1].split('"')[0]
+            return self._groups.get(table, [])
+        return super().fetchall()
+
+
+def test_what_a_rebuild_will_not_restore_is_counted_with_how(monkeypatch):
+    ran = []
+    tables = ["data_guaardvark_global_768", "data_guaardvark_7_768", "data_guaardvark_global_2560"]
+    groups = {"data_guaardvark_global_768": [("raptor_summary", 12), ("repository_summary", 2),
+                                              ("", 5)],
+              "data_guaardvark_7_768": [("raptor_summary", 3)]}
+    conn = _Conn(tables, ran)
+    conn.cursor = lambda: _CountCursor(tables, ran, groups)
+    monkeypatch.setattr(indexing_service, "_vector_backend", lambda: "pgvector")
+    monkeypatch.setattr(indexing_service, "_pg_connect", lambda: conn)
+
+    out = {row["kind"]: row for row in indexing_service.rows_not_rebuilt(768)}
+    assert out["raptor_summary"]["rows"] == 15 and "build-corpus-summaries" in out["raptor_summary"]["how"]
+    assert out["repository_summary"]["rows"] == 2 and "/api/index/bulk" in out["repository_summary"]["how"]
+    assert out["other"]["rows"] == 5 and "entity-indexing/index-all" in out["other"]["how"]
+    assert not any('global_2560"' in sql for sql in ran)  # other widths are not this index

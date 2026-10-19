@@ -62,6 +62,17 @@ CHAT_KB_CONTEXT_HEADER = (
     "from your own knowledge as usual and do not mention them or the knowledge base."
 )
 
+# Sent with the turn when the search of the person's documents failed (not when
+# it found nothing), only with the chat_say_rag_failed setting on (off by
+# default). Without it an empty context reads the same as "nothing relevant",
+# and the model answers a question about their documents from general knowledge.
+RAG_SEARCH_FAILED_NOTE = (
+    "The search of the person's documents failed for this message ({reason}), so no "
+    "excerpts from them are available. If the message is about their documents, files or "
+    "projects, tell them in one line that you couldn't search their documents just now; do "
+    "not answer it from general knowledge as if you had searched. Answer anything else as usual."
+)
+
 # Sent in the user turn when its media tools are withheld: the user turned an
 # image down, or asked for writing. Measured on gemma4:e2b replaying "write 300
 # words ... for Z Image Turbo ... try one version now": with no note the model

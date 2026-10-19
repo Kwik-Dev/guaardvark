@@ -2718,6 +2718,7 @@ class UnifiedChatEngine:
         # 2. RAG context (optional, skipped for action-oriented, conversational, and image messages)
         self._local_facts_this_turn = False
         rag_context = ""
+        self._rag_error = None
         conversational = is_conversational(message)
         has_image = bool(self._image_data)
         if options.get("use_rag", True) and not conversational and not has_image and not self._should_skip_rag(message):
@@ -2957,6 +2958,9 @@ class UnifiedChatEngine:
         if rag_context and not hold_rag_for_code:
             from backend.services.chat_prompt_blocks import CHAT_KB_CONTEXT_HEADER
             context_parts.append(f"{CHAT_KB_CONTEXT_HEADER}\n{rag_context}")
+        _rag_failed = self._rag_failure_note()
+        if _rag_failed:
+            context_parts.append(_rag_failed)
         # Vision pipeline context (if active). Ask the plugin manager first so
         # we skip a 2-second HTTP probe on every chat when the plugin is off.
         try:
@@ -5809,10 +5813,21 @@ class UnifiedChatEngine:
         Hits from knowledge sources a distribution registered are appended in the
         same source-labelled shape, so the model can cite either corpus.
         """
+        self._rag_error = None
         try:
             from backend.services.indexing_service import search_with_llamaindex
             project_id = getattr(self, '_project_id', None)
-            results = search_with_llamaindex(query, project_id=project_id)
+            out = search_with_llamaindex(query, project_id=project_id, with_trace=True)
+            if isinstance(out, dict):
+                results, trace = out.get("results") or [], out.get("trace") or {}
+            else:  # an older or substituted search that returns the bare list
+                results, trace = out or [], {}
+            # A search that could not run returns no results like one that
+            # found nothing; the trace tells them apart.
+            if trace.get("error"):
+                self._note_rag_failure(str(trace["error"]))
+            elif trace.get("degraded"):
+                self._prov_note("rag_degraded", str(trace.get("degraded_reason") or "")[:200])
             from backend.utils.reranker import drop_unrelated
             results, dropped = drop_unrelated(results or [])
             if dropped:
@@ -5834,8 +5849,32 @@ class UnifiedChatEngine:
             self._prov_note("rag_sources", list(dict.fromkeys(sources))[:10])
             return "\n\n".join(chunks)
         except Exception as e:
-            logger.debug(f"RAG retrieval skipped: {e}")
+            self._note_rag_failure(f"{e.__class__.__name__}: {e}")
             return ""
+
+    def _note_rag_failure(self, reason: str) -> None:
+        """Retrieval failed this turn: log it where an operator looks and keep
+        it in the turn's trace (provenance ``rag_error``), so an answer without
+        document context is not taken for one that found nothing."""
+        reason = (reason or "unknown error")[:200]
+        logger.warning("RAG retrieval failed for this chat turn: %s", reason)
+        self._rag_error = reason
+        self._prov_note("rag_error", reason)
+
+    def _rag_failure_note(self) -> str:
+        """RAG_SEARCH_FAILED_NOTE for this turn when retrieval failed and the
+        chat_say_rag_failed setting (off by default) is on, else ""."""
+        reason = getattr(self, "_rag_error", None)
+        if not reason:
+            return ""
+        try:
+            from backend.utils.settings_utils import get_setting
+            if not get_setting("chat_say_rag_failed", default=False, cast=bool):
+                return ""
+        except Exception:
+            return ""
+        from backend.services.chat_prompt_blocks import RAG_SEARCH_FAILED_NOTE
+        return RAG_SEARCH_FAILED_NOTE.format(reason=reason)
 
     # Action keywords that indicate tool-use intent — RAG is unlikely to help
     _ACTION_KEYWORDS = frozenset({

@@ -807,6 +807,7 @@ def set_embedding_model():
         model_changed = prev_model != model_name
         index_cleared = dimension_changed or model_changed
         requeued = {"queued": 0, "pending": 0}
+        not_rebuilt = []
         if index_cleared:
             try:
                 import os
@@ -830,6 +831,10 @@ def set_embedding_model():
                 idx_svc.index = None
                 idx_svc.storage_context = None
                 current_app.config.pop("INDEX_CACHE", None)
+                # What the new index will not have until someone rebuilds it:
+                # text that came from no document (corpus summaries, repository
+                # summaries, entities), counted in the outgoing model's tables.
+                not_rebuilt = idx_svc.rows_not_rebuilt(prev_dim or embed_dim)
                 # The tables of the new width hold the old model's rows on a
                 # same-width switch, or an earlier model's on a switch back;
                 # either would be searched with the new model.
@@ -838,8 +843,10 @@ def set_embedding_model():
             except Exception as clear_err:
                 logger.warning(f"Failed to clear the old model's vectors: {clear_err}")
             try:
-                from backend.api.indexing_api import requeue_indexed_documents
-                requeued = requeue_indexed_documents()
+                # Every document that belongs in the index, failed and waiting
+                # ones included, not only those INDEXED a moment ago.
+                from backend.api.indexing_api import requeue_documents_for_new_index
+                requeued = requeue_documents_for_new_index()
             except Exception as queue_err:
                 logger.warning(f"Could not queue documents for re-indexing: {queue_err}")
             logger.info(
@@ -857,6 +864,9 @@ def set_embedding_model():
             "index_cleared": index_cleared,
             "reindex_queued": requeued["queued"],
             "reindex_pending": requeued["pending"],
+            "reindex_by_status": requeued.get("by_status", {}),
+            # Not rebuilt by the re-index: each kind, its row count and how to rebuild it.
+            "not_rebuilt": not_rebuilt,
         }, f"Embedding model switched to {model_name}")
 
     except Exception as e:
