@@ -279,7 +279,7 @@ RENDER_ERROR_POLICY: dict[RenderErrorKind, dict[str, Any]] = {
         "action": "Start the ComfyUI plugin; if it does not stay up, read logs/comfyui.log."},
     RenderErrorKind.SERVICE_DOWN: {
         "label": "Service not running", "retryable": True, "retry_after_s": [30],
-        "action": "Start the plugin the message names; if it does not stay up, read its log in logs/."},
+        "action": "Start the plugin it needs on the Plugins page; if it does not stay up, read its log in logs/."},
     RenderErrorKind.NODE_MISSING: {
         "label": "ComfyUI node missing", "retryable": False, "retry_after_s": [],
         "action": "Run plugins/comfyui/scripts/install_deps.sh, then restart the ComfyUI plugin."},

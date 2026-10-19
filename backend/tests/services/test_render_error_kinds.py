@@ -445,3 +445,19 @@ def test_pipeline_failures_keep_the_kind():
     assert classify_render_exception(RuntimeError("CUDA out of memory. Tried to allocate")) is K.OOM
     assert classify_render_exception(ValueError("x")) is K.UNKNOWN
     assert describe_failure(None, "x")["kind"] == "unknown"
+
+
+def test_a_connection_error_is_comfyui_only_on_comfyuis_port():
+    import requests
+
+    from backend.config import COMFYUI_URL
+    from backend.services.job_operation_gate import classify_render_exception
+
+    def refused(url):
+        return requests.ConnectionError("refused", request=requests.Request("POST", url).prepare())
+
+    assert classify_render_exception(refused(f"{COMFYUI_URL}/prompt")) is K.COMFYUI_DOWN
+    # The video editor a music video assembles in is another service.
+    assert classify_render_exception(refused("http://127.0.0.1:8207/analyze")) is K.SERVICE_DOWN
+    # Without the URL, ComfyUI stays the likely one.
+    assert classify_render_exception(requests.ConnectionError("refused")) is K.COMFYUI_DOWN
