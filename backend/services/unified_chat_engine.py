@@ -230,22 +230,56 @@ def set_approval_response(
     approved: bool,
     scope: Optional[str] = None,
     tools: Optional[List[str]] = None,
-):
-    """Set the response for a pending tool approval.
+    request_id: Optional[str] = None,
+    approval_id: Optional[str] = None,
+) -> bool:
+    """Answer the approval card a turn on ``session_id`` is waiting on.
+
+    The answer must name the card it answers: ``approval_id`` (sent with every
+    ``chat:tool_approval_request``) or, from older clients, the turn's
+    ``request_id``. An answer naming another card, or arriving when no card is
+    waiting, is ignored, so a stale or crafted reply cannot approve a later
+    call. A reply that names neither still answers the waiting card, but only
+    for this call ("once"): standing grants need a bound answer.
 
     scope: once | session | task | always (defaults to once). "always" also
         stores the tools so later chats run them without a card.
-    tools: optional explicit list from client; otherwise uses pending batch.
+    tools: optional list from the client; only the tools the waiting card
+        named are granted, whatever else the list holds.
+
+    Returns True when the answer was applied.
     """
-    tools = tools or []
+    approved = approved is True
     sc = (scope or "once").strip().lower()
     if sc not in ("once", "session", "task", "always"):
         sc = "once"
     with _approval_lock:
         pending = _approval_batch_meta.get(session_id) or {}
-        batch_tools = list(tools) if tools else list(pending.get("tools") or [])
+        if not pending.get("pending") or session_id not in _approval_events:
+            logger.warning("approval answer for %s ignored: no card is waiting", session_id)
+            return False
+        if approval_id is not None and approval_id != pending.get("approval_id"):
+            logger.warning("approval answer for %s ignored: it answers another card", session_id)
+            return False
+        if approval_id is None and request_id is not None and request_id != pending.get("request_id"):
+            logger.warning("approval answer for %s ignored: it answers another request", session_id)
+            return False
+        if approval_id is None and request_id is None:
+            sc = "once"
+        asked = list(pending.get("tools") or [])
+        if tools:
+            batch_tools = [t for t in asked if t in set(tools)]
+            if not batch_tools:
+                logger.warning(
+                    "approval answer for %s ignored: it names %s, the card asked for %s",
+                    session_id, list(tools), asked,
+                )
+                return False
+        else:
+            batch_tools = asked
         _approval_batch_meta[session_id] = {
             **pending,
+            "pending": False,
             "approved": approved,
             "scope": sc,
             "tools": batch_tools,
@@ -262,14 +296,14 @@ def set_approval_response(
                 g = _task_tool_grants.setdefault(session_id, set())
                 g.update(batch_tools)
         _approval_responses[session_id] = approved
-        if session_id in _approval_events:
-            _approval_events[session_id].set()
+        _approval_events[session_id].set()
     if approved and batch_tools and sc == "always":
         try:
             from backend.services.tool_approval_prefs import allow_always
             allow_always(batch_tools)
         except Exception:
             logger.warning("could not store always-approved tools %s", batch_tools, exc_info=True)
+    return True
 
 
 # How long a turn waits for the approval card before treating silence as a
@@ -4128,11 +4162,14 @@ class UnifiedChatEngine:
             ),
         })
         event = threading.Event()
+        approval_id = uuid.uuid4().hex
         with _approval_lock:
             _approval_batch_meta[session_id] = {
                 "tools": list(approval_jobs),
                 "iteration": iteration,
                 "request_id": request_id,
+                "approval_id": approval_id,
+                "pending": True,
                 "approved": None,
                 "scope": None,
             }
@@ -4145,6 +4182,7 @@ class UnifiedChatEngine:
             "available_scopes": ["once", "session", "task", "always"],
             "session_id": session_id,
             "request_id": request_id,
+            "approval_id": approval_id,
         }
         if consent:
             payload["consent"] = True
@@ -4153,7 +4191,12 @@ class UnifiedChatEngine:
         event.wait(timeout=APPROVAL_TIMEOUT_S)
 
         with _approval_lock:
-            _approval_events.pop(session_id, None)
+            # The card is closed either way: a late answer must not grant anything.
+            meta = _approval_batch_meta.get(session_id)
+            if meta and meta.get("approval_id") == approval_id:
+                meta["pending"] = False
+            if _approval_events.get(session_id) is event:
+                _approval_events.pop(session_id, None)
             approved = bool(_approval_responses.pop(session_id, False))
         if not approved:
             logger.warning(f"Session {session_id} tool approval REJECTED or TIMED OUT")
@@ -4236,13 +4279,18 @@ class UnifiedChatEngine:
         # requires approval (the identity tool's consent gate) pauses here
         # exactly as it would inside the loop.
         _tool_obj = self.registry.get_tool(tool_name)
+        _pre = _preapproved_tool_names(session_id)
+        # As in the tool loop: a person said yes, on this card or as a standing
+        # grant, so a tool that refuses without a human answer may run.
+        human_approved = tool_name in _pre
         if (
-            _tool_needs_approval_card(_tool_obj, tool_name, params, _preapproved_tool_names(session_id))
+            _tool_needs_approval_card(_tool_obj, tool_name, params, _pre)
             and not is_aborted(session_id)
         ):
             detail = _approval_detail(_tool_obj, tool_name, params)
             if self._await_tool_approval(session_id, emit_fn, request_id, 1, [detail]):
                 _record_approved_consent(_tool_obj, params, session_id)
+                human_approved = True
             else:
                 return self._direct_tool_declined(
                     tool_name, params, detail, session_id, emit_fn, request_id,
@@ -4250,13 +4298,18 @@ class UnifiedChatEngine:
 
         emit_fn("chat:tool_call", {"tool": tool_name, "params": display_params(params), "iteration": 1})
         _t0 = time.time()
+        import contextlib
+        from backend.services.tool_confirmation import trusted_caller
+        approval_mark = (trusted_caller("chat_approval") if human_approved
+                         else contextlib.nullcontext())
         try:
             # /remember (save_memory) keeps what it stores in this chat's project.
-            result = self.registry.execute_tool(
-                tool_name,
-                agent_context={"transport": "chat", "project_id": getattr(self, "_project_id", None)},
-                **params,
-            )
+            with approval_mark:
+                result = self.registry.execute_tool(
+                    tool_name,
+                    agent_context={"transport": "chat", "project_id": getattr(self, "_project_id", None)},
+                    **params,
+                )
         except Exception as exc:
             _dur_ms = int((time.time() - _t0) * 1000)
             text = f"{tool_name} failed: {exc}"
@@ -5207,7 +5260,6 @@ class UnifiedChatEngine:
             # error, so gate on is_thinking_model. Default-off keeps chat snappy.
             if is_thinking_model and getattr(self, "_think", None) is not None:
                 _chat_kwargs["think"] = bool(self._think)
-            stream = ollama.chat(**_chat_kwargs)
 
             # XML filter: stream tokens to client until <tool_call is detected,
             # then suppress further emission (tool calls are announced separately).
@@ -5311,6 +5363,9 @@ class UnifiedChatEngine:
                 text = "".join(accumulated).strip()
                 return split_inline_reasoning(text, reasoning_tags, leading_only=leading_only)[1]
 
+            # Opened after the stream helpers exist, so the retries in the
+            # except block below can always drain through them.
+            stream = ollama.chat(**_chat_kwargs)
             _consume(stream)
             content = _visible_content()
             thinking = "".join(accumulated_thinking).strip()
@@ -5380,39 +5435,25 @@ class UnifiedChatEngine:
                     sanitized = _template_safe(
                         model_name, self._sanitize_messages_for_thinking_model(messages, aggressive=True),
                     )
-                    # The retry keeps the turn's thinking choice; rebuilding the
-                    # kwargs without it would hand the model its own default (on).
-                    _sanitized_kwargs = dict(
-                        model=model_name,
-                        messages=sanitized,
-                        stream=True,
-                        options=opts,
-                    )
+                    # Same call as the first attempt (keep_alive, tools, the
+                    # turn's thinking choice) with only the messages swapped, and
+                    # drained by the same consumer so tokens stream as they arrive.
+                    _sanitized_kwargs = dict(locals().get("_chat_kwargs") or dict(
+                        model=model_name, stream=True, options=opts,
+                    ))
+                    _sanitized_kwargs["messages"] = sanitized
                     if getattr(self, "_think", None) is not None:
                         _sanitized_kwargs["think"] = bool(self._think)
-                    stream = ollama.chat(**_sanitized_kwargs)
-                    for chunk in stream:
-                        if is_aborted(session_id):
-                            break
-                        msg = chunk.get("message", {})
-                        token = msg.get("content", "")
-                        thinking_token = msg.get("thinking", "")
-                        if token:
-                            accumulated.append(token)
-                        if thinking_token:
-                            accumulated_thinking.append(thinking_token)
-                            reasoning_buf.append(thinking_token)
-                            _flush_reasoning()
-                        if chunk.get("done"):
-                            input_tokens = chunk.get("prompt_eval_count", 0) or 0
-                            output_tokens = chunk.get("eval_count", 0) or 0
-                            done_reason = chunk.get("done_reason") or None
-
-                    inline, content = split_inline_reasoning("".join(accumulated), reasoning_tags)
-                    if inline:
-                        accumulated_thinking.append(inline)
+                    accumulated.clear()
+                    xml_detected = False
+                    inline_reasoning = InlineReasoningStream(reasoning_tags, leading_only=leading_only)
+                    think_buffer = ""
+                    _consume(ollama.chat(**_sanitized_kwargs))
+                    content = _visible_content()
                     thinking = "".join(accumulated_thinking).strip()
-                    if not content and thinking:
+                    if _native_active:
+                        self._native_pending_tool_calls = _native_tool_calls_acc or None
+                    if not content and thinking and not _native_tool_calls_acc:
                         logger.info(f"Sanitized retry returned reasoning only ({len(thinking)} chars)")
                         content = _REASONING_ONLY_FALLBACK_TEXT
                         if emit_tokens:
@@ -5499,35 +5540,13 @@ class UnifiedChatEngine:
                         except Exception as warm_err:
                             logger.debug(f"EOF runner warmup ping skipped: {warm_err}")
                         _time.sleep(2.0)
-                        stream = ollama.chat(**_retry_kwargs)
-                        for chunk in stream:
-                            if is_aborted(session_id):
-                                break
-                            msg = chunk.get("message", {})
-                            token = msg.get("content", "")
-                            thinking_token = msg.get("thinking", "")
-                            if _native_active:
-                                try:
-                                    _tc = msg.get("tool_calls") if isinstance(msg, dict) else getattr(msg, "tool_calls", None)
-                                except Exception:
-                                    _tc = None
-                                if _tc:
-                                    _native_tool_calls_acc.extend(_tc)
-                            if token:
-                                accumulated.append(token)
-                            if thinking_token:
-                                accumulated_thinking.append(thinking_token)
-                                reasoning_buf.append(thinking_token)
-                                _flush_reasoning()
-                            if chunk.get("done"):
-                                input_tokens = chunk.get("prompt_eval_count", 0) or 0
-                                output_tokens = chunk.get("eval_count", 0) or 0
-                                done_reason = chunk.get("done_reason") or None
-                        inline, content = split_inline_reasoning(
-                            "".join(accumulated), reasoning_tags, leading_only=leading_only,
-                        )
-                        if inline:
-                            accumulated_thinking.append(inline)
+                        # Streamed through the same consumer as the first
+                        # attempt, so the answer reaches chat:token as it arrives.
+                        xml_detected = False
+                        inline_reasoning = InlineReasoningStream(reasoning_tags, leading_only=leading_only)
+                        think_buffer = ""
+                        _consume(ollama.chat(**_retry_kwargs))
+                        content = _visible_content()
                         if _native_active:
                             self._native_pending_tool_calls = _native_tool_calls_acc or None
                         if content:

@@ -249,6 +249,8 @@ def handle_chat_abort(data):
     try:
         from backend.services.unified_chat_engine import set_abort_flag
         set_abort_flag(session_id)
+        from backend.api.unified_chat_api import release_turn_slot
+        release_turn_slot(session_id)
         logger.info(f"Abort requested for chat session: {session_id}")
         emit("chat:aborted", {"session_id": session_id})
     except Exception as e:
@@ -268,10 +270,19 @@ def handle_tool_approval_response(data):
         return
     try:
         from backend.services.unified_chat_engine import set_approval_response
-        set_approval_response(session_id, approved, scope=scope, tools=tools)
+        applied = set_approval_response(
+            session_id, approved, scope=scope, tools=tools,
+            request_id=data.get("request_id"), approval_id=data.get("approval_id"),
+        )
+        if not applied:
+            emit("chat:tool_approval_ignored", {
+                "session_id": session_id,
+                "approval_id": data.get("approval_id"),
+                "error": "No approval card matching this answer is waiting.",
+            })
         logger.info(
             f"Tool approval response received for session {session_id}: "
-            f"approved={approved} scope={scope}"
+            f"approved={approved} scope={scope} applied={applied}"
         )
         
         # Check if this session is Suspended and needs to be resumed
@@ -541,8 +552,15 @@ def _handle_chat_send_local(payload):
     # the first picture is the primary one, the rest ride along for the model.
     options.pop("attached_images", None)
     options.pop("attached_image_urls", None)
+    # Saved for chat history exactly as POST /api/chat/unified does: one URL per
+    # picture, None where a save failed, the first one is the turn's image_url.
+    from backend.api.unified_chat_api import _save_chat_image
+    image_urls = [_save_chat_image(img) for img in attached_images]
+    image_url = image_urls[0] if image_urls else None
     if len(attached_images) > 1:
         options["attached_images"] = attached_images
+        if any(image_urls):
+            options["attached_image_urls"] = image_urls
     # Named here so the brain's turn decision and its telemetry row say where
     # the turn came from; AgentBrain reuses an id it is given.
     options["surface"] = "cluster"
@@ -638,7 +656,7 @@ def _handle_chat_send_local(payload):
                         llm = get_llm_for_startup()
                     except Exception:
                         pass
-                    eng = UnifiedChatEngine(registry=reg, llm_instance=llm or object())
+                    eng = UnifiedChatEngine(tool_registry=reg, llm_instance=llm or object())
                     eng.app = app
                     eng._project_id = project_id
                     rid = str(uuid.uuid4())
@@ -660,11 +678,12 @@ def _handle_chat_send_local(payload):
                     session_id=session_id, message=message,
                     options=options, emit_fn=emit_fn, app=app,
                     project_id=project_id, image_data=image_data,
+                    image_url=image_url, is_voice_message=is_voice_message,
                 )
             else:
                 engine.chat(session_id, message, options, emit_fn, app=app,
                             project_id=project_id, image_data=image_data,
-                            is_voice_message=is_voice_message)
+                            image_url=image_url, is_voice_message=is_voice_message)
         except Exception as _e:
             logger.error("[BRIDGE-LOCAL] engine error: %s", _e, exc_info=True)
             emit_fn("chat:error", {"error": str(_e)})
@@ -672,7 +691,19 @@ def _handle_chat_send_local(payload):
             interactive_turn.close()
             end_turn(session_id)
 
-    threading.Thread(target=_run, daemon=True, name=f"bridge-chat-{session_id[:8]}").start()
+    # One turn per session, shared with POST /api/chat/unified: the previous
+    # turn (stopped by begin_new_turn above) gets a moment to exit first.
+    from backend.api.unified_chat_api import start_turn_thread
+    if start_turn_thread(session_id, _run, f"bridge-chat-{session_id[:8]}") is None:
+        logger.warning("[BRIDGE-LOCAL] session %s: previous turn still running; refused", session_id)
+        try:
+            _sio.emit("chat:error", {
+                "session_id": session_id,
+                "error": "A previous request for this session is still running and didn't "
+                         "respond to the abort signal. Stop it, or start a new chat.",
+            }, room=session_id)
+        except Exception as _e:
+            logger.warning("[BRIDGE-LOCAL] emit chat:error failed: %s", _e)
 
 
 @socketio.on("chat:send")

@@ -17,6 +17,9 @@ function withApproval(card, data) {
   return {
     ...card,
     requiresApproval: true,
+    // Echoed back with the answer so it can only approve this card.
+    approvalId: data?.approval_id,
+    approvalRequestId: data?.request_id,
     params: parsed.params,
     consent: parsed.consent,
     consentImage: parsed.image,

@@ -177,13 +177,17 @@ class UnifiedChatService {
 
   /**
    * Send tool approval response.
-   * @param {{scope?: "once"|"session"|"task"|"always", tools?: string[]}} [opts]
+   * approvalId / requestId come from the chat:tool_approval_request being
+   * answered; the server ignores an answer that names another card.
+   * @param {{scope?: "once"|"session"|"task"|"always", tools?: string[], approvalId?: string, requestId?: string}} [opts]
    */
   sendToolApproval(sessionId, approved, opts) {
     if (this.socket?.connected) {
       const payload = { session_id: sessionId, approved };
       if (opts?.scope) payload.approval_scope = opts.scope;
       if (opts?.tools?.length) payload.tools = opts.tools;
+      if (opts?.approvalId) payload.approval_id = opts.approvalId;
+      if (opts?.requestId) payload.request_id = opts.requestId;
       this.socket.emit("chat:tool_approval_response", payload);
     }
   }
