@@ -23,7 +23,6 @@ import backend.utils.llama_index_local_config
 import logging
 
 logger = logging.getLogger(__name__)
-
 import threading
 import re
 import hashlib

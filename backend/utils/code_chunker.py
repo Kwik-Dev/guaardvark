@@ -167,4 +167,3 @@ def bind_chunks_to_document(nodes: List[TextNode], document) -> List[TextNode]:
         node.id_ = f"{doc_id}_{hashlib.md5(text.encode()).hexdigest()[:8]}"
         node.relationships = {NodeRelationship.SOURCE: source}
     return nodes
-
