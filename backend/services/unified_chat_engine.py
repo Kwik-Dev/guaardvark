@@ -4279,13 +4279,18 @@ class UnifiedChatEngine:
         # requires approval (the identity tool's consent gate) pauses here
         # exactly as it would inside the loop.
         _tool_obj = self.registry.get_tool(tool_name)
+        _pre = _preapproved_tool_names(session_id)
+        # As in the tool loop: a person said yes, on this card or as a standing
+        # grant, so a tool that refuses without a human answer may run.
+        human_approved = tool_name in _pre
         if (
-            _tool_needs_approval_card(_tool_obj, tool_name, params, _preapproved_tool_names(session_id))
+            _tool_needs_approval_card(_tool_obj, tool_name, params, _pre)
             and not is_aborted(session_id)
         ):
             detail = _approval_detail(_tool_obj, tool_name, params)
             if self._await_tool_approval(session_id, emit_fn, request_id, 1, [detail]):
                 _record_approved_consent(_tool_obj, params, session_id)
+                human_approved = True
             else:
                 return self._direct_tool_declined(
                     tool_name, params, detail, session_id, emit_fn, request_id,
@@ -4293,13 +4298,18 @@ class UnifiedChatEngine:
 
         emit_fn("chat:tool_call", {"tool": tool_name, "params": display_params(params), "iteration": 1})
         _t0 = time.time()
+        import contextlib
+        from backend.services.tool_confirmation import trusted_caller
+        approval_mark = (trusted_caller("chat_approval") if human_approved
+                         else contextlib.nullcontext())
         try:
             # /remember (save_memory) keeps what it stores in this chat's project.
-            result = self.registry.execute_tool(
-                tool_name,
-                agent_context={"transport": "chat", "project_id": getattr(self, "_project_id", None)},
-                **params,
-            )
+            with approval_mark:
+                result = self.registry.execute_tool(
+                    tool_name,
+                    agent_context={"transport": "chat", "project_id": getattr(self, "_project_id", None)},
+                    **params,
+                )
         except Exception as exc:
             _dur_ms = int((time.time() - _t0) * 1000)
             text = f"{tool_name} failed: {exc}"
