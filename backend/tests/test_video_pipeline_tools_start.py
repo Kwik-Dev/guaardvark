@@ -106,14 +106,15 @@ def test_a_stopped_comfyui_does_not_block_the_screenwriter(pipeline, monkeypatch
 
     monkeypatch.setattr(video_model_registry, "preflight_video_model", lambda model_id: (
         False, RenderFailure(RenderErrorKind.COMFYUI_DOWN, "Wan 2.2 requires ComfyUI.")))
-    monkeypatch.setattr(plugin_bridge, "job_service_start_enabled", lambda: False)
+    monkeypatch.setattr(plugin_bridge, "job_service_start_enabled", lambda context=None: False)
     res = vpt.FilmCrewTool().execute(script_text=SCRIPT)
     assert pipeline[-1].get("comfyui_down_ok") is True
     assert res.success and "The screenwriter is running" in res.output
-    assert "ComfyUI is not running now" in res.output and "before then" in res.output
+    assert "ComfyUI is not running" in res.output and "until the clips render" in res.output
+    assert plugin_bridge.service_down_message("comfyui", context="film-crew") in res.output
     assert res.metadata["comfyui_running"] is False
 
-    monkeypatch.setattr(plugin_bridge, "job_service_start_enabled", lambda: True)
+    monkeypatch.setattr(plugin_bridge, "job_service_start_enabled", lambda context=None: True)
     res = vpt.FilmCrewTool().execute(script_text=SCRIPT)
     assert "it is started when the clips render" in res.output
 

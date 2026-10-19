@@ -24,6 +24,7 @@ same point it requests VRAM.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import threading
 import time
@@ -171,6 +172,12 @@ def classify_render_exception(exc: BaseException):
     carried = failure_kind(exc) or next((failure_kind(a) for a in getattr(exc, "args", ()) if failure_kind(a)), None)
     if carried:
         return carried
+    try:
+        from backend.services.gpu_resource_policy import RenderStopped
+        if isinstance(exc, RenderStopped):
+            return RenderErrorKind.CANCELLED
+    except ImportError:  # pragma: no cover
+        pass
     if isinstance(exc, GpuCapacityError):
         return RenderErrorKind.CARD_TOO_SMALL
     if isinstance(exc, GpuBusyError):
@@ -179,11 +186,32 @@ def classify_render_exception(exc: BaseException):
         return RenderErrorKind.OOM
     try:
         import requests
-        if isinstance(exc, (requests.ConnectionError, requests.Timeout)):
-            return RenderErrorKind.COMFYUI_DOWN
-    except ImportError:  # pragma: no cover - requests is a backend dependency
-        pass
+        unreachable = (requests.ConnectionError, requests.Timeout)
+    except (ImportError, AttributeError):  # pragma: no cover - requests is a backend dependency
+        unreachable = ()
+    if unreachable and isinstance(exc, unreachable):
+        # requests names the URL it could not reach. Another service's (the
+        # video editor a music video assembles in, Audio Foundry) is not
+        # ComfyUI; without a URL, ComfyUI stays the likely one.
+        url = str(getattr(getattr(exc, "request", None), "url", None) or "")
+        if url and not _is_comfyui_url(url):
+            return RenderErrorKind.SERVICE_DOWN
+        return RenderErrorKind.COMFYUI_DOWN
     return RenderErrorKind.UNKNOWN
+
+
+def _is_comfyui_url(url: str) -> bool:
+    """True when ``url`` is on ComfyUI's port (config.COMFYUI_URL). The host is
+    not compared: localhost and 127.0.0.1 both name this machine."""
+    from urllib.parse import urlsplit
+    try:
+        from backend.config import COMFYUI_URL
+    except Exception:  # noqa: BLE001 - config needs the full backend environment
+        COMFYUI_URL = os.environ.get("GUAARDVARK_COMFYUI_URL") or "http://127.0.0.1:8188"
+    try:
+        return urlsplit(url).port == urlsplit(COMFYUI_URL).port
+    except ValueError:
+        return False
 
 
 class JobOperationGate:

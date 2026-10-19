@@ -14,6 +14,7 @@ from pathlib import Path
 from backend.services.agent_tools import BaseTool, ToolParameter, ToolResult
 from backend.utils.backend_http import is_mcp_caller, is_mcp_transport, run_tool_in_backend
 from backend.utils.request_phrases import HOW_TO_QUESTION_RE, VIDEO_SOFTWARE_PATTERN, declines_media
+from backend.services.pipeline_status import status_id
 
 logger = logging.getLogger(__name__)
 
@@ -189,8 +190,9 @@ def _comfyui_note(model_id: str):
     if job_service_start_enabled():
         return ("ComfyUI is not running now; it is started when the clips render, the last "
                 "stage, which you start from Film Crew.")
-    return ("ComfyUI is not running now. Nothing needs it until the clips render, the last stage, "
-            "which you start from Film Crew: start the ComfyUI plugin (Plugins) before then.")
+    from backend.services.plugin_bridge import service_down_message
+    return ("Nothing needs ComfyUI until the clips render, the last stage, which you start from "
+            "Film Crew. " + service_down_message("comfyui", context="film-crew"))
 
 
 def _dispatch_first_stage(svc, row_id: int, agent: str):
@@ -476,10 +478,12 @@ class MusicVideoTool(BaseTool):
                 output="\n".join([
                     f"Music video '{mv.name}' created (id {mv.id}, stage: {mv.current_stage}).",
                     next_line,
+                    f"Follow it with get_generation_status(batch_id=\"{status_id('music_video', mv.id)}\").",
                     f"Open Music Video: {studio}",
                 ]),
                 metadata={
                     "music_video_id": mv.id,
+                    "status_id": status_id("music_video", mv.id),
                     "project_id": project_id,
                     "stage": mv.current_stage,
                     "studio_url": studio,
@@ -592,10 +596,12 @@ class FilmCrewTool(BaseTool):
                 output="\n".join([
                     f"Film Crew '{prod.name}' created (id {prod.id}, stage: {prod.current_stage}).",
                     *lines,
+                    f"Follow it with get_generation_status(batch_id=\"{status_id('production', prod.id)}\").",
                     f"Open Film Crew: {studio}",
                 ]),
                 metadata={
                     "production_id": prod.id,
+                    "status_id": status_id("production", prod.id),
                     "stage": prod.current_stage,
                     "studio_url": studio,
                     "video_model": picked,

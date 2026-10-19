@@ -15,6 +15,12 @@ from backend.services.swarm.agents.editor import Editor
 from backend.services.swarm.script_markup import parse_markup, apply_intents
 
 
+def _render_kind(exc):
+    """The RenderErrorKind an exception carries or is classified as (job_types)."""
+    from backend.services.job_operation_gate import classify_render_exception
+    return classify_render_exception(exc)
+
+
 class _AgentNonOK(Exception):
     pass
 
@@ -66,7 +72,7 @@ def _agent_run(prod_id: int, *, agent_name: str, expected_stage: str, next_agent
     except Exception as e:
         # Catch all other exceptions, fail stage, and absorb.
         # Absorbing is safer because Celery retry behavior is default, which WILL retry.
-        ProductionService(db.session).fail_stage(prod_id, stage=expected_stage, error=str(e))
+        ProductionService(db.session).fail_stage(prod_id, stage=expected_stage, error=str(e), kind=_render_kind(e))
         pass
     else:
         # Clean exit
@@ -566,7 +572,9 @@ def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
             elif not ready and not resolve_err:
                 resolve_err = prep_err
         if resolve_err:
-            ctx.fail(resolve_err)
+            # ComfyUI down: the sentence every tool gives for a stopped service.
+            from backend.services.video_model_registry import comfyui_down_failure
+            ctx.fail(comfyui_down_failure(resolve_err, "film-crew"))
             return
         caps = model_capabilities(resolved)
         vram_estimate_mb = vram_mb_for_model(resolved, default=14000)

@@ -33,7 +33,7 @@ def test_a_stopped_plugin_is_named_not_blamed_on_the_backend(monkeypatch):
     res = _status(monkeypatch, backend_http.BackendError(
         "plugin_offline", "Audio Foundry service not running (start the plugin ...)", status=503, body=STOPPED))
     text = res.output or res.error
-    assert "Audio Foundry is not running" in text and "start it in Plugins" in text
+    assert "Audio Foundry is not running" in text and "Start the Audio Foundry plugin" in text
     assert "backend did not answer" not in text and "Try again shortly" not in text
 
 
@@ -113,4 +113,8 @@ def test_the_proxy_marks_its_own_503_as_plugin_not_running(monkeypatch):
     app = Flask(__name__)
     app.register_blueprint(audio_foundry_api.audio_foundry_bp)
     res = app.test_client().get(f"/api/audio-foundry/jobs/{JOB}")
-    assert res.status_code == 503 and res.get_json() == STOPPED
+    body = res.get_json()
+    assert res.status_code == 503 and {k: body[k] for k in STOPPED} == STOPPED
+    # What to do about it, in the words every tool uses for a stopped service.
+    assert body["error_kind"] == "service_down"
+    assert body["message"].startswith("Audio Foundry is not running. Start the Audio Foundry plugin")

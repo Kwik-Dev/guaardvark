@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from backend.services.agent_tools import BaseTool, ToolParameter, ToolResult
+from backend.services.tool_jobs import MAX_WAIT_S as _SPEECH_MAX_WAIT_S
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ SPEECH_POLL_S = 2.0
 # default 120 s per-call timeout (backend/mcp/config.py).
 SPEECH_SUBMIT_TIMEOUT_S = 110
 
+# The older wording; the tools now give plugin_bridge.service_down_message.
 AUDIO_FOUNDRY_NOT_RUNNING = (
     "Audio Foundry is not running. Start it from the Studio's Plugins page "
     "(or POST /api/plugins/audio_foundry/start), then try again."
@@ -58,13 +60,36 @@ def plugin_stopped(error) -> bool:
 
 
 def _backend_error_text(error) -> str:
-    if plugin_stopped(error):
-        return AUDIO_FOUNDRY_NOT_RUNNING
+    """What a failed backend call says, as a job_types.RenderFailure when the
+    failure has a kind (a stopped Audio Foundry is SERVICE_DOWN; a refusal
+    whose body names its ``error_kind`` keeps it)."""
+    from backend.services.job_types import RenderErrorKind, RenderFailure
+
     body = error.body if isinstance(getattr(error, "body", None), dict) else {}
+    if plugin_stopped(error):
+        # The backend's own sentence (plugin_bridge.service_down_message): it
+        # knows whether automatic start is on there. Older backends lack it.
+        from backend.services.plugin_bridge import service_down_message
+        return RenderFailure(RenderErrorKind.SERVICE_DOWN, str(
+            body.get("message") or service_down_message("audio_foundry", context="audio")))
     if error.kind in ("plugin_offline", "auth", "http") and body.get("detail"):
         # The plugin's own words; backend_http's hints are about the backend.
-        return str(body["detail"])
-    return str(error)
+        text = str(body["detail"])
+    else:
+        text = str(error)
+    try:
+        kind = RenderErrorKind(body["error_kind"]) if body.get("error_kind") else None
+    except ValueError:
+        kind = None
+    return RenderFailure(kind, text) if kind else text
+
+
+def _refused(err) -> ToolResult:
+    """A failed call, with ``metadata.error_kind`` when the failure has one."""
+    from backend.services.job_types import failure_kind
+    kind = failure_kind(err)
+    return ToolResult(success=False, error=str(err),
+                      metadata={"error_kind": kind.value} if kind else {})
 
 
 def _call(method: str, path: str, payload: Optional[dict] = None,
@@ -189,7 +214,7 @@ class GenerateMusicTool(BaseTool):
 
         body, err = _post("/api/audio-foundry/generate/music", payload, read_timeout=60)
         if err:
-            return ToolResult(success=False, error=err)
+            return _refused(err)
         job_id = body.get("job_id")
         if job_id:
             return ToolResult(
@@ -216,9 +241,12 @@ class GenerateSpeechTool(BaseTool):
     read_only = False
     destructive = False
     description = (
-        "Turn text into speech on this machine with Guaardvark's Audio Foundry. Waits up to about "
-        "a minute for the file (usually seconds) and returns its name, library document id, length "
-        "and a download link. A longer read, such as a script near the 3000-character limit or a "
+        "Turn text into speech on this machine with Guaardvark's Audio Foundry. Unlike the other "
+        "generate tools, which over MCP answer at once with a job or batch id to poll, this waits "
+        "for the file: up to "
+        f"{_SPEECH_MAX_WAIT_S:.0f} s, or half the MCP per-call timeout when that is shorter "
+        "(usually it takes seconds), and returns its name, library document id, length and a "
+        "download link. A longer read, such as a script near the 3000-character limit or a "
         "cold start, answers with a job_id instead: poll get_generation_status with it, and do not "
         "call again, since the file lands in the library either way. Up to 3000 characters per "
         "call; split longer scripts. Voices: naming a voice (a Kokoro id "
@@ -291,7 +319,7 @@ class GenerateSpeechTool(BaseTool):
         started = time.monotonic()
         body, err = _post("/api/audio-foundry/generate/voice", payload, read_timeout=SPEECH_SUBMIT_TIMEOUT_S)
         if err:
-            return ToolResult(success=False, error=err)
+            return _refused(err)
         if body.get("path"):
             return self._finished(body)
         job_id = body.get("job_id")
@@ -315,9 +343,11 @@ class GenerateSpeechTool(BaseTool):
             if status == "done":
                 return self._finished(job.get("result") or {}, job_id=job_id)
             if status in ("error", "cancelled"):
+                kind = job.get("error_kind") or ("cancelled" if status == "cancelled" else None)
                 return ToolResult(success=False, error=(
                     f"Speech job {job_id} {'failed' if status == 'error' else 'was cancelled'}: "
-                    f"{job.get('error') or 'no reason given'}"), metadata={"job_id": job_id})
+                    f"{job.get('error') or 'no reason given'}"),
+                    metadata={"job_id": job_id, **({"error_kind": kind} if kind else {})})
 
         progress = job.get("progress") or {}
         output: dict[str, Any] = {
@@ -336,7 +366,8 @@ class GenerateSpeechTool(BaseTool):
     @staticmethod
     def _finished(result: dict, job_id: Optional[str] = None) -> ToolResult:
         if not result.get("path"):
-            return ToolResult(success=False, error="Audio Foundry finished without a file")
+            return ToolResult(success=False, error="Audio Foundry finished without a file",
+                              metadata={"error_kind": "output_missing"})
         meta = result.get("meta") or {}
         output = {"status": "complete", **_file_entry(result),
                   "engine": meta.get("backend") or meta.get("engine"),

@@ -20,6 +20,8 @@ from datetime import datetime
 import time
 import threading
 
+from backend.services.job_types import batch_failure, describe_failure
+
 logger = logging.getLogger(__name__)
 
 # Import dependencies with fallback handling
@@ -1819,6 +1821,9 @@ def get_batch_generation_status(batch_id: str):
             "retry_data": getattr(status, "retry_data", None),
             "gpu_wait_reason": getattr(status, "gpu_wait_reason", None),
             "progress_percentage": _progress_percentage(status),
+            # The failure with its kind and next step (job_types), as video batches report it.
+            "error_kind": getattr(status, "error_kind", None),
+            "failure": batch_failure(status, surface="image"),
         }
 
         # Include results if requested
@@ -1835,6 +1840,9 @@ def get_batch_generation_status(batch_id: str):
                     "thumbnail_path": r.thumbnail_path,
                     "generation_time": r.generation_time,
                     "error": r.error,
+                    "error_kind": getattr(r, "error_kind", None),
+                    "failure": (describe_failure(getattr(r, "error_kind", None), r.error, "image")
+                                if not r.success else None),
                     "metadata": r.metadata
                 }
                 for r in status.results

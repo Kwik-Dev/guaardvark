@@ -39,6 +39,23 @@ from backend.services.plugin_bridge import ensure_plugin_running, PluginUnavaila
 
 log = logging.getLogger(__name__)
 
+
+def _render_kind(exc):
+    """The RenderErrorKind an exception carries or is classified as (job_types)."""
+    from backend.services.job_operation_gate import classify_render_exception
+    return classify_render_exception(exc)
+
+
+def _comfyui_unavailable(what: str):
+    """ComfyUI is not answering for ``what``: a COMFYUI_DOWN failure with the
+    sentence every tool gives for a stopped service. Music-video stages start
+    ComfyUI only through the stage prep (GUAARDVARK_PIPELINE_STAGE_PREP)."""
+    from backend.services.job_types import RenderErrorKind, RenderFailure
+    from backend.services.plugin_bridge import service_down_message
+    return RenderFailure(RenderErrorKind.COMFYUI_DOWN, (
+        f"ComfyUI unavailable for {what}. "
+        + service_down_message("comfyui", context="music-video")))
+
 PLUGIN_URL = "http://127.0.0.1:8207"   # video_editor plugin (analyze + assemble)
 # Between clips, wait out the GPU gate's post-release cooldown (job_operation_gate
 # GPU_RELEASE_COOLDOWN_S ~8s) before the next clip claims the GPU — otherwise the
@@ -441,7 +458,7 @@ def _mv_run(mv_id: int, *, expected_stage: str, next_agent: str | None):
         yield mv
     except Exception as e:  # noqa: BLE001
         log.exception("music_video stage '%s' failed for %s", expected_stage, mv_id)
-        MusicVideoService(db.session).fail_stage(mv_id, stage=expected_stage, error=str(e))
+        MusicVideoService(db.session).fail_stage(mv_id, stage=expected_stage, error=str(e), kind=_render_kind(e))
     else:
         advanced = MusicVideoService(db.session).advance_if_predecessor(
             mv_id, expected_predecessor=expected_stage
@@ -825,7 +842,7 @@ def run_clip_generator(mv_id: int):
             celery.send_task("music_video.run_clip_generator", args=[mv_id], countdown=GPU_COOLDOWN_RETRY_S)
             return
         log.exception("music_video %s clip %s generation failed", mv_id, target.get("index"))
-        MusicVideoService(db.session).fail_stage(mv_id, stage="generating", error=str(e))
+        MusicVideoService(db.session).fail_stage(mv_id, stage="generating", error=str(e), kind=_render_kind(e))
         return
 
     # Continue with the next clip — but AFTER the GPU gate's release cooldown, so
@@ -1054,9 +1071,7 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
                         except Exception:
                             vg.service_available = False
                     if not getattr(vg, "service_available", True):
-                        raise RuntimeError(
-                            "ComfyUI unavailable for music-video keyframe/i2v (start it or free VRAM)."
-                        )
+                        raise RuntimeError(_comfyui_unavailable("music-video keyframe/i2v"))
                     img = ComfyUIImageGenerator(
                         lora_strength=kf_lora_strength,
                         flux_unet=s.get("flux_unet"),
@@ -1130,7 +1145,7 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
                 except Exception:
                     vg.service_available = False
             if not getattr(vg, "service_available", True):
-                raise RuntimeError("ComfyUI unavailable for music-video i2v clip render.")
+                raise RuntimeError(_comfyui_unavailable("music-video i2v clip render"))
             result = vg.generate_video(req)
             if not result.success or not result.video_path:
                 from backend.services.job_types import RenderErrorKind, render_failed

@@ -17,6 +17,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from backend.services.job_types import RenderErrorKind, RenderFailure, failure_kind
+
 logger = logging.getLogger(__name__)
 
 MODEL_ID = "minimax-music3-int8"
@@ -109,7 +111,9 @@ class ComfyUIMusicGenerator:
                          vram_estimate_mb=vram_mb_for_model(model_id), require_fit=True):
             prompt_id = self.vg._queue_prompt(workflow)
             if not prompt_id:
-                return {"success": False, "error": getattr(self.vg, "_last_queue_error", None) or "ComfyUI refused the song"}
+                return {"success": False, "error": RenderFailure(
+                    RenderErrorKind.NODE_ERROR,
+                    getattr(self.vg, "_last_queue_error", None) or "ComfyUI refused the song")}
             # The plan stage is an 8B language model writing the whole song
             # before diffusion starts; budget on the song's length, not steps.
             timeout = int(max(600, float(seconds) * 12))
@@ -123,7 +127,8 @@ class ComfyUIMusicGenerator:
                     paths.extend(self.vg._download_file(item["filename"], out_dir, file_type=item.get("type", "output"),
                                                         subfolder=item.get("subfolder", "")))
         if not paths:
-            return {"success": False, "error": "No audio was produced by ComfyUI"}
+            return {"success": False, "error": RenderFailure(
+                RenderErrorKind.OUTPUT_MISSING, "No audio was produced by ComfyUI")}
         return {
             "success": True, "path": paths[0], "seconds": seconds, "steps": steps, "seed": seed,
             "model": model_id, "attribution": "MiniMax-Music3",
@@ -153,13 +158,20 @@ def start_job(**params) -> str:
             result = ComfyUIMusicGenerator().generate(**params)
             if result.get("success") and app is not None:
                 result["document_id"] = _register(app, result, params)
+            kind = None if result.get("success") else failure_kind(result.get("error"))
             with _JOBS_LOCK:
                 _JOBS[job_id].update(result)
                 _JOBS[job_id]["status"] = "done" if result.get("success") else "failed"
+                if kind is not None:
+                    _JOBS[job_id]["error_kind"] = kind.value
         except Exception as e:  # noqa: BLE001 — the job carries the failure
             logger.exception("MiniMax Music 3 job failed")
+            from backend.services.job_operation_gate import classify_render_exception
+            kind = classify_render_exception(e)
             with _JOBS_LOCK:
                 _JOBS[job_id].update({"status": "failed", "error": str(e)})
+                if kind is not RenderErrorKind.UNKNOWN:
+                    _JOBS[job_id]["error_kind"] = kind.value
 
     threading.Thread(target=_run, name=f"music3-{job_id[:8]}", daemon=True).start()
     return job_id

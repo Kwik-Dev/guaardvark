@@ -163,13 +163,27 @@ class PipelineService:
             except Exception:  # noqa: BLE001
                 pass
 
-    def fail_stage(self, row_id: int, *, stage: str, error) -> None:
-        """Persist a ``failed_<stage>`` status + error blob so the boot resumer skips it."""
+    def fail_stage(self, row_id: int, *, stage: str, error, kind=None) -> None:
+        """Persist a ``failed_<stage>`` status + error blob so the boot resumer skips it.
+
+        ``kind`` is the RenderErrorKind of the failure (job_types); an error
+        that is itself a RenderFailure, or an exception carrying one, gives it
+        too. It is stored as ``error_kind`` so status readers can name it.
+        """
         row = self.s.get(self.model_cls, row_id)
         if row is None:
             return
+        if kind is None and isinstance(error, BaseException):
+            from backend.services.job_operation_gate import classify_render_exception
+            kind = classify_render_exception(error)
+        elif kind is None:
+            from backend.services.job_types import failure_kind
+            kind = failure_kind(error)
+        blob = {"stage": stage, "error": _coerce_error(error)}
+        if kind is not None and str(getattr(kind, "value", kind)) != "unknown":
+            blob["error_kind"] = str(getattr(kind, "value", kind))
         row.status = f"failed_{stage}"
-        row.error_blob = {"stage": stage, "error": _coerce_error(error)}
+        row.error_blob = blob
         self.s.commit()
         self.stamp_stage(row_id, None, failed=stage)
 

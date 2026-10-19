@@ -155,7 +155,12 @@ def comfy(services, monkeypatch):
 def test_image_down_and_start_off_keeps_the_old_error(comfy, services):
     with pytest.raises(RuntimeError) as err:
         comfy._require_up("ComfyUI not reachable at http://127.0.0.1:8188 — cannot edit image")
-    assert str(err.value) == "ComfyUI not reachable at http://127.0.0.1:8188 — cannot edit image"
+    # The old error still leads; the sentence every tool gives for a stopped
+    # service (how to start it, the setting that lets Guaardvark) follows.
+    assert str(err.value) == (
+        "ComfyUI not reachable at http://127.0.0.1:8188 — cannot edit image. "
+        + plugin_bridge.service_down_message("comfyui", context="image"))
+    assert JOB_SERVICE_START_ENV + "=1" in str(err.value)
     assert services.started == []
 
 

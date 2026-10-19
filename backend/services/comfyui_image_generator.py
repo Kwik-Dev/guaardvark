@@ -25,6 +25,9 @@ from typing import Optional
 
 import requests
 
+# Failure kinds named where each failure is detected (job_types).
+from backend.services.job_types import RenderErrorKind as K, RenderFailure
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -347,6 +350,11 @@ def edit_steps(steps, *, default: int, floor: int = 0, label: str = "") -> tuple
     return int(floor), f"{label} needs at least {floor} steps; raised {asked} to {floor}."
 
 
+def _failure(kind, message: str):
+    """A failure message that carries its RenderErrorKind (job_types)."""
+    return RenderFailure(kind, message)
+
+
 class ComfyUIImageGenerator:
     """Implements the storyboard ImageGenerator protocol with real LoRA support.
 
@@ -463,19 +471,27 @@ class ComfyUIImageGenerator:
         return engines
 
     def _require_up(self, down_message: str) -> None:
-        """Raise ``down_message`` unless ComfyUI answers.
+        """Raise ``down_message`` unless ComfyUI answers, followed by the
+        sentence every tool gives for a stopped service
+        (plugin_bridge.service_down_message), as a COMFYUI_DOWN failure.
 
         With GUAARDVARK_JOB_SERVICE_START on, ComfyUI is started first through
         the image stage; the reason a start did not help is added to the error.
         """
         if self._available():
             return
-        from backend.services.plugin_bridge import job_service_start_enabled, start_for_job
-        if not job_service_start_enabled():
-            raise RuntimeError(down_message)
-        ok, why = start_for_job("image", "generating", is_up=self._available)
-        if not ok:
-            raise RuntimeError(f"{down_message} ({why})")
+        from backend.services.plugin_bridge import (
+            job_service_start_enabled, service_down_message, start_for_job,
+        )
+        why = ""
+        if job_service_start_enabled():
+            ok, why = start_for_job("image", "generating", is_up=self._available)
+            if ok:
+                return
+        raise RuntimeError(_failure(
+            K.COMFYUI_DOWN,
+            f"{down_message}. {service_down_message('comfyui', context='image', why=why)}",
+        ))
 
     # ── workflow ──────────────────────────────────────────────────────
     def _build_workflow(
@@ -854,6 +870,13 @@ class ComfyUIImageGenerator:
                 resp.raise_for_status()
                 hist = resp.json()
                 if prompt_id in hist:
+                    # A prompt that ended in an error has empty outputs; say what
+                    # failed (out of memory, a node, an interrupt) with its kind
+                    # instead of a later "produced no image".
+                    from backend.services.comfyui_video_generator import ComfyUIVideoGenerator
+                    failed = ComfyUIVideoGenerator._history_failure(hist[prompt_id])
+                    if failed is not None and not hist[prompt_id].get("outputs"):
+                        raise RuntimeError(failed)
                     return hist[prompt_id].get("outputs", {})
             except requests.exceptions.RequestException as e:
                 logger.warning("ComfyUI history poll error: %s", e)
@@ -1220,13 +1243,13 @@ class ComfyUIImageGenerator:
             raise_if_stopped(should_stop, "before ComfyUI was given the graph")
             prompt_id = self._queue(workflow)
             if not prompt_id:
-                raise RuntimeError("ComfyUI did not accept the image workflow")
+                raise RuntimeError(_failure(K.NODE_ERROR, "ComfyUI did not accept the image workflow"))
             outputs = self._wait(prompt_id, timeout=timeout, should_stop=should_stop)
             if outputs is None:
-                raise RuntimeError(f"ComfyUI image job timed out (prompt {prompt_id})")
+                raise RuntimeError(_failure(K.RENDER_TIMEOUT, f"ComfyUI image job timed out (prompt {prompt_id})"))
             result = self._fetch_first_image(outputs, output_path)
             if result is None:
-                raise RuntimeError(f"ComfyUI produced no image for prompt {prompt_id}")
+                raise RuntimeError(_failure(K.OUTPUT_MISSING, f"ComfyUI produced no image for prompt {prompt_id}"))
         return result
 
     def edit_image_qwen(
@@ -1238,7 +1261,7 @@ class ComfyUIImageGenerator:
         raised to it; ``last_steps`` and ``last_steps_notice`` say what was rendered."""
         if not self.qwen_edit_installed():
             from backend.services.image_editing_packs import missing_message
-            raise RuntimeError(missing_message("edit_image"))
+            raise RuntimeError(_failure(K.MODEL_NOT_INSTALLED, missing_message("edit_image")))
         self._require_up(f"ComfyUI not reachable at {self.comfy_url} — cannot edit image")
         names = []
         for p in image_paths:
@@ -1275,7 +1298,7 @@ class ComfyUIImageGenerator:
             raise RuntimeError(f"Source image not found: {image_path}")
         if not self.pulid_installed():
             from backend.services.image_editing_packs import missing_message
-            raise RuntimeError(missing_message("generate_identity"))
+            raise RuntimeError(_failure(K.MODEL_NOT_INSTALLED, missing_message("generate_identity")))
         self._require_up(f"ComfyUI not reachable at {self.comfy_url}")
         src_name = self._upload_image_to_comfyui(image_path)
         if not src_name:
@@ -1356,13 +1379,13 @@ class ComfyUIImageGenerator:
             )
             prompt_id = self._queue(workflow)
             if not prompt_id:
-                raise RuntimeError("ComfyUI did not accept the Kontext edit workflow")
+                raise RuntimeError(_failure(K.NODE_ERROR, "ComfyUI did not accept the Kontext edit workflow"))
             outputs = self._wait(prompt_id)
             if outputs is None:
-                raise RuntimeError(f"ComfyUI image edit timed out (prompt {prompt_id})")
+                raise RuntimeError(_failure(K.RENDER_TIMEOUT, f"ComfyUI image edit timed out (prompt {prompt_id})"))
             result = self._fetch_first_image(outputs, output_path)
             if result is None:
-                raise RuntimeError(f"ComfyUI produced no edited image for prompt {prompt_id}")
+                raise RuntimeError(_failure(K.OUTPUT_MISSING, f"ComfyUI produced no edited image for prompt {prompt_id}"))
         logger.info("Kontext edit complete: %s", result)
         return result
 
@@ -1430,7 +1453,7 @@ class ComfyUIImageGenerator:
         cancels this prompt only and raises RenderStopped.
         """
         self._require_up(
-            f"ComfyUI not reachable at {self.comfy_url} — cannot generate storyboard image"
+            f"ComfyUI not reachable at {self.comfy_url} — cannot generate the image"
         )
 
         effective_model = model or self.model
@@ -1478,15 +1501,15 @@ class ComfyUIImageGenerator:
             raise_if_stopped(should_stop, "before ComfyUI was given the graph")
             prompt_id = self._queue(workflow)
             if not prompt_id:
-                raise RuntimeError("ComfyUI did not accept the image workflow")
+                raise RuntimeError(_failure(K.NODE_ERROR, "ComfyUI did not accept the image workflow"))
 
             outputs = self._wait(prompt_id, should_stop=should_stop)
             if outputs is None:
-                raise RuntimeError(f"ComfyUI image generation timed out (prompt {prompt_id})")
+                raise RuntimeError(_failure(K.RENDER_TIMEOUT, f"ComfyUI image generation timed out (prompt {prompt_id})"))
 
             result = self._fetch_first_image(outputs, output_path)
             if result is None:
-                raise RuntimeError(f"ComfyUI produced no image for prompt {prompt_id}")
+                raise RuntimeError(_failure(K.OUTPUT_MISSING, f"ComfyUI produced no image for prompt {prompt_id}"))
 
         self.last_steps = next(
             node["inputs"]["steps"] for node in workflow.values()

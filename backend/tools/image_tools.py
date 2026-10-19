@@ -17,7 +17,9 @@ from backend.utils.backend_http import BackendError
 from backend.utils.backend_http import backend_base_url as _backend_base_url
 from backend.utils.backend_http import http_json as _http_json
 from backend.utils.backend_http import is_mcp_caller, is_mcp_transport, run_tool_in_backend
-from backend.services.job_types import RenderErrorKind, batch_failure, describe_failure, failure_kind, failure_text
+from backend.services.job_types import (
+    RenderErrorKind, batch_failure, describe_failure, failure_kind, failure_text, record_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -494,14 +496,18 @@ class ImageGeneratorTool(BaseTool):
                 )
 
             err = (still.error if still else None) or "Image generation failed."
+            kind = failure_kind(err)
             low = err.lower()
+            if "out of memory" in low:
+                kind = RenderErrorKind.OOM
             if "out of memory" in low or "cuda" in low:
                 err = (
                     "The GPU ran out of memory generating this image. "
                     "Try a smaller size, a lighter model, or wait for other "
                     "renders to finish, then try again."
                 )
-            return ToolResult(success=False, error=err)
+            return ToolResult(success=False, error=err,
+                              metadata={"error_kind": kind.value} if kind else {})
 
         except ImportError:
             return ToolResult(
@@ -510,7 +516,7 @@ class ImageGeneratorTool(BaseTool):
             )
         except Exception as e:
             logger.error(f"ImageGeneratorTool error: {e}", exc_info=True)
-            return ToolResult(success=False, error=f"Image generation failed: {e}")
+            return _failed("Image generation failed", e)
 
 
     MAX_WAIT_S = 20 * 60
@@ -557,7 +563,7 @@ class ImageGeneratorTool(BaseTool):
             return ToolResult(success=False, error="Batch image generation is not available.")
         except Exception as e:
             logger.error("ImageGeneratorTool queue failed: %s", e, exc_info=True)
-            return ToolResult(success=False, error=f"Could not queue the image: {e}")
+            return _failed("Could not queue the image", e)
         if wait:
             return self._wait_http(batch_id, prompt, sampling)
         cast_line = (
@@ -783,6 +789,16 @@ def _forward_tool_job(tool: BaseTool, arguments: dict, wait_for_result) -> ToolR
     return _job_tool_result(snapshot) or _job_queued_result(snapshot, waited_s=wait_s)
 
 
+def _failed(what: str, exc: BaseException) -> ToolResult:
+    """A failed tool call, with the failure's kind (job_types) named where the
+    tool caught it: ``metadata.error_kind``, which a tool job keeps and
+    get_generation_status turns into a label and a next step."""
+    from backend.services.job_operation_gate import classify_render_exception
+    kind = classify_render_exception(exc)
+    meta = {} if kind is RenderErrorKind.UNKNOWN else {"error_kind": kind.value}
+    return ToolResult(success=False, error=f"{what}: {exc}", metadata=meta)
+
+
 class GenerationStatusTool(BaseTool):
     """Read the state of a queued image or video batch, bulk CSV job, song or tool job by id."""
 
@@ -794,7 +810,9 @@ class GenerationStatusTool(BaseTool):
         "generate_image with wait_for_result=false or started in the Studio, a video batch "
         "from generate_video, a bulk CSV job (bulk_gen_...) from generate_bulk_csv, a song "
         "(a 32-character job id) from generate_music, or a tool job (tooljob_...) from edit_image, "
-        "inpaint_image, outpaint_image, remove_background or generate_animation called over MCP. "
+        "inpaint_image, outpaint_image, remove_background or generate_animation called over MCP, "
+        "a music video (music_video:<id>) from generate_music_video, or a Film Crew production "
+        "(production:<id>) from start_film_crew. "
         "Returns status (a tool job is queued, running, done or failed, with the time since it "
         "started), progress while running (a video batch names its pipeline stage, such as gpu_wait "
         "or generate, with the share of clips finished), and each finished file (URL for images, video and "
@@ -846,6 +864,8 @@ class GenerationStatusTool(BaseTool):
                     "generation_time": r.generation_time,
                 })
         failed = [r.error for r in (status.results or []) if not r.success and r.error]
+        failures = [describe_failure(getattr(r, "error_kind", None), r.error, "image")
+                    for r in (status.results or []) if not r.success]
         return {
             "kind": "image",
             "batch_id": batch_id,
@@ -856,6 +876,8 @@ class GenerationStatusTool(BaseTool):
             "error": status.error,
             "errors": failed,
             "files": files,
+            "failure": batch_failure(status, "image"),
+            "failures": failures,
             "studio_url": ImageGeneratorTool.STUDIO_URL,
         }
 
@@ -881,11 +903,18 @@ class GenerationStatusTool(BaseTool):
                     "generation_time": r.get("generation_time"),
                 })
         failed = [r.get("error") for r in (d.get("results") or []) if not r.get("success") and r.get("error")]
+        failures = [r.get("failure") or describe_failure(r.get("error_kind"), r.get("error"), "image")
+                    for r in (d.get("results") or []) if not r.get("success")]
+        batch = d.get("failure")
+        if batch is None and (d.get("error") or d.get("status") == "cancelled"):
+            batch = describe_failure("cancelled" if d.get("status") == "cancelled" else d.get("error_kind"),
+                                     d.get("error") or "Cancelled", "image")
         return {
             "kind": "image", "batch_id": batch_id, "status": d.get("status"),
             "completed": d.get("completed_images"), "failed": d.get("failed_images"),
             "total": d.get("total_images"), "error": d.get("error"), "errors": failed,
-            "files": files, "studio_url": ImageGeneratorTool.STUDIO_URL,
+            "files": files, "failure": batch, "failures": failures,
+            "studio_url": ImageGeneratorTool.STUDIO_URL,
         }
 
     @staticmethod
@@ -1062,26 +1091,35 @@ class GenerationStatusTool(BaseTool):
             meta = result.get("meta") or {}
             if job.get("intent") == "voice" and meta.get("backend"):
                 notes.append(f"Engine: {meta['backend']}" + (f", voice {meta['voice']}" if meta.get("voice") else ""))
+        failure = None
+        if status in ("error", "cancelled"):
+            # The kind Audio Foundry named (service/jobs.py failure_kind_of).
+            kind = job.get("error_kind") or ("cancelled" if status == "cancelled" else None)
+            failure = describe_failure(kind, job.get("error") or ("Cancelled" if status == "cancelled" else ""),
+                                       "voice" if job.get("intent") == "voice" else "audio")
         return {
             "kind": {"music": "song", "voice": "speech", "fx": "sound effect"}.get(job.get("intent"), "audio"),
             "batch_id": job_id, "status": status, "progress": pct, "message": prog.get("stage") or "",
             "error": job.get("error"), "errors": [], "files": files, "studio_url": STUDIO_URL,
+            "failure": failure, "failures": [] if failure else None,
             "note": ". ".join(notes) or None,
         }
 
     @staticmethod
-    def _audio_foundry_stopped(job_id: str):
+    def _audio_foundry_stopped(job_id: str, said: Optional[str] = None):
         """The answer for an audio job id while Audio Foundry is stopped: the
         backend answered, the plugin that holds the job did not, and retrying
-        will not change that until someone starts it."""
+        will not change that until someone starts it. ``said`` is the
+        backend's own service-down sentence, when its 503 carried one."""
+        from backend.services.plugin_bridge import service_down_message
         from backend.tools.audio_tools import STUDIO_URL
+        message = ((said or service_down_message("audio_foundry", context="audio"))
+                   + " Until then this job cannot be read. A job that was running when it stopped is "
+                     "marked interrupted when it starts again; a finished file is already in the library.")
         return {
             "kind": "audio", "batch_id": job_id, "status": "unknown", "progress": None,
-            "error": ("Audio Foundry is not running (start it in Plugins, or POST "
-                      "/api/plugins/audio_foundry/start), so this job cannot be read. A job that was "
-                      "running when it stopped is marked interrupted when it starts again; a finished "
-                      "file is already in the library."),
-            "errors": [], "files": [], "studio_url": STUDIO_URL,
+            "error": message, "errors": [], "files": [], "studio_url": STUDIO_URL,
+            "failure": describe_failure("service_down", message, "audio"), "failures": [],
         }
 
     @classmethod
@@ -1093,7 +1131,8 @@ class GenerationStatusTool(BaseTool):
             job = _http_json("GET", f"/api/audio-foundry/jobs/{job_id}")
         except RuntimeError as e:
             if plugin_stopped(e):
-                return cls._audio_foundry_stopped(job_id)
+                body = e.body if isinstance(getattr(e, "body", None), dict) else {}
+                return cls._audio_foundry_stopped(job_id, said=body.get("message"))
             if "not found" in str(e).lower() or "unknown job" in str(e).lower() or "404" in str(e):
                 return None
             raise
@@ -1109,7 +1148,7 @@ class GenerationStatusTool(BaseTool):
         m3_job = m3.job_status(job_id)
         if m3_job is not None:
             job = {"intent": "music", "status": {"failed": "error"}.get(m3_job["status"], m3_job["status"]),
-                   "error": m3_job.get("error"),
+                   "error": m3_job.get("error"), "error_kind": m3_job.get("error_kind"),
                    "result": {"path": m3_job.get("path"), "document_id": m3_job.get("document_id"),
                               "duration_s": m3_job.get("seconds")} if m3_job.get("path") else None}
             return cls._audio_info(job_id, job)
@@ -1135,6 +1174,10 @@ class GenerationStatusTool(BaseTool):
                 if url and all(f["url"] != url for f in files):
                     files.append({"url": url})
         tool = snapshot.get("tool") or "tool"
+        failure = None
+        if status == "failed":
+            # Every tool job is an image render (an edit, a cut-out, animation frames).
+            failure = describe_failure(meta.get("error_kind"), result.get("error"), "image")
         return {
             "kind": _TOOL_JOB_KINDS.get(tool, tool), "noun": "job", "tool": tool,
             "batch_id": snapshot.get("job_id"), "status": status, "note": snapshot.get("note"),
@@ -1142,6 +1185,7 @@ class GenerationStatusTool(BaseTool):
             "output": result.get("output") if status == "done" else None,
             "error": result.get("error") if status == "failed" else None,
             "errors": [], "files": files, "studio_url": None,
+            "failure": failure, "failures": [] if failure else None,
         }
 
     @classmethod
@@ -1168,12 +1212,58 @@ class GenerationStatusTool(BaseTool):
                                 "so it runs the same version as this MCP server.")}
         return cls._tool_job_info(snapshot)
 
+    @staticmethod
+    def _pipeline_status(batch_id: str):
+        """A music video or Film Crew run, read from its row in this process."""
+        from backend.services import pipeline_status as ps
+        parsed = ps.parse_pipeline_id(batch_id)
+        if not parsed:
+            return None
+        kind, row_id = parsed
+        from backend.models import db
+        if kind == "music_video":
+            from backend.api.music_video_api import _mv_dict
+            from backend.models import MusicVideo
+            mv = db.session.get(MusicVideo, row_id)
+            return ps.music_video_info(_mv_dict(mv)) if mv else None
+        from backend.api.production_api import _shot_to_dict
+        from backend.models import Production
+        prod = db.session.get(Production, row_id)
+        if prod is None:
+            return None
+        return ps.production_info({
+            "id": prod.id, "status": prod.status, "current_stage": prod.current_stage,
+            "error_blob": prod.error_blob, "shots": [_shot_to_dict(sh) for sh in prod.shots],
+        })
+
+    @staticmethod
+    def _pipeline_status_http(batch_id: str):
+        """The same, through the backend's music video and Film Crew routes."""
+        from backend.services import pipeline_status as ps
+        parsed = ps.parse_pipeline_id(batch_id)
+        if not parsed:
+            return None
+        kind, row_id = parsed
+        path = f"/api/music-video/{row_id}" if kind == "music_video" else f"/api/production/{row_id}"
+        try:
+            d = _http_json("GET", path)
+        except RuntimeError as e:
+            if "not found" in str(e).lower() or "404" in str(e):
+                return None
+            raise
+        if not isinstance(d, dict) or "current_stage" not in d:
+            return None
+        return ps.music_video_info(d) if kind == "music_video" else ps.production_info(d)
+
     def _read(self, batch_id: str):
         """(info, unreachable): the job from whichever reader knows its id."""
         info = None
         unreachable = None
         remote = self._context.get("transport") == "mcp"
-        if _tool_jobs.is_job_id(batch_id):
+        from backend.services.pipeline_status import parse_pipeline_id
+        if parse_pipeline_id(batch_id):
+            readers = (self._pipeline_status_http,) if remote else (self._pipeline_status,)
+        elif _tool_jobs.is_job_id(batch_id):
             readers = (self._tool_job_status_http,) if remote else (self._tool_job_status,)
         else:
             readers = (
@@ -1221,14 +1311,20 @@ class GenerationStatusTool(BaseTool):
                 f"Could not read {batch_id}: the Guaardvark backend did not answer ({unreachable}). "
                 "Try again shortly."))
         if info is None:
-            return ToolResult(success=False, error=f"No image, video, audio or bulk CSV job named {batch_id}")
+            hint = ""
+            if batch_id.isdigit():
+                hint = (f" A music video or Film Crew id needs its kind: music_video:{batch_id} "
+                        f"or production:{batch_id}.")
+            return ToolResult(success=False, error=(
+                f"No image, video, audio, bulk CSV, music video or Film Crew job named {batch_id}.{hint}"))
         if info.get("missing"):
             return ToolResult(success=False, error=info["missing"])
         total = info.get("total")
         done = info.get("completed") or 0
-        noun = info.get("noun") or (
+        noun = info["noun"] if "noun" in info else (
             "job" if info["kind"] in ("song", "speech", "sound effect", "audio") else "batch")
-        head = f"{info['kind'][0].upper()}{info['kind'][1:]} {noun} {batch_id}: {info['status']}"
+        head = " ".join(p for p in (f"{info['kind'][0].upper()}{info['kind'][1:]}", noun, batch_id) if p)
+        head += f": {info['status']}"
         if total:
             head += f" ({done}/{total} finished"
             if info.get("failed"):
@@ -1259,12 +1355,12 @@ class GenerationStatusTool(BaseTool):
                 lines.append(review_line)
         failures = info.get("failures")
         if failures is not None:
-            # Video: every failure with its kind, the batch's own first.
+            # Every failure with its kind and next step, the batch's own first.
             batch = info.get("failure")
             if batch and info.get("error"):
-                lines.append("Error: " + failure_text(batch["kind"], batch["message"]))
+                lines.append("Error: " + record_text(batch))
             for f in failures:
-                lines.append("Failed item: " + failure_text(f["kind"], f["message"]))
+                lines.append("Failed item: " + record_text(f))
         else:
             if info.get("error"):
                 lines.append(f"Error: {info['error']}")
@@ -1284,6 +1380,8 @@ class GenerationStatusTool(BaseTool):
             lines.append(info["note"])
         if info.get("output"):
             lines.append(str(info["output"]))
+        if info.get("eta_seconds") and info["status"] == "running":
+            lines.append(f"About {int(info['eta_seconds']) // 60} min {int(info['eta_seconds']) % 60} s left (estimate)")
         if info["status"] in ("queued", "pending", "running"):
             lines.append("Still running; poll again in a few seconds, or pass wait_seconds to wait here.")
         if info.get("studio_url"):
@@ -1416,7 +1514,8 @@ class AnimationGeneratorTool(BaseTool):
                     result = anim_gen.generate(request)
             except GpuBusyError as e:
                 return ToolResult(success=False, error=_gpu_refusal(e, gpu_wait) or (
-                    "GPU is busy with another render right now — try again in a moment."))
+                    "GPU is busy with another render right now — try again in a moment."),
+                    metadata={"gpu_busy": True, "error_kind": "vram_busy"})
 
             if result.success:
                 output_lines = [
@@ -1995,7 +2094,7 @@ class VideoGeneratorTool(BaseTool):
             return ToolResult(success=False, error="Video generation dependencies not available.")
         except Exception as e:
             logger.error(f"VideoGeneratorTool error: {e}", exc_info=True)
-            return ToolResult(success=False, error=f"Video generation failed: {str(e)}")
+            return _failed("Video generation failed", e)
 
 
 class EditImageTool(BaseTool):
@@ -2111,7 +2210,8 @@ class EditImageTool(BaseTool):
             backend = self._pick_edit_backend("auto")
         if backend is None:
             from backend.services.image_editing_packs import missing_message
-            return ToolResult(success=False, error=missing_message(self.for_tool))
+            return ToolResult(success=False, error=missing_message(self.for_tool),
+                              metadata={"error_kind": RenderErrorKind.MODEL_NOT_INSTALLED.value})
         if references and backend != "qwen":
             runs_on = "FLUX.1 Kontext" if backend == "kontext" else f"img2img with '{model}'"
             return ToolResult(success=False, error=(
@@ -2334,9 +2434,9 @@ class EditImageTool(BaseTool):
         except Exception as e:
             refusal = _gpu_refusal(e, gpu_wait)
             if refusal:
-                return ToolResult(success=False, error=refusal, metadata={"gpu_busy": True})
+                return ToolResult(success=False, error=refusal, metadata={"gpu_busy": True, "error_kind": "vram_busy"})
             logger.error(f"EditImageTool error: {e}", exc_info=True)
-            return ToolResult(success=False, error=f"Image edit failed: {str(e)}")
+            return _failed("Image edit failed", e)
 
 
 _GPU_WAIT_STATUS = "Waiting for the GPU: another render is running. This starts as soon as it finishes."
@@ -2522,10 +2622,11 @@ class RemoveBackgroundTool(BaseTool):
                           "device": device.lower()},
             )
         except BackgroundRemovalNotInstalled as e:
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(success=False, error=str(e),
+                              metadata={"error_kind": RenderErrorKind.MODEL_NOT_INSTALLED.value})
         except Exception as e:
             logger.error("remove_background failed: %s", e, exc_info=True)
-            return ToolResult(success=False, error=f"Background removal failed: {e}")
+            return _failed("Background removal failed", e)
 
 
 class InpaintImageTool(BaseTool):
@@ -2676,7 +2777,8 @@ class OutpaintImageTool(BaseTool):
                 backend = "kontext"
             else:
                 from backend.services.image_editing_packs import missing_message
-                return ToolResult(success=False, error=missing_message("outpaint_image"))
+                return ToolResult(success=False, error=missing_message("outpaint_image"),
+                                  metadata={"error_kind": RenderErrorKind.MODEL_NOT_INSTALLED.value})
             image_url = f"/api/outputs/generated_images/{filename}"
             done = ("Canvas extended (qwen)." if backend == "qwen" else
                     "Kontext widened the view inside the original frame; the canvas size is "
@@ -2690,9 +2792,9 @@ class OutpaintImageTool(BaseTool):
         except Exception as e:
             refusal = _gpu_refusal(e, gpu_wait)
             if refusal:
-                return ToolResult(success=False, error=refusal, metadata={"gpu_busy": True})
+                return ToolResult(success=False, error=refusal, metadata={"gpu_busy": True, "error_kind": "vram_busy"})
             logger.error("outpaint_image failed: %s", e, exc_info=True)
-            return ToolResult(success=False, error=f"Outpaint failed: {e}")
+            return _failed("Outpaint failed", e)
 
 
 class GenerateIdentityTool(BaseTool):
@@ -2828,6 +2930,6 @@ class GenerateIdentityTool(BaseTool):
         except Exception as e:
             refusal = _gpu_refusal(e, gpu_wait)
             if refusal:
-                return ToolResult(success=False, error=refusal, metadata={"gpu_busy": True})
+                return ToolResult(success=False, error=refusal, metadata={"gpu_busy": True, "error_kind": "vram_busy"})
             logger.error("generate_identity failed: %s", e, exc_info=True)
-            return ToolResult(success=False, error=f"Identity generate failed: {e}")
+            return _failed("Identity generate failed", e)
