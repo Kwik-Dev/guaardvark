@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from backend.services.agent_tools import BaseTool, ToolParameter, ToolResult
+from backend.services.tool_jobs import MAX_WAIT_S as _SPEECH_MAX_WAIT_S
 
 logger = logging.getLogger(__name__)
 
@@ -240,9 +241,12 @@ class GenerateSpeechTool(BaseTool):
     read_only = False
     destructive = False
     description = (
-        "Turn text into speech on this machine with Guaardvark's Audio Foundry. Waits up to about "
-        "a minute for the file (usually seconds) and returns its name, library document id, length "
-        "and a download link. A longer read, such as a script near the 3000-character limit or a "
+        "Turn text into speech on this machine with Guaardvark's Audio Foundry. Unlike the other "
+        "generate tools, which over MCP answer at once with a job or batch id to poll, this waits "
+        "for the file: up to "
+        f"{_SPEECH_MAX_WAIT_S:.0f} s, or half the MCP per-call timeout when that is shorter "
+        "(usually it takes seconds), and returns its name, library document id, length and a "
+        "download link. A longer read, such as a script near the 3000-character limit or a "
         "cold start, answers with a job_id instead: poll get_generation_status with it, and do not "
         "call again, since the file lands in the library either way. Up to 3000 characters per "
         "call; split longer scripts. Voices: naming a voice (a Kokoro id "
