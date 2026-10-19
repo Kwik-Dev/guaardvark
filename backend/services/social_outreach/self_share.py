@@ -19,6 +19,7 @@ import requests
 
 from backend.services.social_outreach import audit, kill_switch, persona
 from backend.services.social_outreach.reddit_outreach import (
+    web_access_refused,
     REDDIT_BASE,
     fetch_subreddit_rules,
     is_self_promo_banned,
@@ -314,6 +315,8 @@ class SelfShareLoop:
                 status="aborted", abort_reason="kill_switch_off",
                 task_id=task_id,
             )
+            return report
+        if web_access_refused(subreddit, report, task_id):
             return report
 
         rules = fetch_subreddit_rules(subreddit)
