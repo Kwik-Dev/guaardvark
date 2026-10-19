@@ -4,6 +4,7 @@ Agent Tools System - Base Infrastructure
 Provides tool definition, registry, and execution patterns for agent capabilities
 """
 
+import os
 import inspect
 import threading
 import logging
@@ -626,6 +627,23 @@ class ToolRegistry:
                 error=f"Tool '{tool_name}' validation failed - missing required parameters: {expected_params}. Received: {received_params}"
             )
 
+        schema_error = tool_argument_error(tool, kwargs)
+        if schema_error:
+            if strict_tool_args_enabled():
+                logger.warning(f"Tool {tool_name} refused: invalid arguments: {schema_error}")
+                return ToolResult(
+                    success=False,
+                    error=(
+                        f"Tool '{tool_name}' was not run: invalid arguments: {schema_error}. "
+                        f"Call it again with arguments that match its parameters: "
+                        f"{describe_tool_parameters(tool)}"
+                    ),
+                    metadata={"invalid_arguments": schema_error},
+                )
+            # Off by default: these calls ran before schema checks existed, so
+            # report what strict mode would refuse without changing the outcome.
+            logger.info(f"Tool {tool_name} arguments fail its schema (not enforced): {schema_error}")
+
         try:
             logger.info(f"Executing tool: {tool_name}")
             
@@ -782,6 +800,56 @@ def consent_reference(tool, params: Dict[str, Any]) -> Optional[str]:
         return None
     ref = (params or {}).get("image") or ""
     return ref or None
+
+
+# Chat tool calls are checked against the same JSON Schema an MCP client sees
+# (backend/mcp/tools_adapter.py). Enforced only when this is on: a stricter
+# check refuses some calls (out-of-range numbers, values outside an enum) that
+# run today after type coercion.
+STRICT_TOOL_ARGS_ENV = "GUAARDVARK_STRICT_TOOL_ARGS"
+
+
+def strict_tool_args_enabled() -> bool:
+    return os.environ.get(STRICT_TOOL_ARGS_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def tool_argument_error(tool, arguments: Dict[str, Any]) -> Optional[str]:
+    """The schema violation in ``arguments`` for ``tool``, or None.
+
+    Uses the MCP server's schema builder and validator, so chat and MCP judge a
+    call the same way. Keys starting with ``_`` are the backend's own context,
+    not arguments. A tool that publishes its own ``input_schema`` (an MCP proxy)
+    is checked against that. None when the validator is unavailable.
+    """
+    try:
+        from jsonschema import Draft202012Validator
+        from backend.mcp.tools_adapter import _argument_error, _tool_input_schema
+    except Exception as exc:  # noqa: BLE001 - jsonschema / mcp missing: no check
+        logger.debug("tool argument schema check unavailable: %s", exc)
+        return None
+    schema = getattr(tool, "input_schema", None) or _tool_input_schema(tool)
+    try:
+        validator = Draft202012Validator(schema)
+    except Exception as exc:  # noqa: BLE001 - a bad schema must not block the tool
+        logger.warning("no argument validation for %s: %s", getattr(tool, "name", "?"), exc)
+        return None
+    present = {k: v for k, v in arguments.items() if not str(k).startswith("_")}
+    return _argument_error(validator, present)
+
+
+def describe_tool_parameters(tool) -> str:
+    """One line naming each parameter, its type and whether it is required."""
+    parts = []
+    for name, param in (getattr(tool, "parameters", None) or {}).items():
+        bits = [param.type or "string", "required" if param.required else "optional"]
+        if getattr(param, "enum", None):
+            bits.append("one of " + ", ".join(map(str, param.enum)))
+        if getattr(param, "minimum", None) is not None:
+            bits.append(f">= {param.minimum}")
+        if getattr(param, "maximum", None) is not None:
+            bits.append(f"<= {param.maximum}")
+        parts.append(f"{name} ({', '.join(bits)})")
+    return "; ".join(parts) or "none"
 
 
 def tool_needs_approval_card(tool, tool_name: str, params: Dict[str, Any], preapproved: set) -> bool:
