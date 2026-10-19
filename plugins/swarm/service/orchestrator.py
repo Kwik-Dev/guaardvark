@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -69,6 +70,10 @@ def backend_installed(name: str, backend_config) -> bool:
     command = getattr(backend_config, "command", "") or ""
     if command and shutil.which(command):
         return True
+    if os.sep in command:
+        # A configured path is what the wrapper runs; another CLI of the same
+        # name elsewhere on PATH does not stand in for it.
+        return False
     cls = _backend_classes().get(name)
     if cls is None:
         return False

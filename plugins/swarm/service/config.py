@@ -68,13 +68,12 @@ class SwarmConfig:
     test_command: str = "python3 -m pytest"
     flight_mode: bool = False
     # Longest one agent may run before the swarm stops it and marks the task
-    # timed_out; 0 turns the limit off. The CLIs have no timeout of their own,
-    # so a hung agent otherwise holds its slot (and the swarm) forever. 120
-    # minutes is a ceiling for a hang, not a budget for normal work: a single
-    # task is one worktree and one focused change, and an assumption (not a
-    # measurement) is that such tasks finish well inside an hour even on the
-    # slower local backend. Raise it for plans with large tasks.
-    agent_timeout_minutes: float = 120
+    # timed_out; 0 (the default) means no limit. The CLIs have no timeout of
+    # their own, so a hung agent otherwise holds its slot (and the swarm)
+    # forever. Off until a value is chosen from measured task durations: none
+    # have been recorded, and a limit set too low stops legitimate work. Set it
+    # in config.yaml (for example 120 as a ceiling for a hang).
+    agent_timeout_minutes: float = 0
 
     backends: dict[str, BackendConfig] = field(default_factory=dict)
 
@@ -189,7 +188,7 @@ def load_config(
         run_tests_before_merge=defaults.get("run_tests_before_merge", True),
         test_command=defaults.get("test_command", "python3 -m pytest"),
         flight_mode=(env_flight == "1") if env_flight else defaults.get("flight_mode", False),
-        agent_timeout_minutes=float(defaults.get("agent_timeout_minutes", 120) or 0),
+        agent_timeout_minutes=float(defaults.get("agent_timeout_minutes", 0) or 0),
         offline_ping_target=offline_raw.get("target", ""),
         offline_ping_timeout=offline_raw.get("timeout_seconds", 2),
         auto_fallback=offline_raw.get("auto_fallback", True),
