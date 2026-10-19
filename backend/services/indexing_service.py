@@ -312,10 +312,18 @@ class PostgresSparseRetriever:
     than by over-fetching and discarding afterwards.
     """
 
-    def __init__(self, table: str, top_k: int = 10, filters: Optional[Dict[str, Any]] = None):
+    def __init__(self, table: str, top_k: int = 10, filters: Optional[Dict[str, Any]] = None,
+                 project_id=None):
         self.table = table
         self.top_k = top_k
         self.filters = filters or {}
+        # A project read out of the shared table (global mode): its own rows and
+        # the corpus summaries that belong to no project (project_scope_sql).
+        self.project_id = project_id
+        # What the last retrieve() did, for the caller's trace: the rows it
+        # returned, or the error that made it return none.
+        self.last_error: Optional[str] = None
+        self.last_count: int = 0
 
     # Terms too common to be worth OR-ing over a large corpus; an OR containing one
     # of these matches most of the table and makes the ranking do all the work.
@@ -379,6 +387,10 @@ class PostgresSparseRetriever:
         for key, value in self.filters.items():
             where.append("metadata_->>%s = %s")
             params.extend([key, str(value)])
+        if self.project_id is not None:
+            scope_sql, scope_params = project_scope_sql(self.project_id)
+            where.append(scope_sql)
+            params.extend(scope_params)
         params.append(self.top_k)
         rank_fn = match_sql.split(" @@ ")[1].replace("%s", "%s")
         from psycopg2 import sql as pgsql
@@ -433,13 +445,16 @@ class PostgresSparseRetriever:
     def retrieve(self, query) -> List[Any]:
         from llama_index.core.schema import NodeWithScore, TextNode
         text = query if isinstance(query, str) else getattr(query, "query_str", str(query))
+        self.last_error, self.last_count = None, 0
         if not (text or "").strip():
             return []
         try:
             rows = self._rows(text)
         except Exception as e:
             logger.warning("Sparse (postgres) retrieval failed: %s", e)
+            self.last_error = f"{e.__class__.__name__}: {str(e)[:160]}"
             return []
+        self.last_count = len(rows)
         out = []
         for node_id, node_text, meta, rank in rows:
             meta = meta if isinstance(meta, dict) else (json.loads(meta) if meta else {})
@@ -463,6 +478,25 @@ class PostgresSparseRetriever:
 
 
 
+def project_scope_sql(project_id):
+    """WHERE clause (and its parameters) for one project read out of the shared
+    vector table: its own rows, and RAPTOR summaries that carry no project, which
+    describe the whole corpus and are meant to answer project questions too."""
+    return (
+        "(metadata_->>'project_id' = %s OR (metadata_->>'content_type' = 'raptor_summary' "
+        "AND metadata_->>'project_id' IS NULL))",
+        [str(project_id)],
+    )
+
+
+def in_project_scope(metadata: Optional[Dict[str, Any]], project_id) -> bool:
+    """project_scope_sql for a node already retrieved."""
+    md = metadata or {}
+    if str(md.get("project_id")) == str(project_id):
+        return True
+    return md.get("content_type") == "raptor_summary" and md.get("project_id") in (None, "")
+
+
 def _get_sparse_retriever(storage_ctx, top_k: int, project_id=None, profile: Optional[str] = None):
     """The keyword leg: Postgres full-text when available, BM25 as the fallback.
 
@@ -471,18 +505,22 @@ def _get_sparse_retriever(storage_ctx, top_k: int, project_id=None, profile: Opt
     regression rather than a missing retriever.
     """
     table = None
+    scope = _store_scope(project_id)
     try:
-        table = resolve_existing_vector_table(project_id, profile)
+        # The table the vector leg reads: the project's own in per-project mode,
+        # the shared one otherwise. Keyed by the raw project id it named a
+        # per-project table that global mode (the default) never creates, every
+        # query failed, and the leg returned nothing.
+        table = resolve_existing_vector_table(scope, profile)
     except Exception:
         table = None
     if table:
-        # No project filter here on purpose. `resolve_existing_vector_table`
-        # already returns that project's own table -- scope is enforced by which
-        # table is read, not by a column -- so filtering again inside it adds no
-        # isolation and silently drops any node that does not carry the key.
-        # RAPTOR summaries are exactly such nodes, so the filter made corpus-level
-        # answers disappear from project-scoped questions.
-        return PostgresSparseRetriever(table, top_k=top_k)
+        # In its own table a project needs no filter: scope is the table. Read
+        # from the shared table it is filtered to its rows plus the corpus
+        # summaries that belong to no project (project_scope_sql).
+        return PostgresSparseRetriever(
+            table, top_k=top_k,
+            project_id=project_id if (project_id is not None and scope is None) else None)
 
     # File-backed store: fall back to the docstore-driven BM25.
     try:
@@ -2161,12 +2199,28 @@ def search_with_llamaindex(
         if _filter_pairs:
             try:
                 from llama_index.core.vector_stores.types import MetadataFilters, MetadataFilter, FilterOperator
-                metadata_filters = MetadataFilters(
-                    filters=[
-                        MetadataFilter(key=_k, value=_v, operator=FilterOperator.EQ)
-                        for _k, _v in _filter_pairs
-                    ]
-                )
+                _eq = [MetadataFilter(key=_k, value=_v, operator=FilterOperator.EQ)
+                       for _k, _v in _filter_pairs if _k != "project_id"]
+                if project_id is not None:
+                    if _vector_backend() == "pgvector":
+                        # The project's rows, or a corpus summary that belongs to
+                        # no project (in_project_scope). The file-backed store
+                        # cannot nest filters; there the post-fusion check below
+                        # is the only one that admits such summaries.
+                        _eq.insert(0, MetadataFilters(condition="or", filters=[
+                            MetadataFilter(key="project_id", value=str(project_id),
+                                           operator=FilterOperator.EQ),
+                            MetadataFilters(condition="and", filters=[
+                                MetadataFilter(key="content_type", value="raptor_summary",
+                                               operator=FilterOperator.EQ),
+                                MetadataFilter(key="project_id", value=None,
+                                               operator=FilterOperator.IS_EMPTY),
+                            ]),
+                        ]))
+                    else:
+                        _eq.insert(0, MetadataFilter(key="project_id", value=str(project_id),
+                                                     operator=FilterOperator.EQ))
+                metadata_filters = MetadataFilters(filters=_eq)
                 base_retriever = local_index.as_retriever(similarity_top_k=candidate_top_k, filters=metadata_filters)
                 trace["filters_applied"] = True
             except Exception:
@@ -2292,6 +2346,19 @@ def search_with_llamaindex(
 
         nodes = retriever.retrieve(query_bundle)
 
+        # The keyword leg answers errors with an empty list; the trace must not
+        # keep naming a leg that did not run.
+        _sparse = locals().get("bm25_retriever")
+        _sparse_error = getattr(_sparse, "last_error", None) if "bm25" in trace["legs"] else None
+        if _sparse_error:
+            trace["legs"] = [leg for leg in trace["legs"] if leg != "bm25"]
+            trace["fusion"] = "vector_only" if trace["legs"] else "none"
+            trace["sparse_error"] = _sparse_error
+            trace["degraded"] = True
+            trace["degraded_reason"] = f"keyword leg failed ({_sparse_error}); vector-only results"
+        elif "bm25" in trace["legs"] and _sparse is not None and hasattr(_sparse, "last_count"):
+            trace["sparse_hits"] = _sparse.last_count
+
         # query_expansion (autoresearch param, default off): one LLM paraphrase,
         # union the two retrievals; downstream dedup removes the overlap.
         if overlay.get("query_expansion") and isinstance(query, str):
@@ -2310,7 +2377,10 @@ def search_with_llamaindex(
             def _passes(nws):
                 n = nws.node if hasattr(nws, "node") else nws
                 md = getattr(n, "metadata", None) or {}
-                return all(str(md.get(k)) == v for k, v in _filter_pairs)
+                # The project scope admits corpus summaries that belong to no
+                # project (in_project_scope); the other filters are equalities.
+                return all(in_project_scope(md, v) if k == "project_id" else str(md.get(k)) == v
+                           for k, v in _filter_pairs)
 
             _pre_filter = len(nodes)
             nodes = [n for n in nodes if _passes(n)]
