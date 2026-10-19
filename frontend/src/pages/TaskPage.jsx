@@ -6,6 +6,7 @@
 // - Cleaner, more useful interface
 
 import { formatUiError } from "../utils/uiError";
+import ConfirmActionDialog from "../components/settings/ui/ConfirmActionDialog";
 import {
   Alert,
   Box,
@@ -105,6 +106,8 @@ const TaskPage = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState(null);
+  // The delete waiting for ConfirmActionDialog: { title, description, facts?, confirmLabel, run }.
+  const [pendingConfirm, setPendingConfirm] = useState(null);
   // Projects or models that could not be loaded: the project filter and the
   // task form's model list are empty then, so say why.
   const [lookupErrors, setLookupErrors] = useState({});
@@ -517,16 +520,21 @@ const TaskPage = () => {
     }
   };
 
-  const handleDeleteTask = async (taskId, taskName, event) => {
+  // Asks with ConfirmActionDialog; deleteTaskConfirmed runs on confirm.
+  const handleDeleteTask = (taskId, taskName, event) => {
     // BUG FIX #4: Safely check if event exists and has stopPropagation method
     if (event && typeof event.stopPropagation === 'function') {
       event.stopPropagation(); // Prevent row click
     }
+    setPendingConfirm({
+      title: "Delete this task",
+      description: `"${taskName || "this task"}" is deleted.`,
+      confirmLabel: "Delete task",
+      run: () => deleteTaskConfirmed(taskId),
+    });
+  };
 
-    if (!window.confirm(`Are you sure you want to delete task "${taskName || 'this task'}"?`)) {
-      return;
-    }
-
+  const deleteTaskConfirmed = async (taskId) => {
     try {
       const result = await deleteTask(taskId);
       if (result?.error) {
@@ -608,10 +616,16 @@ const TaskPage = () => {
       return;
     }
 
-    if (!window.confirm(`Are you sure you want to delete ALL ${tasks.length} tasks? This action cannot be undone.`)) {
-      return;
-    }
+    setPendingConfirm({
+      title: "Delete all tasks",
+      description: "Every task in this list is deleted.",
+      facts: [{ label: "Tasks", value: tasks.length }],
+      confirmLabel: "Delete all",
+      run: clearAllTasksConfirmed,
+    });
+  };
 
+  const clearAllTasksConfirmed = async () => {
     try {
       setIsSaving(true);
       setFeedback({
@@ -814,6 +828,20 @@ const TaskPage = () => {
             {Object.values(lookupErrors).join(". ")}.
           </Alert>
         )}
+
+        <ConfirmActionDialog
+          open={Boolean(pendingConfirm)}
+          title={pendingConfirm?.title || ""}
+          description={pendingConfirm?.description}
+          facts={pendingConfirm?.facts || []}
+          confirmLabel={pendingConfirm?.confirmLabel}
+          onConfirm={() => {
+            const run = pendingConfirm?.run;
+            setPendingConfirm(null);
+            run?.();
+          }}
+          onClose={() => setPendingConfirm(null)}
+        />
 
         {/* Enhanced Task Action Modal */}
         <TaskActionModal
