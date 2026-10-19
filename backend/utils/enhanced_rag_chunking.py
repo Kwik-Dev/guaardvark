@@ -1620,8 +1620,14 @@ class EnhancedRAGChunker:
         return leaves
 
     def chunk_documents(self, documents: List[LlamaDocument],
-                       strategy_name: str = 'auto') -> List[BaseNode]:
-        """Chunk multiple documents using specified strategy"""
+                       strategy_name: str = 'auto',
+                       errors: Optional[List[str]] = None) -> List[BaseNode]:
+        """Chunk multiple documents using specified strategy.
+
+        A document that cannot be chunked is skipped and logged; pass ``errors``
+        (a list) to be told about it, one message per document, so the caller
+        can fail the ingest instead of indexing the file with a part missing.
+        """
         all_nodes = []
 
         for document in documents:
@@ -1712,6 +1718,8 @@ class EnhancedRAGChunker:
             except Exception as e:
                 logger.error(f"Error chunking document {document.doc_id}: {e}")
                 self.chunking_stats['chunking_errors'] += 1
+                if errors is not None:
+                    errors.append(f"{e.__class__.__name__}: {e}")
 
         all_nodes = self._reduce_to_leaf_nodes(all_nodes)
 
