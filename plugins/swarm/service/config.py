@@ -68,12 +68,13 @@ class SwarmConfig:
     test_command: str = "python3 -m pytest"
     flight_mode: bool = False
     # Longest one agent may run before the swarm stops it and marks the task
-    # timed_out; 0 (the default) means no limit. The CLIs have no timeout of
-    # their own, so a hung agent otherwise holds its slot (and the swarm)
-    # forever. Off until a value is chosen from measured task durations: none
-    # have been recorded, and a limit set too low stops legitimate work. Set it
-    # in config.yaml (for example 120 as a ceiling for a hang).
-    agent_timeout_minutes: float = 0
+    # timed_out; 0 turns the limit off. The CLIs have no timeout of their own,
+    # so a hung agent otherwise holds its slot (and the swarm) forever. 120 is
+    # not measured (no swarm task durations were on record when it was set): a
+    # task is one focused change in one worktree, so two hours is a ceiling for
+    # a hung CLI rather than a budget for work. Revise it from the elapsed
+    # times tasks now report.
+    agent_timeout_minutes: float = 120
 
     backends: dict[str, BackendConfig] = field(default_factory=dict)
 
@@ -102,9 +103,10 @@ class SwarmConfig:
     def select_backend(self, preferred: str | None, online: bool = True) -> tuple[BackendConfig | None, str]:
         """Pick the backend for a task: (backend, "") or (None, reason).
 
-        A named backend is used or refused, never swapped for another: the
-        priority list ranks the cloud CLI first, so a task assigned to a local
-        backend that is missing would otherwise run in the cloud.
+        A named backend is used or refused, never swapped for another. A task
+        that names none runs on the first installed local backend: a hosted
+        backend receives the task and the repository's code, so it runs only
+        when a task names it.
         """
         import shutil
 
@@ -120,8 +122,15 @@ class SwarmConfig:
             return b, ""
 
         candidates = self.get_backend_priority_list(online=online)
-        if candidates:
-            return candidates[0], ""
+        local = [b for b in candidates if not b.requires_internet]
+        if local:
+            return local[0], ""
+        hosted = [b.name for b in candidates if b.requires_internet]
+        if hosted:
+            return None, (
+                f"no local agent CLI is installed, and a hosted backend ({', '.join(hosted)}) "
+                f"runs a task only when the task names it, for example [Backend: {hosted[0]}]"
+            )
         return None, "no configured backend is installed for this mode"
 
     def select_backend_for_model(self, model: str, online: bool = True) -> tuple[BackendConfig | None, str]:
@@ -188,7 +197,7 @@ def load_config(
         run_tests_before_merge=defaults.get("run_tests_before_merge", True),
         test_command=defaults.get("test_command", "python3 -m pytest"),
         flight_mode=(env_flight == "1") if env_flight else defaults.get("flight_mode", False),
-        agent_timeout_minutes=float(defaults.get("agent_timeout_minutes", 0) or 0),
+        agent_timeout_minutes=float(defaults.get("agent_timeout_minutes", 120) or 0),
         offline_ping_target=offline_raw.get("target", ""),
         offline_ping_timeout=offline_raw.get("timeout_seconds", 2),
         auto_fallback=offline_raw.get("auto_fallback", True),

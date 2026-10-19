@@ -120,7 +120,7 @@ def test_an_agent_past_the_limit_is_stopped_and_timed_out(repo, tmp_path):
 def test_timeout_is_declared_in_the_config():
     from service.config import load_config
 
-    assert load_config().agent_timeout_minutes == 0  # off until a limit is chosen
+    assert load_config().agent_timeout_minutes == 120
 
 
 def test_a_backend_whose_cli_is_missing_is_not_installed(tmp_path, monkeypatch):
