@@ -264,9 +264,25 @@ class TestSwarmHonesty:
         assert not result.success
         assert "not running" in result.error.lower()
 
-    def test_launch_uses_proxy_post(self, monkeypatch):
+    def test_launch_uses_proxy_post(self, monkeypatch, tmp_path):
+        """The tool takes the Swarm page's path: the goal becomes a plan file
+        (the sidecar refuses a launch without plan_path) before the proxy post."""
+        import subprocess
+        from pathlib import Path
+
+        import backend.config as config
         from backend.api import swarm_api
         from backend.tools.workstation_tools import LaunchSwarmTool
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        install = tmp_path / "install"
+        monkeypatch.setattr(config, "GUAARDVARK_ROOT", str(install))
+        monkeypatch.setattr(swarm_api, "default_repo_root", lambda: repo.resolve())
+        monkeypatch.setattr(
+            "backend.services.guarded_code_service.default_repo_root", lambda: repo.resolve(),
+        )
 
         seen = {}
 
@@ -276,15 +292,39 @@ class TestSwarmHonesty:
             return {"swarm_id": "s1"}, 200
 
         monkeypatch.setattr(swarm_api, "_proxy_post", fake_post)
-        monkeypatch.setattr(
-            "backend.services.guarded_code_service.default_repo_root",
-            lambda: type("P", (), {"__str__": lambda self: "/repo"})(),
-        )
         result = LaunchSwarmTool().execute(goal="add tests", acknowledge_dirty_tree=True)
-        assert result.success
+        assert result.success, result.error
         assert seen["path"] == "/swarm/launch"
         assert seen["body"]["self_code"] is True
         assert seen["body"]["auto_merge"] is False
+        assert "goal" not in seen["body"]
+        plan = install / seen["body"]["plan_path"]
+        assert plan.is_file()
+        assert "## Task: add tests" in plan.read_text(encoding="utf-8")
+
+    def test_launch_refuses_a_dirty_self_code_tree_like_the_page(self, monkeypatch, tmp_path):
+        import subprocess
+
+        import backend.config as config
+        from backend.api import swarm_api
+        from backend.tools.workstation_tools import LaunchSwarmTool
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / "untracked.txt").write_text("x")
+        monkeypatch.setattr(config, "GUAARDVARK_ROOT", str(tmp_path / "install"))
+        monkeypatch.setattr(swarm_api, "default_repo_root", lambda: repo.resolve())
+        monkeypatch.setattr(
+            "backend.services.guarded_code_service.default_repo_root", lambda: repo.resolve(),
+        )
+        monkeypatch.setattr(swarm_api, "_proxy_post",
+                            lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not post")))
+
+        result = LaunchSwarmTool().execute(goal="add tests")
+        assert not result.success
+        assert "acknowledge_dirty_tree" in result.error
+        assert result.metadata["http_status"] == 409
 
 
 class TestSelfImprovementHonesty:

@@ -720,13 +720,19 @@ class LaunchSwarmTool(BaseTool):
         from backend.api import swarm_api
         from backend.services.guarded_code_service import default_repo_root
 
-        body = {
+        # Same path as the Swarm page: the goal becomes a one-task plan file,
+        # which is what the sidecar reads (it refuses a body with no plan_path).
+        body, refusal = swarm_api.prepare_launch({
             "goal": goal,
             "self_code": True,
             "auto_merge": False,
             "acknowledge_dirty_tree": bool(kwargs.get("acknowledge_dirty_tree")),
             "repo_path": str(default_repo_root()),
-        }
+        })
+        if refusal:
+            message, http_status, code = refusal
+            return ToolResult(success=False, error=message,
+                              metadata={"http_status": http_status, "code": code})
         data, status = swarm_api._proxy_post("/swarm/launch", body, timeout=30)
         if status == 503:
             return ToolResult(

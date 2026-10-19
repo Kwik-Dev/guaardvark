@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -37,6 +38,7 @@ from .models import (
     SwarmResult,
     SwarmStatus,
     SwarmTask,
+    TERMINAL_STATUSES,
     TimelineEvent,
     generate_swarm_id,
 )
@@ -48,6 +50,43 @@ logger = logging.getLogger("swarm.orchestrator")
 
 # how often we check on running agents (seconds)
 POLL_INTERVAL = 5
+
+def _backend_classes() -> dict:
+    """Backend name in config.yaml -> the class that runs it."""
+    from .agent_backends.claude_backend import ClaudeBackend
+    from .agent_backends.cline_backend import ClineBackend
+
+    return {"claude": ClaudeBackend, "cline": ClineBackend}
+
+
+def backend_installed(name: str, backend_config) -> bool:
+    """Whether a configured backend's CLI is on this machine.
+
+    The configured command on PATH, or else the backend's own check (cline
+    accepts several CLI names). Never runs a model.
+    """
+    import shutil
+
+    command = getattr(backend_config, "command", "") or ""
+    if command and shutil.which(command):
+        return True
+    if os.sep in command:
+        # A configured path is what the wrapper runs; another CLI of the same
+        # name elsewhere on PATH does not stand in for it.
+        return False
+    cls = _backend_classes().get(name)
+    if cls is None:
+        return False
+    try:
+        return bool(cls().is_available())
+    except Exception as e:  # noqa: BLE001 - a broken probe means not usable
+        logger.debug(f"is_available() failed for backend {name}: {e}")
+        return False
+
+
+# Files the agent backends write into a worktree for their own bookkeeping
+# (wrapper script, log, exit status, captured reply); not the agent's work.
+_SWARM_OWN_FILES = frozenset({".swarm-run.sh", ".swarm-agent.log", ".swarm-status", "completion.md"})
 
 # Tag values that mean "no preference", as the plan's "Assign to:" line reads them.
 _NO_PREFERENCE = ("", "any", "auto", "none")
@@ -360,7 +399,12 @@ class SwarmOrchestrator:
         return backend.get_logs(process, lines)
 
     def get_task_diff(self, task_id: str) -> str:
-        """Get the current git diff for a task's worktree."""
+        """The task branch's changes against the commit it started from:
+        committed work and uncommitted edits together, plus new untracked files.
+
+        `git diff HEAD` showed only uncommitted edits, so a task whose agent
+        committed (as it is told to) always read "no changes".
+        """
         if not self.worktree_mgr:
             return "(worktree manager not initialized)"
 
@@ -369,16 +413,34 @@ class SwarmOrchestrator:
             return f"(no worktree found for task {task_id})"
 
         import subprocess
-        try:
-            # git diff HEAD — get all changes (staged and unstaged) in the worktree
-            res = subprocess.run(
-                ["git", "diff", "HEAD"],
-                cwd=info.worktree_path,
-                capture_output=True, text=True, timeout=5
+
+        def git(*args):
+            return subprocess.run(
+                ["git", *args], cwd=info.worktree_path, capture_output=True, text=True, timeout=10,
             )
-            if not res.stdout.strip():
+
+        try:
+            task = self._find_task(task_id)
+            base = (task.tags.get("base_head") if task else None) or ""
+            if not base:
+                # Older runs did not record it: the branch point from the base branch.
+                mb = git("merge-base", "HEAD", self.worktree_mgr.manifest.base_branch)
+                base = mb.stdout.strip() if mb.returncode == 0 else "HEAD"
+            # Working tree against the base commit: commits since then and
+            # uncommitted edits to tracked files, in one diff.
+            res = git("diff", base)
+            if res.returncode != 0:
+                return f"Error: git diff failed: {res.stderr.strip()}"
+            out = res.stdout
+            untracked = git("ls-files", "--others", "--exclude-standard").stdout.split()
+            untracked = [p for p in untracked if p not in _SWARM_OWN_FILES]
+            if untracked:
+                out += ("\n" if out else "") + "# Untracked files (not in the diff):\n" + "\n".join(
+                    f"#   {p}" for p in untracked
+                ) + "\n"
+            if not out.strip():
                 return "(no changes in worktree)"
-            return res.stdout
+            return out
         except Exception as e:
             logger.warning(f"Failed to get diff for task {task_id}: {e}")
             return f"Error: {e}"
@@ -450,20 +512,14 @@ class SwarmOrchestrator:
                     self._emit_event("task_failed", task.id, {"error": str(e)})
 
             # are we done?
-            all_terminal = all(
-                t.status in (SwarmStatus.DONE, SwarmStatus.FAILED, SwarmStatus.MERGED,
-                             SwarmStatus.NEEDS_REVIEW, SwarmStatus.CANCELLED)
-                for t in tasks
-            )
+            all_terminal = all(t.status in TERMINAL_STATUSES for t in tasks)
             if all_terminal:
                 logger.info("All tasks have reached terminal state")
                 break
 
             # check for deadlock — everything is blocked but nothing is running
             all_blocked_or_terminal = all(
-                t.status in (SwarmStatus.BLOCKED, SwarmStatus.DONE, SwarmStatus.FAILED,
-                             SwarmStatus.MERGED, SwarmStatus.NEEDS_REVIEW, SwarmStatus.CANCELLED)
-                for t in tasks
+                t.status == SwarmStatus.BLOCKED or t.status in TERMINAL_STATUSES for t in tasks
             )
             if all_blocked_or_terminal and running_count == 0:
                 logger.error("Deadlock detected — all remaining tasks are blocked with nothing running")
@@ -562,6 +618,9 @@ class SwarmOrchestrator:
             if not backend:
                 continue
 
+            if self._stop_if_timed_out(task_id, process, backend):
+                continue
+
             prev_status = process.status
             new_status = backend.check_status(process)
 
@@ -578,6 +637,15 @@ class SwarmOrchestrator:
                 if completion_state.get("has_uncommitted_diff"):
                     task.status = SwarmStatus.NEEDS_REVIEW
                     task.error = "Agent finished with uncommitted worktree changes"
+                elif (
+                    completion_state.get("base_head")
+                    and "completion_check_error" not in completion_state
+                    and not completion_state.get("has_commit")
+                ):
+                    # A clean exit that left the branch where it started: the
+                    # agent produced nothing to merge, so the task did not get done.
+                    task.status = SwarmStatus.NO_CHANGES
+                    task.error = "Agent exited without committing or changing anything"
                 else:
                     task.status = SwarmStatus.DONE
                 task.completed_at = time.time()
@@ -650,6 +718,36 @@ class SwarmOrchestrator:
                 self._release_gpu_hold(task_id)
                 self._processes.pop(task_id, None)
 
+    def _stop_if_timed_out(self, task_id: str, process, backend) -> bool:
+        """Stop an agent past agent_timeout_minutes; True when it was stopped."""
+        limit_min = float(getattr(self.config, "agent_timeout_minutes", 0) or 0)
+        task = self._find_task(task_id)
+        if limit_min <= 0 or not task or not task.started_at or task.status != SwarmStatus.RUNNING:
+            return False
+        elapsed = time.time() - task.started_at
+        if elapsed <= limit_min * 60:
+            return False
+        stopped = False
+        try:
+            stopped = bool(backend.kill(process))
+        except Exception as e:  # noqa: BLE001 - still end the task; say the kill failed
+            logger.error(f"Could not stop timed-out agent for '{task_id}': {e}")
+        task.status = SwarmStatus.TIMED_OUT
+        task.completed_at = time.time()
+        task.error = (
+            f"Agent ran longer than the {limit_min:g}-minute limit (agent_timeout_minutes) "
+            + ("and was stopped" if stopped else "; stopping its process failed")
+        )
+        logger.warning(f"Task '{task_id}' timed out after {int(elapsed)}s")
+        self._emit_event("task_timed_out", task_id, {
+            "elapsed": task.elapsed_human,
+            "limit_minutes": limit_min,
+            "process_stopped": stopped,
+        })
+        self._release_gpu_hold(task_id)
+        self._processes.pop(task_id, None)
+        return True
+
     def _completion_state(self, task: SwarmTask) -> dict[str, object]:
         """Summarize whether a completed task produced committed or uncommitted changes."""
         if not task.worktree_path:
@@ -670,11 +768,21 @@ class SwarmOrchestrator:
                 timeout=5,
             )
             base_head = task.tags.get("base_head")
+            # New files the agent left uncommitted are work too; the swarm's
+            # own files in the worktree (wrapper, log, status) are not.
+            untracked = [
+                p for p in subprocess.run(
+                    ["git", "ls-files", "--others", "--exclude-standard"],
+                    cwd=task.worktree_path, capture_output=True, text=True, timeout=5,
+                ).stdout.split()
+                if p not in _SWARM_OWN_FILES
+            ]
             return {
                 "base_head": base_head,
                 "head": head,
                 "has_commit": bool(base_head and head != base_head),
-                "has_uncommitted_diff": diff.returncode == 1,
+                "has_uncommitted_diff": diff.returncode == 1 or bool(untracked),
+                "untracked_files": untracked[:20],
             }
         except Exception as e:
             logger.warning(f"Could not verify completion state for {task.id}: {e}")
@@ -720,13 +828,7 @@ class SwarmOrchestrator:
 
     def _init_backends(self) -> None:
         """Initialize backend instances from config."""
-        from .agent_backends.claude_backend import ClaudeBackend
-        from .agent_backends.cline_backend import ClineBackend
-
-        backend_map = {
-            "claude": ClaudeBackend,
-            "cline": ClineBackend,
-        }
+        backend_map = _backend_classes()
 
         for name in self.config.backends:
             cls = backend_map.get(name)
