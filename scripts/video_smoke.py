@@ -11,8 +11,9 @@ end, downloaded, and checked with the post-render frame checker
 Every clip is the smallest the model accepts, so a full run stays short:
   length      the model's declared minimum (min_frames, min_clip_s) and at least
               one second at its native frame rate, snapped up onto its frame grid
-  size        the smallest canvas its tier_defaults declare, else 16:9 with a
-              480 px short side on its alignment grid (the backend clamps further)
+  size        the smallest canvas its tier_defaults declare, else 16:9 on its
+              alignment grid with its declared short_side (capped by
+              max_long_side), or 480 px when it declares none
   steps       min_steps, else default_steps; no speed profile, no upscale, no
               frame interpolation, prompt enhancement off
 The prompt, seed and start frame are fixed so runs compare over time.
@@ -85,8 +86,12 @@ def smallest_clip(caps: dict) -> dict:
         align = int(caps.get("dimension_alignment") or 16) or 16
         if caps.get("output_alignment"):  # a two-stage graph's file lands on a coarser grid
             align = math.lcm(align, int(caps["output_alignment"]))
-        short = SHORT_SIDE
+        # A model that fixes its canvas renders off it as a broken clip, and the
+        # backend fits the request onto it, so plan on it.
+        short = int(caps.get("short_side") or SHORT_SIDE)
         long_side = short * max(rw, rh) / min(rw, rh)
+        if caps.get("max_long_side"):
+            long_side = min(long_side, int(caps["max_long_side"]))
         long_side = max(align, int(long_side // align) * align)
         short = max(align, int(short // align) * align)
         width, height = (long_side, short) if rw >= rh else (short, long_side)
