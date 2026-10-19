@@ -66,7 +66,7 @@ def _shell_function(name: str) -> str:
     return text[start:end]
 
 
-def _run_kinds(tmp_path, python_body: str) -> str:
+def _run_kinds(tmp_path, python_body: str, **env) -> str:
     venv = tmp_path / "venv" / "bin"
     venv.mkdir(parents=True)
     py = venv / "python"
@@ -74,12 +74,20 @@ def _run_kinds(tmp_path, python_body: str) -> str:
     py.chmod(py.stat().st_mode | stat.S_IEXEC)
     script = _shell_function("ollama_model_kinds") + '\nollama_model_kinds\n'
     return subprocess.run(["bash", "-c", script], input=OLLAMA_LIST, capture_output=True, text=True,
-                          env={**os.environ, "VENV_DIR": str(tmp_path / "venv")}, check=True).stdout
+                          cwd=tmp_path, env={**os.environ, "VENV_DIR": str(tmp_path / "venv"), **env},
+                          check=True).stdout
 
 
 def test_start_sh_uses_the_backends_answer(tmp_path):
     out = _run_kinds(tmp_path, 'cat >/dev/null; printf "bge-m3:latest\\tembedding\\tapi_show\\n"\n')
     assert out == "bge-m3:latest\tembedding\tapi_show\n"
+
+
+def test_start_sh_asks_from_the_checkout_whatever_the_cwd(tmp_path):
+    # python -m backend... resolves only from the checkout; start.sh may be run from anywhere.
+    out = _run_kinds(tmp_path, 'cat >/dev/null; printf "%s\\tchat\\tapi_show\\n" "$PWD"\n',
+                     SCRIPT_DIR=str(REPO))
+    assert out == f"{REPO}\tchat\tapi_show\n"
 
 
 def test_start_sh_falls_back_to_the_name_without_a_venv(tmp_path):

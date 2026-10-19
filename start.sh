@@ -1115,7 +1115,7 @@ check_migrations_preflight() {
 ollama_model_kinds() {
     local _list _out
     _list="$(cat)"
-    _out="$(printf '%s\n' "$_list" | timeout 30 "$VENV_DIR/bin/python" -m backend.services.model_capabilities kinds 2>/dev/null)"
+    _out="$(cd "${SCRIPT_DIR:-.}" && printf '%s\n' "$_list" | timeout 30 "$VENV_DIR/bin/python" -m backend.services.model_capabilities kinds 2>/dev/null)"
     if [ $? -eq 0 ] && [ -n "$_out" ]; then
         printf '%s\n' "$_out"
         return 0
