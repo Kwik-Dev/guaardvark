@@ -40,6 +40,7 @@ import InfoIcon from "@mui/icons-material/Info";
 import * as apiService from "../../api";
 import { getRules } from "../../api/ruleService";
 import { getWebsites } from "../../api/websiteService";
+import { formatUiError } from "../../utils/uiError";
 import { generateStructuredCSV } from "../../api/bulkGenerationService";
 import { useUnifiedProgress } from "../../contexts/UnifiedProgressContext";
 
@@ -82,6 +83,16 @@ const TaskActionModal = ({
   });
 
   const [formError, setFormError] = useState(null);
+  // Lists that could not be loaded (models, rules, websites): their dropdowns
+  // are empty then, so say why without blocking the form.
+  const [lookupWarnings, setLookupWarnings] = useState({});
+  const noteLookup = useCallback((key, text) =>
+    setLookupWarnings((prev) => {
+      const next = { ...prev };
+      if (text) next[key] = text;
+      else delete next[key];
+      return next;
+    }), []);
   const [projects, setProjects] = useState([]);
   const [availableModels, setAvailableModels] = useState([]);
   const [availableRules, setAvailableRules] = useState([]);
@@ -159,9 +170,11 @@ const TaskActionModal = ({
         throw new Error(modelList.error.message || modelList.error);
       }
       setAvailableModels(Array.isArray(modelList) ? modelList : []);
+      noteLookup("models", null);
     } catch (err) {
       console.error("Error fetching models:", err);
       setAvailableModels([]);
+      noteLookup("models", `Models could not be loaded: ${err.message}`);
     } finally {
       setIsLoadingModels(false);
     }
@@ -175,12 +188,15 @@ const TaskActionModal = ({
       if (rulesList.error) {
         console.error("Failed to fetch rules:", rulesList.error);
         setAvailableRules([]);
+        noteLookup("rules", `Rules could not be loaded: ${formatUiError(rulesList.error)}`);
       } else {
         setAvailableRules(rulesList);
+        noteLookup("rules", null);
       }
     } catch (err) {
       console.error("Failed to fetch rules:", err);
       setAvailableRules([]);
+      noteLookup("rules", `Rules could not be loaded: ${formatUiError(err)}`);
     } finally {
       setIsLoadingRules(false);
     }
@@ -194,12 +210,15 @@ const TaskActionModal = ({
       if (websitesList.error) {
         console.error("Failed to fetch websites:", websitesList.error);
         setAvailableWebsites([]);
+        noteLookup("websites", `Websites could not be loaded: ${formatUiError(websitesList.error)}`);
       } else {
         setAvailableWebsites(Array.isArray(websitesList) ? websitesList : []);
+        noteLookup("websites", null);
       }
     } catch (err) {
       console.error("Failed to fetch websites:", err);
       setAvailableWebsites([]);
+      noteLookup("websites", `Websites could not be loaded: ${formatUiError(err)}`);
     } finally {
       setIsLoadingWebsites(false);
     }
@@ -873,6 +892,11 @@ const TaskActionModal = ({
         {formError && (
           <Alert severity="error" sx={{ mb: 2 }}>
             {formError}
+          </Alert>
+        )}
+        {Object.keys(lookupWarnings).length > 0 && (
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            {Object.values(lookupWarnings).join(". ")}.
           </Alert>
         )}
 

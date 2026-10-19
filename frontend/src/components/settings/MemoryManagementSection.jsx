@@ -33,6 +33,8 @@ import { ActionButton, ChoiceChips, ConfirmActionDialog, Hint } from "./ui";
 import EntityContextMenu from "../common/EntityContextMenu";
 import useContextMenu from "../../hooks/useContextMenu";
 import copyText from "../../utils/copyText";
+import { handleResponse } from "../../api/apiClient";
+import { formatUiError } from "../../utils/uiError";
 
 // Compact spreadsheet-style timestamp: "MM/DD HH:MM:SS". Full ISO available
 // on hover via title attribute for forensic detail.
@@ -54,6 +56,15 @@ const formatTimestamp = (iso) => {
 // is actually bound to. The previous hardcoded fallback "http://localhost:5002/api"
 // silently broke every memory save when the backend happened to land on :5000.
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || "/api";
+
+// A memory API call's JSON body. An error status (or an offline backend)
+// throws with the server's reason through apiClient.handleResponse instead
+// of being read as a body without `success`.
+const requestJson = async (url, init) => {
+  const res = await fetch(url, init);
+  if (res.ok === false) return handleResponse(res, { quiet: true });
+  return res.json();
+};
 
 // Rows per request. The API answers one page and the real count of matching
 // rows (total); the footer shows that count with a Load more button while
@@ -145,6 +156,10 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
   // Set when Add found its text already saved: the API answers with that
   // memory instead of writing a second copy.
   const [notice, setNotice] = useState(null);
+  // A failed edit, delete, merge, clear or add; said above the table.
+  const [actionError, setActionError] = useState(null);
+  // Deletes wait for ConfirmActionDialog: one memory's id, or "all".
+  const [pendingDelete, setPendingDelete] = useState(null);
 
   // Type-aware placeholder. Preference reads naturally in first person (it's
   // *about* the user). Everything else gets imperative/observational phrasing
@@ -194,20 +209,19 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
     if (!content) return;
     setSavingEdit(true);
     try {
-      const res = await fetch(`${BASE_URL}/memory/${editTarget.id}`, {
+      const data = await requestJson(`${BASE_URL}/memory/${editTarget.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content }),
       });
-      const data = await res.json();
       if (data.success) {
         setMemories((prev) => prev.map((m) => (m.id === editTarget.id ? data.memory : m)));
         setEditTarget(null);
       } else {
-        alert(data.error || "Failed to update memory");
+        setActionError(formatUiError(data.error || "Failed to update memory") || "The memory request failed");
       }
     } catch (err) {
-      alert(err.message);
+      setActionError(formatUiError(err.message) || "The memory request failed");
     } finally {
       setSavingEdit(false);
     }
@@ -237,8 +251,7 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
     setError(null);
     try {
       const limit = Math.max(PAGE_SIZE, Math.ceil(rows / PAGE_SIZE) * PAGE_SIZE);
-      const res = await fetch(memoryUrl(applied, limit));
-      const data = await res.json();
+      const data = await requestJson(memoryUrl(applied, limit));
 
       if (data.success) {
         appliedRef.current = applied;
@@ -290,41 +303,40 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
     fetchMemories(searchQuery);
   };
 
-  const handleDelete = async (id) => {
-    if (!window.confirm("Are you sure you want to delete this memory?")) return;
-    
+  const handleDelete = (id) => setPendingDelete(id);
+
+  const deleteMemory = async (id) => {
+    setActionError(null);
     try {
-      const res = await fetch(`${BASE_URL}/memory/${id}`, {
+      const data = await requestJson(`${BASE_URL}/memory/${id}`, {
         method: "DELETE",
       });
-      const data = await res.json();
       
       if (data.success) {
         setMemories(memories.filter((m) => m.id !== id));
         setTotal((prev) => (prev == null ? prev : Math.max(0, prev - 1)));
       } else {
-        alert(data.error || "Failed to delete memory");
+        setActionError(formatUiError(data.error || "Failed to delete memory") || "The memory request failed");
       }
     } catch (err) {
-      alert(err.message);
+      setActionError(formatUiError(err.message) || "The memory request failed");
     }
   };
 
   const handleStatusChange = async (memory, status) => {
     try {
-      const res = await fetch(`${BASE_URL}/memory/${memory.id}`, {
+      const data = await requestJson(`${BASE_URL}/memory/${memory.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status }),
       });
-      const data = await res.json();
       if (data.success) {
         setMemories((prev) => prev.map((m) => (m.id === memory.id ? data.memory : m)));
       } else {
-        alert(data.error || "Failed to update memory status");
+        setActionError(formatUiError(data.error || "Failed to update memory status") || "The memory request failed");
       }
     } catch (err) {
-      alert(err.message);
+      setActionError(formatUiError(err.message) || "The memory request failed");
     }
   };
 
@@ -343,14 +355,13 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
     setMerging(true);
     const mergedContent = `${mergeTarget.content}\n\nMerged duplicate ${editTarget.id}: ${editContent.trim()}`;
     try {
-      const updateRes = await fetch(`${BASE_URL}/memory/${mergeTarget.id}`, {
+      const updateData = await requestJson(`${BASE_URL}/memory/${mergeTarget.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content: mergedContent }),
       });
-      const updateData = await updateRes.json();
       if (!updateData.success) {
-        alert(updateData.error || "Failed to merge memory");
+        setActionError(formatUiError(updateData.error || "Failed to merge memory") || "The memory request failed");
         return;
       }
       await handleStatusChange(editTarget, "archived");
@@ -360,31 +371,31 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
       setMergePickerOpen(false);
       setMergeTargetId("");
     } catch (err) {
-      alert(err.message);
+      setActionError(formatUiError(err.message) || "The memory request failed");
     } finally {
       setMerging(false);
     }
   };
 
-  const handleClearAll = async () => {
-    if (!window.confirm("WARNING: Are you sure you want to delete ALL memories? This cannot be undone.")) return;
-    
+  const handleClearAll = () => setPendingDelete("all");
+
+  const clearAllMemories = async () => {
+    setActionError(null);
     try {
-      const res = await fetch(`${BASE_URL}/memory/clear`, {
+      const data = await requestJson(`${BASE_URL}/memory/clear`, {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ confirmation: "CLEAR_MEMORIES" }),
       });
-      const data = await res.json();
       
       if (data.success) {
         setMemories([]);
         setTotal(0);
       } else {
-        alert(data.error || "Failed to clear memories");
+        setActionError(formatUiError(data.error || "Failed to clear memories") || "The memory request failed");
       }
     } catch (err) {
-      alert(err.message);
+      setActionError(formatUiError(err.message) || "The memory request failed");
     }
   };
 
@@ -394,7 +405,7 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
     setNotice(null);
     try {
       const tagsArray = newTags.split(",").map(t => t.trim()).filter(Boolean);
-      const res = await fetch(`${BASE_URL}/memory`, {
+      const data = await requestJson(`${BASE_URL}/memory`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -404,7 +415,6 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
           source: "manual"
         }),
       });
-      const data = await res.json();
 
       if (data.success && data.already_saved) {
         const saved = data.memory || {};
@@ -423,10 +433,10 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
         setNewTags("");
         reload(1); // refresh list and total
       } else {
-        alert(data.error || "Failed to add memory");
+        setActionError(formatUiError(data.error || "Failed to add memory") || "The memory request failed");
       }
     } catch (err) {
-      alert(err.message);
+      setActionError(formatUiError(err.message) || "The memory request failed");
     } finally {
       setAdding(false);
     }
@@ -497,10 +507,19 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
       </Box>
 
       {error && (
-        <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>
+        <Alert
+          severity="error"
+          sx={{ mb: 2 }}
+          action={<Button color="inherit" size="small" onClick={() => reload()}>Retry</Button>}
+        >
+          {error}
+        </Alert>
       )}
       {notice && (
         <Alert severity="info" sx={{ mb: 2 }} onClose={() => setNotice(null)}>{notice}</Alert>
+      )}
+      {actionError && (
+        <Alert severity="error" sx={{ mb: 2 }} onClose={() => setActionError(null)}>{actionError}</Alert>
       )}
 
       <TableContainer component={Paper} variant="outlined" sx={{ maxHeight: 480 }}>
@@ -510,7 +529,7 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
           </Box>
         ) : memories.length === 0 ? (
           <Box sx={{ textAlign: "center", p: 4, color: "text.secondary" }}>
-            <Typography>No memories found.</Typography>
+            <Typography>{error ? "The memories could not be loaded." : "No memories found."}</Typography>
           </Box>
         ) : (
           // Spreadsheet-style memory table. Clicking any row opens the existing
@@ -844,6 +863,25 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
           </ActionButton>
         </DialogActions>
       </Dialog>
+
+      <ConfirmActionDialog
+        open={pendingDelete != null}
+        title={pendingDelete === "all" ? "Delete all memories" : "Delete this memory"}
+        description={
+          pendingDelete === "all"
+            ? "Every memory the agent has saved is deleted."
+            : (memories.find((m) => m.id === pendingDelete)?.content || "").slice(0, 160) || null
+        }
+        facts={pendingDelete === "all" && typeof total === "number" ? [{ label: "Memories", value: total }] : []}
+        confirmLabel={pendingDelete === "all" ? "Delete all" : "Delete memory"}
+        onConfirm={() => {
+          const target = pendingDelete;
+          setPendingDelete(null);
+          if (target === "all") clearAllMemories();
+          else deleteMemory(target);
+        }}
+        onClose={() => setPendingDelete(null)}
+      />
 
       <ConfirmActionDialog
         open={mergeConfirmOpen}

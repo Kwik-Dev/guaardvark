@@ -40,7 +40,7 @@ import ExportChatsButton from "../components/settings/ExportChatsButton";
 import ProfileSection from "../components/settings/ProfileSection";
 import TipsSetting from "../components/settings/TipsSetting";
 import JobOrderSetting from "../components/settings/JobOrderSetting";
-import { SOCKET_URL } from "../api/apiClient";
+import { SOCKET_URL, handleResponse } from "../api/apiClient";
 import { SUPPORT_LINKS } from "../config/constants";
 import CoffeeIcon from "@mui/icons-material/Coffee";
 import StarIcon from "@mui/icons-material/Star";
@@ -85,6 +85,7 @@ import IndexProfileEditDialog from "../components/settings/IndexProfileEditDialo
 import RefreshIcon from "@mui/icons-material/Refresh";
 import { useTheme, useMediaQuery } from "@mui/material";
 import { useSnackbar } from "../components/common/SnackbarProvider";
+import { formatUiError } from "../utils/uiError";
 import * as interconnectorApi from "../api/interconnectorService";
 import { useVoice } from "../contexts/VoiceContext";
 import * as apiService from "../api";
@@ -371,6 +372,7 @@ const SettingsPage = () => {
   const [embeddingModels, setEmbeddingModels] = useState([]);
   const [selectedEmbeddingModel, setSelectedEmbeddingModel] = useState("");
   const [isSwitchingEmbedding, setIsSwitchingEmbedding] = useState(false);
+  const [confirmEmbeddingOpen, setConfirmEmbeddingOpen] = useState(false);
   const [embedDimFilter, setEmbedDimFilter] = useState(null); // null = all, or a number like 1024
   const [chatSizeFilter, setChatSizeFilter] = useState(null); // null = all, or "small"/"medium"/"large"
 
@@ -2129,16 +2131,11 @@ const SettingsPage = () => {
     }
   };
 
-  const handleSetEmbeddingClick = async () => {
-    if (
-      !window.confirm(
-        "Switch the embedding model?\n\n" +
-          "Another model's vectors cannot be searched alongside the old ones, even at the same width, " +
-          "so the index is emptied and every indexed document is queued to be indexed again with the new model. " +
-          "Searches find less until that finishes.\n\nContinue?",
-      )
-    )
-      return;
+  // Asks first (ConfirmActionDialog below); switchEmbedding runs on confirm.
+  const handleSetEmbeddingClick = () => setConfirmEmbeddingOpen(true);
+
+  const switchEmbedding = async () => {
+    setConfirmEmbeddingOpen(false);
     setIsSwitchingEmbedding(true);
     try {
       const r = await fetch("/api/model/embedding/set", {
@@ -2146,7 +2143,9 @@ const SettingsPage = () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model: selectedEmbeddingModel }),
       });
-      const d = await r.json();
+      // handleResponse: an error status or an offline backend becomes an
+      // error with the server's reason instead of a JSON parse failure.
+      const d = await handleResponse(r, { quiet: true });
       if (d.success) {
         setEmbeddingModel(selectedEmbeddingModel);
         const payload = payloadOf(d);
@@ -2164,10 +2163,10 @@ const SettingsPage = () => {
         fetchResources();
         setProfilesReloadKey((k) => k + 1);
       } else {
-        showMessage(d.error || "Failed to switch embedding", "error");
+        showMessage(formatUiError(d.error) || "Failed to switch embedding", "error");
       }
     } catch (e) {
-      showMessage(`Failed: ${e.message}`, "error");
+      showMessage(`The embedding model was not switched: ${formatUiError(e) || "the request failed"}`, "error");
     } finally {
       setIsSwitchingEmbedding(false);
     }
@@ -3987,6 +3986,21 @@ const SettingsPage = () => {
             })
             .catch(() => {});
         }}
+      />
+      <ConfirmActionDialog
+        open={confirmEmbeddingOpen}
+        onClose={() => setConfirmEmbeddingOpen(false)}
+        onConfirm={switchEmbedding}
+        title="Switch the embedding model"
+        description={
+          "Another model's vectors cannot be searched alongside the old ones, even at the same width, " +
+          "so the index is emptied and every indexed document is queued to be indexed again with the new model. " +
+          "Searches find less until that finishes."
+        }
+        facts={[{ label: "New model", value: selectedEmbeddingModel || "—" }]}
+        keeps="your documents themselves; only their search index is rebuilt."
+        confirmLabel="Switch and re-index"
+        busy={isSwitchingEmbedding}
       />
       <ConfirmActionDialog
         open={rebootDialogOpen}

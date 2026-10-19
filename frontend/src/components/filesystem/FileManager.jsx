@@ -226,6 +226,12 @@ const FileManager = () => {
   const [dropTarget, setDropTarget] = useState(null);
   const [clipboard, setClipboard] = useState(null); // { item, operation: 'copy' | 'cut' }
   const [folderLayouts, setFolderLayouts] = useState({});
+  // The layouts as last rendered, for code that must compute the next layout
+  // outside a setState updater (an updater runs twice under StrictMode, so it
+  // must not save).
+  const folderLayoutsRef = useRef(folderLayouts);
+  folderLayoutsRef.current = folderLayouts;
+  const layoutSaveNoticeRef = useRef(false);
   const [folderColors, setFolderColors] = useState({});
   const [folderStateLoaded, setFolderStateLoaded] = useState(false);
   
@@ -362,17 +368,31 @@ const FileManager = () => {
       folderColors: newColors ?? folderColors,
       lastSaved: new Date().toISOString(),
     };
+    let failure = null;
     try {
-      await fetch(FOLDER_STATE_ENDPOINT, {
+      const res = await fetch(FOLDER_STATE_ENDPOINT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(stateToSave),
       });
-      // Silently fail - state will be saved to localStorage as fallback
-    } catch {
-      // Silently fail - state will be saved to localStorage as fallback
+      if (!res.ok) failure = `the backend answered HTTP ${res.status}`;
+    } catch (err) {
+      failure = err?.message || 'the request failed';
     }
-  }, [folderLayouts, folderColors]);
+    if (!failure) return;
+    // The loader falls back to these keys; write them so the fallback is real.
+    try {
+      localStorage.setItem('folderLayouts', JSON.stringify(stateToSave.folderLayouts));
+      localStorage.setItem(FOLDER_COLORS_KEY, JSON.stringify(stateToSave.folderColors));
+    } catch {
+      // storage full or blocked: the message below still says it was not saved
+    }
+    // Layout saves follow every drag; say a failure once, not per drag.
+    if (!layoutSaveNoticeRef.current) {
+      layoutSaveNoticeRef.current = true;
+      showMessage(`Folder layout was not saved to the server (${failure}); it is kept in this browser only.`, 'warning');
+    }
+  }, [folderLayouts, folderColors, showMessage]);
 
   const saveFolderLayouts = useCallback((newLayouts) => {
     setFolderLayouts(newLayouts);
@@ -547,38 +567,30 @@ const FileManager = () => {
     
     lastSyncedFoldersRef.current.set(folderLayoutKey, currentFolderIds);
 
-    setFolderLayouts(prev => {
-      let existing = prev[folderLayoutKey] || generateDefaultFolderLayout(items.folders);
+    // Computed from the current layouts here, not inside a setState updater:
+    // StrictMode runs updaters twice, which saved twice.
+    const prev = folderLayoutsRef.current;
+    let existing = prev[folderLayoutKey] || generateDefaultFolderLayout(items.folders);
 
-      // Migrate legacy layouts to compact dimensions
-      existing = migrateLegacyLayout(existing);
+    // Migrate legacy layouts to compact dimensions
+    existing = migrateLegacyLayout(existing);
 
-      const synced = syncFolderLayout(existing, items.folders);
+    const synced = syncFolderLayout(existing, items.folders);
 
-      // Quick check - if lengths differ, definitely changed
-      if (existing.length !== synced.length) {
-        const updated = { ...prev, [folderLayoutKey]: synced };
-        // Save state asynchronously (don't await)
-        saveFolderState(updated, folderColors).catch(() => {});
-        return updated;
-      }
-
-      // Only do deep comparison if lengths match
-      const layoutsEqual = existing.every((item, idx) => {
-        const syncedItem = synced[idx];
-        return item.i === syncedItem.i && item.x === syncedItem.x && 
-               item.y === syncedItem.y && item.w === syncedItem.w && item.h === syncedItem.h;
-      });
-
-      // Only update if layout actually changed
-      if (!layoutsEqual) {
-        const updated = { ...prev, [folderLayoutKey]: synced };
-        // Save state asynchronously (don't await)
-        saveFolderState(updated, folderColors).catch(() => {});
-        return updated;
-      }
-      return prev;
+    // Quick check - if lengths differ, definitely changed; else compare items.
+    const layoutsEqual = existing.length === synced.length && existing.every((item, idx) => {
+      const syncedItem = synced[idx];
+      return item.i === syncedItem.i && item.x === syncedItem.x &&
+             item.y === syncedItem.y && item.w === syncedItem.w && item.h === syncedItem.h;
     });
+
+    // Only update if layout actually changed
+    if (!layoutsEqual) {
+      const updated = { ...prev, [folderLayoutKey]: synced };
+      setFolderLayouts(updated);
+      // Save state asynchronously; saveFolderState reports its own failure.
+      void saveFolderState(updated, folderColors);
+    }
   }, [folderLayoutKey, currentFolderIds, items.folders, folderStateLoaded, generateDefaultFolderLayout, syncFolderLayout, folderColors, saveFolderState]);
 
   // Clear selection when path changes

@@ -105,6 +105,16 @@ const TaskPage = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState(null);
+  // Projects or models that could not be loaded: the project filter and the
+  // task form's model list are empty then, so say why.
+  const [lookupErrors, setLookupErrors] = useState({});
+  const noteLookup = (key, err) =>
+    setLookupErrors((prev) => {
+      const next = { ...prev };
+      if (err) next[key] = err;
+      else delete next[key];
+      return next;
+    });
   const [feedback, setFeedback] = useState({
     open: false,
     message: "",
@@ -176,9 +186,13 @@ const TaskPage = () => {
       const result = await getProjects();
       if (!result.error) {
         setAvailableProjects(result);
+        noteLookup("projects", null);
+      } else {
+        noteLookup("projects", `Projects could not be loaded: ${formatUiError(result.error)}`);
       }
     } catch (err) {
       console.error("Failed to fetch projects:", err);
+      noteLookup("projects", `Projects could not be loaded: ${formatUiError(err) || "the request failed"}`);
     }
   }, []);
 
@@ -188,9 +202,13 @@ const TaskPage = () => {
       const result = await getAvailableModels();
       if (!result.error) {
         setAvailableModels(result);
+        noteLookup("models", null);
+      } else {
+        noteLookup("models", `Models could not be loaded: ${formatUiError(result.error)}`);
       }
     } catch (err) {
       console.error("Failed to fetch models:", err);
+      noteLookup("models", `Models could not be loaded: ${formatUiError(err) || "the request failed"}`);
     }
   }, []);
 
@@ -781,6 +799,19 @@ const TaskPage = () => {
         {error && (
           <Alert severity="error" sx={{ mb: 2 }}>
             {error}
+          </Alert>
+        )}
+        {Object.keys(lookupErrors).length > 0 && (
+          <Alert
+            severity="warning"
+            sx={{ mb: 2 }}
+            action={
+              <Button color="inherit" size="small" onClick={() => { fetchProjects(); fetchAvailableModels(); }}>
+                Retry
+              </Button>
+            }
+          >
+            {Object.values(lookupErrors).join(". ")}.
           </Alert>
         )}
 

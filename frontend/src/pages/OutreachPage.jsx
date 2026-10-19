@@ -225,6 +225,8 @@ const OutreachPage = () => {
       setApproved(Array.isArray(rows) ? rows : []);
     } catch (e) {
       console.warn(`approved fetch failed: ${e.message}`);
+      // The approved list would read as empty; say it did not load.
+      setError(`approved fetch failed: ${e.message}`);
     }
   }, []);
 
@@ -243,6 +245,7 @@ const OutreachPage = () => {
       setHistory(Array.isArray(rows) ? rows : []);
     } catch (e) {
       console.warn(`history fetch failed: ${e.message}`);
+      setError(`history fetch failed: ${e.message}`);
     } finally {
       setLoadingHistory(false);
     }
