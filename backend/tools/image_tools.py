@@ -1247,8 +1247,9 @@ class GenerationStatusTool(BaseTool):
         path = f"/api/music-video/{row_id}" if kind == "music_video" else f"/api/production/{row_id}"
         try:
             d = _http_json("GET", path)
-        except RuntimeError as e:
-            if "not found" in str(e).lower() or "404" in str(e):
+        except BackendError as e:
+            # Both routes answer an unknown id with 404 {"error": "not_found"}.
+            if e.status == 404:
                 return None
             raise
         if not isinstance(d, dict) or "current_stage" not in d:
