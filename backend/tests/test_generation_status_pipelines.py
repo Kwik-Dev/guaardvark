@@ -9,6 +9,7 @@ import pytest
 import backend.tools.image_tools as image_tools
 from backend.services import pipeline_status as ps
 from backend.tools.image_tools import GenerationStatusTool
+from backend.utils.backend_http import BackendError
 
 
 def _tool():
@@ -24,6 +25,9 @@ def _serve(monkeypatch, routes):
         calls.append(path)
         if path in routes:
             return routes[path]
+        if path.startswith(("/api/music-video/", "/api/production/")):
+            # What backend_http.http_json raises for these routes' 404 {"error": "not_found"}.
+            raise BackendError("http", "not_found", status=404, body={"error": "not_found"})
         raise RuntimeError("404 not found")
 
     monkeypatch.setattr(image_tools, "_http_json", fake)
@@ -98,10 +102,13 @@ def test_a_bare_number_asks_for_the_kind(monkeypatch):
     assert "music_video:12 or production:12" in result.error
 
 
-def test_an_unknown_music_video_is_an_error(monkeypatch):
+@pytest.mark.parametrize("batch_id", ["music_video:999", "production:999"])
+def test_an_unknown_pipeline_id_is_not_found(monkeypatch, batch_id):
     _serve(monkeypatch, {})
-    result = _tool().execute(batch_id="music_video:999")
+    result = _tool().execute(batch_id=batch_id)
     assert not result.success
+    assert result.error.startswith("No image, video, audio, bulk CSV, music video or Film Crew job named")
+    assert "did not answer" not in result.error
 
 
 @pytest.mark.parametrize("text,parsed", [

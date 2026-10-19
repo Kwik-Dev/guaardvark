@@ -19,6 +19,12 @@ import pytest
 import requests
 from flask import Flask
 
+from backend.tests._mcp_sdk import use_mcp_sdk
+
+# media_inputs reaches backend.mcp.resources_adapter, which imports mcp.types;
+# see backend/tests/_mcp_sdk.py.
+use_mcp_sdk()
+
 from backend import config
 from backend.api import audio_foundry_api as afa
 from backend.api import batch_image_generation_api as bia
