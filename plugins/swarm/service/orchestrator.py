@@ -562,7 +562,7 @@ class SwarmOrchestrator:
             import shutil
             installed = [n for n in configured if shutil.which(self.config.backends[n].command)]
             raise RuntimeError(
-                f"No backend available for {'offline' if not online else 'online'} mode. "
+                f"No backend available for {'offline' if not online else 'online'} mode: {reason}. "
                 f"Configured: {configured}. Installed: {installed or 'none'}. "
                 f"{'Install cline/openclaw for offline mode, or disable flight mode.' if not online else ''}"
             )

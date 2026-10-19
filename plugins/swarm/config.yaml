@@ -13,10 +13,14 @@ defaults:
   test_command: "python3 -m pytest"
   flight_mode: false
   # Stop an agent that runs longer than this many minutes and mark its task
-  # timed_out (0 = no limit, the default until a value is measured; see
-  # agent_timeout_minutes in service/config.py).
-  agent_timeout_minutes: 0
+  # timed_out (0 = no limit). An unmeasured ceiling for a hung CLI; see
+  # agent_timeout_minutes in service/config.py.
+  agent_timeout_minutes: 120
 
+# A task that names no backend runs on the first installed backend with
+# requires_internet: false, in priority order. A hosted backend (claude) gets
+# the task and the repository's code, so it runs only for a task that names it:
+# [Backend: claude] or [Model: claude].
 backends:
   claude:
     command: "claude"
