@@ -638,7 +638,7 @@ def _handle_chat_send_local(payload):
                         llm = get_llm_for_startup()
                     except Exception:
                         pass
-                    eng = UnifiedChatEngine(registry=reg, llm_instance=llm or object())
+                    eng = UnifiedChatEngine(tool_registry=reg, llm_instance=llm or object())
                     eng.app = app
                     eng._project_id = project_id
                     rid = str(uuid.uuid4())
