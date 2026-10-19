@@ -14,6 +14,8 @@ import {
   CircularProgress,
   Divider,
   Tooltip,
+  Alert,
+  Button,
 } from "@mui/material";
 import SearchIcon from "@mui/icons-material/Search";
 import AddIcon from "@mui/icons-material/Add";
@@ -25,6 +27,7 @@ import { listChatSessions, deleteChatSession } from "../../api/chatService";
 import EntityContextMenu from "../common/EntityContextMenu";
 import ConfirmActionDialog from "../settings/ui/ConfirmActionDialog";
 import useContextMenu from "../../hooks/useContextMenu";
+import { formatUiError } from "../../utils/uiError";
 
 const DRAWER_WIDTH = 340;
 
@@ -38,16 +41,20 @@ const ChatSessionDrawer = ({
 }) => {
   const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(false);
+  // Why the list could not be loaded; shown instead of "No chats yet".
+  const [loadError, setLoadError] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
   const rowMenu = useContextMenu();
 
   const loadSessions = useCallback(async () => {
     setLoading(true);
+    setLoadError(null);
     try {
       const data = await listChatSessions(projectId, 100);
       setSessions(data.sessions || []);
     } catch (err) {
       console.error("Failed to load sessions:", err);
+      setLoadError(formatUiError(err) || "The chat list could not be loaded.");
     } finally {
       setLoading(false);
     }
@@ -62,9 +69,11 @@ const ChatSessionDrawer = ({
   // The chat waiting for the person to confirm its deletion.
   const [pendingDelete, setPendingDelete] = useState(null);
   const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState(null);
 
   const askDelete = (session, e) => {
     e?.stopPropagation();
+    setDeleteError(null);
     setPendingDelete(session);
   };
 
@@ -72,6 +81,7 @@ const ChatSessionDrawer = ({
     const sessionId = pendingDelete?.session_id;
     if (!sessionId) return;
     setDeleting(true);
+    setDeleteError(null);
     try {
       await deleteChatSession(sessionId);
       setSessions((prev) => prev.filter((s) => s.session_id !== sessionId));
@@ -81,6 +91,7 @@ const ChatSessionDrawer = ({
       setPendingDelete(null);
     } catch (err) {
       console.error("Failed to delete session:", err);
+      setDeleteError(`The chat was not deleted: ${formatUiError(err) || "the request failed"}.`);
     } finally {
       setDeleting(false);
     }
@@ -403,6 +414,15 @@ const ChatSessionDrawer = ({
           <Box sx={{ display: "flex", justifyContent: "center", py: 4 }}>
             <CircularProgress size={28} />
           </Box>
+        ) : loadError ? (
+          <Box sx={{ px: 2, py: 2 }}>
+            <Alert
+              severity="error"
+              action={<Button color="inherit" size="small" onClick={loadSessions}>Retry</Button>}
+            >
+              {loadError}
+            </Alert>
+          </Box>
         ) : filteredSessions.length === 0 ? (
           <Box sx={{ display: "flex", flexDirection: "column", alignItems: "center", py: 4, px: 2 }}>
             <ChatBubbleOutlineIcon sx={{ fontSize: 40, color: "text.disabled", mb: 1 }} />
@@ -457,8 +477,9 @@ const ChatSessionDrawer = ({
         }
         confirmLabel="Delete chat"
         busy={deleting}
+        extra={deleteError ? <Alert severity="error" sx={{ mt: 1 }}>{deleteError}</Alert> : null}
         onConfirm={confirmDelete}
-        onClose={() => setPendingDelete(null)}
+        onClose={() => { setPendingDelete(null); setDeleteError(null); }}
       />
 
       {/* Footer stats */}

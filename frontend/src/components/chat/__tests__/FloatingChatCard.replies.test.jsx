@@ -209,4 +209,31 @@ describe("FloatingChatCard replies", () => {
     expect(useFloatingChatStore.getState().isSending).toBe(true);
     expect(screen.queryByText("Error: elsewhere")).toBeNull();
   });
+
+  it("says so in the thread when Stop does not reach the backend", async () => {
+    renderCard();
+    await typeAndSend("draw a fox");
+    fetch.mockImplementation(async (url) =>
+      String(url).includes("/abort") || String(url).includes("/agent-control/kill")
+        ? {
+            ok: false,
+            status: 502,
+            statusText: "Bad Gateway",
+            url: String(url),
+            headers: { get: () => "application/json" },
+            json: async () => ({ error: "backend_offline" }),
+            text: async () => JSON.stringify({ error: "backend_offline" }),
+          }
+        : jsonResponse({})
+    );
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("StopIcon").closest("button"));
+    });
+
+    const expected =
+      "Error: Stop did not reach the chat turn and the agent task: the backend is not reachable. It may still be running.";
+    await waitFor(() => expect(screen.getByText(expected)).toBeInTheDocument());
+    expect(useFloatingChatStore.getState().messages.at(-1).content).toBe(expected);
+  });
 });

@@ -21,6 +21,7 @@ import ChatBubbleOutlineIcon from "@mui/icons-material/ChatBubbleOutline";
 import Tooltip from "@mui/material/Tooltip";
 import { useFloatingChatStore } from "../../stores/useFloatingChatStore";
 import UnifiedChatService, { steerAgent } from "../../api/unifiedChatService";
+import { stopChatTurn } from "../../api/chatStopService";
 import StreamingMessage from "./StreamingMessage";
 import FloatingChatMessage from "./FloatingChatMessage";
 import { useUnifiedProgress } from "../../contexts/UnifiedProgressContext";
@@ -585,8 +586,15 @@ const FloatingChatCard = () => {
       unifiedChatService.abort(sessionId);
       unifiedChatService.cleanup();
     }
-    fetch(`/api/chat/unified/${sessionId}/abort`, { method: "POST" }).catch(() => {});
-    fetch("/api/agent-control/kill", { method: "POST" }).catch(() => {});
+    stopChatTurn(sessionId).then((result) => {
+      if (result.ok) return;
+      addMessage({
+        id: `stop_err_${Date.now()}`,
+        role: "system",
+        content: `Error: ${result.error}`,
+        timestamp: new Date().toISOString(),
+      });
+    });
 
     setIsStreamingMessage(false);
     setIsSending(false);
