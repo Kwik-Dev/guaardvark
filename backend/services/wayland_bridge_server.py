@@ -21,6 +21,12 @@ talks to it over a Unix socket, one JSON object per line each way:
     {"op": "type", "text": "hello", "interval": 0.02}
     {"op": "hotkey", "keys": ["ctrl", "s"]}
     {"op": "scroll", "dy": -3, "dx": 0}
+    {"op": "record_start", "path": "/abs/out.mkv", "monitor": 0, "fps": 30}
+    {"op": "record_stop"}
+
+A recording takes one monitor (its index in the layout, left to right) or
+"all" side by side, cursor included, encoded with x264. A .mkv file survives
+an interrupted recording; .mp4 is finalised only by record_stop.
 
 Coordinates are the desktop's logical pixels, monitors laid out as the
 compositor reports them, the same space a screenshot is taken in.
@@ -115,6 +121,7 @@ class Bridge:
         self._pipelines = []
         self.closed = False
         self._n = 0
+        self.recording = None                # {"pipeline", "path", "started"}
 
     # --- portal requests ------------------------------------------------
 
@@ -213,6 +220,85 @@ class Bridge:
                 stream["frame"] = frame
         return Gst.FlowReturn.OK
 
+    def record_start(self, path: str, monitor="all", fps: int = 30) -> dict:
+        """Record from the frames this bridge already receives, pushed at a steady
+        rate. The desktop streams send a frame only when the screen changes, so a
+        second consumer joining a still monitor would record nothing; re-sending the
+        latest frame records a still screen as a still picture."""
+        if self.recording:
+            raise RuntimeError(f"already recording to {self.recording['path']}")
+        fps = max(1, min(int(fps), 60))
+        ordered = sorted(self.streams, key=lambda s: (s["x"], s["y"]))
+        picked = ordered if monitor in (None, "all") else [ordered[int(monitor)]]
+        bx, by = min(s["x"] for s in picked), min(s["y"] for s in picked)
+        w = max(s["x"] + s["w"] for s in picked) - bx
+        h = max(s["y"] + s["h"] for s in picked) - by
+        mux = "mp4mux" if path.lower().endswith(".mp4") else "matroskamux"
+        pipeline = Gst.parse_launch(
+            f"appsrc name=src is-live=true format=time "
+            f"caps=video/x-raw,format=RGB,width={w},height={h},framerate={fps}/1 "
+            f"! videoconvert ! video/x-raw,format=I420 "
+            f"! x264enc pass=qual quantizer=20 speed-preset=veryfast key-int-max={fps * 2} "
+            f"! {mux} ! filesink location={path}")
+        src = pipeline.get_by_name("src")
+        if pipeline.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
+            raise RuntimeError("the recording pipeline did not start")
+        rec = {"pipeline": pipeline, "path": path, "started": time.monotonic(), "stop": threading.Event()}
+
+        def compose():
+            canvas = Image.new("RGB", (w, h))
+            with self._frame_lock:
+                frames = [(s, s["frame"]) for s in picked]
+            for s, frame in frames:
+                if frame is None:
+                    continue
+                if frame.size != (s["w"], s["h"]):
+                    frame = frame.resize((s["w"], s["h"]))
+                canvas.paste(frame, (s["x"] - bx, s["y"] - by))
+            return canvas.tobytes()
+
+        def pusher():
+            step = Gst.SECOND // fps
+            n = 0
+            t0 = time.monotonic()
+            while not rec["stop"].is_set():
+                buf = Gst.Buffer.new_wrapped(compose())
+                buf.pts, buf.duration = n * step, step
+                if src.emit("push-buffer", buf) != Gst.FlowReturn.OK:
+                    break
+                n += 1
+                # Hold the frame rate against the wall clock, dropping no frame numbers.
+                delay = t0 + n / fps - time.monotonic()
+                if delay > 0:
+                    rec["stop"].wait(delay)
+            src.emit("end-of-stream")
+
+        rec["thread"] = threading.Thread(target=pusher, daemon=True)
+        rec["thread"].start()
+        self.recording = rec
+        return {"path": path, "monitors": [{k: s[k] for k in ("x", "y", "w", "h")} for s in picked],
+                "size": [w, h], "fps": fps}
+
+    def record_stop(self) -> dict:
+        rec = self.recording
+        if not rec:
+            raise RuntimeError("not recording")
+        self.recording = None
+        rec["stop"].set()
+        rec["thread"].join(timeout=10)
+        pipeline = rec["pipeline"]
+        # The pusher ends the stream; the muxer then writes its index. Without it an
+        # .mp4 is unreadable.
+        msg = pipeline.get_bus().timed_pop_filtered(
+            30 * Gst.SECOND, Gst.MessageType.EOS | Gst.MessageType.ERROR)
+        pipeline.set_state(Gst.State.NULL)
+        if msg is not None and msg.type == Gst.MessageType.ERROR:
+            err, _ = msg.parse_error()
+            raise RuntimeError(f"the recording failed: {err.message}")
+        return {"path": rec["path"], "seconds": round(time.monotonic() - rec["started"], 1),
+                "bytes": os.path.getsize(rec["path"]) if os.path.exists(rec["path"]) else 0,
+                "finalised": msg is not None}
+
     def _on_closed(self, *_):
         # The person stopped sharing from the top bar, or the portal went away.
         self.closed = True
@@ -231,6 +317,11 @@ class Bridge:
             fh.write(token)
 
     def stop(self):
+        if self.recording:
+            try:
+                self.record_stop()
+            except Exception:  # noqa: BLE001 - closing anyway
+                pass
         for p in self._pipelines:
             p.set_state(Gst.State.NULL)
         if self.session is not None and not self.closed:
@@ -344,6 +435,10 @@ def handle(bridge: Bridge, req: dict) -> dict:
         if int(req.get("dx", 0)):
             bridge.scroll(AXIS_HORIZONTAL, int(req["dx"]))
         return {}
+    if op == "record_start":
+        return bridge.record_start(req["path"], req.get("monitor", "all"), req.get("fps", 30))
+    if op == "record_stop":
+        return bridge.record_stop()
     raise ValueError(f"unknown op {op!r}")
 
 
@@ -401,7 +496,8 @@ def serve(bridge: Bridge, sock_path: str, idle_s: float):
     threading.Thread(target=acceptor, daemon=True).start()
 
     def watchdog():
-        if bridge.closed or (idle_s and time.monotonic() - last_use[0] > idle_s):
+        idle = idle_s and not bridge.recording and time.monotonic() - last_use[0] > idle_s
+        if bridge.closed or idle:
             loop.quit()
             return False
         return True
