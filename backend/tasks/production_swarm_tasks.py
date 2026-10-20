@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import requests
 from contextlib import contextmanager
 from pathlib import Path
@@ -174,6 +175,45 @@ def create_production_swarm_tasks(celery_app: Celery):
     }
 
 
+# A speaker's name written just before a line: `DETECTIVE (V.O.): "...`, or a
+# screenplay cue on its own line above the dialogue.
+_SPEAKER_BEFORE_LINE = re.compile(
+    r"([A-Za-z][\w'\-]*(?: [A-Za-z][\w'\-]*){0,3})\s*"
+    r"(?:\((?:V\.?O\.?|O\.?S\.?|O\.?C\.?|CONT'D)\))?\s*:?\s*[\"\u201c]?\s*$"
+)
+
+
+def _speaker_in_script(script_text: str, dialogue: str | None, characters: list[str]) -> str | None:
+    """The character whose name the script writes before this line, for a shot
+    whose speaker the screenwriter model left empty. Only names of characters the
+    breakdown found are accepted, so a scene heading is never taken for one."""
+    probe = (dialogue or "").strip().strip('"\u201c\u201d')[:40]
+    at = script_text.find(probe) if probe else -1
+    if at < 0:
+        return None
+    m = _SPEAKER_BEFORE_LINE.search(script_text[max(0, at - 80):at])
+    if not m:
+        return None
+    by_upper = {c.upper(): c for c in characters}
+    words = m.group(1).split()
+    # The longest run of trailing words that names a character: "the Detective" -> Detective.
+    for k in range(len(words)):
+        found = by_upper.get(" ".join(words[k:]).upper())
+        if found:
+            return found
+    return None
+
+
+def _production_character(prod_id: int, name: str):
+    """The production's own character Subject called ``name``, or None."""
+    return (
+        Subject.query.join(ProductionSubject, ProductionSubject.subject_id == Subject.id)
+        .filter(ProductionSubject.production_id == prod_id,
+                Subject.kind == "character", Subject.name == name)
+        .first()
+    )
+
+
 def run_screenwriter(prod_id: int, llm=None):
     if llm is None:
         llm = _default_ollama_llm
@@ -231,6 +271,7 @@ def run_screenwriter(prod_id: int, llm=None):
                 cast_required=subj["cast_required"],
             ))
         
+        characters = [subj["name"] for subj in resolved_subjects if subj["kind"] == "character"]
         for scene in out.scenes:
             for shot in scene.shots:
                 new_shot = ProductionShot(
@@ -239,7 +280,8 @@ def run_screenwriter(prod_id: int, llm=None):
                     shot_number=shot.number,
                     description=shot.description,
                     scene_mood=scene.mood,
-                    character_name=shot.character_name,
+                    character_name=(shot.character_name
+                                    or _speaker_in_script(input_data, shot.dialogue, characters)),
                     dialogue_text=shot.dialogue
                 )
                 db.session.add(new_shot)
@@ -681,7 +723,10 @@ def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
             char_cast = [c for c in cast if c.kind == "character"]
             speaker = None
             if s.character_name:
-                speaker = next((c for c in char_cast if c.name == s.character_name), None)
+                # The named speaker, in the shot or not: a voice-over narrator is
+                # cast in the production but rarely appears in the shot.
+                speaker = (next((c for c in char_cast if c.name == s.character_name), None)
+                           or _production_character(prod_id, s.character_name))
             if speaker is None:
                 speaker = char_cast[0] if char_cast else None
             if speaker is None and s.character_name:

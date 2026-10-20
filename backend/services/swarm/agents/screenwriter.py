@@ -34,6 +34,9 @@ significant prop as a Subject with a short description.
 For each scene, identify a "mood" (e.g., suspense, action, romantic, neutral) which will
 be used for music and lighting.
 
+A shot's "character_name" is whoever speaks its dialogue, including a voice-over (V.O.) or
+off-screen (O.S.) speaker who is not in the picture.
+
 Return ONLY a JSON object matching this shape, with no prose around it:
 {
   "scenes": [
