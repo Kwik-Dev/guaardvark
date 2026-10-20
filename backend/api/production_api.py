@@ -54,7 +54,7 @@ def _cast_required(subject, link) -> bool:
     )
 
 
-VALID_CAST_ACTIONS = {"use_existing_lora", "train_from_uploads", "train_from_generated"}
+VALID_CAST_ACTIONS = {"use_existing_lora", "train_from_uploads", "train_from_generated", "as_described"}
 
 
 def _dispatch_lora_train(subject_id: int) -> str | None:
@@ -295,6 +295,19 @@ def cast_subject(prod_id, subject_id):
     elif action == "train_from_generated":
         subj.training_status = "training"
         needs_dispatch = True
+
+    elif action == "as_described":
+        # Drawn from the script's description in each shot, with no LoRA: an
+        # unseen voice, a crowd, or a figure whose face may vary between shots.
+        # The choice is stored on this production's link, so the Cast Library
+        # subject other films share keeps its own setting.
+        from backend.models import ProductionSubject
+        link = ProductionSubject.query.filter_by(
+            production_id=prod_id, subject_id=subj.id
+        ).first()
+        if link is None:
+            return jsonify({"error": "subject is not part of this production"}), 404
+        link.cast_required = False
 
     # Commit the status transition BEFORE dispatching the Celery task. The
     # trainer reads training_status in a separate worker process/connection and
