@@ -408,6 +408,74 @@ def list_memories():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+class MemoryNotFound(LookupError):
+    """No memory has the id update_memory_entry was given."""
+
+
+def update_memory_entry(memory_id, data: dict, actor: str) -> AgentMemory:
+    """Apply a PATCH /api/memory/<id> body to one memory and commit it with
+    its audit row. Raises MemoryNotFound for an unknown id and ValueError for
+    a value the entry cannot take; the caller rolls back on either."""
+    memory = db.session.query(AgentMemory).filter_by(id=memory_id).first()
+    if not memory:
+        raise MemoryNotFound(memory_id)
+
+    before = _memory_snapshot(memory)
+    new_type = normalize_memory_type(data.get("type", memory.type)) if data.get("type") else memory.type
+
+    if "content" in data:
+        content = (data.get("content") or "").strip()
+        if not content:
+            raise ValueError("Content cannot be empty")
+        lesson_payload = _parse_lesson_content(content, new_type, data.get("source", memory.source))
+        memory.content = content
+        if lesson_payload:
+            metadata = dict(memory.extra_data or {})
+            metadata["lesson"] = lesson_payload
+            memory.extra_data = metadata
+    if "tags" in data:
+        tags = normalize_tags(data.get("tags") or [])
+        memory.tags = json.dumps(tags) if tags else None
+    if "type" in data and data["type"]:
+        if "content" not in data:
+            lesson_payload = _parse_lesson_content(memory.content, new_type, data.get("source", memory.source))
+            if lesson_payload:
+                metadata = dict(memory.extra_data or {})
+                metadata["lesson"] = lesson_payload
+                memory.extra_data = metadata
+        memory.type = new_type
+    if "importance" in data and data["importance"] is not None:
+        try:
+            float(data["importance"])
+        except (TypeError, ValueError):
+            raise ValueError("importance must be numeric")
+        memory.importance = coerce_importance(data["importance"], memory.type)
+    if "confidence" in data and data["confidence"] is not None:
+        try:
+            float(data["confidence"])
+        except (TypeError, ValueError):
+            raise ValueError("confidence must be numeric")
+        memory.confidence = coerce_confidence(data["confidence"])
+    if "status" in data and data["status"]:
+        memory.status = normalize_memory_status(data["status"])
+    if "project_id" in data:
+        memory.project_id = data.get("project_id")
+    if "user_id" in data:
+        memory.user_id = data.get("user_id")
+    if "workspace_root" in data:
+        memory.workspace_root = data.get("workspace_root")
+    if "lesson_id" in data:
+        memory.lesson_id = data.get("lesson_id")
+    if "metadata" in data:
+        memory.extra_data = data.get("metadata") if isinstance(data.get("metadata"), dict) else None
+
+    memory.updated_at = datetime.now()
+    _write_memory_audit("update", memory_id, before=before, after=memory.to_dict(), actor=actor)
+    db.session.commit()
+    logger.info(f"Memory updated: {memory_id}")
+    return memory
+
+
 @memory_bp.route("/<memory_id>", methods=["PATCH"])
 def update_memory(memory_id):
     """
@@ -421,77 +489,13 @@ def update_memory(memory_id):
     """
     data = request.get_json(silent=True) or {}
     try:
-        memory = db.session.query(AgentMemory).filter_by(id=memory_id).first()
-        if not memory:
-            return jsonify({"success": False, "error": "Memory not found"}), 404
-
-        before = _memory_snapshot(memory)
-        new_type = normalize_memory_type(data.get("type", memory.type)) if data.get("type") else memory.type
-
-        if "content" in data:
-            content = (data.get("content") or "").strip()
-            if not content:
-                return jsonify({"success": False, "error": "Content cannot be empty"}), 400
-            try:
-                lesson_payload = _parse_lesson_content(content, new_type, data.get("source", memory.source))
-            except ValueError as err:
-                return jsonify({"success": False, "error": str(err)}), 400
-            memory.content = content
-            if lesson_payload:
-                metadata = dict(memory.extra_data or {})
-                metadata["lesson"] = lesson_payload
-                memory.extra_data = metadata
-        if "tags" in data:
-            tags = normalize_tags(data.get("tags") or [])
-            memory.tags = json.dumps(tags) if tags else None
-        if "type" in data and data["type"]:
-            if "content" not in data:
-                try:
-                    lesson_payload = _parse_lesson_content(memory.content, new_type, data.get("source", memory.source))
-                except ValueError as err:
-                    return jsonify({"success": False, "error": str(err)}), 400
-                if lesson_payload:
-                    metadata = dict(memory.extra_data or {})
-                    metadata["lesson"] = lesson_payload
-                    memory.extra_data = metadata
-            memory.type = new_type
-        if "importance" in data and data["importance"] is not None:
-            try:
-                float(data["importance"])
-            except (TypeError, ValueError):
-                return jsonify({"success": False, "error": "importance must be numeric"}), 400
-            memory.importance = coerce_importance(data["importance"], memory.type)
-        if "confidence" in data and data["confidence"] is not None:
-            try:
-                float(data["confidence"])
-            except (TypeError, ValueError):
-                return jsonify({"success": False, "error": "confidence must be numeric"}), 400
-            memory.confidence = coerce_confidence(data["confidence"])
-        if "status" in data and data["status"]:
-            memory.status = normalize_memory_status(data["status"])
-        if "project_id" in data:
-            memory.project_id = data.get("project_id")
-        if "user_id" in data:
-            memory.user_id = data.get("user_id")
-        if "workspace_root" in data:
-            memory.workspace_root = data.get("workspace_root")
-        if "lesson_id" in data:
-            memory.lesson_id = data.get("lesson_id")
-        if "metadata" in data:
-            memory.extra_data = data.get("metadata") if isinstance(data.get("metadata"), dict) else None
-
-        memory.updated_at = datetime.now()
-        _write_memory_audit(
-            "update",
-            memory_id,
-            before=before,
-            after=memory.to_dict(),
-            actor=(data.get("source") or "manual"),
-        )
-        db.session.commit()
-
-        logger.info(f"Memory updated: {memory_id}")
+        memory = update_memory_entry(memory_id, data, actor=(data.get("source") or "manual"))
         return jsonify({"success": True, "memory": memory.to_dict()})
+    except MemoryNotFound:
+        return jsonify({"success": False, "error": "Memory not found"}), 404
+    except ValueError as err:
+        db.session.rollback()
+        return jsonify({"success": False, "error": str(err)}), 400
     except Exception as e:
         db.session.rollback()
         logger.error(f"Failed to update memory {memory_id}: {e}")

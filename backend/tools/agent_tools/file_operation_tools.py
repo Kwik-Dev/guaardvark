@@ -291,7 +291,7 @@ class ProcessFileTool(BaseTool):
         from backend.services.guarded_code_service import (
             external_path_reason, forbidden_path_reason, private_path_reason,
         )
-        from backend.utils.backend_http import is_mcp_transport
+        from backend.utils.backend_http import is_mcp_caller
         from backend.utils.path_safety import is_sensitive
 
         if is_sensitive(str(path)):
@@ -311,7 +311,7 @@ class ProcessFileTool(BaseTool):
             if private_path_reason(rel, root):
                 return "git-ignored local data is not read"
             return None
-        if is_mcp_transport(self):
+        if is_mcp_caller(self):
             return "it is outside Guaardvark's uploads, outputs and install folder, which is all this tool reads over MCP"
         if external_path_reason(path):
             return "system folders and key folders (.ssh, .aws, .gnupg and similar) are not read"
