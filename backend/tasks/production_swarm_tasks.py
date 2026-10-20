@@ -468,6 +468,33 @@ def _shot_loras_and_prompt(shot) -> tuple[list[str], str]:
     return lora_paths, base
 
 
+def _shot_identity_subjects(shot) -> list:
+    """The shot's subjects that carry an identity into its storyboard still.
+
+    A subject with a trained LoRA, or one this production requires as a cast
+    member, is locked. Props, places and characters cast as described have no
+    LoRA and are drawn from the shot's own words; passing them would trip the
+    still pipeline's refusal to render a cast member with nothing to load.
+    """
+    from backend.services.swarm.script_markup import effective_cast_required
+    subjects = [pss.subject for pss in shot.shot_subjects if pss.subject]
+    if not subjects:
+        return []
+    pins = {
+        link.subject_id: link.cast_required
+        for link in ProductionSubject.query.filter_by(production_id=shot.production_id)
+    }
+    locked = []
+    for s in subjects:
+        pinned = pins.get(s.id)
+        required = effective_cast_required(
+            pinned if pinned is not None else s.cast_required, s.kind
+        )
+        if s.lora_path or required:
+            locked.append(s)
+    return locked
+
+
 def _storyboard_path(prod_id: int, scene_number: int, shot_number: int) -> str:
     from backend.config import STORAGE_DIR
     out_dir = Path(STORAGE_DIR) / "outputs" / "storyboards" / str(prod_id)
@@ -504,7 +531,7 @@ def run_storyboard_artist(prod_id: int, image_generator=None):
                     shot.scene_number or 1,
                     shot.shot_number or (i + 1),
                 )
-                subjects = [pss.subject for pss in shot.shot_subjects if pss.subject]
+                subjects = _shot_identity_subjects(shot)
                 if lora_paths or image_generator is None:
                     still = render_character_still(
                         prompt,
@@ -783,7 +810,7 @@ def regen_storyboard_shot(shot_id: int, prompt_override: str | None = None, imag
                 prompt=prompt, loras=lora_paths, output_path=output_path,
             )
         else:
-            subjects = [pss.subject for pss in shot.shot_subjects if pss.subject]
+            subjects = _shot_identity_subjects(shot)
             still = render_character_still(
                 prompt,
                 subjects=subjects,
