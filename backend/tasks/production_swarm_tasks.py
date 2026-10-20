@@ -155,13 +155,26 @@ def create_production_swarm_tasks(celery_app: Celery):
 
     @celery_app.task(name="production.regen_storyboard_shot")
     def regen_storyboard_shot_task(shot_id: int, prompt_override: str | None = None):
+        from backend.services.job_operation_gate import GpuBusyError
         with current_app.app_context():
-            regen_storyboard_shot(shot_id, prompt_override)
+            try:
+                regen_storyboard_shot(shot_id, prompt_override)
+            except GpuBusyError as e:
+                # Redraws of several shots arrive together, and every one after
+                # the first meets the gate's cooldown. Ask again shortly rather
+                # than drop it; once the storyboard is approved a redraw no-ops.
+                import logging
+                logging.getLogger(__name__).info(
+                    "Storyboard redraw of shot %s deferred (%s); retrying in %ss", shot_id, e, _REGEN_RETRY_S)
+                celery_app.send_task("production.regen_storyboard_shot",
+                                     args=[shot_id, prompt_override], countdown=_REGEN_RETRY_S)
 
     @celery_app.task(name="production.regen_shot_plan")
     def regen_shot_plan_task(shot_id: int, feedback: str):
         with current_app.app_context():
             run_regen_shot_plan(shot_id, feedback)
+        # The new image prompt only shows once the still is drawn from it.
+        celery_app.send_task("production.regen_storyboard_shot", args=[shot_id, None])
 
     return {
         "run_screenwriter": run_screenwriter_task,
@@ -558,6 +571,11 @@ def _still_canvas(production) -> dict:
         return {}
     width, height = shape["still"]
     return {"width": width, "height": height}
+
+
+# Seconds before a storyboard redraw refused by the GPU gate asks again; the
+# gate's cooldown between jobs is shorter.
+_REGEN_RETRY_S = 15
 
 
 def _storyboard_path(prod_id: int, scene_number: int, shot_number: int) -> str:
