@@ -230,7 +230,18 @@ def reclaim_in_process_vram(needed_mb: int = 0) -> int:
 
 _RECLAIM_POLL_S = 0.5
 _RECLAIM_POLLS = 34  # with the 3 s settle: up to 20 s for a freed model to leave the card
-_REEVICT_EVERY = 4   # polls between Ollama re-evictions while a job that evicted it waits
+_REEVICT_EVERY = 4   # polls between checks for an Ollama model that loaded while a job waits
+
+
+def _ollama_has_loaded_model() -> bool:
+    """True when Ollama reports a loaded model. False when it is empty, down or slow."""
+    try:
+        import requests
+        from backend.config import OLLAMA_BASE_URL
+        r = requests.get(f"{OLLAMA_BASE_URL}/api/ps", timeout=2)
+        return bool(r.ok and r.json().get("models"))
+    except Exception:  # noqa: BLE001 — a probe; the fit check decides
+        return False
 
 
 def vram_holders_text(*, limit: int = 6) -> str:
@@ -270,8 +281,8 @@ def _wait_until_fits(vram_estimate_mb: int, reserve_mb: int, op_id: str,
     every time. Returns as soon as the job fits; the caller re-checks anyway.
 
     With ``evict_ollama``, a model Ollama loads during the wait is evicted
-    again: a Celery worker's first task builds the app, and its start-up asks
-    Ollama for a chat and an embedding model inside this very window."""
+    again, and only then: a Celery worker's first task builds the app, and its
+    start-up asks Ollama for an embedding model inside this very window."""
     time.sleep(_RECLAIM_SETTLE_S)
     for poll in range(_RECLAIM_POLLS):
         try:
@@ -279,7 +290,7 @@ def _wait_until_fits(vram_estimate_mb: int, reserve_mb: int, op_id: str,
                 return
         except Exception:  # noqa: BLE001 — the real check follows
             return
-        if evict_ollama and poll % _REEVICT_EVERY == _REEVICT_EVERY - 1:
+        if evict_ollama and poll % _REEVICT_EVERY == _REEVICT_EVERY - 1 and _ollama_has_loaded_model():
             evict_ollama_models()
         time.sleep(_RECLAIM_POLL_S)
     waited = _RECLAIM_SETTLE_S + _RECLAIM_POLLS * _RECLAIM_POLL_S
