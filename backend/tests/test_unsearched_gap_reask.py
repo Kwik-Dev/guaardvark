@@ -17,6 +17,7 @@ from backend.services import unified_chat_engine as uce
     "I do not have specific knowledge regarding the indexing software you are referring to.",
     "I need more information to tell you how to restrict which extension folders load.",
     "Please provide the security report you are referring to.",
+    "The document `INSTALL.md` says the Swarm runs on `127.0.0.1`, but it does not explicitly state the port.",
 ])
 def test_deferring_replies_are_caught(reply):
     assert uce._UNSEARCHED_GAP_RE.search(reply)
