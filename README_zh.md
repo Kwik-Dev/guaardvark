@@ -85,9 +85,9 @@ cp .env.example .env       # 使用您的配置进行编辑
 
 ## 技术栈
 
-**后端：** Flask 3.0 · SQLAlchemy + SQLite · Celery + Redis · LlamaIndex + Ollama · PyTorch · Diffusers · Whisper.cpp · Piper TTS · Ariadne (GraphQL)
+**后端：** Flask 3.0 · SQLAlchemy + PostgreSQL（pgvector）· Celery + Redis · LlamaIndex + Ollama · PyTorch · Diffusers · Whisper.cpp · Chatterbox / Kokoro / Piper TTS
 
-**前端：** React 18 · Vite · Material-UI v5 · Zustand · Apollo Client · Monaco Editor · Socket.io
+**前端：** React 18 · Vite · Material-UI v5 · Zustand · Monaco Editor · Socket.io
 
 **CLI：** Typer · Rich · httpx · python-socketio
 
@@ -101,10 +101,9 @@ cp .env.example .env       # 使用您的配置进行编辑
         ▼
 Flask 应用 (端口 5000)
   ├── 约 96 个 REST API 模块
-  ├── GraphQL (Ariadne)
   └── Socket.IO (实时流)
         │
-  服务层 (48 个模块)
+  服务层 (约 215 个模块)
   ├── 智能体执行器 (ReACT 循环)
   ├── RAG 管道 (LlamaIndex)
   ├── 生成服务
@@ -112,7 +111,7 @@ Flask 应用 (端口 5000)
         │
   ┌─────┼────────────────┐
   ▼     ▼                ▼
-SQLite  Celery + Redis   Ollama / GPU
+PostgreSQL  Celery + Redis   Ollama / GPU
 ```
 
 **关键流程：**

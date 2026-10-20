@@ -1142,7 +1142,7 @@ class SlashRouter:
             old_t, new_t = [x.strip() for x in rest.split(">>>", 1)]
 
         if old_t and new_t:
-            # Strongly prefer the real backend edit_code (guarded, audited, part of 70+ tool engine)
+            # Strongly prefer the real backend edit_code (guarded, audited, part of the backend tool engine)
             try:
                 from llx.client import get_client, LlxConnectionError, LlxError
                 client = get_client(server)
