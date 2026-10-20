@@ -206,8 +206,10 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   const [negativePrompt, setNegativePrompt] = useState("");
   const [lowVramMode, setLowVramMode] = useState(() => {
     const saved = localStorage.getItem('lowVramMode');
-    // Default to TRUE for 16GB GPUs to prevent CUDA memory errors
-    return saved !== null ? saved === 'true' : true;
+    // Off unless the person turns it on. On a 16 GB card Wan 2.2 14B renders
+    // 416x736 and 832x480 at 49 frames and 25 steps without it (measured
+    // 2026-10-20); on, it cut every Wan clip to 480 px and 33 frames.
+    return saved !== null ? saved === 'true' : false;
   });
 
   // Advanced settings
@@ -1886,7 +1888,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   on={lowVramMode}
                   note={lowVramMode ? (lowVramClampApplies ? "next job" : "not for this model") : undefined}
                   tooltip={lowVramClampApplies || !lowVramMode
-                    ? "Reduces frames, resolution, and steps for CogVideoX and Wan on 16GB cards. Default on."
+                    ? "Reduces frames, resolution, and steps for CogVideoX and Wan, for a card that runs out of memory. Off by default."
                     : "Clamps frames, resolution and steps for CogVideoX and Wan only; this model renders at the settings shown."}
                   onToggle={(next) => {
                     setLowVramMode(next);
