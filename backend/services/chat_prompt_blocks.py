@@ -62,6 +62,13 @@ CHAT_KB_CONTEXT_HEADER = (
     "from your own knowledge as usual and do not mention them or the knowledge base."
 )
 
+# Each excerpt under that header is cut to this many characters. Passages run to
+# about 1,100 characters on a stock index (median ~800: 15 pre-turn passages for
+# five doc questions, 2026-10-19); cut at 500 the model read about half of each and
+# answered from the half it had, e.g. Notes' undo without its "up to 30 steps".
+# rag_eval_harness builds its answer context the same way.
+CHAT_KB_EXCERPT_CHARS = 1500
+
 # Sent with the turn when the search of the person's documents failed (not when
 # it found nothing), only with the chat_say_rag_failed setting on (off by
 # default). Without it an empty context reads the same as "nothing relevant",

@@ -5853,17 +5853,18 @@ class UnifiedChatEngine:
             results, dropped = drop_unrelated(results or [])
             if dropped:
                 self._prov_note("rag_dropped_unrelated", dropped)
+            from backend.services.chat_prompt_blocks import CHAT_KB_EXCERPT_CHARS
             chunks = []
             sources = []
             for r in results:
                 source = r.get("metadata", {}).get("source_filename", "Unknown")
-                text = cut_on_whitespace(r.get("text", ""), 500)
+                text = cut_on_whitespace(r.get("text", ""), CHAT_KB_EXCERPT_CHARS)
                 chunks.append(f"[Source: {source}]\n{text}")
                 sources.append(str(source))
             try:
                 from backend.services.knowledge_sources import retrieve_from_sources
                 for hit in retrieve_from_sources(query):
-                    chunks.append(f"[Source: {hit['title']}]\n{cut_on_whitespace(hit['snippet'], 500)}")
+                    chunks.append(f"[Source: {hit['title']}]\n{cut_on_whitespace(hit['snippet'], CHAT_KB_EXCERPT_CHARS)}")
                     sources.append("ks:" + str(hit.get("title", "")))
             except Exception as e:
                 logger.debug(f"Knowledge source retrieval skipped: {e}")
