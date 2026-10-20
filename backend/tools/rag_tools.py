@@ -153,7 +153,7 @@ class KnowledgeSearchTool(BaseTool):
         "project_id": ToolParameter(
             name="project_id",
             type="string",
-            description="Id of a Guaardvark project, e.g. '12', to search only its documents. Pass one only when the user gives it; no tool here lists projects.",
+            description="Id of a Guaardvark project, e.g. '12', to search only its documents; find_records lists projects with their ids. Omit to search every document.",
             required=False
         )
     }
@@ -316,8 +316,9 @@ def _queue_for_index(path, project_id):
     """(document, copied): the document for this file, with indexing queued.
 
     A file already registered as a document in uploads is queued again in
-    place, unless it is indexing now; any other file is copied in through the
-    Documents page's upload path, which queues it. Raises ValueError when
+    place, unless it is indexing now; any other file goes in through the
+    Documents page's upload path, which queues it (a file in uploads that is
+    not yet a document is registered where it is). Raises ValueError when
     indexing is paused or cannot be queued.
     """
     import io
@@ -362,9 +363,10 @@ def _queue_for_index(path, project_id):
             f"Guaardvark's uploads already hold a file named {chosen} that is not a document, so "
             f"nothing was copied over it. Rename {path.name}, or add that file with file_path '{chosen}'."
         )
-    stream = io.BytesIO(path.read_bytes()) if target == path else path.open("rb")
+    in_place = target == path
+    stream = io.BytesIO(path.read_bytes()) if in_place else path.open("rb")
     with stream:
         document, _job_id = UnifiedUploadService.upload_file(
             FileStorage(stream=stream, filename=path.name), project_id=project_id,
         )
-    return document, True
+    return document, not in_place

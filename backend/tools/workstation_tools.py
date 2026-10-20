@@ -615,14 +615,20 @@ class SwarmStatusTool(BaseTool):
     read_only = True
     idempotent = True
     description = (
-        "Get Swarm Orchestrator status (same as GET /api/swarm/status). "
-        "Use when the user asks about the coding swarm, worktrees, or running swarm tasks. "
-        "Returns an honest offline error if the swarm plugin is not running."
+        "Report what Guaardvark's Swarm Orchestrator is doing: the coding swarms that run several agents "
+        "at once, each task in its own git worktree. Without swarm_id it returns every swarm the service "
+        "is tracking (swarms, with their count); each swarm has its status (not_started, running, completed or "
+        "failed), its tasks (title, status, branch, worktree, agent backend, elapsed time, tokens, "
+        "estimated cost, error), task counts by status, how many are running, total cost and tokens, "
+        "elapsed seconds and worktree disk use. With swarm_id it returns that swarm alone, a finished "
+        "one too when its result is saved on disk; an unknown id is 'Swarm not found'. Reads only: swarms "
+        "are started from Guaardvark's chat, its Swarm page or POST /api/swarm/launch. When the swarm "
+        "plugin is not running the call fails and says so; do not report a swarm as running then."
     )
     parameters = {
         "swarm_id": ToolParameter(
             name="swarm_id", type="string", required=False, default="",
-            description="Optional id of one swarm, as the launch returned it, e.g. 'swarm-20260930-120000-a1b2c3' (letters, digits, '-' and '_' only).",
+            description="One swarm's id, as its launch returned it, e.g. 'swarm-20260930-120000-a1b2c3' (letters, digits, '-' and '_' only). Omit to list every tracked swarm.",
         ),
     }
 
