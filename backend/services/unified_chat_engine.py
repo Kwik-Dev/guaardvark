@@ -115,6 +115,35 @@ _LOOKUP_REQUEST_NUDGE = (
     "answer it instead."
 )
 
+# A reply that says it lacks the answer, or asks the user to supply what the
+# question is about, when no tool ran in this turn. The default chat model reads
+# the few pre-turn excerpts as the whole documents and says they do not cover
+# the question without searching them ("The provided documents do not contain
+# ...", "the template you are referring to"): 24 of 49 wrong answers, 40
+# questions about indexed docs asked three times, 2026-10-19 (gemma4:e2b, real
+# chat path). Every reply it caught that was right was an honest "not in the
+# documents" to a question they do not answer, where searching first is right too.
+_DOCS_WORD = r"(?:documents?|docs|excerpts?|passages?|context|knowledge base|sources?|files?|text)"
+_GAP_VERB = r"(?:contain|mention|include|say|specify|state|provide|cover|describe|detail|list|address|explain|give)"
+_UNSEARCHED_GAP_RE = re.compile(
+    rf"\b{_DOCS_WORD}\b[^.!?\n]{{0,60}}\b(?:do|does|did)(?: not|n['’]t)\s+(?:\w+\s+)?{_GAP_VERB}"
+    rf"|\b(?:no|not|nothing|none)\b[^.!?\n]{{0,60}}\b(?:mentioned|specified|stated|provided|included|"
+    rf"covered|described|detailed|listed|found)\b[^.!?\n]{{0,40}}\b(?:in|by|within|from)\s+"
+    rf"(?:the|these|those|your|any)\s+(?:\w+\s+)?{_DOCS_WORD}\b"
+    r"|\bi (?:do not|don['’]t) have (?:access to|any |specific |enough |the |)(?:information|knowledge|details|data|access)\b"
+    r"|\bi (?:do not|don['’]t) have access to\b"
+    r"|\byou(?:['’]re| are) referring to\b"
+    r"|\bi need more (?:information|context|details)\b",
+    re.IGNORECASE,
+)
+_UNSEARCHED_GAP_NUDGE = (
+    "Your reply says you do not have this information, but no search of the person's "
+    "documents ran in this reply. The excerpts you were given, if any, are a few passages "
+    "picked before you answered, not the documents. Call search_knowledge_base now, with "
+    "the key terms of the question as the query. Answer from what it returns, and only if "
+    "it finds nothing say the documents do not cover it."
+)
+
 # A reply that opens with a tool signature the way the TOOLS prompt block prints
 # one: optional bracket or dash, a tool name, then "(param:type" ...
 _TOOL_SIGNATURE_RE = re.compile(r"^[\[\-\s]*([A-Za-z_]\w*)\(\s*[A-Za-z_]\w*\s*:\s*\w+\??")
@@ -924,6 +953,19 @@ _MEDIA_CALL_AS_TEXT_RE = re.compile(
     r"[\"'“](.+)[\"'”]\s*(?:,[^()]*)?\)\s*`*\s*$",
     re.DOTALL,
 )
+
+
+def _assistant_turn_text(llm_response: str, tool_calls) -> str:
+    """What the next prompt shows as this step's assistant turn: the reply, or,
+    when the calls came as structured tool_calls with no text, those calls in
+    the prompt's own XML form, so the model sees what it asked for."""
+    if (llm_response or "").strip() or not tool_calls:
+        return (llm_response or "")[:800]
+    parts = []
+    for tc in tool_calls:
+        params = "".join(f"\n<{k}>{v}</{k}>" for k, v in (tc.parameters or {}).items())
+        parts.append(f"<tool_call>\n<tool>{tc.tool_name}</tool>{params}\n</tool_call>")
+    return "\n".join(parts)[:800]
 
 
 def _media_call_as_text(reply: str) -> Optional[str]:
@@ -3152,15 +3194,16 @@ class UnifiedChatEngine:
                 }
 
             # 6c. Parse for tool calls
-            # NATIVE PATH: when native tool-calling is active, the model returns
-            # structured tool_calls in message.tool_calls (captured out-of-band by
-            # _call_llm_streaming into self._native_pending_tool_calls). Build the
-            # SAME ToolCallResponse the XML parser yields so every downstream stage
-            # (tool_jobs, guard, executor, observation collation) is unchanged.
+            # Structured tool_calls (message.tool_calls, captured out-of-band by
+            # _call_llm_streaming into self._native_pending_tool_calls) arrive when
+            # native tool-calling is active, and from a model that writes its own
+            # call format on the XML path. Build the SAME ToolCallResponse the XML
+            # parser yields so every downstream stage (tool_jobs, guard, executor,
+            # observation collation) is unchanged.
             parsed = None
-            if getattr(self, "_native_toolcalls_active", False):
-                _native_calls = getattr(self, "_native_pending_tool_calls", None)
-                self._native_pending_tool_calls = None  # consume
+            _native_calls = getattr(self, "_native_pending_tool_calls", None)
+            self._native_pending_tool_calls = None  # consume
+            if _native_calls or getattr(self, "_native_toolcalls_active", False):
                 parsed = self._native_tool_calls_to_response(_native_calls, llm_response)
 
             if parsed is None:
@@ -3219,24 +3262,29 @@ class UnifiedChatEngine:
                 _claims = not steps and self._claims_unrun_search(final_text, session_id)
                 _unlooked = (not steps and not _skip_tools
                              and bool(_LOOKUP_REQUEST_RE.search(selection_text)))
-                if not options.get("skip_nudges") and (_claims or _unlooked):
+                _unsearched_gap = (not steps and not _skip_tools
+                                   and "search_knowledge_base" in (selected_tools or [])
+                                   and bool(_UNSEARCHED_GAP_RE.search(final_text)))
+                if not options.get("skip_nudges") and (_claims or _unlooked or _unsearched_gap):
                     if not claimed_search_retried and not _skip_tools and not is_aborted(session_id):
                         claimed_search_retried = True
+                        reason, nudge = (
+                            ("claimed search", _CLAIMED_SEARCH_NUDGE) if _claims
+                            else ("lookup request", _LOOKUP_REQUEST_NUDGE) if _unlooked
+                            else ("unsearched gap", _UNSEARCHED_GAP_NUDGE)
+                        )
                         logger.info(
-                            f"[UNIFIED_ENGINE] iter={iteration} no tool ran for a "
-                            f"{'claimed search' if _claims else 'lookup request'}; re-asking once"
+                            f"[UNIFIED_ENGINE] iter={iteration} no tool ran for a {reason}; re-asking once"
                         )
                         # The reply was streamed as it was written; take it off the screen.
                         emit_fn("chat:token", {"content": "", "reset": True, "session_id": session_id})
-                        ollama_messages.append({
-                            "role": "system",
-                            "content": _CLAIMED_SEARCH_NUDGE if _claims else _LOOKUP_REQUEST_NUDGE,
-                        })
+                        ollama_messages.append({"role": "system", "content": nudge})
                         continue
-                    # Still no tool: whatever the reply says it found, nothing was checked.
-                    logger.info(f"[UNIFIED_ENGINE] iter={iteration} still no tool for a lookup; noting it")
-                    final_text = f"{final_text.rstrip()}\n\n{_CLAIMED_SEARCH_NOTE}"
-                    emit_fn("chat:token", {"content": f"\n\n{_CLAIMED_SEARCH_NOTE}", "session_id": session_id})
+                    if _claims or _unlooked:
+                        # Still no tool: whatever the reply says it found, nothing was checked.
+                        logger.info(f"[UNIFIED_ENGINE] iter={iteration} still no tool for a lookup; noting it")
+                        final_text = f"{final_text.rstrip()}\n\n{_CLAIMED_SEARCH_NOTE}"
+                        emit_fn("chat:token", {"content": f"\n\n{_CLAIMED_SEARCH_NOTE}", "session_id": session_id})
                 logger.info(f"[UNIFIED_ENGINE] iter={iteration} NO tool calls, returning final answer")
                 final_text = re.sub(r'\u003c/?(?:tool_call|tool|observation)[^\u003e]*\u003e', '', final_text).strip()
 
@@ -3406,7 +3454,10 @@ class UnifiedChatEngine:
                     if not tool_jobs:
                         # All tools in this iteration were rejected
                         steps.append(step_info)
-                        ollama_messages.append({"role": "assistant", "content": llm_response[:800]})
+                        ollama_messages.append({
+                            "role": "assistant",
+                            "content": _assistant_turn_text(llm_response, parsed.tool_calls),
+                        })
                         ollama_messages.append({
                             "role": "user",
                             "content": (
@@ -3740,7 +3791,9 @@ class UnifiedChatEngine:
                 continuity_block = ""
 
             # Append assistant response (truncated to limit context growth)
-            ollama_messages.append({"role": "assistant", "content": llm_response[:800]})
+            ollama_messages.append({
+                "role": "assistant", "content": _assistant_turn_text(llm_response, parsed.tool_calls),
+            })
 
             # Build guard status block if any tools are blocked
             guard_block = ""
@@ -5115,9 +5168,13 @@ class UnifiedChatEngine:
         # when thinking content contains XML-like tags. (N/A for cloud providers.)
         # One predicate for the whole product: name patterns, then Ollama's
         # capabilities list, so a model the pattern list has not met still counts.
-        from backend.utils.ollama_resource_manager import model_supports_thinking
+        from backend.utils.ollama_resource_manager import model_supports_thinking, think_off_value
         is_thinking_model = model_supports_thinking(model_name)
         think_on = is_thinking_model and bool(getattr(self, "_think", False))
+        # think:false for most models; a level for one that reasons regardless,
+        # which then needs the reasoning budget as if thinking were on.
+        think_off = think_off_value(model_name) if is_thinking_model else False
+        reasons_anyway = is_thinking_model and not think_on and think_off is not False
 
         # Reasoning written into the content stream goes to the reasoning
         # channel, not the answer: anywhere, or ended by a lone closing tag, for
@@ -5197,7 +5254,7 @@ class UnifiedChatEngine:
             # call gets the extra budget on top of the answer budget. The cap
             # keeps prompt + generation inside the context window but never
             # drops below max_tokens: the cap only removes thinking headroom.
-            if think_on:
+            if think_on or reasons_anyway:
                 from backend.config import AGENTIC_THINKING_TOKEN_BUDGET
                 num_predict = max_tokens + AGENTIC_THINKING_TOKEN_BUDGET
                 room = max(int(ctx_window) - estimated, max_tokens)
@@ -5234,10 +5291,9 @@ class UnifiedChatEngine:
             # structured tool_calls in message.tool_calls rather than inline XML.
             _native_active = bool(getattr(self, "_native_toolcalls_active", False))
             _native_schema = getattr(self, "_native_tools_schema", None)
-            if _native_active:
-                # Reset the per-call native tool-call sink so a prior iteration's
-                # calls never leak into this one.
-                self._native_pending_tool_calls = None
+            # Reset the per-call tool-call sink so a prior iteration's calls never
+            # leak into this one.
+            self._native_pending_tool_calls = None
 
             from backend.config import get_chat_keep_alive
             _chat_kwargs = dict(
@@ -5253,7 +5309,7 @@ class UnifiedChatEngine:
             # Only thinking-capable models accept `think`; passing it to others can
             # error, so gate on is_thinking_model. Default-off keeps chat snappy.
             if is_thinking_model and getattr(self, "_think", None) is not None:
-                _chat_kwargs["think"] = bool(self._think)
+                _chat_kwargs["think"] = True if self._think else think_off
 
             # XML filter: stream tokens to client until <tool_call is detected,
             # then suppress further emission (tool calls are announced separately).
@@ -5295,15 +5351,17 @@ class UnifiedChatEngine:
                     msg = chunk.get("message", {})
                     token = msg.get("content", "")
                     thinking_token = msg.get("thinking", "")
-                    # Native path: collect any structured tool_calls from this chunk.
-                    if _native_active:
+                    # Structured tool_calls from this chunk. Kept on the XML path too:
+                    # Ollama parses a model's own call format into this field without
+                    # tools=[...], and gpt-oss answers the XML prompt that way, which
+                    # left its replies empty.
+                    _tc = None
+                    try:
+                        _tc = msg.get("tool_calls") if isinstance(msg, dict) else getattr(msg, "tool_calls", None)
+                    except Exception:
                         _tc = None
-                        try:
-                            _tc = msg.get("tool_calls") if isinstance(msg, dict) else getattr(msg, "tool_calls", None)
-                        except Exception:
-                            _tc = None
-                        if _tc:
-                            _native_tool_calls_acc.extend(_tc)
+                    if _tc:
+                        _native_tool_calls_acc.extend(_tc)
                     if token:
                         # Reasoning precedes the answer; send any held tail
                         # before the first visible token so the channel is
@@ -5376,14 +5434,14 @@ class UnifiedChatEngine:
                     "re-asking for the answer with thinking off"
                 )
                 retry_kwargs = dict(_chat_kwargs)
-                retry_kwargs["think"] = False
+                retry_kwargs["think"] = think_off
                 retry_kwargs["messages"] = _template_safe(model_name, list(call_messages) + [
                     {"role": "system", "content": _ANSWER_AFTER_REASONING_NUDGE},
                 ])
                 retry_kwargs["options"] = sampling_profiles.profile_options(
                     sampling_profiles.DEFAULT_PROFILE,
                     num_ctx=ctx_window,
-                    num_predict=max_tokens,
+                    num_predict=num_predict if reasons_anyway else max_tokens,
                     extra={"num_keep": -1},
                 )
                 accumulated.clear()
@@ -5398,12 +5456,11 @@ class UnifiedChatEngine:
                     if emit_tokens:
                         emit_fn("chat:token", {"content": content, "session_id": session_id})
 
-            # Native path: hand the collected structured tool_calls back to the
-            # ReACT loop out-of-band (the return signature is fixed at
-            # (text, in_tok, out_tok) for the XML path). The loop converts these
-            # into the SAME ToolCallResponse the XML parser produces.
-            if _native_active:
-                self._native_pending_tool_calls = _native_tool_calls_acc or None
+            # Hand the collected structured tool_calls back to the ReACT loop
+            # out-of-band (the return signature is fixed at (text, in_tok,
+            # out_tok)). The loop converts these into the SAME ToolCallResponse
+            # the XML parser produces.
+            self._native_pending_tool_calls = _native_tool_calls_acc or None
 
             _finish_call(thinking, len(content))
             return content, input_tokens, output_tokens
@@ -5437,7 +5494,7 @@ class UnifiedChatEngine:
                     ))
                     _sanitized_kwargs["messages"] = sanitized
                     if getattr(self, "_think", None) is not None:
-                        _sanitized_kwargs["think"] = bool(self._think)
+                        _sanitized_kwargs["think"] = True if self._think else think_off
                     accumulated.clear()
                     xml_detected = False
                     inline_reasoning = InlineReasoningStream(reasoning_tags, leading_only=leading_only)
@@ -5445,8 +5502,7 @@ class UnifiedChatEngine:
                     _consume(ollama.chat(**_sanitized_kwargs))
                     content = _visible_content()
                     thinking = "".join(accumulated_thinking).strip()
-                    if _native_active:
-                        self._native_pending_tool_calls = _native_tool_calls_acc or None
+                    self._native_pending_tool_calls = _native_tool_calls_acc or None
                     if not content and thinking and not _native_tool_calls_acc:
                         logger.info(f"Sanitized retry returned reasoning only ({len(thinking)} chars)")
                         content = _REASONING_ONLY_FALLBACK_TEXT
@@ -5491,7 +5547,7 @@ class UnifiedChatEngine:
                     ns_kwargs["stream"] = False
                     resp = ollama.chat(**ns_kwargs)
                     content, input_tokens, output_tokens, native_tc = _extract_nostream_response(resp)
-                    if _native_active and native_tc:
+                    if native_tc:
                         self._native_pending_tool_calls = native_tc
                     if content:
                         logger.info(f"Ollama EOF non-stream retry succeeded (kind={eof_kind})")
@@ -5541,8 +5597,7 @@ class UnifiedChatEngine:
                         think_buffer = ""
                         _consume(ollama.chat(**_retry_kwargs))
                         content = _visible_content()
-                        if _native_active:
-                            self._native_pending_tool_calls = _native_tool_calls_acc or None
+                        self._native_pending_tool_calls = _native_tool_calls_acc or None
                         if content:
                             logger.info(f"Ollama EOF runner reload retry succeeded (kind={eof_kind})")
                             _finish_call("".join(accumulated_thinking).strip(), len(content))
@@ -5832,17 +5887,18 @@ class UnifiedChatEngine:
             results, dropped = drop_unrelated(results or [])
             if dropped:
                 self._prov_note("rag_dropped_unrelated", dropped)
+            from backend.services.chat_prompt_blocks import CHAT_KB_EXCERPT_CHARS
             chunks = []
             sources = []
             for r in results:
                 source = r.get("metadata", {}).get("source_filename", "Unknown")
-                text = cut_on_whitespace(r.get("text", ""), 500)
+                text = cut_on_whitespace(r.get("text", ""), CHAT_KB_EXCERPT_CHARS)
                 chunks.append(f"[Source: {source}]\n{text}")
                 sources.append(str(source))
             try:
                 from backend.services.knowledge_sources import retrieve_from_sources
                 for hit in retrieve_from_sources(query):
-                    chunks.append(f"[Source: {hit['title']}]\n{cut_on_whitespace(hit['snippet'], 500)}")
+                    chunks.append(f"[Source: {hit['title']}]\n{cut_on_whitespace(hit['snippet'], CHAT_KB_EXCERPT_CHARS)}")
                     sources.append("ks:" + str(hit.get("title", "")))
             except Exception as e:
                 logger.debug(f"Knowledge source retrieval skipped: {e}")

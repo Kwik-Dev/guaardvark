@@ -53,3 +53,10 @@ def test_parser_accepts_arguments_key_and_json_string():
         ' {"function": {"name": "b", "arguments": {"y": 2}}}]}'
     )
     assert [(tc.tool_name, tc.parameters) for tc in resp.tool_calls] == [("a", {"x": 1}), ("b", {"y": 2})]
+
+
+def test_gemma_template_quote_is_dropped_from_values():
+    # gemma4 wrote its chat template's string quote into a text tool call.
+    out = coerce_params_to_schema(
+        {"query": 'floating chat shortcut and product profile<|"|>', "level": '<|"|>3<|"|>'}, _Typed())
+    assert out == {"query": "floating chat shortcut and product profile", "level": 3}

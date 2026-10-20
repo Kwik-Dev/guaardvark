@@ -612,15 +612,18 @@ class RAGEvalHarness:
 
             # Answer with the same context shape production chat builds
             # (_retrieve_rag_context: unrelated passages dropped, source-labeled,
-            # 500-char-clipped chunks),
+            # chunks clipped to CHAT_KB_EXCERPT_CHARS),
             # on the production answer model — so score deltas transfer to
             # what users actually experience.
+            from backend.services.chat_prompt_blocks import CHAT_KB_EXCERPT_CHARS
             from backend.utils.reranker import drop_unrelated
             answer_results, _ = drop_unrelated(results)
             context_blocks = []
             for r in answer_results:
                 source = (r.get("metadata") or {}).get("source_filename", "Unknown")
-                context_blocks.append(f"[Source: {source}]\n{cut_on_whitespace(r.get('text', ''), 500)}")
+                context_blocks.append(
+                    f"[Source: {source}]\n{cut_on_whitespace(r.get('text', ''), CHAT_KB_EXCERPT_CHARS)}"
+                )
             context = "\n\n".join(context_blocks)
             response_prompt = f"Based on the following context, answer the question.\n\nContext:\n{context}\n\nQuestion: {pair['question']}\n\nAnswer:"
             actual_response = self._call_llm(response_prompt, temperature=0.0, role="answer")

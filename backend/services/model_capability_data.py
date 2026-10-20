@@ -253,6 +253,18 @@ THINKING_NAME_EXCLUDE_PATTERNS = [
     r'embed', r'rerank',
 ]
 
+# Architectures (Ollama's details.family) whose thinking Ollama cannot turn off:
+# think:false is ignored and the model reasons anyway, out of the same num_predict
+# as the answer. The value is the level sent instead when thinking is meant to be
+# off, the least the architecture takes; the caller budgets for the reasoning.
+# gpt-oss:20b on Ollama 0.40.6, 2026-10-19, five document questions replayed with
+# chat's own system prompt: think:false still reasoned 457-1,417 characters a
+# reply (167-425 tokens out); "low" reasoned 28-344 (47-167 tokens), same answers.
+# At a 1,024-token budget think:false left 15 of 30 replies empty.
+THINK_OFF_LEVEL_BY_ARCH = {
+    "gptoss": "low",
+}
+
 # is_vision_model's fallback when the capability resolver cannot be imported.
 VISION_NAME_PATTERNS = [
     r'vl\b', r'vision', r'llava', r'moondream', r'bakllava',
