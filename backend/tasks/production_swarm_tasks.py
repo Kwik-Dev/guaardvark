@@ -724,7 +724,10 @@ def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
             _af = AudioFoundryClient()
             audio_foundry = _af if _af.available() else None
 
-        shots = ProductionShot.query.filter_by(production_id=prod_id, approved=True).all()
+        # Script order: the clips are cut together in this order, and without
+        # it the database returns rows in whatever order they were last updated.
+        shots = (ProductionShot.query.filter_by(production_id=prod_id, approved=True)
+                 .order_by(ProductionShot.scene_number, ProductionShot.shot_number).all())
         if not shots:
             ctx.fail("No approved shots")
 
