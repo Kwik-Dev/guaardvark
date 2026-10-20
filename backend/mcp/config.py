@@ -43,6 +43,18 @@ DEFAULT_DENY_CATEGORIES: List[str] = [
                        # must be explicitly allowed; prevents silent bypass of default-deny
 ]
 
+# Tools chat gates behind its approval card that MCP clients still get. An MCP
+# client asks its user before a call unless told not to, and both declare
+# destructiveHint. Over MCP they act only on the fact, preference and note
+# entries save_memory writes.
+DEFAULT_ALLOW_TOOLS: List[str] = ["update_memory", "delete_memory"]
+
+# Registered tools MCP clients are not offered. inpaint_image runs the same
+# edit as edit_image under a second name, kept for chat's slash commands and
+# turn router; a client choosing between two names for one operation gains
+# nothing.
+DEFAULT_DENY_TOOLS: List[str] = ["inpaint_image"]
+
 # Folders under the outputs root that MCP clients may list and read: the ones
 # Guaardvark's generators write media and documents into (writer in the
 # comment). An entry with a slash serves only that subtree. Nothing else under
@@ -73,8 +85,9 @@ class ToolPolicy:
     deny_categories: List[str] = field(default_factory=lambda: list(DEFAULT_DENY_CATEGORIES))
     # Explicit allow/deny by tool name. ``allow`` is an additive override —
     # a name here bypasses deny_categories. ``deny`` wins over everything.
-    allow: List[str] = field(default_factory=list)
-    deny: List[str] = field(default_factory=list)
+    # A list in mcp.json replaces the default list, as deny_categories does.
+    allow: List[str] = field(default_factory=lambda: list(DEFAULT_ALLOW_TOOLS))
+    deny: List[str] = field(default_factory=lambda: list(DEFAULT_DENY_TOOLS))
     # If True, tools with ``is_dangerous=True`` are hidden.
     hide_dangerous: bool = True
     # If True, tools with ``requires_approval=True`` are hidden.
