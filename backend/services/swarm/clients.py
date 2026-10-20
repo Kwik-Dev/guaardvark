@@ -239,7 +239,11 @@ class FfmpegRunner:
 
         if labels:
             mixed_audio = str(work / "_mixed_audio.m4a")
-            amix = "".join(labels) + f"amix=inputs={len(labels)}:duration=longest:dropout_transition=0[aout]"
+            # Pad the bed to the film's length: -shortest below would otherwise
+            # cut the picture where the last line or the score ends.
+            amix = ("".join(labels)
+                    + f"amix=inputs={len(labels)}:duration=longest:dropout_transition=0,"
+                    + f"apad,atrim=0:{total:.3f}[aout]")
             self._run([*audio_inputs, "-filter_complex", ";".join(filters) + ";" + amix,
                        "-map", "[aout]", "-c:a", "aac", mixed_audio])
             # 3) Mux concatenated video + mixed audio.

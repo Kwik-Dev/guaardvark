@@ -216,26 +216,25 @@ class Editor:
 
         # Phase 1.3: Per-scene music. Skipped entirely when AudioFoundry is
         # unavailable — the production still renders, just video-only.
+        # One score runs under the whole film, sized to the clips as rendered:
+        # the video model can clamp a shot shorter than planned, and a score
+        # cut to the first scene left the rest of the film silent.
         music_path: str | None = None
         if self.audio_foundry is not None:
-            scenes_map: dict[int, list[ShotInput]] = {}
-            for s in shots:
-                if s.scene_number is not None:
-                    scenes_map.setdefault(s.scene_number, []).append(s)
-
-            if scenes_map:
-                for sid in sorted(scenes_map.keys()):
-                    scene_shots = scenes_map[sid]
-                    mood = scene_shots[0].scene_mood or music_mood
-                    duration = sum(s.duration_seconds for s in scene_shots)
-                    track = self._render_music(mood, duration, audio_dir, suffix=f"_scene_{sid}")
-                    # v1: the first scene's track scores the production; stitching
-                    # per-scene tracks across the timeline is a v1.x refinement.
-                    if track and music_path is None:
-                        music_path = track
-            else:
-                total_duration = sum(s.duration_seconds for s in shots) or 1.0
-                music_path = self._render_music(music_mood, total_duration, audio_dir)
+            moods: list[str] = []
+            for s in sorted(shots, key=lambda s: (s.scene_number or 0, s.shot_number)):
+                mood = (s.scene_mood or "").strip()
+                if mood and mood not in moods:
+                    moods.append(mood)
+            probe = getattr(self.ffmpeg, "probe_duration", None)
+            planned = [s.duration_seconds for s in shots] if not windows else []
+            total_duration = sum(
+                (probe(p) if probe else 0.0) or (planned[i] if i < len(planned) else 0.0)
+                for i, p in enumerate(clip_paths)
+            ) or sum(s.duration_seconds for s in shots) or 1.0
+            music_path = self._render_music(
+                ", then ".join(moods) or music_mood, total_duration, audio_dir,
+            )
 
         final_mp4 = str(output_path / "final.mp4")
         self.ffmpeg.concat_with_audio(
