@@ -22,17 +22,19 @@ from backend.services.pipeline_service import (
 # Frame shape a production may ask for (settings_json["aspect_ratio"]): the
 # storyboard still and the clip canvas. These are the music video's still and
 # i2v sizes (music_video_tasks.py), which render Wan 2.2 on a 16 GB card.
-# "1:1" or no setting keeps each model's own default canvas.
+# No setting means FILM_DEFAULT_ASPECT; "1:1" keeps each model's own canvas.
 FILM_FRAME_SHAPES: dict[str, dict[str, tuple[int, int]]] = {
     "16:9": {"still": (1344, 768), "clip": (832, 480)},
     "9:16": {"still": (768, 1344), "clip": (480, 832)},
 }
 FILM_ASPECT_RATIOS = ("16:9", "9:16", "1:1")
+FILM_DEFAULT_ASPECT = "16:9"
 
 
 def film_frame_shape(settings: dict | None) -> dict[str, tuple[int, int]] | None:
-    """The still and clip canvas for a production's settings, or None."""
-    return FILM_FRAME_SHAPES.get(str((settings or {}).get("aspect_ratio") or ""))
+    """The still and clip canvas for a production's settings, or None for 1:1."""
+    aspect = (settings or {}).get("aspect_ratio") or FILM_DEFAULT_ASPECT
+    return FILM_FRAME_SHAPES.get(str(aspect))
 
 
 VALID_TRANSITIONS: dict[str, str] = {

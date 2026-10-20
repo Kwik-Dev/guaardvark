@@ -31,7 +31,7 @@ const CreateProductionDialog = ({ open, onClose, onCreated }) => {
   // choice says what it changes (scene windows with spoken lines).
   const [videoModels, setVideoModels] = useState([]);
   const [videoModel, setVideoModel] = useState('');
-  // Frame shape for the storyboard stills and clips; empty keeps each model's default.
+  // Frame shape for the storyboard stills and clips; empty sends nothing, so the backend default (16:9) applies.
   const [aspectRatio, setAspectRatio] = useState('');
 
   useEffect(() => {
@@ -149,8 +149,7 @@ const CreateProductionDialog = ({ open, onClose, onCreated }) => {
               onChange={(e) => setAspectRatio(e.target.value)}
               label="Frame"
             >
-              <MenuItem value="">Default (each model's own frame)</MenuItem>
-              <MenuItem value="16:9">Wide 16:9</MenuItem>
+              <MenuItem value="">Wide 16:9</MenuItem>
               <MenuItem value="9:16">Tall 9:16</MenuItem>
               <MenuItem value="1:1">Square 1:1</MenuItem>
             </Select>

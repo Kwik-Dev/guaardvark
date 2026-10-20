@@ -541,7 +541,7 @@ class FilmCrewTool(BaseTool):
             name="aspect_ratio",
             type="string",
             description="Optional frame shape for storyboard stills and clips: 16:9, 9:16 or 1:1. "
-                        "Default: each model's own frame.",
+                        "Default: 16:9.",
             required=False,
         ),
     }
