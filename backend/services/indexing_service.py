@@ -20,11 +20,10 @@ from backend.utils.path_guard import PathEscapesRoot, contained, contained_path
 
 # Per edge-portability audit: remove unconditional CUDA_VISIBLE_DEVICES at
 # import time (causes "device 0 does not exist" on CPU/ARM boxes). Only set
-# for GPU hosts; workers stay CPU.
-if os.environ.get('CELERY_WORKER_MODE', 'false').lower() == 'true':
-    os.environ['CUDA_VISIBLE_DEVICES'] = ''
-    logger.info("CUDA disabled for Celery worker - using CPU")
-else:
+# for GPU hosts. A Celery worker is left alone: the same process runs GPU
+# jobs (storyboards, renders), and hiding the card when the first indexing
+# task imported this module left every later GPU job in it on the CPU.
+if os.environ.get('CELERY_WORKER_MODE', 'false').lower() != 'true':
     try:
         import subprocess
         if subprocess.run(['nvidia-smi'], capture_output=True, timeout=3).returncode == 0:

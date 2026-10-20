@@ -127,11 +127,9 @@ def force_local_llama_index_config():
 
     try:
         # Per edge-portability audit: remove unconditional CUDA_VISIBLE at import
-        # (breaks CPU/ARM boxes). Probe for NVIDIA; workers stay CPU.
-        if os.environ.get('CELERY_WORKER_MODE', 'false').lower() == 'true':
-            os.environ['CUDA_VISIBLE_DEVICES'] = ''
-            logger.info("CUDA disabled for Celery worker - using CPU")
-        else:
+        # (breaks CPU/ARM boxes). Probe for NVIDIA. A Celery worker is left alone:
+        # it also runs GPU jobs, and hiding the card here put them on the CPU.
+        if os.environ.get('CELERY_WORKER_MODE', 'false').lower() != 'true':
             try:
                 import subprocess
                 if subprocess.run(['nvidia-smi'], capture_output=True, timeout=3).returncode == 0:
