@@ -926,6 +926,19 @@ _MEDIA_CALL_AS_TEXT_RE = re.compile(
 )
 
 
+def _assistant_turn_text(llm_response: str, tool_calls) -> str:
+    """What the next prompt shows as this step's assistant turn: the reply, or,
+    when the calls came as structured tool_calls with no text, those calls in
+    the prompt's own XML form, so the model sees what it asked for."""
+    if (llm_response or "").strip() or not tool_calls:
+        return (llm_response or "")[:800]
+    parts = []
+    for tc in tool_calls:
+        params = "".join(f"\n<{k}>{v}</{k}>" for k, v in (tc.parameters or {}).items())
+        parts.append(f"<tool_call>\n<tool>{tc.tool_name}</tool>{params}\n</tool_call>")
+    return "\n".join(parts)[:800]
+
+
 def _media_call_as_text(reply: str) -> Optional[str]:
     """The prompt of a reply that is only a media tool call written as text, else None."""
     m = _MEDIA_CALL_AS_TEXT_RE.match(reply or "")
@@ -3152,15 +3165,16 @@ class UnifiedChatEngine:
                 }
 
             # 6c. Parse for tool calls
-            # NATIVE PATH: when native tool-calling is active, the model returns
-            # structured tool_calls in message.tool_calls (captured out-of-band by
-            # _call_llm_streaming into self._native_pending_tool_calls). Build the
-            # SAME ToolCallResponse the XML parser yields so every downstream stage
-            # (tool_jobs, guard, executor, observation collation) is unchanged.
+            # Structured tool_calls (message.tool_calls, captured out-of-band by
+            # _call_llm_streaming into self._native_pending_tool_calls) arrive when
+            # native tool-calling is active, and from a model that writes its own
+            # call format on the XML path. Build the SAME ToolCallResponse the XML
+            # parser yields so every downstream stage (tool_jobs, guard, executor,
+            # observation collation) is unchanged.
             parsed = None
-            if getattr(self, "_native_toolcalls_active", False):
-                _native_calls = getattr(self, "_native_pending_tool_calls", None)
-                self._native_pending_tool_calls = None  # consume
+            _native_calls = getattr(self, "_native_pending_tool_calls", None)
+            self._native_pending_tool_calls = None  # consume
+            if _native_calls or getattr(self, "_native_toolcalls_active", False):
                 parsed = self._native_tool_calls_to_response(_native_calls, llm_response)
 
             if parsed is None:
@@ -3406,7 +3420,10 @@ class UnifiedChatEngine:
                     if not tool_jobs:
                         # All tools in this iteration were rejected
                         steps.append(step_info)
-                        ollama_messages.append({"role": "assistant", "content": llm_response[:800]})
+                        ollama_messages.append({
+                            "role": "assistant",
+                            "content": _assistant_turn_text(llm_response, parsed.tool_calls),
+                        })
                         ollama_messages.append({
                             "role": "user",
                             "content": (
@@ -3740,7 +3757,9 @@ class UnifiedChatEngine:
                 continuity_block = ""
 
             # Append assistant response (truncated to limit context growth)
-            ollama_messages.append({"role": "assistant", "content": llm_response[:800]})
+            ollama_messages.append({
+                "role": "assistant", "content": _assistant_turn_text(llm_response, parsed.tool_calls),
+            })
 
             # Build guard status block if any tools are blocked
             guard_block = ""
@@ -5234,10 +5253,9 @@ class UnifiedChatEngine:
             # structured tool_calls in message.tool_calls rather than inline XML.
             _native_active = bool(getattr(self, "_native_toolcalls_active", False))
             _native_schema = getattr(self, "_native_tools_schema", None)
-            if _native_active:
-                # Reset the per-call native tool-call sink so a prior iteration's
-                # calls never leak into this one.
-                self._native_pending_tool_calls = None
+            # Reset the per-call tool-call sink so a prior iteration's calls never
+            # leak into this one.
+            self._native_pending_tool_calls = None
 
             from backend.config import get_chat_keep_alive
             _chat_kwargs = dict(
@@ -5295,15 +5313,17 @@ class UnifiedChatEngine:
                     msg = chunk.get("message", {})
                     token = msg.get("content", "")
                     thinking_token = msg.get("thinking", "")
-                    # Native path: collect any structured tool_calls from this chunk.
-                    if _native_active:
+                    # Structured tool_calls from this chunk. Kept on the XML path too:
+                    # Ollama parses a model's own call format into this field without
+                    # tools=[...], and gpt-oss answers the XML prompt that way, which
+                    # left its replies empty.
+                    _tc = None
+                    try:
+                        _tc = msg.get("tool_calls") if isinstance(msg, dict) else getattr(msg, "tool_calls", None)
+                    except Exception:
                         _tc = None
-                        try:
-                            _tc = msg.get("tool_calls") if isinstance(msg, dict) else getattr(msg, "tool_calls", None)
-                        except Exception:
-                            _tc = None
-                        if _tc:
-                            _native_tool_calls_acc.extend(_tc)
+                    if _tc:
+                        _native_tool_calls_acc.extend(_tc)
                     if token:
                         # Reasoning precedes the answer; send any held tail
                         # before the first visible token so the channel is
@@ -5398,12 +5418,11 @@ class UnifiedChatEngine:
                     if emit_tokens:
                         emit_fn("chat:token", {"content": content, "session_id": session_id})
 
-            # Native path: hand the collected structured tool_calls back to the
-            # ReACT loop out-of-band (the return signature is fixed at
-            # (text, in_tok, out_tok) for the XML path). The loop converts these
-            # into the SAME ToolCallResponse the XML parser produces.
-            if _native_active:
-                self._native_pending_tool_calls = _native_tool_calls_acc or None
+            # Hand the collected structured tool_calls back to the ReACT loop
+            # out-of-band (the return signature is fixed at (text, in_tok,
+            # out_tok)). The loop converts these into the SAME ToolCallResponse
+            # the XML parser produces.
+            self._native_pending_tool_calls = _native_tool_calls_acc or None
 
             _finish_call(thinking, len(content))
             return content, input_tokens, output_tokens
@@ -5445,8 +5464,7 @@ class UnifiedChatEngine:
                     _consume(ollama.chat(**_sanitized_kwargs))
                     content = _visible_content()
                     thinking = "".join(accumulated_thinking).strip()
-                    if _native_active:
-                        self._native_pending_tool_calls = _native_tool_calls_acc or None
+                    self._native_pending_tool_calls = _native_tool_calls_acc or None
                     if not content and thinking and not _native_tool_calls_acc:
                         logger.info(f"Sanitized retry returned reasoning only ({len(thinking)} chars)")
                         content = _REASONING_ONLY_FALLBACK_TEXT
@@ -5491,7 +5509,7 @@ class UnifiedChatEngine:
                     ns_kwargs["stream"] = False
                     resp = ollama.chat(**ns_kwargs)
                     content, input_tokens, output_tokens, native_tc = _extract_nostream_response(resp)
-                    if _native_active and native_tc:
+                    if native_tc:
                         self._native_pending_tool_calls = native_tc
                     if content:
                         logger.info(f"Ollama EOF non-stream retry succeeded (kind={eof_kind})")
@@ -5541,8 +5559,7 @@ class UnifiedChatEngine:
                         think_buffer = ""
                         _consume(ollama.chat(**_retry_kwargs))
                         content = _visible_content()
-                        if _native_active:
-                            self._native_pending_tool_calls = _native_tool_calls_acc or None
+                        self._native_pending_tool_calls = _native_tool_calls_acc or None
                         if content:
                             logger.info(f"Ollama EOF runner reload retry succeeded (kind={eof_kind})")
                             _finish_call("".join(accumulated_thinking).strip(), len(content))
