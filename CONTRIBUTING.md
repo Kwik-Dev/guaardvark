@@ -109,12 +109,12 @@ The startup script handles everything on first run — PostgreSQL, Redis, Python
 
 ```
 backend/           Flask app — API endpoints, services, models
-  api/             ~90+ API modules (auto-discovered via blueprint_discovery)
+  api/             about 96 API modules (auto-discovered via blueprint_discovery)
   services/        Core business logic + guarded_code_service, plugin runner, etc.
-  tools/           ~70 tool classes (registered; policy-gated for MCP)
+  tools/           about 110 tool classes (100+ registered; policy-gated for MCP)
   tests/           Test suite
 frontend/          React/Vite app
-  src/pages/       ~38 page routes
+  src/pages/       about 50 page components
   src/components/  Many UI components (chat, agent, videoeditor, documents, swarm, etc.)
   src/stores/      Zustand + contexts
 cli/               Guaardvark CLI (`llx` / PyPI `guaardvark`); 24 command modules
@@ -162,13 +162,17 @@ flask run --debug --host=0.0.0.0 --port=5000
 
 ### Database Migrations
 
-If you modify `backend/models.py`:
+`backend/models.py` is the source of truth; a native install stamps Alembic revisions to head rather than replaying them. If you modify it:
+
+- A new table is created at startup by `db.create_all()`.
+- A new column on an existing table also needs an idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` in the schema reconcile block of `backend/app.py`, because `db.create_all()` never alters an existing table.
+
+The backend applies both at every start, and `./start.sh` runs `scripts/schema_sync.py` before it. To apply or check by hand:
 
 ```bash
-cd backend && source venv/bin/activate
-flask db migrate -m "description of change"
-flask db upgrade
-python3 ../scripts/check_migrations.py
+source backend/venv/bin/activate
+python3 scripts/schema_sync.py          # create missing tables, stamp Alembic to head
+python3 scripts/schema_sync.py --check  # report missing tables, change nothing
 ```
 
 ---

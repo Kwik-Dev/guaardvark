@@ -416,7 +416,7 @@ Supervised AI for social-media engagement. Production path: **recon → draft �
 ### Three Phases
 1. **Recon** — search for candidate posts/threads (YouTube keyword topics, Reddit subs, Discord channels). Outputs candidates; **never posts**
 2. **Content** — LLM drafts + grades in the user's voice. Outputs `drafted` rows; **never posts**
-3. **Dispatch** — after approve, `tick_process_approved_drafts` posts via servo (Reddit/YouTube) or Discord cog, with Redis cadence (1 successful post/platform/tick)
+3. **Dispatch** — after approve, Reddit, YouTube and Facebook drafts are posted one at a time through the agent's browser when a person presses **Post now, I'm watching**, and Discord drafts by the Discord bot, with Redis cadence (at most 1 post per 30 min and 8 per 24 h, per platform)
 
 ### Natural language control
 - GUI Chat / slash: `/outreach comment on some youtube videos regarding Offline AI or ComfyUI`
@@ -477,6 +477,7 @@ Dedicated upscaling plugin for sharpening generated content to 4K/8K.
 | RealESRGAN x2plus | 2x | 64 MB | Mild upscaling |
 | RealESRGAN x4plus (Anime) | 4x | 17 MB | Anime and stylized content |
 | realesr-animevideov3 | 4x | 6 MB | Video-optimized anime |
+| realesr-general-x4v3 | 4x | 6 MB | Lightweight general-purpose (Real-ESRGAN Compact) |
 | 4x-UltraSharp | 4x | 67 MB | Enhanced sharpness |
 | 4x NMKD-Superscale | 4x | 67 MB | Advanced super-scaling |
 | 4x Foolhardy Remacri | 4x | 67 MB | Texture-focused upscaling |
@@ -608,7 +609,7 @@ Centralized configuration across six sections.
 - **Pending updates banner** — shows when Interconnector has available updates
 
 ### Appearance
-- **Theme selection** — four dark themes with accent colors
+- **Theme selection** — six built-in themes (five dark, one light) with accent colors
 - **View modes** — customize default layouts
 
 ### Maintenance
@@ -791,8 +792,8 @@ Plugins can register:
 ## System Architecture
 
 ### Backend Stack
-- **Flask 3.0** — HTTP server with 68+ REST API blueprints (auto-discovered)
-- **SQLAlchemy + PostgreSQL** — ORM with 42 models; Alembic migrations + a custom `schema_sync.py` (single master)
+- **Flask 3.0** — HTTP server with about 96 REST API modules (auto-discovered)
+- **SQLAlchemy + PostgreSQL** — ORM with about 67 models; Alembic migrations + a custom `schema_sync.py` (single master)
 - **Celery + Redis** — async task processing with two worker pools (main + training/GPU), plus a research worker that an autoresearch run starts for itself and stops when it is done
 - **LlamaIndex** — RAG pipeline with vector storage, entity extraction, hybrid retrieval
 - **Ollama** — local LLM and embedding model inference (managed plugin)
