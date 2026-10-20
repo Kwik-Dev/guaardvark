@@ -280,7 +280,7 @@ class UpdateMemoryTool(BaseTool):
         "memory_id": ToolParameter(
             name="memory_id",
             type="string",
-            description="The entry's ID as search_memory prints it after 'ID:', e.g. '3f2b8c1e-...'.",
+            description="The entry's ID as search_memory prints it after 'ID:', e.g. 'd810bf6d7946'.",
             required=True,
         ),
         "content": ToolParameter(
@@ -383,7 +383,7 @@ class DeleteMemoryTool(BaseTool):
         "memory_id": ToolParameter(
             name="memory_id",
             type="string",
-            description="The entry's ID as search_memory prints it after 'ID:', e.g. '3f2b8c1e-...'.",
+            description="The entry's ID as search_memory prints it after 'ID:', e.g. 'd810bf6d7946'.",
             required=True
         )
     }

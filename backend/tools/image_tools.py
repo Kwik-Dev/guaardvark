@@ -810,7 +810,7 @@ class GenerationStatusTool(BaseTool):
         "generate_image with wait_for_result=false or started in the Studio, a video batch "
         "from generate_video, a bulk CSV job (bulk_gen_...) from generate_bulk_csv, a song "
         "(a 32-character job id) from generate_music, or a tool job (tooljob_...) from edit_image, "
-        "inpaint_image, outpaint_image, remove_background or generate_animation called over MCP, "
+        "outpaint_image, remove_background or generate_animation called over MCP, "
         "a music video (music_video:<id>) from generate_music_video, or a Film Crew production "
         "(production:<id>) from start_film_crew. "
         "Returns status (a tool job is queued, running, done or failed, with the time since it "
