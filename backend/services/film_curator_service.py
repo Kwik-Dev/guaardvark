@@ -119,11 +119,15 @@ def judge_shot(shot, *, analyzer=None, decider=None, threshold: int = DEFAULT_TH
         return {"approved": False, "approve": False, "confidence": 0,
                 "reason": f"vision failed: {seen.error}"}
 
+    # The verdict comes from the Film Crew's own model, the one its other
+    # agents write with, not whichever text model happens to be installed first.
+    from backend.services.ollama_chat_model import resolve_chat_model
+    from backend.services.swarm.agents.base import BaseSwarmAgent
     decision = decider.text_query(_DECIDE_PROMPT.format(
         character=_resolve_character(shot),
         shot=shot.description or "(no description)",
         frame=seen.description,
-    ))
+    ), model=resolve_chat_model(BaseSwarmAgent.model))
     if not decision.success:
         return {"approved": False, "approve": False, "confidence": 0,
                 "reason": f"decider failed: {decision.error}"}
