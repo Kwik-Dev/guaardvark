@@ -11,6 +11,8 @@
      bladevark: 158c431c-0ff8-4b25-a1b2-b5fbebdc81d4
      batvark:   b8f28582-6c1d-45b8-862e-9206a28cf103 -->
 
+<!-- mcp-name: io.github.guaardvark/guaardvark -->
+
 <div align="center">
 
 # Guaardvark
