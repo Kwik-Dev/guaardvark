@@ -15,7 +15,10 @@ const GATED_STAGES = ['casting', 'awaiting_approval'];
 
 const StageProgress = ({ currentStage, status, errorBlob }) => {
   // Decision: Map draft to Screenwriting (step 0) as it advances immediately anyway.
-  const activeStep = STAGES.findIndex(s => s.key === currentStage);
+  // A finished production has every step done, Complete included: past the last index.
+  const activeStep = currentStage === 'complete'
+    ? STAGES.length
+    : STAGES.findIndex(s => s.key === currentStage);
   const isFailed = status?.startsWith('failed');
   
   return (
