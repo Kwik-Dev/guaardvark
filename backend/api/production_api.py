@@ -193,8 +193,25 @@ def get_production(prod_id):
         "script_text": p.script_text,
         "settings_json": p.settings_json,
         "error_blob": p.error_blob,
+        "final_video": _final_video(p),
         "shots": shots,
     })
+
+
+def _final_video(p):
+    """The newest finished film of a production, or None before the first one."""
+    from backend.services.production_documents import production_outputs
+    films = production_outputs(p, "final")
+    if not films:
+        return None
+    doc = films[0]
+    return {
+        "document_id": doc.id,
+        "filename": doc.filename,
+        "path": doc.path,
+        "url": f"/api/files/document/{doc.id}/download",
+        "created_at": doc.uploaded_at.isoformat() if doc.uploaded_at else None,
+    }
 
 
 @bp.delete("/<int:prod_id>")
