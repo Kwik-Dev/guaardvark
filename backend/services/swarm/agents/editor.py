@@ -200,19 +200,22 @@ class Editor:
                 clip_paths = [r[0] for r in results]
                 voiceover_paths = [r[1] for r in results]
         else:
+            # Every clip first, then every spoken line. A voice model loaded
+            # between clips stays on the card (the Audio Foundry sidecar owns
+            # it), and on 16 GB the next clip was refused for want of memory.
+            # A line does not depend on its clip; lip-sync joins them after.
             for shot in shots:
-                clip_path = self._render_clip(shot, clips_dir)
+                clip_paths.append(self._render_clip(shot, clips_dir))
+                self._emit_progress(production_id, shot.shot_number, clip_paths[-1])
+
+            from backend.config import FILM_CREW_LIPSYNC_ENABLED
+            for i, shot in enumerate(shots):
                 shot_voice = shot.voice_id or default_voice
                 vo_path = self._render_voiceover(shot, audio_dir, shot_voice)
-
-                from backend.config import FILM_CREW_LIPSYNC_ENABLED
                 if FILM_CREW_LIPSYNC_ENABLED and self.lipsync and vo_path:
                     synced_path = str(clips_dir / f"shot_{shot.shot_number}_synced.mp4")
-                    clip_path = self.lipsync.lipsync(video_path=clip_path, audio_path=vo_path, output_path=synced_path)
-
-                clip_paths.append(clip_path)
+                    clip_paths[i] = self.lipsync.lipsync(video_path=clip_paths[i], audio_path=vo_path, output_path=synced_path)
                 voiceover_paths.append(vo_path)
-                self._emit_progress(production_id, shot.shot_number, clip_path)
 
         # Phase 1.3: Per-scene music. Skipped entirely when AudioFoundry is
         # unavailable — the production still renders, just video-only.
