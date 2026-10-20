@@ -177,7 +177,7 @@ export const MODEL_OPTIONS = {
   },
   "wan22-14b": {
     label: "Wan 2.2 14B (GGUF Q5)",
-    description: "Best quality, 5s videos (~11GB VRAM)",
+    description: "Best quality, 5s videos (16GB VRAM)",
     type: "wan",
     nativeFps: 16,
     maxFrames: 81,
@@ -196,7 +196,7 @@ export const MODEL_OPTIONS = {
   },
   "wan22-14b-i2v": {
     label: "Wan 2.2 14B I2V (GGUF Q5)",
-    description: "Top-tier image-to-video, 5s clips (~11GB VRAM)",
+    description: "Top-tier image-to-video, 5s clips (16GB VRAM)",
     type: "wan",
     nativeFps: 16,
     maxFrames: 81,
@@ -351,7 +351,7 @@ export const MODEL_OPTIONS = {
   },
   "hunyuan-t2v": {
     label: "HunyuanVideo 13B T2V (GGUF Q5)",
-    description: "Tencent HunyuanVideo — cinematic motion, no content filter. 24fps, ~3s clips (~11GB VRAM)",
+    description: "Tencent HunyuanVideo — cinematic motion, no content filter. 24fps, ~3s clips (16GB VRAM)",
     type: "hunyuan",
     nativeFps: 24,
     maxFrames: 129,
@@ -365,7 +365,7 @@ export const MODEL_OPTIONS = {
   },
   "hunyuan-i2v": {
     label: "HunyuanVideo 13B I2V (GGUF Q5)",
-    description: "HunyuanVideo image-to-video (v2) — follows the start frame closely. 24fps, ~3s (~11GB VRAM)",
+    description: "HunyuanVideo image-to-video (v2) — follows the start frame closely. 24fps, ~3s (16GB VRAM)",
     type: "hunyuan",
     nativeFps: 24,
     maxFrames: 129,
