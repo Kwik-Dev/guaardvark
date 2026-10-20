@@ -125,11 +125,14 @@ _LOOKUP_REQUEST_NUDGE = (
 # documents" to a question they do not answer, where searching first is right too.
 _DOCS_WORD = r"(?:documents?|docs|excerpts?|passages?|context|knowledge base|sources?|files?|text)"
 _GAP_VERB = r"(?:contain|mention|include|say|specify|state|provide|cover|describe|detail|list|address|explain|give)"
+# Within one sentence; the dot in "trial-INSTALL.md" or "127.0.0.1" does not end it.
+_SAME_SENTENCE = r"(?:[^.!?\n]|[.!?](?=\S))"
 _UNSEARCHED_GAP_RE = re.compile(
-    rf"\b{_DOCS_WORD}\b[^.!?\n]{{0,60}}\b(?:do|does|did)(?: not|n['’]t)\s+(?:\w+\s+)?{_GAP_VERB}"
-    rf"|\b(?:no|not|nothing|none)\b[^.!?\n]{{0,60}}\b(?:mentioned|specified|stated|provided|included|"
-    rf"covered|described|detailed|listed|found)\b[^.!?\n]{{0,40}}\b(?:in|by|within|from)\s+"
+    rf"\b{_DOCS_WORD}\b{_SAME_SENTENCE}{{0,60}}\b(?:do|does|did)(?: not|n['’]t)\s+(?:\w+\s+)?{_GAP_VERB}"
+    rf"|\b(?:no|not|nothing|none)\b{_SAME_SENTENCE}{{0,60}}\b(?:mentioned|specified|stated|provided|included|"
+    rf"covered|described|detailed|listed|found)\b{_SAME_SENTENCE}{{0,40}}\b(?:in|by|within|from)\s+"
     rf"(?:the|these|those|your|any)\s+(?:\w+\s+)?{_DOCS_WORD}\b"
+    r"|\b(?:it|this|they)\s+(?:do|does|did)(?: not|n['’]t)\s+(?:\w+\s+)?(?:mention|specify|state|say)\b"
     r"|\bi (?:do not|don['’]t) have (?:access to|any |specific |enough |the |)(?:information|knowledge|details|data|access)\b"
     r"|\bi (?:do not|don['’]t) have access to\b"
     r"|\byou(?:['’]re| are) referring to\b"
