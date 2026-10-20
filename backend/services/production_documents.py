@@ -1,5 +1,6 @@
 """Register production-pipeline outputs in the Documents/Folders hierarchy
-so they surface in DocumentsPage and ImagesPage automatically.
+so they surface in DocumentsPage. The Media Library lists the finished films
+through GET /api/production/films.
 
 Folder layout: project_<id>/productions/<prod_id>/<category>/
 """
