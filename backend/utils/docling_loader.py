@@ -50,6 +50,13 @@ def _get_converter():
 
         pdf_options = PdfPipelineOptions()
         pdf_options.do_ocr = False  # see module docstring
+        if os.environ.get("CELERY_WORKER_MODE", "false").lower() == "true":
+            # A GPU job running in another process can only reclaim models in its
+            # own process, so layout models left on the card by a worker's indexing
+            # task held ~1.4GB until the worker restarted and kept the next image
+            # batch from fitting. In a worker they run on the CPU.
+            from docling.datamodel.accelerator_options import AcceleratorDevice, AcceleratorOptions
+            pdf_options.accelerator_options = AcceleratorOptions(device=AcceleratorDevice.CPU)
         _converter = DocumentConverter(
             format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_options)}
         )
