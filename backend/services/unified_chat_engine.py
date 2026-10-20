@@ -115,6 +115,35 @@ _LOOKUP_REQUEST_NUDGE = (
     "answer it instead."
 )
 
+# A reply that says it lacks the answer, or asks the user to supply what the
+# question is about, when no tool ran in this turn. The default chat model reads
+# the few pre-turn excerpts as the whole documents and says they do not cover
+# the question without searching them ("The provided documents do not contain
+# ...", "the template you are referring to"): 24 of 49 wrong answers, 40
+# questions about indexed docs asked three times, 2026-10-19 (gemma4:e2b, real
+# chat path). Every reply it caught that was right was an honest "not in the
+# documents" to a question they do not answer, where searching first is right too.
+_DOCS_WORD = r"(?:documents?|docs|excerpts?|passages?|context|knowledge base|sources?|files?|text)"
+_GAP_VERB = r"(?:contain|mention|include|say|specify|state|provide|cover|describe|detail|list|address|explain|give)"
+_UNSEARCHED_GAP_RE = re.compile(
+    rf"\b{_DOCS_WORD}\b[^.!?\n]{{0,60}}\b(?:do|does|did)(?: not|n['’]t)\s+(?:\w+\s+)?{_GAP_VERB}"
+    rf"|\b(?:no|not|nothing|none)\b[^.!?\n]{{0,60}}\b(?:mentioned|specified|stated|provided|included|"
+    rf"covered|described|detailed|listed|found)\b[^.!?\n]{{0,40}}\b(?:in|by|within|from)\s+"
+    rf"(?:the|these|those|your|any)\s+(?:\w+\s+)?{_DOCS_WORD}\b"
+    r"|\bi (?:do not|don['’]t) have (?:access to|any |specific |enough |the |)(?:information|knowledge|details|data|access)\b"
+    r"|\bi (?:do not|don['’]t) have access to\b"
+    r"|\byou(?:['’]re| are) referring to\b"
+    r"|\bi need more (?:information|context|details)\b",
+    re.IGNORECASE,
+)
+_UNSEARCHED_GAP_NUDGE = (
+    "Your reply says you do not have this information, but no search of the person's "
+    "documents ran in this reply. The excerpts you were given, if any, are a few passages "
+    "picked before you answered, not the documents. Call search_knowledge_base now, with "
+    "the key terms of the question as the query. Answer from what it returns, and only if "
+    "it finds nothing say the documents do not cover it."
+)
+
 # A reply that opens with a tool signature the way the TOOLS prompt block prints
 # one: optional bracket or dash, a tool name, then "(param:type" ...
 _TOOL_SIGNATURE_RE = re.compile(r"^[\[\-\s]*([A-Za-z_]\w*)\(\s*[A-Za-z_]\w*\s*:\s*\w+\??")
@@ -3233,24 +3262,29 @@ class UnifiedChatEngine:
                 _claims = not steps and self._claims_unrun_search(final_text, session_id)
                 _unlooked = (not steps and not _skip_tools
                              and bool(_LOOKUP_REQUEST_RE.search(selection_text)))
-                if not options.get("skip_nudges") and (_claims or _unlooked):
+                _unsearched_gap = (not steps and not _skip_tools
+                                   and "search_knowledge_base" in (selected_tools or [])
+                                   and bool(_UNSEARCHED_GAP_RE.search(final_text)))
+                if not options.get("skip_nudges") and (_claims or _unlooked or _unsearched_gap):
                     if not claimed_search_retried and not _skip_tools and not is_aborted(session_id):
                         claimed_search_retried = True
+                        reason, nudge = (
+                            ("claimed search", _CLAIMED_SEARCH_NUDGE) if _claims
+                            else ("lookup request", _LOOKUP_REQUEST_NUDGE) if _unlooked
+                            else ("unsearched gap", _UNSEARCHED_GAP_NUDGE)
+                        )
                         logger.info(
-                            f"[UNIFIED_ENGINE] iter={iteration} no tool ran for a "
-                            f"{'claimed search' if _claims else 'lookup request'}; re-asking once"
+                            f"[UNIFIED_ENGINE] iter={iteration} no tool ran for a {reason}; re-asking once"
                         )
                         # The reply was streamed as it was written; take it off the screen.
                         emit_fn("chat:token", {"content": "", "reset": True, "session_id": session_id})
-                        ollama_messages.append({
-                            "role": "system",
-                            "content": _CLAIMED_SEARCH_NUDGE if _claims else _LOOKUP_REQUEST_NUDGE,
-                        })
+                        ollama_messages.append({"role": "system", "content": nudge})
                         continue
-                    # Still no tool: whatever the reply says it found, nothing was checked.
-                    logger.info(f"[UNIFIED_ENGINE] iter={iteration} still no tool for a lookup; noting it")
-                    final_text = f"{final_text.rstrip()}\n\n{_CLAIMED_SEARCH_NOTE}"
-                    emit_fn("chat:token", {"content": f"\n\n{_CLAIMED_SEARCH_NOTE}", "session_id": session_id})
+                    if _claims or _unlooked:
+                        # Still no tool: whatever the reply says it found, nothing was checked.
+                        logger.info(f"[UNIFIED_ENGINE] iter={iteration} still no tool for a lookup; noting it")
+                        final_text = f"{final_text.rstrip()}\n\n{_CLAIMED_SEARCH_NOTE}"
+                        emit_fn("chat:token", {"content": f"\n\n{_CLAIMED_SEARCH_NOTE}", "session_id": session_id})
                 logger.info(f"[UNIFIED_ENGINE] iter={iteration} NO tool calls, returning final answer")
                 final_text = re.sub(r'\u003c/?(?:tool_call|tool|observation)[^\u003e]*\u003e', '', final_text).strip()
 
