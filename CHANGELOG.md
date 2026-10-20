@@ -16,6 +16,13 @@
   gemma4:e2b drafts) is marked not independent, as one graded by the drafter's own build already
   was.
 
+## 3.2.2 — Ready for the official MCP Registry
+
+- **Guaardvark's MCP server can be listed in the official MCP Registry** as
+  `io.github.guaardvark/guaardvark`. The PyPI page carries the ownership line the registry checks,
+  and `server.json` describes the server: `uvx guaardvark mcp serve` over stdio, which needs
+  Guaardvark installed on the same machine. No other changes from 3.2.1.
+
 ## 3.2.1 — Code Editor works offline and saves safely; Audio Studio fits on the card
 
 - **The Code Editor loads offline.** Its editor came from a public CDN on every visit; it now
