@@ -194,6 +194,17 @@ def collect_exposed_tools(config: MCPConfig) -> list[tuple[BaseTool, mcp_types.T
     return out
 
 
+def _image_blocks(tool_result: Any) -> list[mcp_types.ContentBlock]:
+    """A picture the tool put in its metadata (a screenshot), as MCP image content,
+    so the calling agent can look at it rather than read about it."""
+    meta = getattr(tool_result, "metadata", None)
+    data = meta.get("image_base64") if isinstance(meta, dict) else None
+    if not data:
+        return []
+    fmt = str(meta.get("format") or "png").lower().replace("jpg", "jpeg")
+    return [mcp_types.ImageContent(type="image", data=data, mime_type=f"image/{fmt}")]
+
+
 def _content_blocks_from_result(result: Any) -> list[mcp_types.ContentBlock]:
     """Serialize a ToolResult.output into MCP content blocks. Keep it simple."""
     if result is None:
@@ -373,8 +384,8 @@ async def _await_result(task: asyncio.Future, name: str, timeout: float, read_on
             blocks = [mcp_types.TextContent(type="text", text=str(error))] + _content_blocks_from_result(payload)
             rec["bytes_out"] = sum(len(getattr(b, "text", "")) for b in blocks)
             return mcp_types.CallToolResult(content=blocks, is_error=True)
-    blocks = _content_blocks_from_result(payload)
-    rec["bytes_out"] = sum(len(getattr(b, "text", "")) for b in blocks)
+    blocks = _content_blocks_from_result(payload) + (_image_blocks(tool_result) if success else [])
+    rec["bytes_out"] = sum(len(getattr(b, "text", "") or getattr(b, "data", "")) for b in blocks)
     return mcp_types.CallToolResult(content=blocks, is_error=not success)
 
 
