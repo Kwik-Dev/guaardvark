@@ -495,6 +495,17 @@ def _shot_identity_subjects(shot) -> list:
     return locked
 
 
+def _still_canvas(production) -> dict:
+    """width/height for a storyboard still in the production's frame shape;
+    empty, so the stills model keeps its default, when none is set."""
+    from backend.services.production_service import film_frame_shape
+    shape = film_frame_shape(getattr(production, "settings_json", None))
+    if not shape:
+        return {}
+    width, height = shape["still"]
+    return {"width": width, "height": height}
+
+
 def _storyboard_path(prod_id: int, scene_number: int, shot_number: int) -> str:
     from backend.config import STORAGE_DIR
     out_dir = Path(STORAGE_DIR) / "outputs" / "storyboards" / str(prod_id)
@@ -540,6 +551,7 @@ def run_storyboard_artist(prod_id: int, image_generator=None):
                         source="filmcrew",
                         output_path=output_path,
                         keep_pipeline=True,
+                        **_still_canvas(ctx.production),
                     )
                     if not still.success:
                         raise RuntimeError(still.error or f"storyboard still failed for shot {shot.shot_number}")
@@ -619,9 +631,12 @@ def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
                 i2v = SvdI2VGenerator()
             else:
                 from backend.services.comfyui_video_generator import Wan22I2VGenerator
+                from backend.services.production_service import film_frame_shape
+                shape = film_frame_shape(settings)
                 i2v = Wan22I2VGenerator(
                     model=resolved,
                     fps=int(caps.get("native_fps") or 24),
+                    canvas=shape["clip"] if shape else None,
                 )
 
         # Real service clients with graceful degradation: ffmpeg always present
@@ -826,6 +841,7 @@ def regen_storyboard_shot(shot_id: int, prompt_override: str | None = None, imag
                 source="filmcrew",
                 output_path=output_path,
                 keep_pipeline=False,
+                **_still_canvas(db.session.get(Production, shot.production_id)),
             )
             if not still.success:
                 raise RuntimeError(still.error or "storyboard regen failed")

@@ -2990,11 +2990,14 @@ class Wan22I2VGenerator:
     inside generate_video. Short clips keep identity stable and VRAM in budget on 16 GB.
     """
 
-    def __init__(self, model: str = "wan22-5b", fps: int | None = None):
+    def __init__(self, model: str = "wan22-5b", fps: int | None = None,
+                 canvas: tuple[int, int] | None = None):
         from backend.services.video_model_registry import model_capabilities
         self.model = model
         caps = model_capabilities(model)
         self.fps = int(fps if fps is not None else (caps.get("native_fps") or 24))
+        # (width, height) for every clip; None keeps the request's default.
+        self.canvas = canvas
 
     def i2v_from_image(
         self, *, image_path: str, prompt: str, loras: list[str],
@@ -3017,6 +3020,7 @@ class Wan22I2VGenerator:
             duration_frames=frames,
             fps=self.fps,
             enhance_prompt=False,
+            **({"width": self.canvas[0], "height": self.canvas[1]} if self.canvas else {}),
             output_dir=out_dir,                      # known base → result path resolves
             # Identity comes from the LoRA-locked init frame. This lora_name is an
             # image-model LoRA, so generate_video leaves it out and logs that.
