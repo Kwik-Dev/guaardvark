@@ -33,9 +33,9 @@ logger = logging.getLogger(__name__)
 
 # Minimum number of table entries a healthy pg_dump must contain.
 #
-# The app declares 42 SQLAlchemy models. A real dump's pg_restore TOC lists at
-# least one TABLE entry per persisted model (plus indexes/constraints/sequences,
-# which we don't count). We set the floor comfortably below 42 to tolerate
+# The app declares about 67 SQLAlchemy models. A real dump's pg_restore TOC lists
+# at least one TABLE entry per persisted model (plus indexes/constraints/sequences,
+# which we don't count). We set the floor comfortably below that to tolerate
 # legitimate variance (association tables, models not yet migrated, abstract
 # bases) while still catching the failure mode this guard exists for: an empty
 # or near-empty dump shipped because pg_dump silently produced garbage. A dump

@@ -117,7 +117,7 @@ frontend/          React/Vite app
   src/pages/       about 50 page components
   src/components/  Many UI components (chat, agent, videoeditor, documents, swarm, etc.)
   src/stores/      Zustand + contexts
-cli/               Guaardvark CLI (`llx` / PyPI `guaardvark`); 24 command modules
+cli/               Guaardvark CLI (`llx` / PyPI `guaardvark`); 34 command modules
 plugins/           10+ GPU service plugins (each with plugin.json manifest)
 scripts/           Operator scripts, system-manager, dep_reconciler, etc.
 ```

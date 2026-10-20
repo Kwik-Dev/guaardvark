@@ -62,7 +62,8 @@ def main():
                 db.create_all()
                 status_msg = "Fresh database created from models.py"
             else:
-                # Existing database — db.create_all() adds missing tables/columns
+                # Existing database — db.create_all() adds missing tables; it never adds
+                # a column to an existing table (backend/app.py's reconcile block does that)
                 if check_only:
                     model_tables = set(db.metadata.tables.keys())
                     missing = model_tables - existing_tables
