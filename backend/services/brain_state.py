@@ -12,6 +12,7 @@ compiled reflex table.
 
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -683,6 +684,12 @@ class BrainState:
 
     def _start_warmup(self):
         """Send a throwaway prompt to force model into VRAM."""
+        if os.environ.get("CELERY_WORKER_MODE", "false").lower() == "true":
+            # A Celery worker never serves chat, and it builds the app inside
+            # its first task, often a render that has just evicted Ollama.
+            logger.info("BrainState: skipping warm-up in the Celery worker")
+            self.health.warm_up_status = WarmUpStatus.READY
+            return
         self.health.warm_up_status = WarmUpStatus.WARMING
 
         def _ping():

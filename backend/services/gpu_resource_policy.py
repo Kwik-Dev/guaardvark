@@ -230,6 +230,7 @@ def reclaim_in_process_vram(needed_mb: int = 0) -> int:
 
 _RECLAIM_POLL_S = 0.5
 _RECLAIM_POLLS = 34  # with the 3 s settle: up to 20 s for a freed model to leave the card
+_REEVICT_EVERY = 4   # polls between Ollama re-evictions while a job that evicted it waits
 
 
 def vram_holders_text(*, limit: int = 6) -> str:
@@ -260,19 +261,26 @@ def vram_holders_text(*, limit: int = 6) -> str:
         return "unavailable"
 
 
-def _wait_until_fits(vram_estimate_mb: int, reserve_mb: int, op_id: str) -> None:
+def _wait_until_fits(vram_estimate_mb: int, reserve_mb: int, op_id: str,
+                     evict_ollama: bool = False) -> None:
     """ComfyUI answers /free before the memory is actually back. After the
     fixed settle, poll the fit up to _RECLAIM_POLLS times instead of trusting
     the settle alone: a 12 GB FLUX unload took longer than 3 s, so a chat edit
     that followed an identity render was refused with "try again shortly"
-    every time. Returns as soon as the job fits; the caller re-checks anyway."""
+    every time. Returns as soon as the job fits; the caller re-checks anyway.
+
+    With ``evict_ollama``, a model Ollama loads during the wait is evicted
+    again: a Celery worker's first task builds the app, and its start-up asks
+    Ollama for a chat and an embedding model inside this very window."""
     time.sleep(_RECLAIM_SETTLE_S)
-    for _ in range(_RECLAIM_POLLS):
+    for poll in range(_RECLAIM_POLLS):
         try:
             if fit_verdict(vram_estimate_mb, reserve_mb=reserve_mb).ok:
                 return
         except Exception:  # noqa: BLE001 — the real check follows
             return
+        if evict_ollama and poll % _REEVICT_EVERY == _REEVICT_EVERY - 1:
+            evict_ollama_models()
         time.sleep(_RECLAIM_POLL_S)
     waited = _RECLAIM_SETTLE_S + _RECLAIM_POLLS * _RECLAIM_POLL_S
     fit = None
@@ -876,7 +884,8 @@ def gpu_session(
                         # keep_alive=0 returns before the runner drops its CUDA
                         # context. Waiting only for ComfyUI left the Ollama-only
                         # callers measuring mid-unload and refusing a job that fits.
-                        _wait_until_fits(vram_estimate_mb, vram_reserve_mb, op_id)
+                        _wait_until_fits(vram_estimate_mb, vram_reserve_mb, op_id,
+                                         evict_ollama=evict_ollama)
                     else:
                         log.info("gpu_session(%s): %d MB already fits; skipping eviction", op_id, vram_estimate_mb)
                 elif evict_ollama or free_comfyui:
