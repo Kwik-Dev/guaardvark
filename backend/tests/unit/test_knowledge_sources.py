@@ -159,9 +159,12 @@ def test_rag_returns_source_hits_even_when_pgvector_is_empty(engine, pgvector_re
 
 
 def test_rag_clips_source_snippets_like_pgvector_chunks(engine, pgvector_results):
-    ks.register_knowledge_source("verbose", lambda q, k: [hit("Long", snippet="x" * 900)])
+    from backend.services.chat_prompt_blocks import CHAT_KB_EXCERPT_CHARS
 
-    assert engine._retrieve_rag_context("q") == "[Source: Long]\n" + "x" * 500
+    ks.register_knowledge_source(
+        "verbose", lambda q, k: [hit("Long", snippet="x" * (CHAT_KB_EXCERPT_CHARS + 400))])
+
+    assert engine._retrieve_rag_context("q") == "[Source: Long]\n" + "x" * CHAT_KB_EXCERPT_CHARS
 
 
 def _scored(src, text, score):
