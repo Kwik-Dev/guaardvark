@@ -1,0 +1,43 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.guaardvark/guaardvark",
+  "title": "Guaardvark",
+  "description": "Local AI studio on your GPU: images, video, music, voice, RAG. Needs the Guaardvark app installed.",
+  "version": "3.2.2",
+  "websiteUrl": "https://guaardvark.com/mcp/",
+  "repository": {
+    "url": "https://github.com/guaardvark/guaardvark",
+    "source": "github"
+  },
+  "icons": [
+    {
+      "src": "https://raw.githubusercontent.com/guaardvark/guaardvark/main/frontend/public/icon-512.png",
+      "mimeType": "image/png",
+      "sizes": [
+        "512x512"
+      ]
+    }
+  ],
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "guaardvark",
+      "version": "3.2.2",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        },
+        {
+          "type": "positional",
+          "value": "serve"
+        }
+      ]
+    }
+  ]
+}
