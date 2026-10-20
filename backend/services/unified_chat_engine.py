@@ -5134,9 +5134,13 @@ class UnifiedChatEngine:
         # when thinking content contains XML-like tags. (N/A for cloud providers.)
         # One predicate for the whole product: name patterns, then Ollama's
         # capabilities list, so a model the pattern list has not met still counts.
-        from backend.utils.ollama_resource_manager import model_supports_thinking
+        from backend.utils.ollama_resource_manager import model_supports_thinking, think_off_value
         is_thinking_model = model_supports_thinking(model_name)
         think_on = is_thinking_model and bool(getattr(self, "_think", False))
+        # think:false for most models; a level for one that reasons regardless,
+        # which then needs the reasoning budget as if thinking were on.
+        think_off = think_off_value(model_name) if is_thinking_model else False
+        reasons_anyway = is_thinking_model and not think_on and think_off is not False
 
         # Reasoning written into the content stream goes to the reasoning
         # channel, not the answer: anywhere, or ended by a lone closing tag, for
@@ -5216,7 +5220,7 @@ class UnifiedChatEngine:
             # call gets the extra budget on top of the answer budget. The cap
             # keeps prompt + generation inside the context window but never
             # drops below max_tokens: the cap only removes thinking headroom.
-            if think_on:
+            if think_on or reasons_anyway:
                 from backend.config import AGENTIC_THINKING_TOKEN_BUDGET
                 num_predict = max_tokens + AGENTIC_THINKING_TOKEN_BUDGET
                 room = max(int(ctx_window) - estimated, max_tokens)
@@ -5271,7 +5275,7 @@ class UnifiedChatEngine:
             # Only thinking-capable models accept `think`; passing it to others can
             # error, so gate on is_thinking_model. Default-off keeps chat snappy.
             if is_thinking_model and getattr(self, "_think", None) is not None:
-                _chat_kwargs["think"] = bool(self._think)
+                _chat_kwargs["think"] = True if self._think else think_off
 
             # XML filter: stream tokens to client until <tool_call is detected,
             # then suppress further emission (tool calls are announced separately).
@@ -5396,14 +5400,14 @@ class UnifiedChatEngine:
                     "re-asking for the answer with thinking off"
                 )
                 retry_kwargs = dict(_chat_kwargs)
-                retry_kwargs["think"] = False
+                retry_kwargs["think"] = think_off
                 retry_kwargs["messages"] = _template_safe(model_name, list(call_messages) + [
                     {"role": "system", "content": _ANSWER_AFTER_REASONING_NUDGE},
                 ])
                 retry_kwargs["options"] = sampling_profiles.profile_options(
                     sampling_profiles.DEFAULT_PROFILE,
                     num_ctx=ctx_window,
-                    num_predict=max_tokens,
+                    num_predict=num_predict if reasons_anyway else max_tokens,
                     extra={"num_keep": -1},
                 )
                 accumulated.clear()
@@ -5456,7 +5460,7 @@ class UnifiedChatEngine:
                     ))
                     _sanitized_kwargs["messages"] = sanitized
                     if getattr(self, "_think", None) is not None:
-                        _sanitized_kwargs["think"] = bool(self._think)
+                        _sanitized_kwargs["think"] = True if self._think else think_off
                     accumulated.clear()
                     xml_detected = False
                     inline_reasoning = InlineReasoningStream(reasoning_tags, leading_only=leading_only)

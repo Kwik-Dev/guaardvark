@@ -676,6 +676,20 @@ def model_supports_thinking(model_name: str) -> bool:
     return capabilities_for(model_name, with_vision=False).thinking
 
 
+def think_off_value(model_name: str):
+    """What to send as ``think`` when thinking is meant to be off.
+
+    ``False``, or for an architecture whose thinking cannot be turned off
+    (:data:`model_capability_data.THINK_OFF_LEVEL_BY_ARCH`) the least level it
+    takes. A level means the model still reasons, so the caller leaves room for
+    it in num_predict.
+    """
+    from backend.services.model_capabilities import capabilities_for
+    from backend.services.model_capability_data import THINK_OFF_LEVEL_BY_ARCH
+    arch = capabilities_for(model_name, with_vision=False).architecture if model_name else ""
+    return THINK_OFF_LEVEL_BY_ARCH.get(str(arch or "").lower(), False)
+
+
 def thinking_kwargs(model_name: str) -> dict:
     """Constructor kwargs that turn thinking off for a llama-index ``Ollama``.
 
