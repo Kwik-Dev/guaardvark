@@ -109,6 +109,11 @@ def create():
         from backend.services.video_model_registry import VIDEO_MODEL_REGISTRY, model_capabilities
         if video_model not in VIDEO_MODEL_REGISTRY or not model_capabilities(video_model):
             return jsonify({"error": f"video_model '{video_model}' is not a video model"}), 400
+    aspect_ratio = settings.get("aspect_ratio")
+    if aspect_ratio is not None:
+        from backend.services.production_service import FILM_ASPECT_RATIOS
+        if aspect_ratio not in FILM_ASPECT_RATIOS:
+            return jsonify({"error": f"aspect_ratio must be one of {list(FILM_ASPECT_RATIOS)}"}), 400
 
     svc = ProductionService(db.session)
     p = svc.create(name=name, script_text=script_text, project_id=project_id, settings=settings)

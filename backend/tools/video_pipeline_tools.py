@@ -537,13 +537,22 @@ class FilmCrewTool(BaseTool):
             description="Optional I2V / scene model id. Default: the active video model.",
             required=False,
         ),
+        "aspect_ratio": ToolParameter(
+            name="aspect_ratio",
+            type="string",
+            description="Optional frame shape for storyboard stills and clips: 16:9, 9:16 or 1:1. "
+                        "Default: each model's own frame.",
+            required=False,
+        ),
     }
 
     def execute(self, script_text: str, name: str | None = None,
-                video_model: str | None = None, **kwargs) -> ToolResult:
+                video_model: str | None = None, aspect_ratio: str | None = None,
+                **kwargs) -> ToolResult:
         if is_mcp_transport(self):
             # The production row, model resolution and screenwriter dispatch belong to the backend process.
-            arguments = {"script_text": script_text, "name": name, "video_model": video_model}
+            arguments = {"script_text": script_text, "name": name, "video_model": video_model,
+                         "aspect_ratio": aspect_ratio}
             return run_tool_in_backend(self.name, {k: v for k, v in arguments.items() if v is not None})
         script_text, script_err = _script_body(script_text, mcp=is_mcp_caller(self))
         if script_err:
@@ -555,7 +564,13 @@ class FilmCrewTool(BaseTool):
                 resolve_active_video_model, VIDEO_MODEL_REGISTRY, model_capabilities,
             )
 
+            from backend.services.production_service import FILM_ASPECT_RATIOS
             settings = {}
+            aspect = (aspect_ratio or "").strip() or None
+            if aspect:
+                if aspect not in FILM_ASPECT_RATIOS:
+                    return ToolResult(success=False, error=f"aspect_ratio must be one of {', '.join(FILM_ASPECT_RATIOS)}")
+                settings["aspect_ratio"] = aspect
             explicit = (video_model or "").strip() or None
             if explicit:
                 if explicit not in VIDEO_MODEL_REGISTRY or not model_capabilities(explicit):
