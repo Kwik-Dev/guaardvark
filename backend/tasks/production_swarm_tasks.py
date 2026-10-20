@@ -694,8 +694,16 @@ def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
                 character_description=(speaker.description if speaker else None),
             ))
             
-        import tempfile
-        output_dir = tempfile.mkdtemp(prefix=f"prod_{prod_id}_")
+        # The film, its clips and its timeline are registered as documents by
+        # path, so they live under the data folder, not a temp folder that a
+        # reboot empties. Each render gets its own folder; earlier cuts stay.
+        from datetime import datetime
+        from backend.config import STORAGE_DIR
+        output_dir = str(
+            Path(STORAGE_DIR) / "outputs" / "productions" / str(prod_id)
+            / datetime.now().strftime("render_%Y%m%d_%H%M%S")
+        )
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
 
         # Ride the unified job rail: a VIDEO_RENDER progress process so the
         # production render shows up in /api/jobs/active and the gate snapshot,
