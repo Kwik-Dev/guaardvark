@@ -27,7 +27,7 @@ class CheckInboundChangeTool(BaseTool):
     description = (
         "Check a code change against Guaardvark's inbound guard before it lands in this checkout: the "
         "rules that decide whether a merge is allowed, held for a person to read, or blocked. Returns "
-        "'Inbound guard: ALLOW|HOLD|BLOCK - N finding(s) over F file(s), +L line(s).' and up to 25 "
+        "'Inbound guard: ALLOW|HOLD|BLOCK — N finding(s) over F file(s), +L line(s).' and up to 25 "
         "findings, one per line with severity, rule, file:line, why and the matching text. Two ways to "
         "call it: range, to read commits or a branch already in git; or filepath with new_text, to read "
         "one edit before writing it. Giving neither is an error. Reads only: nothing is recorded or "
