@@ -175,12 +175,24 @@ def create_production_swarm_tasks(celery_app: Celery):
     }
 
 
+# A screenplay cue extension after a speaker's name: (V.O.), (O.S.), (CONT'D).
+_CUE = r"\((?:V\.?O\.?|O\.?S\.?|O\.?C\.?|CONT'D)\)"
 # A speaker's name written just before a line: `DETECTIVE (V.O.): "...`, or a
 # screenplay cue on its own line above the dialogue.
 _SPEAKER_BEFORE_LINE = re.compile(
     r"([A-Za-z][\w'\-]*(?: [A-Za-z][\w'\-]*){0,3})\s*"
-    r"(?:\((?:V\.?O\.?|O\.?S\.?|O\.?C\.?|CONT'D)\))?\s*:?\s*[\"\u201c]?\s*$"
+    r"(?:" + _CUE + r")?\s*:?\s*[\"\u201c]?\s*$"
 )
+
+
+def _canonical_speaker(name: str | None, characters: list[str]) -> str | None:
+    """The breakdown's character a shot's speaker names, matched without its cue
+    extension or case (`DETECTIVE (V.O.)` -> `DETECTIVE`); the bare name when none
+    matches, so a Cast Library lookup by name still works."""
+    bare = re.sub(r"\s*" + _CUE + r"\s*$", "", name or "", flags=re.IGNORECASE).strip()
+    if not bare:
+        return None
+    return {c.upper(): c for c in characters}.get(bare.upper(), bare)
 
 
 def _speaker_in_script(script_text: str, dialogue: str | None, characters: list[str]) -> str | None:
@@ -280,7 +292,7 @@ def run_screenwriter(prod_id: int, llm=None):
                     shot_number=shot.number,
                     description=shot.description,
                     scene_mood=scene.mood,
-                    character_name=(shot.character_name
+                    character_name=(_canonical_speaker(shot.character_name, characters)
                                     or _speaker_in_script(input_data, shot.dialogue, characters)),
                     dialogue_text=shot.dialogue
                 )
