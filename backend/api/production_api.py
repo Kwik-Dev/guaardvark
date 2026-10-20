@@ -183,7 +183,7 @@ def get_production(prod_id):
     p = db.session.get(Production, prod_id)
     if p is None:
         return jsonify({"error": "not_found"}), 404
-    shots = [_shot_to_dict(s) for s in p.shots]
+    shots = [_shot_to_dict(s) for s in sorted(p.shots, key=lambda s: (s.scene_number or 0, s.shot_number or 0))]
     return jsonify({
         "id": p.id, "name": p.name,
         "status": p.status, "current_stage": p.current_stage,
