@@ -79,7 +79,28 @@ def test_render_generates_one_music_track(tmp_path):
     assert audio.generate_music.call_count == 1
     call = audio.generate_music.call_args.kwargs
     assert call["mood"] == "hopeful"
-    assert call["duration_seconds"] == 7.5  # sum of shot durations
+    assert call["duration_seconds"] == 6.0  # the two clips as rendered, 3.0 s each
+
+
+def test_one_score_covers_every_scene(tmp_path):
+    i2v, audio, ffmpeg = _make_editor(tmp_path)
+    editor = Editor(i2v=i2v, audio_foundry=audio, ffmpeg=ffmpeg)
+
+    shots = []
+    for num, scene, mood in [(1, 1, "suspense"), (2, 1, "suspense"), (1, 2, "dread")]:
+        shot = _make_shot(num, duration=5.0)
+        shot.scene_number = scene
+        shot.scene_mood = mood
+        shots.append(shot)
+    editor.render(
+        production_id=1, production_name="X",
+        shots=shots, output_dir=str(tmp_path),
+    )
+
+    assert audio.generate_music.call_count == 1
+    call = audio.generate_music.call_args.kwargs
+    assert call["mood"] == "suspense, then dread"
+    assert call["duration_seconds"] == 9.0  # three clips at 3.0 s, not the planned 15 s
 
 
 def test_render_calls_ffmpeg_concat_at_end(tmp_path):
