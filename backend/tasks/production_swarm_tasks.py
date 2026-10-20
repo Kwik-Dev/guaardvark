@@ -63,6 +63,17 @@ def _agent_run(prod_id: int, *, agent_name: str, expected_stage: str, next_agent
     if not prod or prod.current_stage != expected_stage:
         yield None
         return
+    # A failed stage keeps its stage name, so a second copy of the task (a
+    # worker boots and resumes in-flight runs while one is already queued)
+    # would pass the check above and run under a "failed" status. Retry
+    # clears the failure first; nothing else re-runs it.
+    if (prod.status or "").startswith("failed"):
+        import logging
+        logging.getLogger(__name__).info(
+            "production %s: %s skipped, stage %s is marked %s (Retry re-runs it)",
+            prod_id, agent_name, expected_stage, prod.status)
+        yield None
+        return
 
     ctx = _AgentRunContext(production=prod, agent_name=agent_name, stage=expected_stage)
     try:
