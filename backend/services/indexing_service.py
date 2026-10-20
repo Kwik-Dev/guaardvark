@@ -656,6 +656,18 @@ def _under_resource_pressure() -> bool:
         return False
 
 
+def _query_embedder_resident() -> bool:
+    """True when the active embedding model is already loaded in Ollama, so
+    embedding a query takes no new VRAM. False when it is not, when it is not an
+    Ollama model, or when Ollama cannot say."""
+    try:
+        from backend.config import get_active_embedding_model
+        from backend.utils.ollama_resource_manager import resident_entry
+        return resident_entry(get_active_embedding_model()) is not None
+    except Exception:
+        return False
+
+
 # Query-embedding cache: (model, query) -> (vector, ts). Repeated/identical retrieval queries
 # skip the embed call. Bounded LRU + TTL; keyed by active model so a model change can't serve
 # stale vectors. Helps CPU-only hosts most (where embedding is slowest).
@@ -2316,7 +2328,10 @@ def search_with_llamaindex(
 
                 # Resource-pressure fallback: under VRAM/RAM pressure, skip the vector leg
                 # entirely (no query embedding) and serve BM25-only rather than thrash.
-                if _under_resource_pressure():
+                # Not when the embedder is already loaded: a query then costs no new
+                # VRAM, and with gpt-oss:20b resident on a 16 GB card free VRAM sits
+                # under the floor, so every chat search was BM25-only (2026-10-19).
+                if _under_resource_pressure() and not _query_embedder_resident():
                     logger.warning(
                         "RAG degraded: resource pressure → BM25-only retrieval (vector embedding skipped)"
                     )
