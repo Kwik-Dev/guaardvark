@@ -160,14 +160,14 @@ All generation runs on your GPU. No cloud APIs, no per-minute billing.
 | Model | Type | Max duration | Native resolution | VRAM |
 |-------|------|-------------|-------------------|------|
 | **Wan 2.2 TI2V-5B** (default) | Text + image to video | ~5 s (up to 121 frames @ 24 fps) | 1280x704 | ~11 GB |
-| **Wan 2.2 14B MoE** | Text to video | 5 s (81 frames @ 16 fps) | 832x480 | 11 GB |
-| **Wan 2.2 14B I2V** | Image to video | 5 s (81 frames @ 16 fps) | 832x480 | 11 GB |
+| **Wan 2.2 14B MoE** | Text to video | 5 s (81 frames @ 16 fps) | 832x480 | 16 GB |
+| **Wan 2.2 14B I2V** | Image to video | 5 s (81 frames @ 16 fps) | 832x480 | 16 GB |
 | **CogVideoX-5B** | Text to video | 6 s (49 frames @ 8 fps) | 720x480 | 16 GB |
 | **CogVideoX-5B I2V** | Image to video | 6 s (49 frames @ 8 fps) | 720x480 | 16 GB |
-| **LTX-2.3 Distilled FP8** | Text + image to video | ~10 s (161 frames @ 16 fps) | 768x512 | ~14 GB |
-| **LTX-2.5 Distilled Int8** | Text + image to video | ~10 s (161 frames @ 16 fps) | 768x512 | ~14 GB |
-| **HunyuanVideo 13B** (GGUF Q5) | Text to video | ~3 s (73 frames @ 24 fps, up to 129) | 848x480 | ~11 GB |
-| **HunyuanVideo 13B I2V** (GGUF Q5) | Image to video | ~3 s (73 frames @ 24 fps, up to 129) | 848x480 | ~11 GB |
+| **LTX-2.3 Distilled FP8** | Text + image to video | ~10 s (161 frames @ 16 fps) | 768x512 | 16 GB |
+| **LTX-2.5 Distilled Int8** | Text + image to video | ~10 s (161 frames @ 16 fps) | 768x512 | 16 GB |
+| **HunyuanVideo 13B** (GGUF Q5) | Text to video | ~3 s (73 frames @ 24 fps, up to 129) | 848x480 | 16 GB |
+| **HunyuanVideo 13B I2V** (GGUF Q5) | Image to video | ~3 s (73 frames @ 24 fps, up to 129) | 848x480 | 16 GB |
 | **MiniMax H3** (pruned Int8) | Text, first frame, last frame, first + last frame to video **with its own stereo soundtrack** (dialogue, ambience, score) | ~7 s offered (175 frames @ 24 fps; the model trains to 15 s) | 864x480 default, 1344x768 max | 16 GB card; measured 6.5 min for a 5 s clip at 864x480, 20 steps, on a 16 GB RTX 40-series card |
 | **MiniMax H3 Reference** (pruned Int8) | Up to 9 images, 3 clips and 3 audio files to video with soundtrack (identity, motion, voice, editing) | same | same | same |
 
@@ -477,7 +477,7 @@ Config: `~/.guaardvark/cli.json` (legacy `~/.llx/config.json` is still read). Th
 Browser / CLI (PyPI: guaardvark) / MCP Client (Claude Desktop, Cursor, etc.)
     | HTTP + WebSocket / stdio MCP
     v
-Flask (~100 API blueprints, auto-discovered) + Socket.IO
+Flask (about 96 API modules, auto-discovered) + Socket.IO
     |
     +-- AgentBrain (3-tier routing: Reflex → Instinct → Deliberation)
     |

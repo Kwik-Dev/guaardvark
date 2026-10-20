@@ -56,7 +56,7 @@ scripts/lint.sh                                    # flake8 (syntax-only: E9,E11
 
 **Blueprint auto-discovery.** API endpoints in `backend/api/` (about 96 modules ending `_api.py`) are **not** registered manually — `backend/utils/blueprint_discovery.py` scans the directory and registers every Flask blueprint it finds. Add a new endpoint by dropping a module that exports a `Blueprint`; no central wiring needed. (A handful of blueprints with import-order constraints are still registered explicitly near the end of `create_app()`.)
 
-**Tool registry (`backend/tools/` + `backend/services/agent_tools.py`).** About 110 tool classes (subclasses of `BaseTool`) registered into a global registry at startup via `backend/tools/tool_registry_init.py`. Tools carry a **category** (content, generation, desktop, agent_control, system, browser, etc.) and flags (`is_dangerous`, `requires_approval`). These categories/flags are what the MCP policy gates on — see below.
+**Tool registry (`backend/tools/` + `backend/services/agent_tools.py`).** About 110 tool classes (subclasses of `BaseTool`), 100+ of them registered into a global registry at startup via `backend/tools/tool_registry_init.py`. Tools carry a **category** (content, generation, desktop, agent_control, system, browser, etc.) and flags (`is_dangerous`, `requires_approval`). These categories/flags are what the MCP policy gates on — see below.
 
 **AgentBrain (`backend/services/agent_brain.py`).** Three-tier router every chat message enters at Tier 1 and escalates only if needed: **Reflex** (<100ms, pattern match, 0 LLM calls) → **Instinct** (single pre-warmed shot) → **Deliberation** (full ReACT loop). Telemetry appends to `logs/tier_telemetry.jsonl`. State lives in `backend/services/brain_state.py`.
 
@@ -72,7 +72,7 @@ scripts/lint.sh                                    # flake8 (syntax-only: E9,E11
 
 ## Database & schema
 
-SQLAlchemy models in `backend/models.py` (about 65 models; `db = SQLAlchemy()` shared instance). **Schema is kept in sync via `scripts/schema_sync.py`, not migration replay** — it diffs `models.py` against the live DB and applies changes (`--check` to verify only). `start.sh` and `run_tests.py` run schema sync / `scripts/check_migrations.py` automatically. After changing `models.py`, run `python3 scripts/schema_sync.py` (or `--check` in CI). Default DB URL: `postgresql://guaardvark:guaardvark@localhost:5432/guaardvark` (override via `DATABASE_URL`).
+SQLAlchemy models in `backend/models.py` (about 67 models; `db = SQLAlchemy()` shared instance). **Schema is kept in sync via `scripts/schema_sync.py`, not migration replay** — it creates the tables `models.py` declares that the live DB lacks and stamps Alembic to head (`--check` reports missing tables without changing anything). `db.create_all()` never alters an existing table, so a new column on one also needs an idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` in the schema reconcile block that `backend/app.py` runs at every start. `start.sh` and `run_tests.py` run schema sync / `scripts/check_migrations.py` automatically. After changing `models.py`, run `python3 scripts/schema_sync.py` (or `--check` in CI). Default DB URL: `postgresql://guaardvark:guaardvark@localhost:5432/guaardvark` (override via `DATABASE_URL`).
 
 ## Knowledge index (RAG)
 

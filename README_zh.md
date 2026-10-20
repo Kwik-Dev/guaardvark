@@ -32,7 +32,7 @@
 - **自动化工具** — 浏览器自动化（Playwright），桌面自动化（pyautogui），MCP 服务器集成
 - **CLI** — 通过带有交互式 REPL 的 `llx` 终端工具访问整个平台
 - **插件系统** — 无需修改核心代码的即插即用扩展
-- **主题** — 四个内置的深色主题（Default, Musk, Hacker, Vader），支持强调色 UI
+- **主题** — 六个内置主题（五个深色，一个浅色），支持强调色 UI
 - **支持离线** — 所有 AI 处理均通过 Ollama 在本地运行；无需云服务
 
 ---
@@ -100,7 +100,7 @@ cp .env.example .env       # 使用您的配置进行编辑
         │ HTTP + WebSocket
         ▼
 Flask 应用 (端口 5000)
-  ├── 68 个 REST API 蓝图
+  ├── 约 96 个 REST API 模块
   ├── GraphQL (Ariadne)
   └── Socket.IO (实时流)
         │
@@ -129,7 +129,7 @@ SQLite  Celery + Redis   Ollama / GPU
 ```
 guaardvark/
 ├── backend/
-│   ├── api/            # 68 个 Flask 蓝图模块
+│   ├── api/            # 约 96 个 Flask 蓝图模块
 │   ├── services/       # 48 个业务逻辑模块
 │   ├── tools/          # 智能体可调用的工具 (代码, 浏览器, 语音, web)
 │   ├── utils/          # 76 个辅助类 (RAG, 上下文, 进度, CSV)
@@ -141,7 +141,7 @@ guaardvark/
 │   └── config.py       # 配置 + 路径解析
 ├── frontend/
 │   ├── src/
-│   │   ├── pages/      # 28 个页面组件
+│   │   ├── pages/      # 约 50 个页面组件
 │   │   ├── components/ # 129 个 UI 组件
 │   │   ├── stores/     # Zustand 状态管理
 │   │   ├── hooks/      # 自定义 React hooks
@@ -201,17 +201,18 @@ GUAARDVARK_MCP_ENABLED=true            # MCP 工具服务器集成
 
 ## 数据库迁移
 
+`backend/models.py` 是模式的唯一来源；原生安装只把 Alembic 版本标记（stamp）到 head，不会重放。修改它时：
+
+- 新表在启动时由 `db.create_all()` 创建。
+- 给已有的表新增列，还需要在 `backend/app.py` 的模式对齐代码块中加入幂等的 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`，因为 `db.create_all()` 从不修改已有的表。
+
 ```bash
 python3 scripts/check_migrations.py          # 检查状态
-
-cd backend && source venv/bin/activate
-flask db migrate -m "description"            # 创建迁移
-flask db upgrade                             # 应用迁移
-
-flask db merge heads -m "merge heads"        # 修复多个前置点
+python3 scripts/schema_sync.py               # 创建缺失的表，并将 Alembic 标记到 head
+python3 scripts/schema_sync.py --check       # 只报告缺失的表，不做修改
 ```
 
-启动脚本会自动应用未决的迁移。如需绕过，请设置 `GUAARDVARK_SKIP_MIGRATIONS=1`。
+后端每次启动都会创建缺失的表并执行这些 `ALTER`，`./start.sh` 还会在启动后端之前运行 `scripts/schema_sync.py`；设置 `GUAARDVARK_SKIP_MIGRATIONS=1` 可跳过后者。
 
 ---
 
