@@ -267,12 +267,13 @@ def test_gpu_session_capacity_refuses_before_reclaim(fresh_gate, monkeypatch):
 
 
 def test_gpu_session_evicts_ollama_at_most_once(fresh_gate, monkeypatch):
-    """One reclaim per session; one settle, then bounded fit polls, before the
-    final fit probe (the freed model may still be leaving the card)."""
+    """One reclaim per session while Ollama stays empty; one settle, then bounded
+    fit polls, before the final fit probe (the freed model may still be leaving the card)."""
     _patch_vram(monkeypatch, free_mb=5000, total_mb=16376)
     evictions = []
     sleeps = []
     monkeypatch.setattr(grp, "evict_ollama_models", lambda: evictions.append(1) or True)
+    monkeypatch.setattr(grp, "_ollama_has_loaded_model", lambda: False)
     monkeypatch.setattr(grp, "free_comfyui_vram", lambda: True)
     monkeypatch.setattr(grp.time, "sleep", lambda s: sleeps.append(s))
     with pytest.raises(GpuBusyError, match="another model/render may be resident"):
@@ -284,3 +285,22 @@ def test_gpu_session_evicts_ollama_at_most_once(fresh_gate, monkeypatch):
     assert evictions == [1]
     assert sleeps[0] == grp._RECLAIM_SETTLE_S
     assert sleeps[1:] == [grp._RECLAIM_POLL_S] * grp._RECLAIM_POLLS
+
+
+def test_gpu_session_evicts_ollama_again_when_a_model_reloads(fresh_gate, monkeypatch):
+    """A model that loads during the settle wait (a worker's start-up asking for
+    its embedding model) is evicted once more; an empty Ollama is left alone."""
+    _patch_vram(monkeypatch, free_mb=5000, total_mb=16376)
+    evictions = []
+    reloads = iter([True])
+    monkeypatch.setattr(grp, "evict_ollama_models", lambda: evictions.append(1) or True)
+    monkeypatch.setattr(grp, "_ollama_has_loaded_model", lambda: next(reloads, False))
+    monkeypatch.setattr(grp, "free_comfyui_vram", lambda: True)
+    monkeypatch.setattr(grp.time, "sleep", lambda s: None)
+    with pytest.raises(GpuBusyError, match="another model/render may be resident"):
+        with grp.gpu_session(
+            JobKind.VIDEO_RENDER, "reload",
+            evict_ollama=True, free_comfyui=True, vram_estimate_mb=14000, require_fit=True,
+        ):
+            pass
+    assert evictions == [1, 1]
