@@ -214,6 +214,35 @@ def _final_video(p):
     }
 
 
+def _poster_url(p):
+    """The first storyboard frame in script order, or None when nothing was drawn."""
+    shots = sorted(p.shots, key=lambda s: (s.scene_number or 0, s.shot_number or 0))
+    first = next((s for s in shots if s.storyboard_image_path), None)
+    if first is None:
+        return None
+    return f"/api/production/{p.id}/storyboard/shot/{first.id}/image"
+
+
+@bp.get("/films")
+def list_films():
+    """Every production's finished film, newest first. The Media Library lists
+    these beside the Video Gen batches; the films themselves are filed in
+    Documents under productions/<id>/final."""
+    films = []
+    for p in Production.query.all():
+        film = _final_video(p)
+        if film is None:
+            continue
+        films.append({
+            "production_id": p.id,
+            "name": p.name,
+            "poster_url": _poster_url(p),
+            **film,
+        })
+    films.sort(key=lambda f: f["created_at"] or "", reverse=True)
+    return jsonify({"films": films})
+
+
 @bp.delete("/<int:prod_id>")
 def delete_production(prod_id):
     """Delete a production and cascaded shots / join rows. Subjects are kept."""
