@@ -684,9 +684,15 @@ def think_off_value(model_name: str):
     takes. A level means the model still reasons, so the caller leaves room for
     it in num_predict.
     """
-    from backend.services.model_capabilities import capabilities_for
     from backend.services.model_capability_data import THINK_OFF_LEVEL_BY_ARCH
-    arch = capabilities_for(model_name, with_vision=False).architecture if model_name else ""
+    if not model_name:
+        return False
+    try:
+        from backend.services.model_capabilities import capabilities_for
+        arch = getattr(capabilities_for(model_name, with_vision=False), "architecture", "")
+    except Exception as e:  # noqa: BLE001 - a failed lookup must not break a chat call
+        logger.debug("architecture lookup failed for %r: %s", model_name, e)
+        return False
     return THINK_OFF_LEVEL_BY_ARCH.get(str(arch or "").lower(), False)
 
 
