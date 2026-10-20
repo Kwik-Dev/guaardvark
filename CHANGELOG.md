@@ -1,7 +1,35 @@
 # Changelog
 
-## Unreleased
+## 3.3.0 — Reusable seeds, music videos paced to the song, and a Film Crew that finishes the film
 
+- **Seeds you can reuse.** Image Gen and Video Gen have a Seed box; every picture shows its seed,
+  and one click reuses it to get the same picture again (with prompt enhancement off).
+- **Wan 2.2 14B image-to-video can end on a chosen frame.** Give it a first and a last picture and
+  the clip travels from one to the other.
+- **Music videos follow the song.** Cuts land on its bars and follow its loudness, with real
+  sections, by default (`GUAARDVARK_MV_MUSIC_PACING=0` restores the old planner). Your story stays
+  in order, clips whose frames flash are held back, and each run shows its progress, keeps its
+  versions and files into a Project.
+- **The Film Crew takes a script to a finished film.** A character can be cast as described
+  (an off-screen voice, a crowd) without training; storyboards render shots that show props and
+  places; a production can be wide, tall or square; every clip renders before the spoken lines, so
+  a 16 GB card no longer runs out of memory mid-film; one score runs under the whole film; and
+  the film is kept in the data folder.
+- **Chat reads your documents before it says they don't cover something.** It gets whole
+  passages, says when a search failed, re-indexes after an embedding model change, and keeps
+  hybrid search while the embedder is loaded. gpt-oss works as a chat model.
+- **Swarms launch from chat and over MCP;** unnamed tasks run locally and agents stop after two
+  hours.
+- **Social Accounts.** Posts wait for a person, can be edited before approval and scheduled, and
+  can go to your own LinkedIn through its official API.
+- **Training:** Build from folder, and Export to Ollama through GGUF with the converter installed
+  on a click.
+- **Works offline more of the time.** The browser tools, outreach drafting and the self-test
+  follow the web-access switch; start-up makes fewer downloads; face restore loads only installed
+  weights.
+- Bulk Import around a drop zone, a device profile from this machine, upscales that start their
+  own service and take their turn on the GPU, and fixes from crawling every page and sweeping the
+  logs.
 - **Each Interconnector machine joins with its own key.** A client enrols with the fleet key and
   waits on the master until you approve its key fingerprint in Settings → Interconnector; every
   request between machines is then signed, and directives are taken only from the master. After
