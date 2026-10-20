@@ -1686,7 +1686,12 @@ def initialize_llm_and_index_async():
             except Exception:
                 _ollama_enabled = True  # Fail-open — better to warm up than leave a real user without chat
 
-            if _ollama_enabled:
+            if os.environ.get("CELERY_WORKER_MODE", "false").lower() == "true":
+                # The worker builds the app inside its first task, often a GPU
+                # render that has just evicted Ollama; a warm-up here takes
+                # the card back mid-render. The web process warms chat.
+                app.logger.info("[LLM-Init] Step 5/6: Skipping model warmup in the Celery worker")
+            elif _ollama_enabled:
                 app.logger.info("[LLM-Init] Step 5/6: Warming up model...")
                 try:
                     model_name = getattr(llm, "model", "unknown")
