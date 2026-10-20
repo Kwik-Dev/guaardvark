@@ -729,6 +729,18 @@ def _heuristic_coerce(v: str) -> Any:
             return v
 
 
+# Gemma 4's chat template quotes a string argument with this token. In a text
+# tool call the model sometimes writes it into the value
+# ([query]... product profile<|"|>), and the search then ran on it.
+_TEMPLATE_QUOTE = '<|"|>'
+
+
+def _strip_template_quotes(value: Any) -> Any:
+    if isinstance(value, str) and _TEMPLATE_QUOTE in value:
+        return value.replace(_TEMPLATE_QUOTE, "").strip()
+    return value
+
+
 def coerce_params_to_schema(params: Dict[str, Any], tool: Optional[BaseTool]) -> Dict[str, Any]:
     """Coerce LLM-produced parameter values to the tool's declared types.
 
@@ -742,6 +754,7 @@ def coerce_params_to_schema(params: Dict[str, Any], tool: Optional[BaseTool]) ->
 
     if not params:
         return {}
+    params = {key: _strip_template_quotes(value) for key, value in params.items()}
     aliases = {"integer": "int", "boolean": "bool", "number": "float", "str": "string"}
     schema = ({name: aliases.get(p.type, p.type) for name, p in (tool.parameters or {}).items()}
               if tool else {})
